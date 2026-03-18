@@ -152,22 +152,23 @@ fn open_in_browser(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn start_browser_auth(config: AgentConfig) -> Result<BrowserAuthStartResponse, String> {
-    let workspace_id = config
-        .platform
-        .workspace_id
-        .ok_or_else(|| "platform.workspace_id 不能为空".to_string())?;
     let client = Client::new();
     let manifest = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
+    let mut payload = serde_json::Map::new();
+    if let Some(workspace_id) = config.platform.workspace_id {
+        payload.insert("workspaceId".to_string(), serde_json::json!(workspace_id));
+    }
+    payload.insert("deviceId".to_string(), serde_json::json!(config.relay.agent_id));
+    payload.insert("deviceName".to_string(), serde_json::json!(config.device.name));
+    payload.insert(
+        "deviceDescription".to_string(),
+        serde_json::json!(config.device.description)
+    );
+    payload.insert("serviceManifest".to_string(), serde_json::json!(manifest));
     let response = client
         .post(format!("{base_url}/api/external-workspace-device-auth/start"))
-        .json(&serde_json::json!({
-            "workspaceId": workspace_id,
-            "deviceId": config.relay.agent_id,
-            "deviceName": config.device.name,
-            "deviceDescription": config.device.description,
-            "serviceManifest": manifest
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|err| err.to_string())?;

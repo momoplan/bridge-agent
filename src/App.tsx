@@ -344,7 +344,7 @@ function App() {
         config: fromUiConfig(config)
       });
       setBrowserAuth(session);
-      setMessage(`已打开浏览器授权页，用户码 ${session.userCode}`);
+      setMessage(`已打开浏览器授权页，用户码 ${session.userCode}。请在网页里选择工作区并完成批准。`);
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -589,7 +589,7 @@ function App() {
           {runtime?.last_error ? <div className="alert warning">{runtime.last_error}</div> : null}
           {browserAuth ? (
             <div className="alert warning">
-              等待浏览器授权中，用户码 {browserAuth.userCode}
+              等待浏览器授权中，用户码 {browserAuth.userCode}。请在浏览器中选择工作区。
             </div>
           ) : null}
         </div>
@@ -597,7 +597,7 @@ function App() {
 
       <section className="workspace-grid">
         <div className="column-main">
-          <Card title="连接设置" description="本地 agent 到 relay 的长连接参数。">
+          <Card title="连接设置" description="本地 agent 到 relay 的长连接参数。工作区在浏览器授权页选择。">
             <div className="form-grid">
               <Field label="Baijimu Base URL">
                 <input
@@ -605,11 +605,11 @@ function App() {
                   onChange={(event) => updatePlatform("base_url", event.target.value)}
                 />
               </Field>
-              <Field label="Workspace ID">
+              <Field label="授权后工作区">
                 <input
-                  value={config.platform.workspace_id}
-                  onChange={(event) => updatePlatform("workspace_id", event.target.value)}
-                  placeholder="1106"
+                  value={config.platform.workspace_id || ""}
+                  readOnly
+                  placeholder="在浏览器授权页里选择后自动写回"
                 />
               </Field>
               <Field label="Relay WebSocket URL">
