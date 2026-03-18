@@ -17,16 +17,16 @@ jobs:
       matrix:
         include:
           - name: macOS Universal
-            runner: macos-14
-            tauri_args: --target universal-apple-darwin
+            runner: macos-13
+            tauri_args: --target universal-apple-darwin --bundles dmg
             rust_targets: aarch64-apple-darwin x86_64-apple-darwin
           - name: Windows x64
             runner: windows-latest
-            tauri_args: ""
+            tauri_args: --bundles msi
             rust_targets: ""
           - name: Linux x64
             runner: ubuntu-22.04
-            tauri_args: ""
+            tauri_args: --bundles appimage,deb
             rust_targets: ""
 
     steps:
