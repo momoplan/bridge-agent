@@ -15,11 +15,17 @@
 给最终用户分发时，直接使用 GitHub Releases 里的安装包：
 
 - 最新版本页：[`Releases / latest`](../../releases/latest)
-- macOS：下载 `.dmg`
+- macOS：优先下载 universal `.dmg`
 - Windows：下载 `.msi` 或安装器
 - Linux：下载 `.AppImage` / `.deb`
 
 如果你只是普通用户，直接下载对应平台安装包即可，不需要本地安装 Rust 或 Node 环境。
+
+如果你拿到的是旧版分发物，需要额外注意：
+
+- Intel Mac 只能运行 `x64` 或 universal 的 macOS 安装包
+- Apple Silicon Mac 可以运行 `arm64` 或 universal 的 macOS 安装包
+- 如果误装了另一种架构，Finder 里能看到应用，但启动会失败
 
 ## 它解决什么问题
 
@@ -218,6 +224,18 @@ npm run build
 
 推荐的正式分发方式不是手工发二进制，而是通过 GitHub Releases 自动上传各平台安装包。
 
+macOS 推荐直接构建 universal 安装包，这样最终用户不需要自己区分 Intel 和 Apple Silicon：
+
+```bash
+npm run tauri:build:macos-universal
+```
+
+如果只是在当前机器本地验证，也可以先跑调试包：
+
+```bash
+npm run tauri:build:macos-universal -- --debug
+```
+
 发布步骤：
 
 1. 同步更新版本号
@@ -225,7 +243,7 @@ npm run build
    - `Cargo.toml`
    - `src-tauri/Cargo.toml`
    - `src-tauri/tauri.conf.json`
-2. 推送版本 tag，例如 `bridge-agent-v0.1.0`
+2. 推送版本 tag，例如 `bridge-agent-v0.1.1`
 3. GitHub Actions 会自动构建并把安装包上传到当前 tag 对应的 Release
 4. 最终用户从仓库的 [`Releases / latest`](../../releases/latest) 直接下载
 
@@ -241,8 +259,8 @@ npm run tauri build -- --debug
 
 本机验证过的产物路径：
 
-- `src-tauri/target/debug/bundle/macos/Bridge Agent.app`
-- `src-tauri/target/debug/bundle/dmg/Bridge Agent_0.1.0_x64.dmg`
+- `src-tauri/target/universal-apple-darwin/debug/bundle/macos/Bridge Agent.app`
+- `src-tauri/target/debug/bundle/dmg/Bridge Agent_0.1.1_x64.dmg`
 
 后续如果要做 Windows / Linux 分发，直接在对应平台执行同样的 `tauri build` 即可。
 

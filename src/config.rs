@@ -12,6 +12,7 @@ const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default = "default_platform_config")]
     pub platform: PlatformConfig,
     pub relay: RelayConfig,
     pub device: DeviceConfig,
@@ -386,9 +387,17 @@ fn default_http_method() -> String {
     "POST".to_string()
 }
 
+fn default_platform_config() -> PlatformConfig {
+    PlatformConfig {
+        base_url: "https://baijimu.com/lowcode3".to_string(),
+        workspace_id: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{load_config, manifest_preview_json, save_config, AgentConfig};
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -412,5 +421,38 @@ mod tests {
         let payload = manifest_preview_json(&AgentConfig::example()).unwrap();
         assert!(payload.contains("\"computer\""));
         assert!(!payload.contains("\"local-java-service\""));
+    }
+
+    #[test]
+    fn load_legacy_config_without_platform() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        fs::write(
+            &path,
+            r#"{
+  "relay": {
+    "url": "ws://127.0.0.1:8080/ws/agent",
+    "agent_id": "devbox",
+    "token": "",
+    "reconnect_secs": 3
+  },
+  "device": {
+    "name": "My Bridge Agent",
+    "description": "Installed on the user's local machine.",
+    "tags": ["desktop", "local"]
+  },
+  "runtime": {
+    "default_timeout_secs": 30,
+    "max_timeout_secs": 120,
+    "log_limit": 500
+  },
+  "services": []
+}"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
+        assert_eq!(loaded.platform.workspace_id, None);
     }
 }

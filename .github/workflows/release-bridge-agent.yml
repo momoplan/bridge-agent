@@ -16,14 +16,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS Intel
-            runner: macos-13
-          - name: macOS Apple Silicon
+          - name: macOS Universal
             runner: macos-14
+            tauri_args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
           - name: Windows x64
             runner: windows-latest
+            tauri_args: ""
+            rust_targets: ""
           - name: Linux x64
             runner: ubuntu-22.04
+            tauri_args: ""
+            rust_targets: ""
 
     steps:
       - name: Checkout
@@ -38,6 +42,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust targets
+        if: matrix.rust_targets != ''
+        run: rustup target add ${{ matrix.rust_targets }}
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -63,10 +71,11 @@ jobs:
             Bridge Agent desktop release.
 
             Download the installer for your platform from the Assets section below:
-            - macOS: `.dmg`
+            - macOS: universal `.dmg` (works on both Intel and Apple Silicon)
             - Windows: `.msi` or installer executable
             - Linux: `.AppImage` / `.deb` / archive
 
             This release is built automatically by GitHub Actions from the tagged source.
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          args: ${{ matrix.tauri_args }}
