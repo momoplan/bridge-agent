@@ -1,5 +1,68 @@
 # bridge-agent
 
+`bridge-agent` 是安装在用户自己电脑上的本地代理。
+
+它的职责不是替代顶层 agent，而是把这台机器上经过用户授权的本地能力，安全地暴露给外部 agent 调用。
+
+先把最容易混淆的一点说清楚：
+
+- 任何人都可以使用这个开源项目
+- 但如果你想让外部 agent 使用你自己电脑上的能力，你必须先在自己的机器上安装并运行 `bridge-agent`
+- 外部 agent 不能在“用户什么都不装”的前提下直接获得本地 shell 或本地服务能力
+
+## 下载
+
+给最终用户分发时，直接使用 GitHub Releases 里的安装包：
+
+- 最新版本页：[`Releases / latest`](../../releases/latest)
+- macOS：下载 `.dmg`
+- Windows：下载 `.msi` 或安装器
+- Linux：下载 `.AppImage` / `.deb`
+
+如果你只是普通用户，直接下载对应平台安装包即可，不需要本地安装 Rust 或 Node 环境。
+
+## 它解决什么问题
+
+`bridge-agent` 解决的是“外部 agent 如何安全地调用用户自己电脑上的本地能力”这个问题。
+
+典型场景：
+
+- 让外部 ChatGPT / Claude 调用本机命令行能力，例如 `computer.exec`
+- 让外部 agent 调用本地已经存在的业务服务，例如本机 Java / Node / Python 服务
+- 让本地机器不暴露公网入站端口，仍然能被远端授权访问
+
+## 架构关系
+
+系统里有三个角色：
+
+- `bridge-agent`
+  - 安装在用户自己的机器上
+  - 管理“我这台机器对外开放哪些服务和方法”
+- `relay`
+  - 负责转发和鉴权
+  - 不直接执行本地命令
+- 外部 agent / app
+  - 通过 `relay` 调用某个设备上的 `service.method`
+
+调用链路：
+
+1. 用户在本机安装并启动 `bridge-agent`
+2. `bridge-agent` 打开授权页面，用户确认授权
+3. `bridge-agent` 获取 `agent token`，主动连接 `relay`
+4. 用户把某个设备服务授权给外部 app / agent
+5. 外部 app / agent 拿到 `client token`
+6. 外部 app / agent 通过 `relay` 调用本机暴露的 `service.method`
+
+## 谁需要安装
+
+- 如果你只是调用别人已经开放出来的服务：不需要安装 `bridge-agent`
+- 如果你想让外部 agent 使用你自己电脑上的能力：需要安装 `bridge-agent`
+- 如果你是平台运营方：需要部署 `relay`
+
+所以它应该是一个可审计、可安装、可分发的开源本地项目，而不是一个纯云端工具。
+
+## 当前工程形态
+
 `bridge-agent` 现在是一个完整的本地端工程，不再只是单个 CLI。
 
 它包含三层：
@@ -17,13 +80,34 @@
   - `shell_command`
   - `http`
 - 本地管理端可编辑服务、方法、超时、allowlist、日志保留等配置
+- 已接浏览器授权启动和轮询，授权成功后会把 `agent token` 自动写回本地配置
 - 可打包为桌面应用分发
+
+## 对外暴露的模型
+
+外部看到的是业务服务模型，而不是本地实现细节。
+
+例如：
+
+- `computer.exec`
+- `local-java-service.invokeApi`
+
+这里：
+
+- `computer` / `local-java-service` 是服务
+- `exec` / `invokeApi` 是方法
+
+外部不会看到：
+
+- 这是 shell 实现的
+- 还是 HTTP 转发实现的
+
+这些都只是本地 `bridge-agent` 的内部 binding 细节。
 
 注意：
 
-- `shell/http` 只是本地实现细节，不在 agent-relay 协议里暴露
+- `shell/http` 不在 agent-relay 协议里暴露
 - relay 看到的是 `services[].methods[]`，例如 `computer.exec`
-- 桌面端已经接了浏览器授权启动和轮询，授权成功后会把 `agent token` 自动写回本地配置
 
 ## 项目结构
 
@@ -48,7 +132,7 @@ cargo run -- init-config
 核心字段：
 
 - `platform.base_url`
-- `platform.workspace_id`
+- `platform.workspace_id`（授权成功后自动写回）
 - `relay.url`
 - `relay.agent_id`
 - `relay.token`
@@ -56,6 +140,33 @@ cargo run -- init-config
 - `services[].methods[].binding`
 
 `binding.type` 只存在于本地配置里，用来决定本机怎么执行方法，不会进入 relay 协议。
+
+## 快速开始
+
+1. 生成配置文件
+
+```bash
+cargo run -- init-config
+```
+
+2. 编辑本地配置，声明你要开放的服务和方法
+
+例如：
+
+- 开一个 `computer.exec`
+- 或者开一个映射本地 Java 服务的 `local-java-service.invokeApi`
+
+3. 启动 agent
+
+```bash
+cargo run -- run
+```
+
+4. 点击浏览器授权，在网页中选择目标工作区并完成批准
+
+5. 授权成功后，外部 app / agent 才能通过 relay 调用这台机器上的服务
+
+如果你要给最终用户分发，一般不是让用户跑 `cargo run`，而是直接分发 Tauri 打包后的桌面应用。
 
 ## CLI
 
@@ -105,6 +216,23 @@ npm run build
 
 ## 打包分发
 
+推荐的正式分发方式不是手工发二进制，而是通过 GitHub Releases 自动上传各平台安装包。
+
+发布步骤：
+
+1. 同步更新版本号
+   - `package.json`
+   - `Cargo.toml`
+   - `src-tauri/Cargo.toml`
+   - `src-tauri/tauri.conf.json`
+2. 推送版本 tag，例如 `bridge-agent-v0.1.0`
+3. GitHub Actions 会自动构建并把安装包上传到当前 tag 对应的 Release
+4. 最终用户从仓库的 [`Releases / latest`](../../releases/latest) 直接下载
+
+对应 workflow：
+
+- `.github/workflows/release-bridge-agent.yml`
+
 调试打包：
 
 ```bash
@@ -117,6 +245,12 @@ npm run tauri build -- --debug
 - `src-tauri/target/debug/bundle/dmg/Bridge Agent_0.1.0_x64.dmg`
 
 后续如果要做 Windows / Linux 分发，直接在对应平台执行同样的 `tauri build` 即可。
+
+注意：
+
+- macOS 正式对外分发建议补代码签名和 notarization
+- Windows 正式对外分发建议补代码签名
+- 没签名也可以先做内测发布，但安装体验会差一些
 
 ## 方法绑定
 
@@ -154,3 +288,16 @@ npm run tauri build -- --debug
 - 每个方法调用都有超时
 
 如果要进一步提高隔离级别，仍然建议搭配单独用户、容器或系统沙箱使用。
+
+## 这个仓库还应该继续补什么
+
+如果它要作为公开项目给外部用户使用，后续还应该持续补这些文档：
+
+- 安装说明：macOS / Windows / Linux 各自怎么安装
+- 授权流程：用户第一次启动后会发生什么
+- 配置说明：每个字段的含义和安全影响
+- 服务模型说明：什么叫 service、什么叫 method
+- 安全模型：哪些能力默认不开、哪些风险需要用户自己确认
+- 发布说明：如何下载桌面包、如何校验版本、如何查看源码
+
+当前 README 先把最关键的产品边界写清楚了：`bridge-agent` 是一个需要安装在本机的开源本地代理，而不是一个无需安装就能直接获得本地能力的云工具。
