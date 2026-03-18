@@ -302,6 +302,12 @@ select:focus {
   gap: 8px;
 }
 
+.field-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .field-wide {
   grid-column: 1 / -1;
 }

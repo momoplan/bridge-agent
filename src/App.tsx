@@ -181,6 +181,8 @@ const HTTP_SCHEMA = {
   additionalProperties: true
 };
 
+const DEFAULT_PLATFORM_BASE_URL = "https://baijimu.com/lowcode3";
+
 function App() {
   const [configPath, setConfigPath] = useState("");
   const [manifestPreview, setManifestPreview] = useState("");
@@ -191,6 +193,7 @@ function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   useEffect(() => {
     void refreshAll();
@@ -202,6 +205,15 @@ function App() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    if (normalizePlatformBaseUrl(config.platform.base_url) !== DEFAULT_PLATFORM_BASE_URL) {
+      setShowAdvancedSettings(true);
+    }
+  }, [config]);
 
   const statusLabel = useMemo(() => {
     if (!runtime) {
@@ -597,21 +609,48 @@ function App() {
 
       <section className="workspace-grid">
         <div className="column-main">
-          <Card title="连接设置" description="本地 agent 到 relay 的长连接参数。工作区在浏览器授权页选择。">
+          <Card
+            title="连接设置"
+            description="本地 agent 到 relay 的长连接参数。工作区在浏览器授权页选择。"
+            action={
+              <button
+                className="secondary"
+                onClick={() => setShowAdvancedSettings((current) => !current)}
+              >
+                {showAdvancedSettings ? "收起高级设置" : "高级设置"}
+              </button>
+            }
+          >
             <div className="form-grid">
-              <Field label="Baijimu Base URL">
-                <input
-                  value={config.platform.base_url}
-                  onChange={(event) => updatePlatform("base_url", event.target.value)}
-                />
+              <Field
+                label="默认平台"
+                hint="桌面端默认连接百积木生产环境，无需手工填写地址。"
+              >
+                <input value={DEFAULT_PLATFORM_BASE_URL} readOnly />
               </Field>
-              <Field label="授权后工作区">
+              <Field
+                label="授权后工作区"
+                hint="浏览器授权页批准时选择工作区，成功后会自动写回。"
+              >
                 <input
                   value={config.platform.workspace_id || ""}
                   readOnly
                   placeholder="在浏览器授权页里选择后自动写回"
                 />
               </Field>
+              {showAdvancedSettings ? (
+                <Field
+                  label="Baijimu Base URL"
+                  hint="仅在切换测试环境或私有部署时修改，留空会自动回退到默认平台。"
+                  wide
+                >
+                  <input
+                    value={config.platform.base_url}
+                    onChange={(event) => updatePlatform("base_url", event.target.value)}
+                    placeholder={DEFAULT_PLATFORM_BASE_URL}
+                  />
+                </Field>
+              ) : null}
               <Field label="Relay WebSocket URL">
                 <input
                   value={config.relay.url}
@@ -1039,11 +1078,13 @@ function Field(props: {
   label: string;
   children: JSX.Element;
   wide?: boolean;
+  hint?: string;
 }) {
   return (
     <label className={`field ${props.wide ? "field-wide" : ""}`}>
       <span>{props.label}</span>
       {props.children}
+      {props.hint ? <small className="field-hint">{props.hint}</small> : null}
     </label>
   );
 }
@@ -1071,7 +1112,7 @@ function Card(props: {
 function toUiConfig(config: AgentConfig): UiAgentConfig {
   return {
     platform: {
-      base_url: config.platform.base_url,
+      base_url: normalizePlatformBaseUrl(config.platform.base_url),
       workspace_id:
         config.platform.workspace_id == null ? "" : String(config.platform.workspace_id)
     },
@@ -1115,7 +1156,7 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
 function fromUiConfig(config: UiAgentConfig): AgentConfig {
   return {
     platform: {
-      base_url: config.platform.base_url.trim(),
+      base_url: normalizePlatformBaseUrl(config.platform.base_url),
       workspace_id: toOptionalNumber(config.platform.workspace_id)
     },
     relay: config.relay,
@@ -1153,6 +1194,11 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
       }))
     }))
   };
+}
+
+function normalizePlatformBaseUrl(value: string): string {
+  const normalized = value.trim();
+  return normalized || DEFAULT_PLATFORM_BASE_URL;
 }
 
 function createShellMethod(): UiMethodConfig {
