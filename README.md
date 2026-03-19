@@ -220,6 +220,49 @@ npm run tauri dev
 npm run build
 ```
 
+## GitHub 发布
+
+`bridge-agent` 现在可以继续通过 GitHub Actions 自动产出 macOS 安装包，但 macOS 这条线必须带上 `Developer ID Application` 签名和 Apple 公证。
+
+仓库里的工作流文件是：
+
+- `.github/workflows/release-bridge-agent.yml`
+
+触发方式：
+
+- 推送 tag：`bridge-agent-v0.1.3`
+- 或者在 GitHub Actions 页面手动执行 `workflow_dispatch`
+
+macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
+
+- `APPLE_CERTIFICATE`
+  - `Developer ID Application` 证书导出的 `.p12` 文件内容，先转成 base64
+- `APPLE_CERTIFICATE_PASSWORD`
+  - 导出 `.p12` 时设置的密码
+- `APPLE_API_ISSUER`
+  - App Store Connect API Key 的 Issuer ID
+- `APPLE_API_KEY`
+  - App Store Connect API Key 的 Key ID
+- `APPLE_API_PRIVATE_KEY`
+  - 下载得到的 `.p8` 私钥全文内容
+
+导出证书并转成 base64 的示例命令：
+
+```bash
+openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-base64.txt
+```
+
+这里的 `Developer ID Application` 证书用于 GitHub 下载分发；如果以后需要给 `.pkg` 安装器签名，还要额外申请 `Developer ID Installer` 证书。
+
+工作流在 macOS runner 上会自动完成这些事情：
+
+- 导入 `Developer ID Application` 证书
+- 用 `Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)` 给 Tauri 的 macOS 产物签名
+- 用 App Store Connect API key 提交 notarization
+- 等待公证通过后再把构建产物上传到 GitHub Release
+
+如果这些 secrets 没配齐，macOS 任务会直接失败，避免把未签名或未公证的安装包发布出去。
+
 ## 打包分发
 
 推荐的正式分发方式不是手工发二进制，而是通过 GitHub Releases 自动上传各平台安装包。
