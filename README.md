@@ -230,7 +230,7 @@ npm run build
 
 触发方式：
 
-- 推送 tag：`bridge-agent-v0.1.5`
+- 推送 tag：`bridge-agent-v0.1.6`
 - 或者在 GitHub Actions 页面手动执行 `workflow_dispatch`
 
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
@@ -286,7 +286,7 @@ npm run tauri:build:macos-universal -- --debug
    - `Cargo.toml`
    - `src-tauri/Cargo.toml`
    - `src-tauri/tauri.conf.json`
-2. 推送版本 tag，例如 `bridge-agent-v0.1.5`
+2. 推送版本 tag，例如 `bridge-agent-v0.1.6`
 3. GitHub Actions 会自动构建并把安装包上传到当前 tag 对应的 Release
 4. 最终用户从仓库的 [`Releases / latest`](../../releases/latest) 直接下载
 
@@ -303,7 +303,7 @@ npm run tauri build -- --debug
 本机验证过的产物路径：
 
 - `src-tauri/target/universal-apple-darwin/debug/bundle/macos/Bridge Agent.app`
-- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/Bridge Agent_0.1.5_universal.dmg`
+- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/Bridge Agent_0.1.6_universal.dmg`
 
 后续如果要做 Windows / Linux 分发，直接在对应平台执行同样的 `tauri build` 即可。
 

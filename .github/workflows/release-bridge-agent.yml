@@ -89,6 +89,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
 
       - name: Validate release tag
+        shell: bash
         run: |
           case "$RELEASE_TAG" in
             bridge-agent-v*) ;;
