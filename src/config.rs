@@ -4,6 +4,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -294,9 +295,34 @@ impl AgentConfig {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("com", "baijimu", "bridge-agent")
-        .context("failed to determine config directory")?;
-    Ok(dirs.config_dir().join(DEFAULT_CONFIG_FILE_NAME))
+    if let Some(path) = config_path_override_from_env() {
+        return Ok(path);
+    }
+
+    #[cfg(windows)]
+    if let Some(path) = windows_service_config_path().filter(|path| path.exists()) {
+        return Ok(path);
+    }
+
+    project_config_path()
+}
+
+pub fn windows_service_config_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let program_data = env::var_os("ProgramData")?;
+        return Some(
+            PathBuf::from(program_data)
+                .join("Baijimu")
+                .join("BridgeAgent")
+                .join(DEFAULT_CONFIG_FILE_NAME),
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub fn load_config(path: &Path) -> Result<AgentConfig> {
@@ -392,6 +418,16 @@ fn default_platform_config() -> PlatformConfig {
         base_url: "https://baijimu.com/lowcode3".to_string(),
         workspace_id: None,
     }
+}
+
+fn config_path_override_from_env() -> Option<PathBuf> {
+    env::var_os("WS_BRIDGE_CONFIG").map(PathBuf::from)
+}
+
+fn project_config_path() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("com", "baijimu", "bridge-agent")
+        .context("failed to determine config directory")?;
+    Ok(dirs.config_dir().join(DEFAULT_CONFIG_FILE_NAME))
 }
 
 #[cfg(test)]

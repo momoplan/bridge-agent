@@ -7,8 +7,8 @@ use anyhow::{anyhow, Result};
 
 pub use config::{
     default_config_path, ensure_config_exists, load_config, manifest_preview_json, save_config,
-    AgentConfig, DeviceConfig, HttpBinding, MethodBinding, MethodConfig, PlatformConfig,
-    RelayConfig, RuntimeConfig, ServiceConfig,
+    windows_service_config_path, AgentConfig, DeviceConfig, HttpBinding, MethodBinding,
+    MethodConfig, PlatformConfig, RelayConfig, RuntimeConfig, ServiceConfig,
 };
 pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
 

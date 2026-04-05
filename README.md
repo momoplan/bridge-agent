@@ -200,6 +200,49 @@ cargo run -- run
 cargo run -- run --config /path/to/agent-config.json
 ```
 
+## Windows 后台服务
+
+如果需要安装后长期后台运行，并且不依赖用户登录，可以使用新增的 `bridge-agent-service` 二进制，把核心 runtime 作为 Windows Service 托管。
+
+服务入口：
+
+- `bridge-agent-service.exe`
+
+调试运行：
+
+```bash
+cargo run --bin bridge-agent-service -- --console
+```
+
+也可以显式指定配置文件：
+
+```bash
+cargo run --bin bridge-agent-service -- --console --config /path/to/agent-config.json
+```
+
+Windows 正式安装时，建议把服务注册成固定服务名 `BridgeAgent`，并把配置文件放到共享路径：
+
+- `C:\ProgramData\Baijimu\BridgeAgent\agent-config.json`
+
+当前默认行为：
+
+- Windows 桌面端 / CLI 如果发现上面的共享配置文件已存在，会优先读取它
+- 否则仍然回退到当前用户自己的配置目录
+- Windows Service 在没有显式传入 `--config` 时，会默认使用上面的共享路径
+
+一个典型的服务注册命令示例：
+
+```powershell
+sc.exe create BridgeAgent binPath= "\"C:\Program Files\Bridge Agent\bridge-agent-service.exe\" --config \"C:\ProgramData\Baijimu\BridgeAgent\agent-config.json\"" start= delayed-auto
+```
+
+实现和打包时要注意：
+
+- 不要把 Tauri 桌面程序直接改成服务，服务化的是 Rust runtime/CLI 这一层
+- MSI 里需要负责注册服务、升级时先停服务再替换文件、完成后重新拉起
+- 如果桌面端也要编辑同一份共享配置，安装器需要给 `C:\ProgramData\Baijimu\BridgeAgent` 配置合适 ACL，让服务账号和交互用户都能读写
+- `bridge-agent-service.exe`、桌面端 exe、安装器和后续升级器都要做正式代码签名
+
 ## 桌面应用开发
 
 安装前端依赖：
