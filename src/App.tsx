@@ -111,6 +111,26 @@ interface ConfigDocument {
   runtime: RuntimeSnapshot;
 }
 
+interface AppUpdateStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  releaseName: string | null;
+  publishedAt: string | null;
+  currentTarget: string;
+  autoDownloadAvailable: boolean;
+  assetName: string | null;
+}
+
+interface AppUpdateInstallResult {
+  status: "up_to_date" | "downloaded";
+  version: string;
+  assetName: string | null;
+  downloadedPath: string | null;
+  releaseUrl: string;
+}
+
 interface UiShellBinding {
   type: "shell_command";
   root_dir: string;
@@ -199,6 +219,9 @@ function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [activeSettingsSection, setActiveSettingsSection] =
     useState<SettingsSection>("identity");
@@ -207,6 +230,10 @@ function App() {
 
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    void checkAppUpdate();
   }, []);
 
   useEffect(() => {
@@ -257,6 +284,8 @@ function App() {
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const enabledServiceCount = config?.services.filter((service) => service.enabled).length ?? 0;
+  const visibleAppUpdate =
+    appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
 
   async function refreshAll() {
     try {
@@ -283,6 +312,54 @@ function App() {
       setLogs(latestLogs);
     } catch (err) {
       setError(readError(err));
+    }
+  }
+
+  async function checkAppUpdate(showLatestMessage = false) {
+    try {
+      const status = await invoke<AppUpdateStatus>("check_app_update");
+      setAppUpdate(status);
+      if (showLatestMessage) {
+        setMessage(
+          status.updateAvailable
+            ? status.autoDownloadAvailable
+              ? `发现新版本 ${status.latestVersion}，可以直接自动下载并安装。`
+              : `发现新版本 ${status.latestVersion}，但当前平台需要跳转发布页手工下载。`
+            : `当前已经是最新版本 ${status.currentVersion}`
+        );
+      }
+      if (!status.updateAvailable) {
+        setDismissedUpdateVersion(null);
+      }
+    } catch (err) {
+      if (showLatestMessage) {
+        setError(readError(err));
+      } else {
+        console.warn("自动检查更新失败", err);
+      }
+    }
+  }
+
+  async function installAppUpdate() {
+    try {
+      setUpdateBusy(true);
+      setMessage("");
+      setError("");
+      const result = await invoke<AppUpdateInstallResult>("install_app_update");
+      if (result.status === "up_to_date") {
+        setMessage(`当前已经是最新版本 ${result.version}`);
+        return;
+      }
+      setDismissedUpdateVersion(result.version);
+      setMessage(
+        result.downloadedPath
+          ? `更新包 ${result.assetName ?? ""} 已下载到 ${result.downloadedPath}，并已打开安装。`
+          : `更新包 ${result.assetName ?? ""} 已下载并开始安装。`
+      );
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setUpdateBusy(false);
     }
   }
 
@@ -367,6 +444,14 @@ function App() {
     try {
       await invoke("clear_logs");
       setLogs([]);
+    } catch (err) {
+      setError(readError(err));
+    }
+  }
+
+  async function openExternalUrl(url: string) {
+    try {
+      await invoke("open_in_browser", { url });
     } catch (err) {
       setError(readError(err));
     }
@@ -794,6 +879,18 @@ function App() {
       <Card title="运行状态" description="查看当前连接快照、本地配置位置和最近错误。">
         <div className="status-detail-grid">
           <InfoRow label="当前状态" value={statusLabel} />
+          <InfoRow label="应用版本" value={appUpdate?.currentVersion ?? "检查中"} />
+          <InfoRow
+            label="更新状态"
+            value={
+              appUpdate?.updateAvailable
+                ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
+                : appUpdate
+                  ? "已是最新版本"
+                  : "尚未完成检查"
+            }
+            tone={appUpdate?.updateAvailable ? "danger" : "normal"}
+          />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
@@ -844,6 +941,53 @@ function App() {
           </p>
         </div>
         <div className="hero-panel">
+          {visibleAppUpdate ? (
+            <div className="update-banner">
+              <div>
+                <p className="update-banner-eyebrow">发现新版本</p>
+                <strong>
+                  当前 {visibleAppUpdate.currentVersion}，可升级到 {visibleAppUpdate.latestVersion}
+                </strong>
+                <p>
+                  {visibleAppUpdate.releaseName || "GitHub Release"} 已发布
+                  {visibleAppUpdate.publishedAt
+                    ? `，发布时间 ${formatReleaseTime(visibleAppUpdate.publishedAt)}`
+                    : ""}。
+                  {visibleAppUpdate.autoDownloadAvailable
+                    ? ` 当前平台 ${visibleAppUpdate.currentTarget} 可直接自动下载${
+                        visibleAppUpdate.assetName ? ` ${visibleAppUpdate.assetName}` : "安装包"
+                      }并拉起安装。`
+                    : ` 当前平台 ${visibleAppUpdate.currentTarget} 暂时只支持跳转到发布页下载。`}
+                </p>
+              </div>
+              <div className="update-banner-actions">
+                {visibleAppUpdate.autoDownloadAvailable ? (
+                  <button
+                    className="primary"
+                    onClick={() => void installAppUpdate()}
+                    disabled={updateBusy}
+                  >
+                    自动更新
+                  </button>
+                ) : (
+                  <button
+                    className="primary"
+                    onClick={() => void openExternalUrl(visibleAppUpdate.releaseUrl)}
+                    disabled={updateBusy}
+                  >
+                    打开下载页
+                  </button>
+                )}
+                <button
+                  className="ghost"
+                  onClick={() => setDismissedUpdateVersion(visibleAppUpdate.latestVersion)}
+                  disabled={updateBusy}
+                >
+                  稍后提醒
+                </button>
+              </div>
+            </div>
+          ) : null}
           <div className="hero-topline">
             <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
             <div className="hero-summary">
@@ -921,7 +1065,19 @@ function App() {
 
       <section className="workspace-grid">
         <div className="column-main">
-          <Card title="设置中心" description="设备信息、连接参数和运行策略都统一收在这里。">
+          <Card
+            title="设置中心"
+            description="设备信息、连接参数和运行策略都统一收在这里。"
+            action={
+              <button
+                className="secondary"
+                onClick={() => void checkAppUpdate(true)}
+                disabled={updateBusy}
+              >
+                检查更新
+              </button>
+            }
+          >
             <div className="section-tabs">
               <button
                 className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
@@ -1551,6 +1707,18 @@ function toOptionalNumber(value: string): number | null {
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
+  });
+}
+
+function formatReleaseTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
   });
 }
 

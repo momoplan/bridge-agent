@@ -121,6 +121,45 @@ select:focus {
   padding: 22px;
 }
 
+.update-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(198, 93, 33, 0.12), rgba(255, 247, 238, 0.92));
+  border: 1px solid rgba(198, 93, 33, 0.2);
+}
+
+.update-banner strong {
+  display: block;
+  margin: 6px 0 8px;
+}
+
+.update-banner p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.update-banner-eyebrow {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.update-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .hero-topline {
   display: flex;
   justify-content: space-between;
@@ -633,6 +672,7 @@ select:focus {
   .service-summary-row,
   .service-summary-button,
   .permission-banner,
+  .update-banner,
   .hero-topline {
     flex-direction: column;
   }
