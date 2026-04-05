@@ -456,6 +456,9 @@ pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
 }
 
 pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
+    if allowlist.iter().any(|allowed| allowed.trim() == "*") {
+        return true;
+    }
     let name = Path::new(command)
         .file_name()
         .and_then(|value| value.to_str())
@@ -503,6 +506,11 @@ mod tests {
     fn allowlist_accepts_basename() {
         assert!(is_command_allowed("/usr/bin/git", &[String::from("git")]));
         assert!(!is_command_allowed("bash", &[String::from("git")]));
+    }
+
+    #[test]
+    fn allowlist_accepts_wildcard() {
+        assert!(is_command_allowed("bash", &[String::from("*")]));
     }
 
     #[test]

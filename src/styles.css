@@ -69,7 +69,7 @@ select:focus {
 
 .hero {
   display: grid;
-  grid-template-columns: 1.25fr 1fr;
+  grid-template-columns: 1.1fr 1fr;
   gap: 24px;
   padding: 28px;
   border-radius: 34px;
@@ -121,6 +121,22 @@ select:focus {
   padding: 22px;
 }
 
+.hero-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.hero-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -160,7 +176,9 @@ select:focus {
 .card-head p,
 .field span,
 .service-head p,
-.log-line span {
+.log-line span,
+.info-row span,
+.permission-banner p {
   color: var(--muted);
 }
 
@@ -177,6 +195,56 @@ select:focus {
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 20px;
+}
+
+.detail-indicators {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.detail-indicator {
+  text-align: left;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(44, 39, 32, 0.08);
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.detail-indicator:hover {
+  transform: translateY(-1px);
+}
+
+.detail-indicator span,
+.detail-indicator small {
+  display: block;
+}
+
+.detail-indicator span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.detail-indicator strong {
+  display: block;
+  margin: 8px 0 6px;
+  font-size: 18px;
+}
+
+.detail-indicator small {
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-indicator.active {
+  border-color: rgba(198, 93, 33, 0.32);
+  box-shadow: 0 12px 24px rgba(125, 47, 24, 0.08);
+  background: rgba(255, 247, 238, 0.92);
 }
 
 .primary,
@@ -252,7 +320,7 @@ select:focus {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.92fr);
   gap: 22px;
   margin-top: 22px;
 }
@@ -270,7 +338,8 @@ select:focus {
 }
 
 .card-head,
-.service-head {
+.service-head,
+.service-summary-row {
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -279,13 +348,15 @@ select:focus {
 
 .card-head h2,
 .service-head h3,
-.service-head h4 {
+.service-head h4,
+.service-title-row h3 {
   margin: 0;
   font-size: 20px;
 }
 
 .card-head p,
-.service-head p {
+.service-head p,
+.service-summary-copy p {
   margin: 8px 0 0;
   font-size: 14px;
   line-height: 1.6;
@@ -312,6 +383,33 @@ select:focus {
   grid-column: 1 / -1;
 }
 
+.section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.section-tab {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--muted);
+  border: 1px solid rgba(44, 39, 32, 0.08);
+}
+
+.section-tab.active {
+  background: rgba(198, 93, 33, 0.12);
+  border-color: rgba(198, 93, 33, 0.28);
+  color: var(--accent-strong);
+}
+
+.section-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+
 .service-list,
 .method-list {
   display: grid;
@@ -321,6 +419,69 @@ select:focus {
 .service-card {
   padding: 18px;
   background: rgba(255, 252, 246, 0.9);
+}
+
+.service-card.expanded {
+  box-shadow: 0 16px 30px rgba(125, 47, 24, 0.08);
+}
+
+.service-summary-button {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  text-align: left;
+  padding: 0;
+  background: transparent;
+}
+
+.service-summary-copy {
+  min-width: 0;
+}
+
+.service-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.service-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.service-badge.enabled {
+  background: rgba(23, 114, 69, 0.1);
+  color: var(--success);
+}
+
+.service-badge.disabled {
+  background: rgba(152, 43, 43, 0.1);
+  color: var(--danger);
+}
+
+.service-summary-meta {
+  display: grid;
+  gap: 6px;
+  min-width: 92px;
+  justify-items: end;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.service-summary-meta strong {
+  color: var(--accent-strong);
+}
+
+.service-details {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(44, 39, 32, 0.08);
 }
 
 .method-card {
@@ -348,6 +509,36 @@ select:focus {
   color: var(--muted);
 }
 
+.permission-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(198, 93, 33, 0.14);
+}
+
+.permission-banner strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.permission-banner p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.permission-banner code {
+  padding: 2px 6px;
+  margin: 0 2px;
+  border-radius: 8px;
+  background: rgba(33, 28, 23, 0.08);
+  color: var(--accent-strong);
+}
+
 .code-panel {
   margin: 0;
   min-height: 320px;
@@ -360,6 +551,29 @@ select:focus {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.status-detail-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.info-row {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.info-row strong {
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.danger-text {
+  color: var(--danger);
 }
 
 .log-panel {
@@ -407,10 +621,24 @@ select:focus {
   background: rgba(255, 255, 255, 0.7);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   .hero,
-  .workspace-grid {
+  .workspace-grid,
+  .detail-indicators {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .service-summary-row,
+  .service-summary-button,
+  .permission-banner,
+  .hero-topline {
+    flex-direction: column;
+  }
+
+  .service-summary-meta {
+    justify-items: start;
   }
 }
 
@@ -427,11 +655,19 @@ select:focus {
     border-radius: 24px;
   }
 
-  .form-grid {
+  .form-grid,
+  .detail-indicators {
     grid-template-columns: 1fr;
   }
 
   .log-line {
     grid-template-columns: 1fr;
+  }
+
+  .hero-actions,
+  .section-tabs,
+  .service-actions,
+  .method-toolbar {
+    width: 100%;
   }
 }
