@@ -33,7 +33,7 @@
 
 典型场景：
 
-- 让外部 ChatGPT / Claude 调用本机命令行能力，例如 `computer.exec`
+- 让外部 ChatGPT / Claude 调用本机桌面控制能力，例如 `computer.screenshot` / `computer.click`
 - 让外部 agent 调用本地已经存在的业务服务，例如本机 Java / Node / Python 服务
 - 让本地机器不暴露公网入站端口，仍然能被远端授权访问
 
@@ -82,7 +82,8 @@
 - 通过 WebSocket 主动连接 relay
 - 上报最小协议 `agent_id + services[]`
 - 按 `service + method + arguments` 接收调用
-- 本地配置里支持两种方法绑定
+- 本地配置里支持三种方法绑定
+  - `computer_use`
   - `shell_command`
   - `http`
 - 本地管理端可编辑服务、方法、超时、allowlist、日志保留等配置
@@ -95,13 +96,14 @@
 
 例如：
 
-- `computer.exec`
+- `computer.screenshot`
+- `computer.click`
 - `local-java-service.invokeApi`
 
 这里：
 
 - `computer` / `local-java-service` 是服务
-- `exec` / `invokeApi` 是方法
+- `screenshot` / `click` / `invokeApi` 是方法
 
 外部不会看到：
 
@@ -112,8 +114,8 @@
 
 注意：
 
-- `shell/http` 不在 agent-relay 协议里暴露
-- relay 看到的是 `services[].methods[]`，例如 `computer.exec`
+- `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
+- relay 看到的是 `services[].methods[]`，例如 `computer.screenshot`
 
 ## 项目结构
 
@@ -159,7 +161,8 @@ cargo run -- init-config
 
 例如：
 
-- 开一个 `computer.exec`
+- 开一个 `computer.screenshot`
+- 再开一个 `computer.click`
 - 或者开一个映射本地 Java 服务的 `local-java-service.invokeApi`
 
 3. 启动 agent
@@ -273,7 +276,7 @@ npm run build
 
 触发方式：
 
-- 推送 tag：`bridge-agent-v0.1.7`
+- 推送 tag：`bridge-agent-v0.1.8`
 - 或者在 GitHub Actions 页面手动执行 `workflow_dispatch`
 
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
@@ -329,7 +332,7 @@ npm run tauri:build:macos-universal -- --debug
    - `Cargo.toml`
    - `src-tauri/Cargo.toml`
    - `src-tauri/tauri.conf.json`
-2. 推送版本 tag，例如 `bridge-agent-v0.1.7`
+2. 推送版本 tag，例如 `bridge-agent-v0.1.8`
 3. GitHub Actions 会自动构建并把安装包上传到当前 tag 对应的 Release
 4. 最终用户从仓库的 [`Releases / latest`](../../releases/latest) 直接下载
 
@@ -346,7 +349,7 @@ npm run tauri build -- --debug
 本机验证过的产物路径：
 
 - `src-tauri/target/universal-apple-darwin/debug/bundle/macos/Bridge Agent.app`
-- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/Bridge Agent_0.1.7_universal.dmg`
+- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/Bridge Agent_0.1.8_universal.dmg`
 
 后续如果要做 Windows / Linux 分发，直接在对应平台执行同样的 `tauri build` 即可。
 
@@ -358,11 +361,25 @@ npm run tauri build -- --debug
 
 ## 方法绑定
 
-### 1. `shell_command`
+### 1. `computer_use`
 
-适合电脑控制类服务，例如：
+适合 GPT-5.4 这类模型驱动的桌面控制服务，例如：
 
-- `computer.exec`
+- `computer.screenshot`
+- `computer.click`
+- `computer.type`
+
+当前首版实现：
+
+- 只在 macOS 上启用
+- 依赖系统的辅助功能权限和屏幕录制权限
+- 内建动作包括截图、单击、双击、移动、拖拽、滚动、输入文本、按键和等待
+
+### 2. `shell_command`
+
+适合终端类服务，例如：
+
+- `terminal.exec`
 
 本地策略包括：
 
@@ -371,7 +388,7 @@ npm run tauri build -- --debug
 - 超时限制
 - 环境变量白名单
 
-### 2. `http`
+### 3. `http`
 
 适合把本地 Java / Node / Python 服务映射成业务方法，例如：
 
@@ -387,6 +404,7 @@ npm run tauri build -- --debug
 
 - 本地机器不开放入站端口给外网
 - 所有调用都通过本地 agent 主动外连 relay
+- `computer_use` 不等于任意 shell，它只执行受控的桌面动作
 - shell 方法必须显式 allowlist
 - cwd 不能逃逸 root_dir
 - 每个方法调用都有超时

@@ -14,6 +14,15 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
+use core_foundation::boolean::CFBoolean;
+#[cfg(target_os = "macos")]
+use core_foundation::dictionary::CFDictionary;
+#[cfg(target_os = "macos")]
+use core_foundation::string::CFString;
+
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/momoplan/bridge-agent/releases/latest";
 const GITHUB_LATEST_RELEASE_PAGE: &str = "https://github.com/momoplan/bridge-agent/releases/latest";
@@ -95,6 +104,16 @@ struct AppUpdateInstallResult {
     release_url: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopPermissionStatus {
+    platform: String,
+    accessibility_granted: bool,
+    screen_recording_granted: bool,
+    accessibility_supported: bool,
+    screen_recording_supported: bool,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct GithubReleaseResponse {
     tag_name: String,
@@ -109,6 +128,15 @@ struct GithubReleaseAsset {
     name: String,
     browser_download_url: String,
     digest: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 #[tauri::command]
@@ -199,6 +227,62 @@ async fn reset_example_config(
 #[tauri::command]
 fn open_in_browser(url: String) -> Result<(), String> {
     open::that(url).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn desktop_permission_status() -> Result<DesktopPermissionStatus, String> {
+    Ok(read_desktop_permission_status())
+}
+
+#[tauri::command]
+fn request_desktop_permission(permission: String) -> Result<DesktopPermissionStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        match permission.trim() {
+            "screen_recording" => {
+                let _ = unsafe { CGRequestScreenCaptureAccess() };
+            }
+            "accessibility" => {
+                prompt_accessibility_permission();
+            }
+            other => return Err(format!("不支持的权限类型: {other}")),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+    }
+
+    Ok(read_desktop_permission_status())
+}
+
+#[tauri::command]
+fn open_desktop_permission_settings(permission: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let target = match permission.trim() {
+            "screen_recording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            other => return Err(format!("不支持的权限类型: {other}")),
+        };
+
+        if open::that(target).is_ok() {
+            return Ok(());
+        }
+
+        open::that("x-apple.systempreferences:com.apple.preference.security")
+            .or_else(|_| open::that("x-apple.systempreferences:"))
+            .or_else(|_| open::that("System Settings"))
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+        Err("当前平台暂不支持打开桌面权限设置".to_string())
+    }
 }
 
 #[tauri::command]
@@ -470,6 +554,38 @@ fn make_asset_ready_to_open(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn read_desktop_permission_status() -> DesktopPermissionStatus {
+    #[cfg(target_os = "macos")]
+    {
+        DesktopPermissionStatus {
+            platform: "macos".to_string(),
+            accessibility_granted: unsafe { AXIsProcessTrusted() },
+            screen_recording_granted: unsafe { CGPreflightScreenCaptureAccess() },
+            accessibility_supported: true,
+            screen_recording_supported: true,
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        DesktopPermissionStatus {
+            platform: std::env::consts::OS.to_string(),
+            accessibility_granted: false,
+            screen_recording_granted: false,
+            accessibility_supported: false,
+            screen_recording_supported: false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_accessibility_permission() {
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+    let _ = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
+}
+
 fn main() {
     install_rustls_crypto_provider().expect("failed to install rustls provider");
     let config_path = default_config_path().expect("failed to determine default config path");
@@ -488,6 +604,9 @@ fn main() {
             clear_logs,
             reset_example_config,
             open_in_browser,
+            desktop_permission_status,
+            request_desktop_permission,
+            open_desktop_permission_settings,
             start_browser_auth,
             poll_browser_auth,
             check_app_update,

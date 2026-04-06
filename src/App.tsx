@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 type RuntimeStatus =
   | "stopped"
@@ -64,7 +64,24 @@ interface HttpBinding {
   timeout_secs?: number | null;
 }
 
-type MethodBinding = ShellBinding | HttpBinding;
+type ComputerAction =
+  | "screenshot"
+  | "click"
+  | "double_click"
+  | "scroll"
+  | "type"
+  | "wait"
+  | "keypress"
+  | "drag"
+  | "move";
+
+interface ComputerUseBinding {
+  type: "computer_use";
+  action: ComputerAction;
+  display_id?: number | null;
+}
+
+type MethodBinding = ShellBinding | HttpBinding | ComputerUseBinding;
 
 interface MethodConfig {
   name: string;
@@ -131,6 +148,14 @@ interface AppUpdateInstallResult {
   releaseUrl: string;
 }
 
+interface DesktopPermissionStatus {
+  platform: string;
+  accessibilityGranted: boolean;
+  screenRecordingGranted: boolean;
+  accessibilitySupported: boolean;
+  screenRecordingSupported: boolean;
+}
+
 interface UiShellBinding {
   type: "shell_command";
   root_dir: string;
@@ -147,7 +172,13 @@ interface UiHttpBinding {
   timeout_secs: string;
 }
 
-type UiMethodBinding = UiShellBinding | UiHttpBinding;
+interface UiComputerUseBinding {
+  type: "computer_use";
+  action: ComputerAction;
+  display_id: string;
+}
+
+type UiMethodBinding = UiShellBinding | UiHttpBinding | UiComputerUseBinding;
 
 interface UiMethodConfig {
   name: string;
@@ -180,7 +211,8 @@ interface UiAgentConfig {
 }
 
 type SettingsSection = "identity" | "connection" | "runtime";
-type DetailPanel = "status" | "logs" | "manifest";
+type AppPage = "overview" | "services" | "connection" | "diagnostics";
+type DetailPanel = "system" | "logs" | "manifest";
 
 const SHELL_SCHEMA = {
   type: "object",
@@ -204,10 +236,163 @@ const HTTP_SCHEMA = {
   additionalProperties: true
 };
 
+const EMPTY_OBJECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {}
+};
+
+const COMPUTER_MOUSE_SCHEMA = {
+  type: "object",
+  required: ["x", "y"],
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+    button: {
+      type: "string",
+      enum: ["left", "middle", "right"]
+    },
+    keys: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+};
+
+const COMPUTER_SCROLL_SCHEMA = {
+  type: "object",
+  required: ["x", "y"],
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+    scroll_x: { type: "integer" },
+    scroll_y: { type: "integer" },
+    scrollX: { type: "integer" },
+    scrollY: { type: "integer" },
+    keys: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+};
+
+const COMPUTER_TYPE_SCHEMA = {
+  type: "object",
+  required: ["text"],
+  properties: {
+    text: { type: "string" }
+  }
+};
+
+const COMPUTER_WAIT_SCHEMA = {
+  type: "object",
+  properties: {
+    ms: {
+      type: "integer",
+      minimum: 0
+    }
+  }
+};
+
+const COMPUTER_KEYPRESS_SCHEMA = {
+  type: "object",
+  required: ["keys"],
+  properties: {
+    keys: {
+      type: "array",
+      items: { type: "string" },
+      minItems: 1
+    }
+  }
+};
+
+const COMPUTER_DRAG_SCHEMA = {
+  type: "object",
+  required: ["path"],
+  properties: {
+    path: {
+      type: "array",
+      minItems: 2,
+      items: {
+        type: "object",
+        required: ["x", "y"],
+        properties: {
+          x: { type: "number" },
+          y: { type: "number" }
+        }
+      }
+    },
+    keys: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+};
+
 const DEFAULT_PLATFORM_BASE_URL = "https://baijimu.com/lowcode3";
-const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls";
+const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls, git";
 const FULL_ACCESS_COMMAND = "*";
 const FULL_ACCESS_ROOT_DIR = "/";
+
+const COMPUTER_METHOD_PRESETS: Record<
+  ComputerAction,
+  { name: string; description: string; schema: unknown; label: string }
+> = {
+  screenshot: {
+    name: "screenshot",
+    description: "Capture the current desktop and return a PNG screenshot.",
+    schema: EMPTY_OBJECT_SCHEMA,
+    label: "截图"
+  },
+  click: {
+    name: "click",
+    description: "Click at a screen coordinate with an optional mouse button.",
+    schema: COMPUTER_MOUSE_SCHEMA,
+    label: "单击"
+  },
+  double_click: {
+    name: "double_click",
+    description: "Double-click at a screen coordinate.",
+    schema: COMPUTER_MOUSE_SCHEMA,
+    label: "双击"
+  },
+  scroll: {
+    name: "scroll",
+    description: "Scroll at a screen coordinate with horizontal and vertical deltas.",
+    schema: COMPUTER_SCROLL_SCHEMA,
+    label: "滚动"
+  },
+  type: {
+    name: "type",
+    description: "Type text into the currently focused app.",
+    schema: COMPUTER_TYPE_SCHEMA,
+    label: "输入文本"
+  },
+  wait: {
+    name: "wait",
+    description: "Pause briefly to let the desktop settle before the next screenshot.",
+    schema: COMPUTER_WAIT_SCHEMA,
+    label: "等待"
+  },
+  keypress: {
+    name: "keypress",
+    description: "Press one key or a key chord such as Command+L.",
+    schema: COMPUTER_KEYPRESS_SCHEMA,
+    label: "按键"
+  },
+  drag: {
+    name: "drag",
+    description: "Drag the pointer across a path of coordinates.",
+    schema: COMPUTER_DRAG_SCHEMA,
+    label: "拖拽"
+  },
+  move: {
+    name: "move",
+    description: "Move the pointer to a screen coordinate.",
+    schema: COMPUTER_MOUSE_SCHEMA,
+    label: "移动"
+  }
+};
 
 function App() {
   const [configPath, setConfigPath] = useState("");
@@ -220,12 +405,18 @@ function App() {
   const [error, setError] = useState("");
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
+  const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [desktopPermissionBusy, setDesktopPermissionBusy] = useState<"accessibility" | "screen_recording" | null>(
+    null
+  );
+  const [expandedMethodAdvancedKey, setExpandedMethodAdvancedKey] = useState<string | null>(null);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [activeSettingsSection, setActiveSettingsSection] =
     useState<SettingsSection>("identity");
-  const [activeDetailPanel, setActiveDetailPanel] = useState<DetailPanel>("status");
+  const [activePage, setActivePage] = useState<AppPage>("overview");
+  const [activeDetailPanel, setActiveDetailPanel] = useState<DetailPanel>("system");
   const [expandedServiceIndex, setExpandedServiceIndex] = useState<number | null>(0);
 
   useEffect(() => {
@@ -234,6 +425,10 @@ function App() {
 
   useEffect(() => {
     void checkAppUpdate();
+  }, []);
+
+  useEffect(() => {
+    void refreshDesktopPermissions();
   }, []);
 
   useEffect(() => {
@@ -284,8 +479,40 @@ function App() {
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const enabledServiceCount = config?.services.filter((service) => service.enabled).length ?? 0;
+  const enabledComputerMethodCount =
+    config?.services.reduce(
+      (count, service) =>
+        count +
+        (service.enabled
+          ? service.methods.filter(
+              (method) => method.enabled && method.binding.type === "computer_use"
+            ).length
+          : 0),
+      0
+    ) ?? 0;
+  const selectedServiceIndex =
+    expandedServiceIndex != null && config?.services[expandedServiceIndex] ? expandedServiceIndex : null;
+  const selectedService = selectedServiceIndex == null ? null : config?.services[selectedServiceIndex] ?? null;
   const visibleAppUpdate =
     appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
+  const hasDesktopPermissionGap =
+    enabledComputerMethodCount > 0 &&
+    desktopPermissions != null &&
+    ((!desktopPermissions.accessibilityGranted && desktopPermissions.accessibilitySupported) ||
+      (!desktopPermissions.screenRecordingGranted && desktopPermissions.screenRecordingSupported));
+
+  function buildMethodEditorKey(serviceIndex: number, methodIndex: number) {
+    return `${serviceIndex}:${methodIndex}`;
+  }
+
+  function isMethodAdvancedOpen(serviceIndex: number, methodIndex: number) {
+    return expandedMethodAdvancedKey === buildMethodEditorKey(serviceIndex, methodIndex);
+  }
+
+  function toggleMethodAdvanced(serviceIndex: number, methodIndex: number) {
+    const key = buildMethodEditorKey(serviceIndex, methodIndex);
+    setExpandedMethodAdvancedKey((current) => (current === key ? null : key));
+  }
 
   async function refreshAll() {
     try {
@@ -312,6 +539,15 @@ function App() {
       setLogs(latestLogs);
     } catch (err) {
       setError(readError(err));
+    }
+  }
+
+  async function refreshDesktopPermissions() {
+    try {
+      const status = await invoke<DesktopPermissionStatus>("desktop_permission_status");
+      setDesktopPermissions(status);
+    } catch (err) {
+      console.warn("读取桌面权限状态失败", err);
     }
   }
 
@@ -452,6 +688,44 @@ function App() {
   async function openExternalUrl(url: string) {
     try {
       await invoke("open_in_browser", { url });
+    } catch (err) {
+      setError(readError(err));
+    }
+  }
+
+  async function requestDesktopPermission(permission: "accessibility" | "screen_recording") {
+    try {
+      setDesktopPermissionBusy(permission);
+      setMessage("");
+      setError("");
+      const status = await invoke<DesktopPermissionStatus>("request_desktop_permission", {
+        permission
+      });
+      setDesktopPermissions(status);
+      if (permission === "screen_recording") {
+        setMessage(
+          status.screenRecordingGranted
+            ? "屏幕录制权限已可用。"
+            : "已请求屏幕录制权限。如果系统没有立即生效，请到系统设置里确认并重新打开应用。"
+        );
+      } else {
+        setMessage(
+          status.accessibilityGranted
+            ? "辅助功能权限已可用。"
+            : "已请求辅助功能权限，请在系统设置里允许 Bridge Agent 控制电脑。"
+        );
+      }
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setDesktopPermissionBusy(null);
+    }
+  }
+
+  async function openDesktopPermissionSettings(permission: "accessibility" | "screen_recording") {
+    try {
+      setError("");
+      await invoke("open_desktop_permission_settings", { permission });
     } catch (err) {
       setError(readError(err));
     }
@@ -623,12 +897,16 @@ function App() {
     );
   }
 
-  function addMethod(serviceIndex: number, type: "shell_command" | "http") {
+  function addMethod(serviceIndex: number, type: "shell_command" | "http" | "computer_use") {
     updateService(serviceIndex, (service) => ({
       ...service,
       methods: [
         ...service.methods,
-        type === "shell_command" ? createShellMethod() : createHttpMethod()
+        type === "shell_command"
+          ? createShellMethod()
+          : type === "http"
+            ? createHttpMethod()
+            : createComputerMethod()
       ]
     }));
   }
@@ -651,10 +929,6 @@ function App() {
         index === methodIndex ? updater(method) : method
       )
     }));
-  }
-
-  function toggleServiceExpanded(serviceIndex: number) {
-    setExpandedServiceIndex((current) => (current === serviceIndex ? null : serviceIndex));
   }
 
   function grantFullShellAccess(serviceIndex: number, methodIndex: number) {
@@ -834,6 +1108,654 @@ function App() {
     }
   }
 
+  function renderOverviewPage() {
+    if (!config) {
+      return <div />;
+    }
+
+    return (
+      <div className="overview-grid">
+        <Card title="运行" description="先看当前状态，再决定启动、停止或重新授权。">
+          <div className="overview-stack">
+            <div className="overview-status-row">
+              <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
+              <div className="overview-meta">
+                <span>最近事件</span>
+                <strong>{runtime ? formatTime(runtime.last_event_at) : "-"}</strong>
+              </div>
+            </div>
+            <div className="hero-actions compact-actions">
+              <button className="primary accent" onClick={() => void startAgent()} disabled={busy}>
+                启动
+              </button>
+              <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
+                停止
+              </button>
+              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                重新授权
+              </button>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="设备" description="用户真正关心的是这台机器当前以什么身份在线。">
+          <div className="status-detail-grid">
+            <InfoRow label="设备名称" value={config.device.name} />
+            <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
+            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
+          </div>
+        </Card>
+
+        <Card title="连接" description="把连接信息压缩成几项关键字段，不再首屏展开全部配置。">
+          <div className="status-detail-grid">
+            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+            <InfoRow
+              label="最近错误"
+              value={runtime?.last_error || "无"}
+              tone={runtime?.last_error ? "danger" : "normal"}
+            />
+            <InfoRow
+              label="更新"
+              value={
+                appUpdate?.updateAvailable
+                  ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
+                  : appUpdate
+                    ? "已是最新版本"
+                    : "检查中"
+              }
+              tone={appUpdate?.updateAvailable ? "danger" : "normal"}
+            />
+          </div>
+        </Card>
+
+        <Card
+          title="桌面权限"
+          description="截图依赖屏幕录制，鼠标键盘控制依赖辅助功能。"
+          action={
+            <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
+              刷新状态
+            </button>
+          }
+        >
+          <div className="status-detail-grid">
+            <InfoRow
+              label="屏幕录制"
+              value={formatDesktopPermissionValue(
+                desktopPermissions,
+                "screen_recording",
+                "用于截图"
+              )}
+              tone={
+                desktopPermissions?.screenRecordingSupported &&
+                !desktopPermissions.screenRecordingGranted
+                  ? "danger"
+                  : "normal"
+              }
+            />
+            <InfoRow
+              label="辅助功能"
+              value={formatDesktopPermissionValue(
+                desktopPermissions,
+                "accessibility",
+                "用于点击、输入和拖拽"
+              )}
+              tone={
+                desktopPermissions?.accessibilitySupported &&
+                !desktopPermissions.accessibilityGranted
+                  ? "danger"
+                  : "normal"
+              }
+            />
+          </div>
+          {desktopPermissions?.platform === "macos" ? (
+            <div className="permission-actions">
+              {!desktopPermissions.screenRecordingGranted ? (
+                <button
+                  className="secondary"
+                  onClick={() => void requestDesktopPermission("screen_recording")}
+                  disabled={desktopPermissionBusy != null}
+                >
+                  {desktopPermissionBusy === "screen_recording" ? "请求中" : "请求屏幕录制"}
+                </button>
+              ) : null}
+              {!desktopPermissions.accessibilityGranted ? (
+                <button
+                  className="secondary"
+                  onClick={() => void requestDesktopPermission("accessibility")}
+                  disabled={desktopPermissionBusy != null}
+                >
+                  {desktopPermissionBusy === "accessibility" ? "请求中" : "请求辅助功能"}
+                </button>
+              ) : null}
+              {!desktopPermissions.screenRecordingGranted ? (
+                <button
+                  className="ghost"
+                  onClick={() => void openDesktopPermissionSettings("screen_recording")}
+                >
+                  打开屏幕录制设置
+                </button>
+              ) : null}
+              {!desktopPermissions.accessibilityGranted ? (
+                <button
+                  className="ghost"
+                  onClick={() => void openDesktopPermissionSettings("accessibility")}
+                >
+                  打开辅助功能设置
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </Card>
+
+        <Card
+          title="服务"
+          description="服务管理单独成页，概览里只给出数量和入口。"
+          action={
+            <button className="secondary" onClick={() => setActivePage("services")}>
+              打开服务页
+            </button>
+          }
+        >
+          <div className="status-detail-grid">
+            <InfoRow label="总服务数" value={String(config.services.length)} />
+            <InfoRow label="已启用" value={String(enabledServiceCount)} />
+            <InfoRow label="最近日志" value={latestLog ? formatTime(latestLog.timestamp_ms) : "暂无"} />
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  function renderServiceEditor(service: UiServiceConfig, serviceIndex: number) {
+    return (
+      <Card
+        title={service.name || "未命名服务"}
+        description={service.description || "填写这个服务对外提供什么能力。"}
+        action={
+          <div className="service-actions">
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={service.enabled}
+                onChange={(event) =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    enabled: event.target.checked
+                  }))
+                }
+              />
+              启用
+            </label>
+            <button className="ghost danger" onClick={() => removeService(serviceIndex)}>
+              删除服务
+            </button>
+          </div>
+        }
+      >
+        <div className="service-editor-layout">
+          <div className="form-grid">
+            <Field label="服务名">
+              <input
+                value={service.name}
+                onChange={(event) =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    name: event.target.value
+                  }))
+                }
+              />
+            </Field>
+            <Field label="服务描述">
+              <input
+                value={service.description}
+                onChange={(event) =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    description: event.target.value
+                  }))
+                }
+              />
+            </Field>
+          </div>
+          <div className="method-toolbar">
+            <button className="secondary" onClick={() => addMethod(serviceIndex, "computer_use")}>
+              新增 Computer 方法
+            </button>
+            <button className="secondary" onClick={() => addMethod(serviceIndex, "shell_command")}>
+              新增 Shell 方法
+            </button>
+            <button className="secondary" onClick={() => addMethod(serviceIndex, "http")}>
+              新增 HTTP 方法
+            </button>
+          </div>
+          <div className="method-list">
+            {service.methods.map((method, methodIndex) => (
+              <div className="method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
+                <div className="method-topline">
+                    <div className="method-copy">
+                      <div className="method-title-row">
+                        <h4>{method.name || "未命名方法"}</h4>
+                        <span className="method-badge">
+                          {method.binding.type === "shell_command"
+                            ? "Shell"
+                            : method.binding.type === "http"
+                              ? "HTTP"
+                              : "Computer"}
+                        </span>
+                      </div>
+                      <p>{describeMethodBinding(method)}</p>
+                  </div>
+                  <div className="service-actions">
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={method.enabled}
+                        onChange={(event) =>
+                          updateMethod(serviceIndex, methodIndex, (current) => ({
+                            ...current,
+                            enabled: event.target.checked
+                          }))
+                        }
+                      />
+                      启用
+                    </label>
+                    <button
+                      className={isMethodAdvancedOpen(serviceIndex, methodIndex) ? "secondary" : "ghost"}
+                      onClick={() => toggleMethodAdvanced(serviceIndex, methodIndex)}
+                    >
+                      {isMethodAdvancedOpen(serviceIndex, methodIndex) ? "收起高级设置" : "高级设置"}
+                    </button>
+                    <button
+                      className="ghost danger"
+                      onClick={() => removeMethod(serviceIndex, methodIndex)}
+                    >
+                      删除方法
+                    </button>
+                  </div>
+                </div>
+
+                <div className="form-grid">
+                  <Field label="方法名">
+                    <input
+                      value={method.name}
+                      onChange={(event) =>
+                        updateMethod(serviceIndex, methodIndex, (current) => ({
+                          ...current,
+                          name: event.target.value
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="方法描述">
+                    <input
+                      value={method.description}
+                      onChange={(event) =>
+                        updateMethod(serviceIndex, methodIndex, (current) => ({
+                          ...current,
+                          description: event.target.value
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="绑定类型">
+                    <select
+                      value={method.binding.type}
+                      onChange={(event) =>
+                        updateMethod(serviceIndex, methodIndex, (current) => ({
+                          ...current,
+                          input_schema_text:
+                            event.target.value === "shell_command"
+                              ? prettyJson(SHELL_SCHEMA)
+                              : event.target.value === "http"
+                                ? prettyJson(HTTP_SCHEMA)
+                                : prettyJson(COMPUTER_METHOD_PRESETS.screenshot.schema),
+                          binding:
+                            event.target.value === "shell_command"
+                              ? createShellMethod().binding
+                              : event.target.value === "http"
+                                ? createHttpMethod().binding
+                                : createComputerMethod().binding
+                        }))
+                      }
+                    >
+                      <option value="computer_use">computer_use</option>
+                      <option value="shell_command">shell_command</option>
+                      <option value="http">http</option>
+                    </select>
+                  </Field>
+
+                  {method.binding.type === "computer_use" ? (
+                    <>
+                      <Field label="动作">
+                        <select
+                          value={method.binding.action}
+                          onChange={(event) =>
+                            updateMethod(serviceIndex, methodIndex, (current) => {
+                              if (current.binding.type !== "computer_use") {
+                                return current;
+                              }
+                              const nextAction = event.target.value as ComputerAction;
+                              const preset = COMPUTER_METHOD_PRESETS[nextAction];
+                              return {
+                                ...current,
+                                input_schema_text: prettyJson(preset.schema),
+                                binding: {
+                                  ...current.binding,
+                                  action: nextAction
+                                }
+                              };
+                            })
+                          }
+                        >
+                          {Object.entries(COMPUTER_METHOD_PRESETS).map(([value, preset]) => (
+                            <option key={value} value={value}>
+                              {value} · {preset.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field
+                        label="桌面能力"
+                        hint="首版按 macOS 实现，依赖系统的辅助功能和屏幕录制权限。"
+                      >
+                        <input value="受控桌面动作" readOnly />
+                      </Field>
+                    </>
+                  ) : method.binding.type === "shell_command" ? (
+                    <Field label="权限模式">
+                      <div className="mode-toggle">
+                        <button
+                          className={!isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                          onClick={() => restoreSafeShellAccess(serviceIndex, methodIndex)}
+                        >
+                          受限
+                        </button>
+                        <button
+                          className={isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                          onClick={() => grantFullShellAccess(serviceIndex, methodIndex)}
+                        >
+                          全部权限
+                        </button>
+                      </div>
+                    </Field>
+                  ) : (
+                    <>
+                      <Field label="本地 URL" wide>
+                        <input
+                          value={method.binding.url}
+                          onChange={(event) =>
+                            updateMethod(serviceIndex, methodIndex, (current) => ({
+                              ...current,
+                              binding: {
+                                ...current.binding,
+                                url: event.target.value
+                              }
+                            }))
+                          }
+                        />
+                      </Field>
+                      <Field label="HTTP 方法">
+                        <input
+                          value={method.binding.http_method}
+                          onChange={(event) =>
+                            updateMethod(serviceIndex, methodIndex, (current) => ({
+                              ...current,
+                              binding: {
+                                ...current.binding,
+                                http_method: event.target.value.toUpperCase()
+                              }
+                            }))
+                          }
+                        />
+                      </Field>
+                    </>
+                  )}
+                </div>
+
+                {isMethodAdvancedOpen(serviceIndex, methodIndex) ? (
+                  <div className="method-advanced">
+                    <div className="method-advanced-head">
+                      <strong>高级设置</strong>
+                      <small>只有在需要细调本地实现时才展开这里。</small>
+                    </div>
+
+                    {method.binding.type === "shell_command" ? (
+                      <>
+                        <div className="permission-banner compact-banner">
+                          <div>
+                            <strong>
+                              {isFullShellAccess(method.binding) ? "当前是全部权限模式" : "当前是受限模式"}
+                            </strong>
+                            <p>这里决定命令白名单、根目录和超时上限。</p>
+                          </div>
+                        </div>
+                        <div className="form-grid">
+                          <Field label="根目录" hint="默认相对配置目录，填 / 表示整机根目录。">
+                            <input
+                              value={method.binding.root_dir}
+                              onChange={(event) =>
+                                updateMethod(serviceIndex, methodIndex, (current) => ({
+                                  ...current,
+                                  binding: {
+                                    ...current.binding,
+                                    root_dir: event.target.value
+                                  }
+                                }))
+                              }
+                            />
+                          </Field>
+                          <Field label="允许命令" hint="逗号分隔；填 * 表示任意命令。">
+                            <input
+                              value={method.binding.allow_commands_text}
+                              onChange={(event) =>
+                                updateMethod(serviceIndex, methodIndex, (current) => ({
+                                  ...current,
+                                  binding: {
+                                    ...current.binding,
+                                    allow_commands_text: event.target.value
+                                  }
+                                }))
+                              }
+                              placeholder="echo, pwd, git 或 *"
+                            />
+                          </Field>
+                          <Field label="默认超时">
+                            <input
+                              value={method.binding.default_timeout_secs}
+                              onChange={(event) =>
+                                updateMethod(serviceIndex, methodIndex, (current) => ({
+                                  ...current,
+                                  binding: {
+                                    ...current.binding,
+                                    default_timeout_secs: event.target.value
+                                  }
+                                }))
+                              }
+                              placeholder="留空则使用全局"
+                            />
+                          </Field>
+                          <Field label="最大超时">
+                            <input
+                              value={method.binding.max_timeout_secs}
+                              onChange={(event) =>
+                                updateMethod(serviceIndex, methodIndex, (current) => ({
+                                  ...current,
+                                  binding: {
+                                    ...current.binding,
+                                    max_timeout_secs: event.target.value
+                                  }
+                                }))
+                              }
+                              placeholder="留空则使用全局"
+                            />
+                          </Field>
+                        </div>
+                      </>
+                    ) : method.binding.type === "computer_use" ? (
+                      <div className="form-grid">
+                        <Field
+                          label="显示器 ID"
+                          hint="留空表示主显示器；截图时可指定其他显示器。"
+                        >
+                          <input
+                            value={method.binding.display_id}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                binding:
+                                  current.binding.type === "computer_use"
+                                    ? {
+                                        ...current.binding,
+                                        display_id: event.target.value
+                                      }
+                                    : current.binding
+                              }))
+                            }
+                            placeholder="留空使用主屏"
+                          />
+                        </Field>
+                      </div>
+                    ) : (
+                      <div className="form-grid">
+                        <Field label="超时">
+                          <input
+                            value={method.binding.timeout_secs}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                binding: {
+                                  ...current.binding,
+                                  timeout_secs: event.target.value
+                                }
+                              }))
+                            }
+                            placeholder="留空则使用全局"
+                          />
+                        </Field>
+                        <Field label="请求头" wide>
+                          <textarea
+                            rows={4}
+                            value={method.binding.headers_text}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                binding: {
+                                  ...current.binding,
+                                  headers_text: event.target.value
+                                }
+                              }))
+                            }
+                            placeholder={"Authorization: Bearer xxx\nX-App: local-java"}
+                          />
+                        </Field>
+                      </div>
+                    )}
+
+                    <Field label="输入 Schema JSON" wide>
+                      <textarea
+                        rows={8}
+                        value={method.input_schema_text}
+                        onChange={(event) =>
+                          updateMethod(serviceIndex, methodIndex, (current) => ({
+                            ...current,
+                            input_schema_text: event.target.value
+                          }))
+                        }
+                      />
+                    </Field>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  function renderServicesPage() {
+    if (!config) {
+      return <div />;
+    }
+
+    return (
+      <div className="services-layout">
+        <Card
+          title="服务列表"
+          description="左侧负责挑选服务，右侧再进入详细编辑。"
+          action={
+            <button className="secondary" onClick={addService}>
+              新增服务
+            </button>
+          }
+        >
+          <div className="service-nav-list">
+            {config.services.length === 0 ? (
+              <div className="empty-state">还没有服务，先新增一个。</div>
+            ) : (
+              config.services.map((service, serviceIndex) => (
+                <button
+                  className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
+                  key={`${service.name}-${serviceIndex}`}
+                  onClick={() => setExpandedServiceIndex(serviceIndex)}
+                >
+                  <div>
+                    <strong>{service.name || "未命名服务"}</strong>
+                    <p>{service.description || "填写服务说明。"}</p>
+                  </div>
+                  <div className="service-nav-meta">
+                    <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
+                      {service.enabled ? "启用" : "停用"}
+                    </span>
+                    <small>{service.methods.length} 个方法</small>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </Card>
+
+        <div className="service-editor-panel">
+          {selectedService && selectedServiceIndex != null ? (
+            renderServiceEditor(selectedService, selectedServiceIndex)
+          ) : (
+            <Card title="服务详情" description="从左侧选择一个服务开始编辑。">
+              <div className="empty-state">还没有可编辑的服务。</div>
+            </Card>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderConnectionPage() {
+    return (
+      <Card title="连接设置" description="把设备、授权和运行参数收进这一页。">
+        <div className="section-tabs">
+          <button
+            className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
+            onClick={() => setActiveSettingsSection("identity")}
+          >
+            设备
+          </button>
+          <button
+            className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
+            onClick={() => setActiveSettingsSection("connection")}
+          >
+            连接
+          </button>
+          <button
+            className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
+            onClick={() => setActiveSettingsSection("runtime")}
+          >
+            运行
+          </button>
+        </div>
+        {renderSettingsSection()}
+      </Card>
+    );
+  }
+
   function renderDetailPanel() {
     if (!config) {
       return <div />;
@@ -842,8 +1764,8 @@ function App() {
     if (activeDetailPanel === "logs") {
       return (
         <Card
-          title="运行日志"
-          description="仅保留本地最近日志，可用于排查连接和调用问题。"
+          title="日志"
+          description="诊断信息放到这里，不再占主工作区。"
           action={
             <button className="ghost" onClick={() => void clearLogs()}>
               清空日志
@@ -869,16 +1791,15 @@ function App() {
 
     if (activeDetailPanel === "manifest") {
       return (
-        <Card title="服务清单预览" description="这里展示将对外暴露的 manifest 形态。">
+        <Card title="服务清单" description="仅在排查或联调用途中查看。">
           <pre className="code-panel">{manifestPreview}</pre>
         </Card>
       );
     }
 
     return (
-      <Card title="运行状态" description="查看当前连接快照、本地配置位置和最近错误。">
+      <Card title="系统信息" description="版本、路径和运行细节都收进诊断页。">
         <div className="status-detail-grid">
-          <InfoRow label="当前状态" value={statusLabel} />
           <InfoRow label="应用版本" value={appUpdate?.currentVersion ?? "检查中"} />
           <InfoRow
             label="更新状态"
@@ -891,9 +1812,30 @@ function App() {
             }
             tone={appUpdate?.updateAvailable ? "danger" : "normal"}
           />
+          <InfoRow label="当前状态" value={statusLabel} />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+          <InfoRow
+            label="桌面权限"
+            value={
+              desktopPermissions == null
+                ? "检查中"
+                : desktopPermissions.platform !== "macos"
+                  ? "当前平台未接入"
+                  : desktopPermissions.accessibilityGranted &&
+                      desktopPermissions.screenRecordingGranted
+                    ? "已就绪"
+                    : "权限未完整授权"
+            }
+            tone={
+              desktopPermissions != null &&
+              desktopPermissions.platform === "macos" &&
+              (!desktopPermissions.accessibilityGranted || !desktopPermissions.screenRecordingGranted)
+                ? "danger"
+                : "normal"
+            }
+          />
           <InfoRow label="配置文件" value={configPath} />
           <InfoRow
             label="最近错误"
@@ -902,6 +1844,34 @@ function App() {
           />
         </div>
       </Card>
+    );
+  }
+
+  function renderDiagnosticsPage() {
+    return (
+      <div className="diagnostics-layout">
+        <div className="section-tabs">
+          <button
+            className={`section-tab ${activeDetailPanel === "system" ? "active" : ""}`}
+            onClick={() => setActiveDetailPanel("system")}
+          >
+            系统
+          </button>
+          <button
+            className={`section-tab ${activeDetailPanel === "logs" ? "active" : ""}`}
+            onClick={() => setActiveDetailPanel("logs")}
+          >
+            日志
+          </button>
+          <button
+            className={`section-tab ${activeDetailPanel === "manifest" ? "active" : ""}`}
+            onClick={() => setActiveDetailPanel("manifest")}
+          >
+            清单
+          </button>
+        </div>
+        {renderDetailPanel()}
+      </div>
     );
   }
 
@@ -917,30 +1887,119 @@ function App() {
 
   if (!config) {
     return (
-      <main className="app-shell">
-        <section className="hero loading-panel">
-          <div className="hero-copy">
-            <p className="eyebrow">Bridge Agent</p>
-            <h1>正在加载本地管理台</h1>
-            <p>读取默认配置、运行状态和日志中。</p>
-            {error ? <div className="alert error">{error}</div> : null}
-          </div>
+      <main className="app-shell app-loading">
+        <section className="loading-panel">
+          <p className="eyebrow">Bridge Agent</p>
+          <h1>正在加载</h1>
+          <p>读取配置和运行状态。</p>
+          {error ? <div className="alert error">{error}</div> : null}
         </section>
       </main>
     );
   }
 
+  const pageTitleMap: Record<AppPage, string> = {
+    overview: "概览",
+    services: "服务",
+    connection: "连接",
+    diagnostics: "诊断"
+  };
+
+  const pageDescriptionMap: Record<AppPage, string> = {
+    overview: "首屏只保留当前状态、设备身份和关键操作。",
+    services: "服务编辑是主工作区，细节只在选中后展开。",
+    connection: "设备、授权和连接参数统一收进连接页。",
+    diagnostics: "日志、清单、版本和恢复操作都放到诊断页。"
+  };
+
   return (
     <main className="app-shell">
-      <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">Bridge Agent Desktop</p>
-          <h1>本地服务暴露与运行控制台</h1>
-          <p>
-            这里管理这台机器要暴露出去的业务服务，也控制 shell 和本地 HTTP 绑定。
-          </p>
-        </div>
-        <div className="hero-panel">
+      <div className="desktop-shell">
+        <aside className="sidebar">
+          <div className="sidebar-brand">
+            <p className="eyebrow">Bridge Agent</p>
+            <h1>{config.device.name}</h1>
+            <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
+          </div>
+
+          <nav className="sidebar-nav">
+            <button
+              className={`sidebar-nav-item ${activePage === "overview" ? "active" : ""}`}
+              onClick={() => setActivePage("overview")}
+            >
+              <span>概览</span>
+              <small>状态与主操作</small>
+            </button>
+            <button
+              className={`sidebar-nav-item ${activePage === "services" ? "active" : ""}`}
+              onClick={() => setActivePage("services")}
+            >
+              <span>服务</span>
+              <small>{config.services.length} 个服务</small>
+            </button>
+            <button
+              className={`sidebar-nav-item ${activePage === "connection" ? "active" : ""}`}
+              onClick={() => setActivePage("connection")}
+            >
+              <span>连接</span>
+              <small>{config.platform.workspace_id || "未授权"}</small>
+            </button>
+            <button
+              className={`sidebar-nav-item ${activePage === "diagnostics" ? "active" : ""}`}
+              onClick={() => setActivePage("diagnostics")}
+            >
+              <span>诊断</span>
+              <small>{latestLog ? "查看日志与清单" : "系统信息"}</small>
+            </button>
+          </nav>
+
+          <div className="sidebar-footer">
+            <div className="sidebar-stat">
+              <span>已启用服务</span>
+              <strong>{enabledServiceCount}</strong>
+            </div>
+            <div className="sidebar-stat">
+              <span>应用版本</span>
+              <strong>{appUpdate?.currentVersion ?? "检查中"}</strong>
+            </div>
+          </div>
+        </aside>
+
+        <section className="main-panel">
+          <header className="page-header">
+            <div>
+              <p className="eyebrow">{pageTitleMap[activePage]}</p>
+              <h2>{pageTitleMap[activePage]}</h2>
+              <p>{pageDescriptionMap[activePage]}</p>
+            </div>
+            <div className="page-actions">
+              {activePage === "services" || activePage === "connection" ? (
+                <button className="primary" onClick={() => void saveOnly()} disabled={busy}>
+                  保存更改
+                </button>
+              ) : null}
+              {activePage === "connection" ? (
+                <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                  浏览器授权
+                </button>
+              ) : null}
+              {activePage === "diagnostics" ? (
+                <button
+                  className="secondary"
+                  onClick={() => void checkAppUpdate(true)}
+                  disabled={updateBusy}
+                >
+                  检查更新
+                </button>
+              ) : null}
+              {activePage === "diagnostics" ? (
+                <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
+                  恢复示例
+                </button>
+              ) : null}
+            </div>
+          </header>
+
           {visibleAppUpdate ? (
             <div className="update-banner">
               <div>
@@ -949,15 +2008,10 @@ function App() {
                   当前 {visibleAppUpdate.currentVersion}，可升级到 {visibleAppUpdate.latestVersion}
                 </strong>
                 <p>
-                  {visibleAppUpdate.releaseName || "GitHub Release"} 已发布
+                  {visibleAppUpdate.releaseName || "GitHub Release"}
                   {visibleAppUpdate.publishedAt
-                    ? `，发布时间 ${formatReleaseTime(visibleAppUpdate.publishedAt)}`
-                    : ""}。
-                  {visibleAppUpdate.autoDownloadAvailable
-                    ? ` 当前平台 ${visibleAppUpdate.currentTarget} 可直接自动下载${
-                        visibleAppUpdate.assetName ? ` ${visibleAppUpdate.assetName}` : "安装包"
-                      }并拉起安装。`
-                    : ` 当前平台 ${visibleAppUpdate.currentTarget} 暂时只支持跳转到发布页下载。`}
+                    ? `，发布于 ${formatReleaseTime(visibleAppUpdate.publishedAt)}`
+                    : ""}
                 </p>
               </div>
               <div className="update-banner-actions">
@@ -988,482 +2042,60 @@ function App() {
               </div>
             </div>
           ) : null}
-          <div className="hero-topline">
-            <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
-            <div className="hero-summary">
-              <span>已启用服务 {enabledServiceCount}</span>
-              <span>{latestLog ? `最近日志 ${formatTime(latestLog.timestamp_ms)}` : "暂无日志"}</span>
-            </div>
-          </div>
-          <div className="hero-metrics">
-            <div>
-              <span>运行名称</span>
-              <strong>{runtime?.agent_id ?? config.relay.agent_id}</strong>
-            </div>
-            <div>
-              <span>Relay</span>
-              <strong>{runtime?.relay_url ?? config.relay.url}</strong>
-            </div>
-            <div>
-              <span>设备名称</span>
-              <strong>{config.device.name}</strong>
-            </div>
-          </div>
-          <div className="hero-actions">
-            <button className="primary" onClick={() => void saveOnly()} disabled={busy}>
-              保存配置
-            </button>
-            <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
-              浏览器授权
-            </button>
-            <button className="primary accent" onClick={() => void startAgent()} disabled={busy}>
-              启动 Agent
-            </button>
-            <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
-              停止 Agent
-            </button>
-            <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
-              恢复示例
-            </button>
-          </div>
-          <div className="detail-indicators">
-            <button
-              className={`detail-indicator ${activeDetailPanel === "status" ? "active" : ""}`}
-              onClick={() => setActiveDetailPanel("status")}
-            >
-              <span>运行状态</span>
-              <strong>{statusLabel}</strong>
-              <small>{runtime?.last_error ? "有错误详情" : "点击查看连接详情"}</small>
-            </button>
-            <button
-              className={`detail-indicator ${activeDetailPanel === "logs" ? "active" : ""}`}
-              onClick={() => setActiveDetailPanel("logs")}
-            >
-              <span>运行日志</span>
-              <strong>{logs.length} 条</strong>
-              <small>{latestLog ? latestLog.message : "暂无日志"}</small>
-            </button>
-            <button
-              className={`detail-indicator ${activeDetailPanel === "manifest" ? "active" : ""}`}
-              onClick={() => setActiveDetailPanel("manifest")}
-            >
-              <span>服务清单</span>
-              <strong>{config.services.length} 个服务</strong>
-              <small>点击查看对外暴露预览</small>
-            </button>
-          </div>
-          {message ? <div className="alert success">{message}</div> : null}
-          {error ? <div className="alert error">{error}</div> : null}
-          {runtime?.last_error ? <div className="alert warning">{runtime.last_error}</div> : null}
-          {browserAuth ? (
-            <div className="alert warning">
-              等待浏览器授权中，用户码 {browserAuth.userCode}。请在浏览器中选择工作区。
+
+          {hasDesktopPermissionGap ? (
+            <div className="permission-banner">
+              <div>
+                <strong>桌面控制权限未准备完成</strong>
+                <p>
+                  当前已启用 {enabledComputerMethodCount} 个桌面控制方法，但
+                  {!desktopPermissions?.screenRecordingGranted ? " 屏幕录制" : ""}
+                  {!desktopPermissions?.screenRecordingGranted &&
+                  !desktopPermissions?.accessibilityGranted
+                    ? " 和"
+                    : ""}
+                  {!desktopPermissions?.accessibilityGranted ? " 辅助功能" : ""}
+                  还没有授权。
+                </p>
+              </div>
+              <div className="permission-actions">
+                {!desktopPermissions?.screenRecordingGranted ? (
+                  <button
+                    className="secondary"
+                    onClick={() => void openDesktopPermissionSettings("screen_recording")}
+                  >
+                    屏幕录制设置
+                  </button>
+                ) : null}
+                {!desktopPermissions?.accessibilityGranted ? (
+                  <button
+                    className="secondary"
+                    onClick={() => void openDesktopPermissionSettings("accessibility")}
+                  >
+                    辅助功能设置
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : null}
-        </div>
-      </section>
 
-      <section className="workspace-grid">
-        <div className="column-main">
-          <Card
-            title="设置中心"
-            description="设备信息、连接参数和运行策略都统一收在这里。"
-            action={
-              <button
-                className="secondary"
-                onClick={() => void checkAppUpdate(true)}
-                disabled={updateBusy}
-              >
-                检查更新
-              </button>
-            }
-          >
-            <div className="section-tabs">
-              <button
-                className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
-                onClick={() => setActiveSettingsSection("identity")}
-              >
-                基础信息
-              </button>
-              <button
-                className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
-                onClick={() => setActiveSettingsSection("connection")}
-              >
-                连接配置
-              </button>
-              <button
-                className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
-                onClick={() => setActiveSettingsSection("runtime")}
-              >
-                运行策略
-              </button>
-            </div>
-            {renderSettingsSection()}
-          </Card>
+          {message ? <div className="alert success">{message}</div> : null}
+          {error ? <div className="alert error">{error}</div> : null}
+          {runtime?.last_error && activePage !== "diagnostics" ? (
+            <div className="alert warning">{runtime.last_error}</div>
+          ) : null}
+          {browserAuth ? (
+            <div className="alert warning">等待浏览器授权中，用户码 {browserAuth.userCode}。</div>
+          ) : null}
 
-          <Card
-            title="业务服务"
-            description="先看服务列表，点开单个服务后再编辑方法和具体绑定。"
-            action={
-              <button className="secondary" onClick={addService}>
-                新增服务
-              </button>
-            }
-          >
-            <div className="service-list">
-              {config.services.map((service, serviceIndex) => (
-                <div
-                  className={`service-card ${expandedServiceIndex === serviceIndex ? "expanded" : ""}`}
-                  key={`${service.name}-${serviceIndex}`}
-                >
-                  <div className="service-summary-row">
-                    <button
-                      className="service-summary-button"
-                      onClick={() => toggleServiceExpanded(serviceIndex)}
-                    >
-                      <div className="service-summary-copy">
-                        <div className="service-title-row">
-                          <h3>{service.name || "未命名服务"}</h3>
-                          <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
-                            {service.enabled ? "已启用" : "已停用"}
-                          </span>
-                        </div>
-                        <p>{service.description || "填写服务说明。"}</p>
-                      </div>
-                      <div className="service-summary-meta">
-                        <span>{service.methods.length} 个方法</span>
-                        <strong>{expandedServiceIndex === serviceIndex ? "收起详情" : "展开详情"}</strong>
-                      </div>
-                    </button>
-                    <div className="service-actions">
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={service.enabled}
-                          onChange={(event) =>
-                            updateService(serviceIndex, (current) => ({
-                              ...current,
-                              enabled: event.target.checked
-                            }))
-                          }
-                        />
-                        启用
-                      </label>
-                      <button className="ghost danger" onClick={() => removeService(serviceIndex)}>
-                        删除服务
-                      </button>
-                    </div>
-                  </div>
-                  {expandedServiceIndex === serviceIndex ? (
-                    <div className="service-details">
-                      <div className="form-grid">
-                        <Field label="服务名">
-                          <input
-                            value={service.name}
-                            onChange={(event) =>
-                              updateService(serviceIndex, (current) => ({
-                                ...current,
-                                name: event.target.value
-                              }))
-                            }
-                          />
-                        </Field>
-                        <Field label="服务描述">
-                          <input
-                            value={service.description}
-                            onChange={(event) =>
-                              updateService(serviceIndex, (current) => ({
-                                ...current,
-                                description: event.target.value
-                              }))
-                            }
-                          />
-                        </Field>
-                      </div>
-                      <div className="method-toolbar">
-                        <button
-                          className="secondary"
-                          onClick={() => addMethod(serviceIndex, "shell_command")}
-                        >
-                          新增 Shell 方法
-                        </button>
-                        <button
-                          className="secondary"
-                          onClick={() => addMethod(serviceIndex, "http")}
-                        >
-                          新增 HTTP 方法
-                        </button>
-                      </div>
-                      <div className="method-list">
-                        {service.methods.map((method, methodIndex) => (
-                          <div
-                            className="method-card"
-                            key={`${service.name}-${method.name}-${methodIndex}`}
-                          >
-                            <div className="service-head">
-                              <div>
-                                <h4>{method.name || "未命名方法"}</h4>
-                                <p>{method.description || "填写方法说明。"}</p>
-                              </div>
-                              <div className="service-actions">
-                                <label className="switch">
-                                  <input
-                                    type="checkbox"
-                                    checked={method.enabled}
-                                    onChange={(event) =>
-                                      updateMethod(serviceIndex, methodIndex, (current) => ({
-                                        ...current,
-                                        enabled: event.target.checked
-                                      }))
-                                    }
-                                  />
-                                  启用
-                                </label>
-                                <button
-                                  className="ghost danger"
-                                  onClick={() => removeMethod(serviceIndex, methodIndex)}
-                                >
-                                  删除方法
-                                </button>
-                              </div>
-                            </div>
-                            <div className="form-grid">
-                              <Field label="方法名">
-                                <input
-                                  value={method.name}
-                                  onChange={(event) =>
-                                    updateMethod(serviceIndex, methodIndex, (current) => ({
-                                      ...current,
-                                      name: event.target.value
-                                    }))
-                                  }
-                                />
-                              </Field>
-                              <Field label="方法描述">
-                                <input
-                                  value={method.description}
-                                  onChange={(event) =>
-                                    updateMethod(serviceIndex, methodIndex, (current) => ({
-                                      ...current,
-                                      description: event.target.value
-                                    }))
-                                  }
-                                />
-                              </Field>
-                              <Field label="本地绑定类型">
-                                <select
-                                  value={method.binding.type}
-                                  onChange={(event) =>
-                                    updateMethod(serviceIndex, methodIndex, (current) => ({
-                                      ...current,
-                                      input_schema_text:
-                                        event.target.value === "shell_command"
-                                          ? prettyJson(SHELL_SCHEMA)
-                                          : prettyJson(HTTP_SCHEMA),
-                                      binding:
-                                        event.target.value === "shell_command"
-                                          ? createShellMethod().binding
-                                          : createHttpMethod().binding
-                                    }))
-                                  }
-                                >
-                                  <option value="shell_command">shell_command</option>
-                                  <option value="http">http</option>
-                                </select>
-                              </Field>
-                            </div>
-
-                            {method.binding.type === "shell_command" ? (
-                              <>
-                                <div className="permission-banner">
-                                  <div>
-                                    <strong>
-                                      {isFullShellAccess(method.binding)
-                                        ? "当前是全部权限模式"
-                                        : "当前是受限模式"}
-                                    </strong>
-                                    <p>
-                                      全部权限会把根目录设为 <code>/</code>，允许命令设为
-                                      <code>*</code>。受限模式默认只开放少量命令。
-                                    </p>
-                                  </div>
-                                  <div className="service-actions">
-                                    {isFullShellAccess(method.binding) ? (
-                                      <button
-                                        className="ghost"
-                                        onClick={() =>
-                                          restoreSafeShellAccess(serviceIndex, methodIndex)
-                                        }
-                                      >
-                                        恢复受限模式
-                                      </button>
-                                    ) : (
-                                      <button
-                                        className="secondary"
-                                        onClick={() => grantFullShellAccess(serviceIndex, methodIndex)}
-                                      >
-                                        授予全部权限
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="form-grid">
-                                  <Field
-                                    label="根目录"
-                                    hint="默认是配置目录；填 / 表示整个文件系统根目录。"
-                                  >
-                                    <input
-                                      value={method.binding.root_dir}
-                                      onChange={(event) =>
-                                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                                          ...current,
-                                          binding: {
-                                            ...current.binding,
-                                            root_dir: event.target.value
-                                          }
-                                        }))
-                                      }
-                                    />
-                                  </Field>
-                                  <Field
-                                    label="允许命令"
-                                    hint="逗号分隔；填 * 表示允许任意命令。"
-                                  >
-                                    <input
-                                      value={method.binding.allow_commands_text}
-                                      onChange={(event) =>
-                                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                                          ...current,
-                                          binding: {
-                                            ...current.binding,
-                                            allow_commands_text: event.target.value
-                                          }
-                                        }))
-                                      }
-                                      placeholder="echo, pwd, git 或 *"
-                                    />
-                                  </Field>
-                                  <Field label="默认超时">
-                                    <input
-                                      value={method.binding.default_timeout_secs}
-                                      onChange={(event) =>
-                                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                                          ...current,
-                                          binding: {
-                                            ...current.binding,
-                                            default_timeout_secs: event.target.value
-                                          }
-                                        }))
-                                      }
-                                      placeholder="留空则使用全局"
-                                    />
-                                  </Field>
-                                  <Field label="最大超时">
-                                    <input
-                                      value={method.binding.max_timeout_secs}
-                                      onChange={(event) =>
-                                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                                          ...current,
-                                          binding: {
-                                            ...current.binding,
-                                            max_timeout_secs: event.target.value
-                                          }
-                                        }))
-                                      }
-                                      placeholder="留空则使用全局"
-                                    />
-                                  </Field>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="form-grid">
-                                <Field label="本地 URL" wide>
-                                  <input
-                                    value={method.binding.url}
-                                    onChange={(event) =>
-                                      updateMethod(serviceIndex, methodIndex, (current) => ({
-                                        ...current,
-                                        binding: {
-                                          ...current.binding,
-                                          url: event.target.value
-                                        }
-                                      }))
-                                    }
-                                  />
-                                </Field>
-                                <Field label="HTTP 方法">
-                                  <input
-                                    value={method.binding.http_method}
-                                    onChange={(event) =>
-                                      updateMethod(serviceIndex, methodIndex, (current) => ({
-                                        ...current,
-                                        binding: {
-                                          ...current.binding,
-                                          http_method: event.target.value.toUpperCase()
-                                        }
-                                      }))
-                                    }
-                                  />
-                                </Field>
-                                <Field label="超时">
-                                  <input
-                                    value={method.binding.timeout_secs}
-                                    onChange={(event) =>
-                                      updateMethod(serviceIndex, methodIndex, (current) => ({
-                                        ...current,
-                                        binding: {
-                                          ...current.binding,
-                                          timeout_secs: event.target.value
-                                        }
-                                      }))
-                                    }
-                                    placeholder="留空则使用全局"
-                                  />
-                                </Field>
-                                <Field label="请求头" wide>
-                                  <textarea
-                                    rows={4}
-                                    value={method.binding.headers_text}
-                                    onChange={(event) =>
-                                      updateMethod(serviceIndex, methodIndex, (current) => ({
-                                        ...current,
-                                        binding: {
-                                          ...current.binding,
-                                          headers_text: event.target.value
-                                        }
-                                      }))
-                                    }
-                                    placeholder={"Authorization: Bearer xxx\nX-App: local-java"}
-                                  />
-                                </Field>
-                              </div>
-                            )}
-
-                            <Field label="输入 Schema JSON" wide>
-                              <textarea
-                                rows={8}
-                                value={method.input_schema_text}
-                                onChange={(event) =>
-                                  updateMethod(serviceIndex, methodIndex, (current) => ({
-                                    ...current,
-                                    input_schema_text: event.target.value
-                                  }))
-                                }
-                              />
-                            </Field>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </Card>
-        </div>
-
-        <div className="column-side">{renderDetailPanel()}</div>
-      </section>
+          <div className="page-body">
+            {activePage === "overview" ? renderOverviewPage() : null}
+            {activePage === "services" ? renderServicesPage() : null}
+            {activePage === "connection" ? renderConnectionPage() : null}
+            {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
+          </div>
+        </section>
+      </div>
     </main>
   );
 }
@@ -1486,8 +2118,8 @@ function Field(props: {
 function Card(props: {
   title: string;
   description: string;
-  children: JSX.Element | JSX.Element[];
-  action?: JSX.Element;
+  children: ReactNode;
+  action?: ReactNode;
 }) {
   return (
     <section className="card">
@@ -1548,13 +2180,19 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
                 default_timeout_secs: toOptionalText(method.binding.default_timeout_secs),
                 max_timeout_secs: toOptionalText(method.binding.max_timeout_secs)
               }
-            : {
-                type: "http",
-                url: method.binding.url,
-                http_method: method.binding.http_method,
-                headers_text: headersToText(method.binding.headers),
-                timeout_secs: toOptionalText(method.binding.timeout_secs)
-              }
+            : method.binding.type === "http"
+              ? {
+                  type: "http",
+                  url: method.binding.url,
+                  http_method: method.binding.http_method,
+                  headers_text: headersToText(method.binding.headers),
+                  timeout_secs: toOptionalText(method.binding.timeout_secs)
+                }
+              : {
+                  type: "computer_use",
+                  action: method.binding.action,
+                  display_id: toOptionalText(method.binding.display_id)
+                }
       }))
     }))
   };
@@ -1591,13 +2229,19 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
                 default_timeout_secs: toOptionalNumber(method.binding.default_timeout_secs),
                 max_timeout_secs: toOptionalNumber(method.binding.max_timeout_secs)
               }
-            : {
-                type: "http",
-                url: method.binding.url.trim(),
-                http_method: method.binding.http_method.trim().toUpperCase(),
-                headers: textToHeaders(method.binding.headers_text),
-                timeout_secs: toOptionalNumber(method.binding.timeout_secs)
-              }
+            : method.binding.type === "http"
+              ? {
+                  type: "http",
+                  url: method.binding.url.trim(),
+                  http_method: method.binding.http_method.trim().toUpperCase(),
+                  headers: textToHeaders(method.binding.headers_text),
+                  timeout_secs: toOptionalNumber(method.binding.timeout_secs)
+                }
+              : {
+                  type: "computer_use",
+                  action: method.binding.action,
+                  display_id: toOptionalNumber(method.binding.display_id)
+                }
       }))
     }))
   };
@@ -1640,6 +2284,21 @@ function createHttpMethod(): UiMethodConfig {
   };
 }
 
+function createComputerMethod(action: ComputerAction = "screenshot"): UiMethodConfig {
+  const preset = COMPUTER_METHOD_PRESETS[action];
+  return {
+    name: preset.name,
+    description: preset.description,
+    enabled: true,
+    input_schema_text: prettyJson(preset.schema),
+    binding: {
+      type: "computer_use",
+      action,
+      display_id: ""
+    }
+  };
+}
+
 function splitCommaList(value: string): string[] {
   return value
     .split(",")
@@ -1649,6 +2308,37 @@ function splitCommaList(value: string): string[] {
 
 function isFullShellAccess(binding: UiShellBinding): boolean {
   return splitCommaList(binding.allow_commands_text).includes(FULL_ACCESS_COMMAND);
+}
+
+function describeMethodBinding(method: UiMethodConfig): string {
+  if (method.binding.type === "shell_command") {
+    return isFullShellAccess(method.binding) ? "Shell 调用，全部权限模式" : "Shell 调用，受限模式";
+  }
+  if (method.binding.type === "computer_use") {
+    const displayLabel = method.binding.display_id.trim()
+      ? `，显示器 ${method.binding.display_id}`
+      : "";
+    return `Computer use · ${method.binding.action}${displayLabel}`;
+  }
+  const url = method.binding.url.trim() || "未填写 URL";
+  return `${method.binding.http_method || "HTTP"} ${url}`;
+}
+
+function formatDesktopPermissionValue(
+  status: DesktopPermissionStatus | null,
+  permission: "screen_recording" | "accessibility",
+  unsupportedLabel: string
+): string {
+  if (!status) {
+    return "检查中";
+  }
+  if (status.platform !== "macos") {
+    return `当前平台未接入，${unsupportedLabel}`;
+  }
+  if (permission === "screen_recording") {
+    return status.screenRecordingGranted ? "已授权" : "未授权";
+  }
+  return status.accessibilityGranted ? "已授权" : "未授权";
 }
 
 function headersToText(headers: Record<string, string>): string {

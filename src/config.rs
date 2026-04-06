@@ -81,6 +81,7 @@ pub struct MethodConfig {
 pub enum MethodBinding {
     ShellCommand(ShellCommandBinding),
     Http(HttpBinding),
+    ComputerUse(ComputerUseBinding),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +104,27 @@ pub struct HttpBinding {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerUseAction {
+    Screenshot,
+    Click,
+    DoubleClick,
+    Scroll,
+    Type,
+    Wait,
+    Keypress,
+    Drag,
+    Move,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputerUseBinding {
+    pub action: ComputerUseAction,
+    #[serde(default)]
+    pub display_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,24 +162,53 @@ impl AgentConfig {
                     description: "Computer control operations exposed as business methods."
                         .to_string(),
                     enabled: true,
-                    methods: vec![MethodConfig {
-                        name: "exec".to_string(),
-                        description: "Run one allowlisted command with optional cwd and env."
-                            .to_string(),
-                        enabled: true,
-                        input_schema: shell_input_schema(),
-                        binding: MethodBinding::ShellCommand(ShellCommandBinding {
-                            root_dir: ".".to_string(),
-                            allow_commands: vec![
-                                "echo".to_string(),
-                                "pwd".to_string(),
-                                "ls".to_string(),
-                                "git".to_string(),
-                            ],
-                            default_timeout_secs: Some(30),
-                            max_timeout_secs: Some(120),
-                        }),
-                    }],
+                    methods: vec![
+                        computer_method(
+                            "screenshot",
+                            "Capture the current desktop and return a PNG screenshot.",
+                            ComputerUseAction::Screenshot,
+                        ),
+                        computer_method(
+                            "click",
+                            "Click at a screen coordinate with an optional mouse button.",
+                            ComputerUseAction::Click,
+                        ),
+                        computer_method(
+                            "double_click",
+                            "Double-click at a screen coordinate.",
+                            ComputerUseAction::DoubleClick,
+                        ),
+                        computer_method(
+                            "scroll",
+                            "Scroll at a screen coordinate with horizontal and vertical deltas.",
+                            ComputerUseAction::Scroll,
+                        ),
+                        computer_method(
+                            "type",
+                            "Type text into the currently focused app.",
+                            ComputerUseAction::Type,
+                        ),
+                        computer_method(
+                            "keypress",
+                            "Press one key or a key chord such as Command+L.",
+                            ComputerUseAction::Keypress,
+                        ),
+                        computer_method(
+                            "drag",
+                            "Drag the pointer across a path of coordinates.",
+                            ComputerUseAction::Drag,
+                        ),
+                        computer_method(
+                            "move",
+                            "Move the pointer to a screen coordinate.",
+                            ComputerUseAction::Move,
+                        ),
+                        computer_method(
+                            "wait",
+                            "Pause briefly to let the desktop settle before the next screenshot.",
+                            ComputerUseAction::Wait,
+                        ),
+                    ],
                 },
                 ServiceConfig {
                     name: "local-java-service".to_string(),
@@ -257,6 +308,7 @@ impl AgentConfig {
                             );
                         }
                     }
+                    MethodBinding::ComputerUse(_) => {}
                 }
             }
         }
@@ -387,6 +439,112 @@ pub fn shell_input_schema() -> Value {
             }
         }
     })
+}
+
+pub fn computer_action_input_schema(action: &ComputerUseAction) -> Value {
+    match action {
+        ComputerUseAction::Screenshot => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        }),
+        ComputerUseAction::Click | ComputerUseAction::DoubleClick | ComputerUseAction::Move => {
+            json!({
+                "type": "object",
+                "required": ["x", "y"],
+                "properties": {
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "middle", "right"]
+                    },
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                }
+            })
+        }
+        ComputerUseAction::Scroll => json!({
+            "type": "object",
+            "required": ["x", "y"],
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "scroll_x": {"type": "integer"},
+                "scroll_y": {"type": "integer"},
+                "scrollX": {"type": "integer"},
+                "scrollY": {"type": "integer"},
+                "keys": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        }),
+        ComputerUseAction::Type => json!({
+            "type": "object",
+            "required": ["text"],
+            "properties": {
+                "text": {"type": "string"}
+            }
+        }),
+        ComputerUseAction::Wait => json!({
+            "type": "object",
+            "properties": {
+                "ms": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            }
+        }),
+        ComputerUseAction::Keypress => json!({
+            "type": "object",
+            "required": ["keys"],
+            "properties": {
+                "keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1
+                }
+            }
+        }),
+        ComputerUseAction::Drag => json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "array",
+                    "minItems": 2,
+                    "items": {
+                        "type": "object",
+                        "required": ["x", "y"],
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"}
+                        }
+                    }
+                },
+                "keys": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        }),
+    }
+}
+
+fn computer_method(name: &str, description: &str, action: ComputerUseAction) -> MethodConfig {
+    MethodConfig {
+        name: name.to_string(),
+        description: description.to_string(),
+        enabled: true,
+        input_schema: computer_action_input_schema(&action),
+        binding: MethodBinding::ComputerUse(ComputerUseBinding {
+            action,
+            display_id: None,
+        }),
+    }
 }
 
 fn default_enabled() -> bool {
