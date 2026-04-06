@@ -897,16 +897,12 @@ function App() {
     );
   }
 
-  function addMethod(serviceIndex: number, type: "shell_command" | "http" | "computer_use") {
+  function addMethod(serviceIndex: number, type: "shell_command" | "http") {
     updateService(serviceIndex, (service) => ({
       ...service,
       methods: [
         ...service.methods,
-        type === "shell_command"
-          ? createShellMethod()
-          : type === "http"
-            ? createHttpMethod()
-            : createComputerMethod()
+        type === "shell_command" ? createShellMethod() : createHttpMethod()
       ]
     }));
   }
@@ -1265,10 +1261,16 @@ function renderOverviewPage() {
   }
 
   function renderServiceEditor(service: UiServiceConfig, serviceIndex: number) {
+    const isComputer = isComputerService(service);
+
     return (
       <Card
         title={service.name || "未命名服务"}
-        description={service.description || "填写这个服务对外提供什么能力。"}
+        description={
+          isComputer
+            ? "内置桌面控制服务。方法由系统维护，这里只展示映射出的能力。"
+            : service.description || "填写这个服务对外提供什么能力。"
+        }
         action={
           <div className="service-actions">
             <label className="switch">
@@ -1284,233 +1286,221 @@ function renderOverviewPage() {
               />
               启用
             </label>
-            <button className="ghost danger" onClick={() => removeService(serviceIndex)}>
-              删除服务
-            </button>
+            {!isComputer ? (
+              <button className="ghost danger" onClick={() => removeService(serviceIndex)}>
+                删除服务
+              </button>
+            ) : null}
           </div>
         }
       >
         <div className="service-editor-layout">
-          <div className="form-grid">
-            <Field label="服务名">
-              <input
-                value={service.name}
-                onChange={(event) =>
-                  updateService(serviceIndex, (current) => ({
-                    ...current,
-                    name: event.target.value
-                  }))
-                }
-              />
-            </Field>
-            <Field label="服务描述">
-              <input
-                value={service.description}
-                onChange={(event) =>
-                  updateService(serviceIndex, (current) => ({
-                    ...current,
-                    description: event.target.value
-                  }))
-                }
-              />
-            </Field>
-          </div>
-          <div className="method-toolbar">
-            <button className="secondary" onClick={() => addMethod(serviceIndex, "computer_use")}>
-              新增 Computer 方法
-            </button>
-            <button className="secondary" onClick={() => addMethod(serviceIndex, "shell_command")}>
-              新增 Shell 方法
-            </button>
-            <button className="secondary" onClick={() => addMethod(serviceIndex, "http")}>
-              新增 HTTP 方法
-            </button>
-          </div>
+          {isComputer ? (
+            <div className="service-readonly-banner">
+              <strong>系统服务</strong>
+              <p>
+                `computer` 会自动映射桌面控制能力。这里不提供方法级新增、删除或改类型，避免把系统能力配置成一堆可编辑项。
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="form-grid">
+                <Field label="服务名">
+                  <input
+                    value={service.name}
+                    onChange={(event) =>
+                      updateService(serviceIndex, (current) => ({
+                        ...current,
+                        name: event.target.value
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="服务描述">
+                  <input
+                    value={service.description}
+                    onChange={(event) =>
+                      updateService(serviceIndex, (current) => ({
+                        ...current,
+                        description: event.target.value
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+              <div className="method-toolbar">
+                <button className="secondary" onClick={() => addMethod(serviceIndex, "shell_command")}>
+                  新增 Shell 方法
+                </button>
+                <button className="secondary" onClick={() => addMethod(serviceIndex, "http")}>
+                  新增 HTTP 方法
+                </button>
+              </div>
+            </>
+          )}
           <div className="method-list">
             {service.methods.map((method, methodIndex) => (
               <div className="method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
                 <div className="method-topline">
-                    <div className="method-copy">
-                      <div className="method-title-row">
-                        <h4>{method.name || "未命名方法"}</h4>
-                        <span className="method-badge">
-                          {method.binding.type === "shell_command"
-                            ? "Shell"
-                            : method.binding.type === "http"
-                              ? "HTTP"
-                              : "Computer"}
+                  <div className="method-copy">
+                    <div className="method-title-row">
+                      <h4>{method.name || "未命名方法"}</h4>
+                      <span className="method-badge">{formatMethodTypeLabel(method.binding.type)}</span>
+                      {isComputer ? (
+                        <span className={`service-badge ${method.enabled ? "enabled" : "disabled"}`}>
+                          {method.enabled ? "启用" : "停用"}
                         </span>
+                      ) : null}
+                    </div>
+                    <p>{describeMethodBinding(method)}</p>
+                    {isComputer && method.binding.type === "computer_use" ? (
+                      <div className="method-facts">
+                        <span>动作：{COMPUTER_METHOD_PRESETS[method.binding.action].label}</span>
+                        <span>说明：{method.description || COMPUTER_METHOD_PRESETS[method.binding.action].description}</span>
                       </div>
-                      <p>{describeMethodBinding(method)}</p>
+                    ) : null}
                   </div>
-                  <div className="service-actions">
-                    <label className="switch">
+                  {!isComputer ? (
+                    <div className="service-actions">
+                      <label className="switch">
+                        <input
+                          type="checkbox"
+                          checked={method.enabled}
+                          onChange={(event) =>
+                            updateMethod(serviceIndex, methodIndex, (current) => ({
+                              ...current,
+                              enabled: event.target.checked
+                            }))
+                          }
+                        />
+                        启用
+                      </label>
+                      <button
+                        className={isMethodAdvancedOpen(serviceIndex, methodIndex) ? "secondary" : "ghost"}
+                        onClick={() => toggleMethodAdvanced(serviceIndex, methodIndex)}
+                      >
+                        {isMethodAdvancedOpen(serviceIndex, methodIndex) ? "收起高级设置" : "高级设置"}
+                      </button>
+                      <button
+                        className="ghost danger"
+                        onClick={() => removeMethod(serviceIndex, methodIndex)}
+                      >
+                        删除方法
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
+                {!isComputer ? (
+                  <div className="form-grid">
+                    <Field label="方法名">
                       <input
-                        type="checkbox"
-                        checked={method.enabled}
+                        value={method.name}
                         onChange={(event) =>
                           updateMethod(serviceIndex, methodIndex, (current) => ({
                             ...current,
-                            enabled: event.target.checked
+                            name: event.target.value
                           }))
                         }
                       />
-                      启用
-                    </label>
-                    <button
-                      className={isMethodAdvancedOpen(serviceIndex, methodIndex) ? "secondary" : "ghost"}
-                      onClick={() => toggleMethodAdvanced(serviceIndex, methodIndex)}
-                    >
-                      {isMethodAdvancedOpen(serviceIndex, methodIndex) ? "收起高级设置" : "高级设置"}
-                    </button>
-                    <button
-                      className="ghost danger"
-                      onClick={() => removeMethod(serviceIndex, methodIndex)}
-                    >
-                      删除方法
-                    </button>
-                  </div>
-                </div>
+                    </Field>
+                    <Field label="方法描述">
+                      <input
+                        value={method.description}
+                        onChange={(event) =>
+                          updateMethod(serviceIndex, methodIndex, (current) => ({
+                            ...current,
+                            description: event.target.value
+                          }))
+                        }
+                      />
+                    </Field>
+                    <Field label="绑定类型">
+                      <select
+                        value={method.binding.type}
+                        disabled={method.binding.type === "computer_use"}
+                        onChange={(event) =>
+                          updateMethod(serviceIndex, methodIndex, (current) => ({
+                            ...current,
+                            input_schema_text:
+                              event.target.value === "shell_command"
+                                ? prettyJson(SHELL_SCHEMA)
+                                : prettyJson(HTTP_SCHEMA),
+                            binding:
+                              event.target.value === "shell_command"
+                                ? createShellMethod().binding
+                                : createHttpMethod().binding
+                          }))
+                        }
+                      >
+                        {method.binding.type === "computer_use" ? (
+                          <option value="computer_use">computer_use（内置）</option>
+                        ) : null}
+                        <option value="shell_command">shell_command</option>
+                        <option value="http">http</option>
+                      </select>
+                    </Field>
 
-                <div className="form-grid">
-                  <Field label="方法名">
-                    <input
-                      value={method.name}
-                      onChange={(event) =>
-                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                          ...current,
-                          name: event.target.value
-                        }))
-                      }
-                    />
-                  </Field>
-                  <Field label="方法描述">
-                    <input
-                      value={method.description}
-                      onChange={(event) =>
-                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                          ...current,
-                          description: event.target.value
-                        }))
-                      }
-                    />
-                  </Field>
-                  <Field label="绑定类型">
-                    <select
-                      value={method.binding.type}
-                      onChange={(event) =>
-                        updateMethod(serviceIndex, methodIndex, (current) => ({
-                          ...current,
-                          input_schema_text:
-                            event.target.value === "shell_command"
-                              ? prettyJson(SHELL_SCHEMA)
-                              : event.target.value === "http"
-                                ? prettyJson(HTTP_SCHEMA)
-                                : prettyJson(COMPUTER_METHOD_PRESETS.screenshot.schema),
-                          binding:
-                            event.target.value === "shell_command"
-                              ? createShellMethod().binding
-                              : event.target.value === "http"
-                                ? createHttpMethod().binding
-                                : createComputerMethod().binding
-                        }))
-                      }
-                    >
-                      <option value="computer_use">computer_use</option>
-                      <option value="shell_command">shell_command</option>
-                      <option value="http">http</option>
-                    </select>
-                  </Field>
-
-                  {method.binding.type === "computer_use" ? (
-                    <>
-                      <Field label="动作">
-                        <select
-                          value={method.binding.action}
-                          onChange={(event) =>
-                            updateMethod(serviceIndex, methodIndex, (current) => {
-                              if (current.binding.type !== "computer_use") {
-                                return current;
-                              }
-                              const nextAction = event.target.value as ComputerAction;
-                              const preset = COMPUTER_METHOD_PRESETS[nextAction];
-                              return {
-                                ...current,
-                                input_schema_text: prettyJson(preset.schema),
-                                binding: {
-                                  ...current.binding,
-                                  action: nextAction
-                                }
-                              };
-                            })
-                          }
-                        >
-                          {Object.entries(COMPUTER_METHOD_PRESETS).map(([value, preset]) => (
-                            <option key={value} value={value}>
-                              {value} · {preset.label}
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
+                    {method.binding.type === "computer_use" ? (
                       <Field
                         label="桌面能力"
-                        hint="首版按 macOS 实现，依赖系统的辅助功能和屏幕录制权限。"
+                        hint="内置能力由系统维护，不在普通服务里编辑。"
                       >
-                        <input value="受控桌面动作" readOnly />
+                        <input value={COMPUTER_METHOD_PRESETS[method.binding.action].label} readOnly />
                       </Field>
-                    </>
-                  ) : method.binding.type === "shell_command" ? (
-                    <Field label="权限模式">
-                      <div className="mode-toggle">
-                        <button
-                          className={!isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
-                          onClick={() => restoreSafeShellAccess(serviceIndex, methodIndex)}
-                        >
-                          受限
-                        </button>
-                        <button
-                          className={isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
-                          onClick={() => grantFullShellAccess(serviceIndex, methodIndex)}
-                        >
-                          全部权限
-                        </button>
-                      </div>
-                    </Field>
-                  ) : (
-                    <>
-                      <Field label="本地 URL" wide>
-                        <input
-                          value={method.binding.url}
-                          onChange={(event) =>
-                            updateMethod(serviceIndex, methodIndex, (current) => ({
-                              ...current,
-                              binding: {
-                                ...current.binding,
-                                url: event.target.value
-                              }
-                            }))
-                          }
-                        />
+                    ) : method.binding.type === "shell_command" ? (
+                      <Field label="权限模式">
+                        <div className="mode-toggle">
+                          <button
+                            className={!isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                            onClick={() => restoreSafeShellAccess(serviceIndex, methodIndex)}
+                          >
+                            受限
+                          </button>
+                          <button
+                            className={isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                            onClick={() => grantFullShellAccess(serviceIndex, methodIndex)}
+                          >
+                            全部权限
+                          </button>
+                        </div>
                       </Field>
-                      <Field label="HTTP 方法">
-                        <input
-                          value={method.binding.http_method}
-                          onChange={(event) =>
-                            updateMethod(serviceIndex, methodIndex, (current) => ({
-                              ...current,
-                              binding: {
-                                ...current.binding,
-                                http_method: event.target.value.toUpperCase()
-                              }
-                            }))
-                          }
-                        />
-                      </Field>
-                    </>
-                  )}
-                </div>
+                    ) : (
+                      <>
+                        <Field label="本地 URL" wide>
+                          <input
+                            value={method.binding.url}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                binding: {
+                                  ...current.binding,
+                                  url: event.target.value
+                                }
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field label="HTTP 方法">
+                          <input
+                            value={method.binding.http_method}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                binding: {
+                                  ...current.binding,
+                                  http_method: event.target.value.toUpperCase()
+                                }
+                              }))
+                            }
+                          />
+                        </Field>
+                      </>
+                    )}
+                  </div>
+                ) : null}
 
-                {isMethodAdvancedOpen(serviceIndex, methodIndex) ? (
+                {!isComputer && isMethodAdvancedOpen(serviceIndex, methodIndex) ? (
                   <div className="method-advanced">
                     <div className="method-advanced-head">
                       <strong>高级设置</strong>
@@ -1680,7 +1670,7 @@ function renderOverviewPage() {
       <div className="services-layout">
         <Card
           title="服务列表"
-          description="左侧负责挑选服务，右侧再进入详细编辑。"
+          description="只在服务层管理能力，对外的方法以清单形式展示。"
           action={
             <button className="secondary" onClick={addService}>
               新增服务
@@ -2282,19 +2272,18 @@ function createHttpMethod(): UiMethodConfig {
   };
 }
 
-function createComputerMethod(action: ComputerAction = "screenshot"): UiMethodConfig {
-  const preset = COMPUTER_METHOD_PRESETS[action];
-  return {
-    name: preset.name,
-    description: preset.description,
-    enabled: true,
-    input_schema_text: prettyJson(preset.schema),
-    binding: {
-      type: "computer_use",
-      action,
-      display_id: ""
-    }
-  };
+function isComputerService(service: Pick<UiServiceConfig, "name">): boolean {
+  return service.name.trim().toLowerCase() === "computer";
+}
+
+function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
+  if (type === "shell_command") {
+    return "Shell";
+  }
+  if (type === "http") {
+    return "HTTP";
+  }
+  return "Computer";
 }
 
 function splitCommaList(value: string): string[] {
