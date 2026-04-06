@@ -157,59 +157,7 @@ impl AgentConfig {
                 log_limit: default_log_limit(),
             },
             services: vec![
-                ServiceConfig {
-                    name: "computer".to_string(),
-                    description: "Computer control operations exposed as business methods."
-                        .to_string(),
-                    enabled: true,
-                    methods: vec![
-                        computer_method(
-                            "screenshot",
-                            "Capture the current desktop and return a PNG screenshot.",
-                            ComputerUseAction::Screenshot,
-                        ),
-                        computer_method(
-                            "click",
-                            "Click at a screen coordinate with an optional mouse button.",
-                            ComputerUseAction::Click,
-                        ),
-                        computer_method(
-                            "double_click",
-                            "Double-click at a screen coordinate.",
-                            ComputerUseAction::DoubleClick,
-                        ),
-                        computer_method(
-                            "scroll",
-                            "Scroll at a screen coordinate with horizontal and vertical deltas.",
-                            ComputerUseAction::Scroll,
-                        ),
-                        computer_method(
-                            "type",
-                            "Type text into the currently focused app.",
-                            ComputerUseAction::Type,
-                        ),
-                        computer_method(
-                            "keypress",
-                            "Press one key or a key chord such as Command+L.",
-                            ComputerUseAction::Keypress,
-                        ),
-                        computer_method(
-                            "drag",
-                            "Drag the pointer across a path of coordinates.",
-                            ComputerUseAction::Drag,
-                        ),
-                        computer_method(
-                            "move",
-                            "Move the pointer to a screen coordinate.",
-                            ComputerUseAction::Move,
-                        ),
-                        computer_method(
-                            "wait",
-                            "Pause briefly to let the desktop settle before the next screenshot.",
-                            ComputerUseAction::Wait,
-                        ),
-                    ],
-                },
+                default_computer_service(),
                 ServiceConfig {
                     name: "local-java-service".to_string(),
                     description: "Example business service backed by a local HTTP endpoint."
@@ -231,6 +179,10 @@ impl AgentConfig {
                 },
             ],
         }
+    }
+
+    pub fn normalize(&mut self) -> bool {
+        ensure_default_computer_methods(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -380,19 +332,22 @@ pub fn windows_service_config_path() -> Option<PathBuf> {
 pub fn load_config(path: &Path) -> Result<AgentConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
-    let config: AgentConfig = serde_json::from_str(&content)
+    let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
+    config.normalize();
     config.validate()?;
     Ok(config)
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
+    let mut config = config.clone();
+    config.normalize();
     config.validate()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create config dir {}", parent.display()))?;
     }
-    let content = serde_json::to_string_pretty(config)?;
+    let content = serde_json::to_string_pretty(&config)?;
     fs::write(path, format!("{content}\n"))
         .with_context(|| format!("failed to write config {}", path.display()))?;
     Ok(())
@@ -547,6 +502,109 @@ fn computer_method(name: &str, description: &str, action: ComputerUseAction) -> 
     }
 }
 
+fn default_computer_service() -> ServiceConfig {
+    ServiceConfig {
+        name: "computer".to_string(),
+        description: "Computer control operations exposed as business methods.".to_string(),
+        enabled: true,
+        methods: vec![
+            computer_method(
+                "screenshot",
+                "Capture the current desktop and return a PNG screenshot.",
+                ComputerUseAction::Screenshot,
+            ),
+            computer_method(
+                "click",
+                "Click at a screen coordinate with an optional mouse button.",
+                ComputerUseAction::Click,
+            ),
+            computer_method(
+                "double_click",
+                "Double-click at a screen coordinate.",
+                ComputerUseAction::DoubleClick,
+            ),
+            computer_method(
+                "scroll",
+                "Scroll at a screen coordinate with horizontal and vertical deltas.",
+                ComputerUseAction::Scroll,
+            ),
+            computer_method(
+                "type",
+                "Type text into the currently focused app.",
+                ComputerUseAction::Type,
+            ),
+            computer_method(
+                "keypress",
+                "Press one key or a key chord such as Command+L.",
+                ComputerUseAction::Keypress,
+            ),
+            computer_method(
+                "drag",
+                "Drag the pointer across a path of coordinates.",
+                ComputerUseAction::Drag,
+            ),
+            computer_method(
+                "move",
+                "Move the pointer to a screen coordinate.",
+                ComputerUseAction::Move,
+            ),
+            computer_method(
+                "wait",
+                "Pause briefly to let the desktop settle before the next screenshot.",
+                ComputerUseAction::Wait,
+            ),
+        ],
+    }
+}
+
+fn ensure_default_computer_methods(config: &mut AgentConfig) -> bool {
+    let default_service = default_computer_service();
+    let default_names: BTreeSet<String> = default_service
+        .methods
+        .iter()
+        .map(|method| method.name.clone())
+        .collect();
+
+    if let Some(service) = config
+        .services
+        .iter_mut()
+        .find(|service| service.name == "computer")
+    {
+        let existing_names: BTreeSet<String> = service
+            .methods
+            .iter()
+            .map(|method| method.name.clone())
+            .collect();
+        let mut changed = false;
+
+        for method in default_service.methods {
+            if !existing_names.contains(&method.name) {
+                service.methods.push(method);
+                changed = true;
+            }
+        }
+
+        if service.description.trim().is_empty() {
+            service.description = default_service.description;
+            changed = true;
+        }
+
+        if !service
+            .methods
+            .iter()
+            .any(|method| default_names.contains(&method.name))
+        {
+            service.enabled = true;
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    config.services.insert(0, default_service);
+    true
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -648,5 +706,77 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
+        assert_eq!(loaded.services[0].name, "computer");
+        assert!(loaded.services[0]
+            .methods
+            .iter()
+            .any(|method| method.name == "screenshot"));
+    }
+
+    #[test]
+    fn load_legacy_computer_service_adds_missing_default_methods() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        fs::write(
+            &path,
+            r#"{
+  "platform": {
+    "base_url": "https://baijimu.com/lowcode3",
+    "workspace_id": null
+  },
+  "relay": {
+    "url": "ws://127.0.0.1:8080/ws/agent",
+    "agent_id": "devbox",
+    "token": "",
+    "reconnect_secs": 3
+  },
+  "device": {
+    "name": "My Bridge Agent",
+    "description": "Installed on the user's local machine.",
+    "tags": ["desktop", "local"]
+  },
+  "runtime": {
+    "default_timeout_secs": 30,
+    "max_timeout_secs": 120,
+    "log_limit": 500
+  },
+  "services": [
+    {
+      "name": "computer",
+      "description": "legacy",
+      "enabled": true,
+      "methods": [
+        {
+          "name": "exec",
+          "description": "legacy shell",
+          "enabled": true,
+          "input_schema": {
+            "type": "object"
+          },
+          "binding": {
+            "type": "shell_command",
+            "root_dir": ".",
+            "allow_commands": ["echo"]
+          }
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        let computer = loaded
+            .services
+            .iter()
+            .find(|service| service.name == "computer")
+            .unwrap();
+        assert!(computer.methods.iter().any(|method| method.name == "exec"));
+        assert!(computer
+            .methods
+            .iter()
+            .any(|method| method.name == "screenshot"));
+        assert!(computer.methods.iter().any(|method| method.name == "click"));
     }
 }

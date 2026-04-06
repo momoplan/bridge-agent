@@ -537,9 +537,10 @@ async fn execute_macos_computer_action(
             perform_macos_type(&args).await
         }
         ComputerUseAction::Wait => {
-            let args: ComputerWaitArgs = serde_json::from_value(arguments).unwrap_or(ComputerWaitArgs {
-                ms: default_wait_ms(),
-            });
+            let args: ComputerWaitArgs =
+                serde_json::from_value(arguments).unwrap_or(ComputerWaitArgs {
+                    ms: default_wait_ms(),
+                });
             sleep(Duration::from_millis(args.ms)).await;
             Ok(success_outcome(json!({ "waited_ms": args.ms })))
         }
@@ -576,7 +577,10 @@ async fn capture_macos_screenshot(display_id: Option<u32>) -> Result<ServiceOutc
     }
     command.arg(&path);
 
-    let output = command.output().await.context("failed to run screencapture")?;
+    let output = command
+        .output()
+        .await
+        .context("failed to run screencapture")?;
     if !output.status.success() {
         bail!(
             "screencapture failed: {}",
@@ -599,7 +603,10 @@ async fn capture_macos_screenshot(display_id: Option<u32>) -> Result<ServiceOutc
 }
 
 #[cfg(target_os = "macos")]
-async fn perform_macos_click(args: &ComputerMouseArgs, double_click: bool) -> Result<ServiceOutcome> {
+async fn perform_macos_click(
+    args: &ComputerMouseArgs,
+    double_click: bool,
+) -> Result<ServiceOutcome> {
     with_macos_modifiers(&args.keys, || {
         post_mouse_move(args.x, args.y)?;
         let button = parse_mouse_button(&args.button)?;
@@ -789,12 +796,7 @@ fn post_scroll(scroll_x: i64, scroll_y: i64) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn post_mouse_event(
-    event_type: CGEventType,
-    button: CGMouseButton,
-    x: f64,
-    y: f64,
-) -> Result<()> {
+fn post_mouse_event(event_type: CGEventType, button: CGMouseButton, x: f64, y: f64) -> Result<()> {
     let source = event_source()?;
     let point = CGPoint::new(x, y);
     let event = CGEvent::new_mouse_event(source, event_type, point, button)
@@ -998,7 +1000,10 @@ enum MacKey {
 #[cfg(target_os = "macos")]
 impl MacKey {
     fn is_modifier(self) -> bool {
-        matches!(self, Self::Shift | Self::Control | Self::Option | Self::Command)
+        matches!(
+            self,
+            Self::Shift | Self::Control | Self::Option | Self::Command
+        )
     }
 
     fn code(self) -> u16 {

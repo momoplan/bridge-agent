@@ -1108,14 +1108,14 @@ function App() {
     }
   }
 
-  function renderOverviewPage() {
+function renderOverviewPage() {
     if (!config) {
       return <div />;
     }
 
     return (
       <div className="overview-grid">
-        <Card title="运行" description="先看当前状态，再决定启动、停止或重新授权。">
+        <Card title="运行">
           <div className="overview-stack">
             <div className="overview-status-row">
               <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
@@ -1138,7 +1138,7 @@ function App() {
           </div>
         </Card>
 
-        <Card title="设备" description="用户真正关心的是这台机器当前以什么身份在线。">
+        <Card title="设备">
           <div className="status-detail-grid">
             <InfoRow label="设备名称" value={config.device.name} />
             <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
@@ -1146,7 +1146,7 @@ function App() {
           </div>
         </Card>
 
-        <Card title="连接" description="把连接信息压缩成几项关键字段，不再首屏展开全部配置。">
+        <Card title="连接">
           <div className="status-detail-grid">
             <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
             <InfoRow
@@ -1170,7 +1170,6 @@ function App() {
 
         <Card
           title="桌面权限"
-          description="截图依赖屏幕录制，鼠标键盘控制依赖辅助功能。"
           action={
             <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
               刷新状态
@@ -1249,7 +1248,6 @@ function App() {
 
         <Card
           title="服务"
-          description="服务管理单独成页，概览里只给出数量和入口。"
           action={
             <button className="secondary" onClick={() => setActivePage("services")}>
               打开服务页
@@ -1906,10 +1904,10 @@ function App() {
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
-    overview: "首屏只保留当前状态、设备身份和关键操作。",
-    services: "服务编辑是主工作区，细节只在选中后展开。",
-    connection: "设备、授权和连接参数统一收进连接页。",
-    diagnostics: "日志、清单、版本和恢复操作都放到诊断页。"
+    overview: "",
+    services: "服务和方法配置",
+    connection: "连接、授权和运行参数",
+    diagnostics: "日志、清单和系统信息"
   };
 
   return (
@@ -1970,7 +1968,7 @@ function App() {
             <div>
               <p className="eyebrow">{pageTitleMap[activePage]}</p>
               <h2>{pageTitleMap[activePage]}</h2>
-              <p>{pageDescriptionMap[activePage]}</p>
+              {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
             </div>
             <div className="page-actions">
               {activePage === "services" || activePage === "connection" ? (
@@ -2117,7 +2115,7 @@ function Field(props: {
 
 function Card(props: {
   title: string;
-  description: string;
+  description?: string;
   children: ReactNode;
   action?: ReactNode;
 }) {
@@ -2126,7 +2124,7 @@ function Card(props: {
       <div className="card-head">
         <div>
           <h2>{props.title}</h2>
-          <p>{props.description}</p>
+          {props.description ? <p>{props.description}</p> : null}
         </div>
         {props.action ?? null}
       </div>
