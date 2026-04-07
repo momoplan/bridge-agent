@@ -432,6 +432,24 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const handleWindowFocus = () => {
+      void refreshDesktopPermissions();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshDesktopPermissions();
+      }
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       void refreshRuntime();
     }, 1500);
@@ -706,13 +724,13 @@ function App() {
         setMessage(
           status.screenRecordingGranted
             ? "屏幕录制权限已可用。"
-            : "已请求屏幕录制权限。如果系统没有立即生效，请到系统设置里确认并重新打开应用。"
+            : "已请求屏幕录制权限。如果系统里已经允许但这里还没同步，先切回应用；少数情况下需要完全退出后重新打开。"
         );
       } else {
         setMessage(
           status.accessibilityGranted
-            ? "辅助功能权限已可用。"
-            : "已请求辅助功能权限，请在系统设置里允许 Bridge Agent 控制电脑。"
+            ? "桌面控制权限已可用。"
+            : "已请求桌面控制权限。允许后切回应用会自动刷新；如果仍未同步，再完全退出后重开。"
         );
       }
     } catch (err) {
@@ -968,13 +986,13 @@ function App() {
       case "identity":
         return (
           <div className="form-grid">
-            <Field label="设备名称" hint="展示给平台和授权页，用来识别这台机器。">
+            <Field label="设备名称" hint="显示给平台和授权页。">
               <input
                 value={config.device.name}
                 onChange={(event) => updateDevice("name", event.target.value)}
               />
             </Field>
-            <Field label="运行名称" hint="当前 agent 在 relay 侧使用的唯一标识。">
+            <Field label="运行名称" hint="Relay 侧的唯一标识。">
               <input
                 value={config.relay.agent_id}
                 onChange={(event) => updateRelay("agent_id", event.target.value)}
@@ -987,7 +1005,7 @@ function App() {
                 placeholder="desktop, local"
               />
             </Field>
-            <Field label="配置文件" hint="shell 的相对目录也会相对这份配置所在目录解析。">
+            <Field label="配置文件" hint="相对路径都基于这里解析。">
               <input value={configPath} readOnly />
             </Field>
             <Field label="设备描述" wide>
@@ -1013,13 +1031,13 @@ function App() {
             <div className="form-grid">
               <Field
                 label="默认平台"
-                hint="桌面端默认连接百积木生产环境，无需手工填写地址。"
+                hint="默认使用正式环境。"
               >
                 <input value={DEFAULT_PLATFORM_BASE_URL} readOnly />
               </Field>
               <Field
                 label="授权后工作区"
-                hint="浏览器授权页批准时选择工作区，成功后会自动写回。"
+                hint="浏览器授权成功后自动写回。"
               >
                 <input
                   value={config.platform.workspace_id || ""}
@@ -1030,7 +1048,7 @@ function App() {
               {showAdvancedSettings ? (
                 <Field
                   label="Baijimu Base URL"
-                  hint="仅在测试环境或私有部署时修改。"
+                  hint="仅在测试环境修改。"
                   wide
                 >
                   <input
@@ -1089,7 +1107,7 @@ function App() {
                 }
               />
             </Field>
-            <Field label="日志上限" hint="仅保留本地日志，不会上报到 relay。">
+            <Field label="日志上限" hint="仅保留本地日志。">
               <input
                 type="number"
                 min={50}
@@ -1243,15 +1261,15 @@ function renderOverviewPage() {
         </Card>
 
         <Card
-          title="服务"
+          title="能力"
           action={
             <button className="secondary" onClick={() => setActivePage("services")}>
-              打开服务页
+              打开能力页
             </button>
           }
         >
           <div className="status-detail-grid">
-            <InfoRow label="总服务数" value={String(config.services.length)} />
+            <InfoRow label="总能力数" value={String(config.services.length)} />
             <InfoRow label="已启用" value={String(enabledServiceCount)} />
             <InfoRow label="最近日志" value={latestLog ? formatTime(latestLog.timestamp_ms) : "暂无"} />
           </div>
@@ -1268,8 +1286,8 @@ function renderOverviewPage() {
         title={service.name || "未命名服务"}
         description={
           isComputer
-            ? "内置桌面控制服务。方法由系统维护，这里只展示映射出的能力。"
-            : service.description || "填写这个服务对外提供什么能力。"
+            ? "系统内置"
+            : service.description || "自定义本地能力"
         }
         action={
           <div className="service-actions">
@@ -1297,10 +1315,8 @@ function renderOverviewPage() {
         <div className="service-editor-layout">
           {isComputer ? (
             <div className="service-readonly-banner">
-              <strong>系统服务</strong>
-              <p>
-                `computer` 会自动映射桌面控制能力。这里不提供方法级新增、删除或改类型，避免把系统能力配置成一堆可编辑项。
-              </p>
+              <strong>系统能力</strong>
+              <p>`computer` 由应用自动维护，只展示可用动作，不做方法级编辑。</p>
             </div>
           ) : (
             <>
@@ -1666,39 +1682,72 @@ function renderOverviewPage() {
       return <div />;
     }
 
+    const systemServices = config.services
+      .map((service, serviceIndex) => ({ service, serviceIndex }))
+      .filter(({ service }) => isComputerService(service));
+    const customServices = config.services
+      .map((service, serviceIndex) => ({ service, serviceIndex }))
+      .filter(({ service }) => !isComputerService(service));
+
     return (
       <div className="services-layout">
         <Card
-          title="服务列表"
-          description="只在服务层管理能力，对外的方法以清单形式展示。"
+          title="能力"
+          description="左侧选择能力，右侧查看或调整。"
           action={
             <button className="secondary" onClick={addService}>
-              新增服务
+              新增自定义服务
             </button>
           }
         >
           <div className="service-nav-list">
             {config.services.length === 0 ? (
-              <div className="empty-state">还没有服务，先新增一个。</div>
+              <div className="empty-state">还没有能力，先新增一个。</div>
             ) : (
-              config.services.map((service, serviceIndex) => (
-                <button
-                  className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
-                  key={`${service.name}-${serviceIndex}`}
-                  onClick={() => setExpandedServiceIndex(serviceIndex)}
-                >
-                  <div>
-                    <strong>{service.name || "未命名服务"}</strong>
-                    <p>{service.description || "填写服务说明。"}</p>
-                  </div>
-                  <div className="service-nav-meta">
-                    <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
-                      {service.enabled ? "启用" : "停用"}
-                    </span>
-                    <small>{service.methods.length} 个方法</small>
-                  </div>
-                </button>
-              ))
+              <>
+                <div className="service-nav-section">系统能力</div>
+                {systemServices.map(({ service, serviceIndex }) => (
+                  <button
+                    className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
+                    key={`${service.name}-${serviceIndex}`}
+                    onClick={() => setExpandedServiceIndex(serviceIndex)}
+                  >
+                    <div>
+                      <strong>{service.name || "未命名服务"}</strong>
+                      <p>{describeServiceSummary(service)}</p>
+                    </div>
+                    <div className="service-nav-meta">
+                      <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
+                        {service.enabled ? "启用" : "停用"}
+                      </span>
+                      <small>{service.methods.length} 项动作</small>
+                    </div>
+                  </button>
+                ))}
+                <div className="service-nav-section">自定义服务</div>
+                {customServices.length === 0 ? (
+                  <div className="empty-state compact-empty-state">还没有自定义服务。</div>
+                ) : (
+                  customServices.map(({ service, serviceIndex }) => (
+                    <button
+                      className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
+                      key={`${service.name}-${serviceIndex}`}
+                      onClick={() => setExpandedServiceIndex(serviceIndex)}
+                    >
+                      <div>
+                        <strong>{service.name || "未命名服务"}</strong>
+                        <p>{describeServiceSummary(service)}</p>
+                      </div>
+                      <div className="service-nav-meta">
+                        <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
+                          {service.enabled ? "启用" : "停用"}
+                        </span>
+                        <small>{service.methods.length} 个接口</small>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </>
             )}
           </div>
         </Card>
@@ -1707,8 +1756,8 @@ function renderOverviewPage() {
           {selectedService && selectedServiceIndex != null ? (
             renderServiceEditor(selectedService, selectedServiceIndex)
           ) : (
-            <Card title="服务详情" description="从左侧选择一个服务开始编辑。">
-              <div className="empty-state">还没有可编辑的服务。</div>
+            <Card title="能力详情" description="从左侧选择一项开始。">
+              <div className="empty-state">还没有可编辑的能力。</div>
             </Card>
           )}
         </div>
@@ -1718,7 +1767,12 @@ function renderOverviewPage() {
 
   function renderConnectionPage() {
     return (
-      <Card title="连接设置" description="把设备、授权和运行参数收进这一页。">
+      <Card title="连接" description="设备、授权与运行参数。">
+        <div className="status-detail-grid connection-summary-grid">
+          <InfoRow label="工作区" value={config?.platform.workspace_id || "未授权"} />
+          <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
+          <InfoRow label="Relay" value={runtime?.relay_url ?? config?.relay.url ?? "-"} />
+        </div>
         <div className="section-tabs">
           <button
             className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
@@ -1753,7 +1807,7 @@ function renderOverviewPage() {
       return (
         <Card
           title="日志"
-          description="诊断信息放到这里，不再占主工作区。"
+          description="最近运行记录。"
           action={
             <button className="ghost" onClick={() => void clearLogs()}>
               清空日志
@@ -1779,14 +1833,14 @@ function renderOverviewPage() {
 
     if (activeDetailPanel === "manifest") {
       return (
-        <Card title="服务清单" description="仅在排查或联调用途中查看。">
+        <Card title="对外清单" description="联调时查看。">
           <pre className="code-panel">{manifestPreview}</pre>
         </Card>
       );
     }
 
     return (
-      <Card title="系统信息" description="版本、路径和运行细节都收进诊断页。">
+      <Card title="系统" description="版本与运行状态。">
         <div className="status-detail-grid">
           <InfoRow label="应用版本" value={appUpdate?.currentVersion ?? "检查中"} />
           <InfoRow
@@ -1888,16 +1942,16 @@ function renderOverviewPage() {
 
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
-    services: "服务",
+    services: "能力",
     connection: "连接",
     diagnostics: "诊断"
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
     overview: "",
-    services: "服务和方法配置",
+    services: "系统能力与本地服务",
     connection: "连接、授权和运行参数",
-    diagnostics: "日志、清单和系统信息"
+    diagnostics: "系统、日志与清单"
   };
 
   return (
@@ -1922,8 +1976,8 @@ function renderOverviewPage() {
               className={`sidebar-nav-item ${activePage === "services" ? "active" : ""}`}
               onClick={() => setActivePage("services")}
             >
-              <span>服务</span>
-              <small>{config.services.length} 个服务</small>
+              <span>能力</span>
+              <small>系统与自定义</small>
             </button>
             <button
               className={`sidebar-nav-item ${activePage === "connection" ? "active" : ""}`}
@@ -2284,6 +2338,25 @@ function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
     return "HTTP";
   }
   return "Computer";
+}
+
+function describeServiceSummary(service: UiServiceConfig): string {
+  if (isComputerService(service)) {
+    return "桌面控制、截图、点击与输入";
+  }
+
+  const shellCount = service.methods.filter((method) => method.binding.type === "shell_command").length;
+  const httpCount = service.methods.filter((method) => method.binding.type === "http").length;
+  const summary: string[] = [];
+
+  if (shellCount > 0) {
+    summary.push(`Shell ${shellCount}`);
+  }
+  if (httpCount > 0) {
+    summary.push(`HTTP ${httpCount}`);
+  }
+
+  return summary.length > 0 ? summary.join(" · ") : "尚未配置接口";
 }
 
 function splitCommaList(value: string): string[] {

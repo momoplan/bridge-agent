@@ -135,7 +135,10 @@ struct GithubReleaseAsset {
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGPreflightPostEventAccess() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestPostEventAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
@@ -244,6 +247,7 @@ fn request_desktop_permission(permission: String) -> Result<DesktopPermissionSta
             }
             "accessibility" => {
                 prompt_accessibility_permission();
+                let _ = unsafe { CGRequestPostEventAccess() };
             }
             other => return Err(format!("不支持的权限类型: {other}")),
         }
@@ -557,9 +561,14 @@ fn make_asset_ready_to_open(path: &Path) -> Result<(), String> {
 fn read_desktop_permission_status() -> DesktopPermissionStatus {
     #[cfg(target_os = "macos")]
     {
+        let accessibility_granted = unsafe {
+            AXIsProcessTrusted()
+                || CGPreflightPostEventAccess()
+                || CGPreflightListenEventAccess()
+        };
         DesktopPermissionStatus {
             platform: "macos".to_string(),
-            accessibility_granted: unsafe { AXIsProcessTrusted() },
+            accessibility_granted,
             screen_recording_granted: unsafe { CGPreflightScreenCaptureAccess() },
             accessibility_supported: true,
             screen_recording_supported: true,

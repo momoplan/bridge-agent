@@ -252,6 +252,16 @@ select:focus {
   gap: 10px;
 }
 
+.service-nav-section {
+  margin-top: 6px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
 .service-nav-item {
   display: flex;
   justify-content: space-between;
@@ -803,6 +813,10 @@ select:focus {
   gap: 12px;
 }
 
+.connection-summary-grid {
+  margin-bottom: 18px;
+}
+
 .info-row {
   display: grid;
   gap: 6px;
@@ -864,6 +878,11 @@ select:focus {
   border-radius: 16px;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.7);
+}
+
+.compact-empty-state {
+  padding: 14px 16px;
+  text-align: left;
 }
 
 @media (max-width: 1180px) {
