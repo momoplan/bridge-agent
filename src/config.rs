@@ -15,6 +15,8 @@ const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 pub struct AgentConfig {
     #[serde(default = "default_platform_config")]
     pub platform: PlatformConfig,
+    #[serde(default)]
+    pub upload: UploadConfig,
     pub relay: RelayConfig,
     pub device: DeviceConfig,
     pub runtime: RuntimeConfig,
@@ -26,6 +28,16 @@ pub struct PlatformConfig {
     pub base_url: String,
     #[serde(default)]
     pub workspace_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadConfig {
+    #[serde(default)]
+    pub prepare_url: Option<String>,
+    #[serde(default = "default_inline_limit_bytes")]
+    pub inline_limit_bytes: usize,
+    #[serde(default = "default_upload_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +152,7 @@ impl AgentConfig {
                 base_url: "https://baijimu.com/lowcode3".to_string(),
                 workspace_id: None,
             },
+            upload: UploadConfig::default(),
             relay: RelayConfig {
                 url: DEFAULT_RELAY_URL.to_string(),
                 agent_id: "devbox".to_string(),
@@ -188,6 +201,17 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<()> {
         if self.platform.base_url.trim().is_empty() {
             bail!("platform.base_url cannot be empty");
+        }
+        if let Some(prepare_url) = &self.upload.prepare_url {
+            if prepare_url.trim().is_empty() {
+                bail!("upload.prepare_url cannot be empty when set");
+            }
+        }
+        if self.upload.inline_limit_bytes == 0 {
+            bail!("upload.inline_limit_bytes must be greater than zero");
+        }
+        if self.upload.timeout_secs == 0 {
+            bail!("upload.timeout_secs must be greater than zero");
         }
         if self.relay.url.trim().is_empty() {
             bail!("relay.url cannot be empty");
@@ -636,6 +660,65 @@ fn default_platform_config() -> PlatformConfig {
     }
 }
 
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            prepare_url: None,
+            inline_limit_bytes: default_inline_limit_bytes(),
+            timeout_secs: default_upload_timeout_secs(),
+        }
+    }
+}
+
+impl UploadConfig {
+    pub fn prepare_url(&self, relay: &RelayConfig) -> Option<String> {
+        if let Some(prepare_url) = self.prepare_url.as_deref() {
+            let trimmed = prepare_url.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        default_prepare_url_from_relay(&relay.url)
+    }
+}
+
+fn default_prepare_url_from_relay(relay_url: &str) -> Option<String> {
+    let trimmed = relay_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let url = url::Url::parse(trimmed).ok()?;
+    let scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        "https" => "https",
+        "http" => "http",
+        _ => return None,
+    };
+
+    let host = url.host_str()?;
+    let mut base = format!("{scheme}://{host}");
+    if let Some(port) = url.port() {
+        let default_port = matches!((scheme, port), ("https", 443) | ("http", 80));
+        if !default_port {
+            base.push(':');
+            base.push_str(&port.to_string());
+        }
+    }
+
+    Some(format!("{base}/api/bridge-agent/uploads/prepare"))
+}
+
+fn default_inline_limit_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+fn default_upload_timeout_secs() -> u64 {
+    60
+}
+
 fn config_path_override_from_env() -> Option<PathBuf> {
     env::var_os("WS_BRIDGE_CONFIG").map(PathBuf::from)
 }
@@ -665,7 +748,21 @@ mod tests {
         save_config(&path, &config).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.relay.agent_id, "devbox");
+        assert_eq!(
+            loaded.upload.prepare_url(&loaded.relay).as_deref(),
+            Some("http://127.0.0.1:8080/api/bridge-agent/uploads/prepare")
+        );
         assert_eq!(loaded.services.len(), 2);
+    }
+
+    #[test]
+    fn upload_prepare_url_prefers_explicit_value() {
+        let mut config = AgentConfig::example();
+        config.upload.prepare_url = Some("https://uploads.example.com/prepare".to_string());
+        assert_eq!(
+            config.upload.prepare_url(&config.relay).as_deref(),
+            Some("https://uploads.example.com/prepare")
+        );
     }
 
     #[test]
@@ -682,6 +779,11 @@ mod tests {
         fs::write(
             &path,
             r#"{
+  "upload": {
+    "prepare_url": null,
+    "inline_limit_bytes": 8388608,
+    "timeout_secs": 60
+  },
   "relay": {
     "url": "ws://127.0.0.1:8080/ws/agent",
     "agent_id": "devbox",
@@ -706,6 +808,7 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
+        assert_eq!(loaded.upload.inline_limit_bytes, 8 * 1024 * 1024);
         assert_eq!(loaded.services[0].name, "computer");
         assert!(loaded.services[0]
             .methods
@@ -723,6 +826,11 @@ mod tests {
   "platform": {
     "base_url": "https://baijimu.com/lowcode3",
     "workspace_id": null
+  },
+  "upload": {
+    "prepare_url": null,
+    "inline_limit_bytes": 8388608,
+    "timeout_secs": 60
   },
   "relay": {
     "url": "ws://127.0.0.1:8080/ws/agent",

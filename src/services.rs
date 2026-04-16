@@ -1,12 +1,12 @@
 use crate::config::{
     AgentConfig, ComputerUseAction, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig,
-    ServiceConfig, ShellCommandBinding,
+    ServiceConfig, ShellCommandBinding, UploadConfig,
 };
 use crate::protocol::{InvokeError, InvokeResult, ServiceDefinition};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use image::GenericImageView;
-use reqwest::Method;
+use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -63,6 +63,12 @@ struct HttpMethod {
 struct ComputerMethod {
     action: ComputerUseAction,
     display_id: Option<u32>,
+    upload: UploadConfig,
+    upload_prepare_url: Option<String>,
+    agent_id: String,
+    relay_token: String,
+    workspace_id: Option<u64>,
+    client: Client,
 }
 
 struct ServiceOutcome {
@@ -137,6 +143,33 @@ struct ComputerDragArgs {
     path: Vec<ComputerPoint>,
     #[serde(default)]
     keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrepareUploadRequest {
+    agent_id: String,
+    content_type: String,
+    file_name: String,
+    size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<u64>,
+    purpose: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrepareUploadResponse {
+    file_id: String,
+    upload_url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    object_key: Option<String>,
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 impl ServiceRegistry {
@@ -360,7 +393,7 @@ impl ComputerMethod {
     async fn invoke(&self, arguments: Value) -> Result<ServiceOutcome> {
         #[cfg(target_os = "macos")]
         {
-            execute_macos_computer_action(&self.action, self.display_id, arguments).await
+            execute_macos_computer_action(self, arguments).await
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -428,7 +461,7 @@ fn build_runtime_method(
             service, method, binding, config,
         )?)),
         MethodBinding::ComputerUse(binding) => Ok(RuntimeMethod::Computer(build_computer_method(
-            service, method, binding,
+            service, method, config, binding,
         )?)),
     }
 }
@@ -496,11 +529,18 @@ fn build_http_method(
 fn build_computer_method(
     _service: &ServiceConfig,
     _method: &MethodConfig,
+    config: &AgentConfig,
     binding: &ComputerUseBinding,
 ) -> Result<ComputerMethod> {
     Ok(ComputerMethod {
         action: binding.action.clone(),
         display_id: binding.display_id,
+        upload: config.upload.clone(),
+        upload_prepare_url: config.upload.prepare_url(&config.relay),
+        agent_id: config.relay.agent_id.clone(),
+        relay_token: config.relay.token.clone(),
+        workspace_id: config.platform.workspace_id,
+        client: Client::new(),
     })
 }
 
@@ -514,12 +554,11 @@ fn default_wait_ms() -> u64 {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos_computer_action(
-    action: &ComputerUseAction,
-    display_id: Option<u32>,
+    method: &ComputerMethod,
     arguments: Value,
 ) -> Result<ServiceOutcome> {
-    match action {
-        ComputerUseAction::Screenshot => capture_macos_screenshot(display_id).await,
+    match &method.action {
+        ComputerUseAction::Screenshot => capture_macos_screenshot(method).await,
         ComputerUseAction::Click => {
             let args: ComputerMouseArgs = serde_json::from_value(arguments)?;
             perform_macos_click(&args, false).await
@@ -560,7 +599,7 @@ async fn execute_macos_computer_action(
 }
 
 #[cfg(target_os = "macos")]
-async fn capture_macos_screenshot(display_id: Option<u32>) -> Result<ServiceOutcome> {
+async fn capture_macos_screenshot(method: &ComputerMethod) -> Result<ServiceOutcome> {
     let path = std::env::temp_dir().join(format!(
         "bridge-agent-screenshot-{}-{}.png",
         std::process::id(),
@@ -572,7 +611,7 @@ async fn capture_macos_screenshot(display_id: Option<u32>) -> Result<ServiceOutc
 
     let mut command = Command::new("/usr/sbin/screencapture");
     command.arg("-x").arg("-t").arg("png");
-    if let Some(display_id) = display_id {
+    if let Some(display_id) = method.display_id {
         command.arg("-D").arg(display_id.to_string());
     }
     command.arg(&path);
@@ -593,12 +632,118 @@ async fn capture_macos_screenshot(display_id: Option<u32>) -> Result<ServiceOutc
     let (width, height) = image.dimensions();
     let _ = fs::remove_file(&path);
 
+    if bytes.len() > method.upload.inline_limit_bytes {
+        return upload_screenshot(method, bytes, width, height).await;
+    }
+
     Ok(success_outcome(json!({
+        "result_type": "inline_image",
         "mime_type": "image/png",
         "width": width,
         "height": height,
-        "display_id": display_id,
+        "display_id": method.display_id,
+        "size_bytes": bytes.len(),
         "image_base64": BASE64_STANDARD.encode(bytes),
+    })))
+}
+
+async fn upload_screenshot(
+    method: &ComputerMethod,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<ServiceOutcome> {
+    let Some(prepare_url) = method.upload_prepare_url.as_deref() else {
+        return Ok(ServiceOutcome {
+            success: false,
+            data: Some(json!({
+                "result_type": "too_large",
+                "mime_type": "image/png",
+                "width": width,
+                "height": height,
+                "display_id": method.display_id,
+                "size_bytes": bytes.len(),
+                "inline_limit_bytes": method.upload.inline_limit_bytes,
+            })),
+            error: Some(InvokeError {
+                code: "PAYLOAD_TOO_LARGE".to_string(),
+                message: format!(
+                    "screenshot is {} bytes, exceeds inline limit {} bytes, and upload.prepare_url is not configured",
+                    bytes.len(),
+                    method.upload.inline_limit_bytes
+                ),
+            }),
+        });
+    };
+
+    let file_name = format!(
+        "bridge-agent-screenshot-{}.png",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let prepare = method
+        .client
+        .post(prepare_url)
+        .timeout(Duration::from_secs(method.upload.timeout_secs))
+        .bearer_auth(&method.relay_token)
+        .json(&PrepareUploadRequest {
+            agent_id: method.agent_id.clone(),
+            content_type: "image/png".to_string(),
+            file_name,
+            size_bytes: bytes.len() as u64,
+            workspace_id: method.workspace_id,
+            purpose: "computer_screenshot".to_string(),
+        })
+        .send()
+        .await
+        .context("failed to request screenshot upload slot")?;
+
+    if !prepare.status().is_success() {
+        let status = prepare.status();
+        let body = prepare.text().await.unwrap_or_default();
+        bail!("prepare upload failed with status {}: {}", status, body);
+    }
+
+    let slot: PrepareUploadResponse = prepare
+        .json()
+        .await
+        .context("failed to decode prepare upload response")?;
+    let upload_method = slot.method.as_deref().unwrap_or("PUT").parse::<Method>()?;
+    let mut upload = method
+        .client
+        .request(upload_method, &slot.upload_url)
+        .timeout(Duration::from_secs(method.upload.timeout_secs))
+        .body(bytes.clone());
+    for (key, value) in &slot.headers {
+        upload = upload.header(key, value);
+    }
+    if !slot.headers.keys().any(|key| key.eq_ignore_ascii_case("content-type")) {
+        upload = upload.header(reqwest::header::CONTENT_TYPE, "image/png");
+    }
+
+    let upload_response = upload
+        .send()
+        .await
+        .context("failed to upload screenshot asset")?;
+    if !upload_response.status().is_success() {
+        let status = upload_response.status();
+        let body = upload_response.text().await.unwrap_or_default();
+        bail!("screenshot upload failed with status {}: {}", status, body);
+    }
+
+    Ok(success_outcome(json!({
+        "result_type": "asset_ref",
+        "asset_id": slot.file_id,
+        "object_key": slot.object_key,
+        "download_url": slot.download_url,
+        "expires_at": slot.expires_at,
+        "mime_type": "image/png",
+        "width": width,
+        "height": height,
+        "display_id": method.display_id,
+        "size_bytes": bytes.len(),
     })))
 }
 

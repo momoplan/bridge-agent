@@ -9,7 +9,7 @@ pub use config::{
     default_config_path, ensure_config_exists, load_config, manifest_preview_json, save_config,
     windows_service_config_path, AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig,
     HttpBinding, MethodBinding, MethodConfig, PlatformConfig, RelayConfig, RuntimeConfig,
-    ServiceConfig,
+    ServiceConfig, UploadConfig,
 };
 pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
 

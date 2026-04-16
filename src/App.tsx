@@ -36,6 +36,12 @@ interface PlatformConfig {
   workspace_id: number | null;
 }
 
+interface UploadConfig {
+  prepare_url?: string | null;
+  inline_limit_bytes: number;
+  timeout_secs: number;
+}
+
 interface DeviceConfig {
   name: string;
   description: string;
@@ -100,6 +106,7 @@ interface ServiceConfig {
 
 interface AgentConfig {
   platform: PlatformConfig;
+  upload: UploadConfig;
   relay: RelayConfig;
   device: DeviceConfig;
   runtime: RuntimeConfig;
@@ -199,6 +206,11 @@ interface UiAgentConfig {
   platform: {
     base_url: string;
     workspace_id: string;
+  };
+  upload: {
+    prepare_url: string;
+    inline_limit_bytes: number;
+    timeout_secs: number;
   };
   relay: RelayConfig;
   device: {
@@ -825,6 +837,23 @@ function App() {
     );
   }
 
+  function updateUpload<K extends "prepare_url" | "inline_limit_bytes" | "timeout_secs">(
+    key: K,
+    value: UiAgentConfig["upload"][K]
+  ) {
+    setConfig((current) =>
+      current
+        ? {
+            ...current,
+            upload: {
+              ...current.upload,
+              [key]: value
+            }
+          }
+        : current
+    );
+  }
+
   function updateDevice<K extends "name" | "description" | "tags_text">(
     key: K,
     value: UiAgentConfig["device"][K]
@@ -1078,6 +1107,40 @@ function App() {
                   value={config.relay.reconnect_secs}
                   onChange={(event) =>
                     updateRelay("reconnect_secs", safeNumber(event.target.value, 3))
+                  }
+                />
+              </Field>
+              <Field
+                label="上传准备接口"
+                wide
+                hint="大截图会先调用这个接口申请上传槽位。留空时默认使用 relay 同域的 /api/bridge-agent/uploads/prepare。"
+              >
+                <input
+                  value={config.upload.prepare_url}
+                  onChange={(event) => updateUpload("prepare_url", event.target.value)}
+                  placeholder="https://relay.baijimu.com/api/bridge-agent/uploads/prepare"
+                />
+              </Field>
+              <Field
+                label="内联上限字节"
+                hint="截图超过这个阈值后不再直接走 WebSocket 内联。"
+              >
+                <input
+                  type="number"
+                  min={1024}
+                  value={config.upload.inline_limit_bytes}
+                  onChange={(event) =>
+                    updateUpload("inline_limit_bytes", safeNumber(event.target.value, 8 * 1024 * 1024))
+                  }
+                />
+              </Field>
+              <Field label="上传超时秒数">
+                <input
+                  type="number"
+                  min={1}
+                  value={config.upload.timeout_secs}
+                  onChange={(event) =>
+                    updateUpload("timeout_secs", safeNumber(event.target.value, 60))
                   }
                 />
               </Field>
@@ -2197,6 +2260,11 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
       workspace_id:
         config.platform.workspace_id == null ? "" : String(config.platform.workspace_id)
     },
+    upload: {
+      prepare_url: config.upload.prepare_url ?? "",
+      inline_limit_bytes: config.upload.inline_limit_bytes,
+      timeout_secs: config.upload.timeout_secs
+    },
     relay: config.relay,
     device: {
       name: config.device.name,
@@ -2246,6 +2314,11 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
       base_url: normalizePlatformBaseUrl(config.platform.base_url),
       workspace_id: toOptionalNumber(config.platform.workspace_id)
     },
+    upload: {
+      prepare_url: emptyToNull(config.upload.prepare_url),
+      inline_limit_bytes: config.upload.inline_limit_bytes,
+      timeout_secs: config.upload.timeout_secs
+    },
     relay: config.relay,
     device: {
       name: config.device.name.trim(),
@@ -2292,6 +2365,11 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
 function normalizePlatformBaseUrl(value: string): string {
   const normalized = value.trim();
   return normalized || DEFAULT_PLATFORM_BASE_URL;
+}
+
+function emptyToNull(value: string): string | null {
+  const normalized = value.trim();
+  return normalized ? normalized : null;
 }
 
 function createShellMethod(): UiMethodConfig {
