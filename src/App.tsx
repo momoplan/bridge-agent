@@ -1021,7 +1021,7 @@ function App() {
                 onChange={(event) => updateDevice("name", event.target.value)}
               />
             </Field>
-            <Field label="运行名称" hint="Relay 侧的唯一标识。">
+            <Field label="运行名称" hint="Relay 侧的唯一标识。默认会自动生成唯一值，不建议多台机器共用。">
               <input
                 value={config.relay.agent_id}
                 onChange={(event) => updateRelay("agent_id", event.target.value)}

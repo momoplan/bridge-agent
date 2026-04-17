@@ -6,10 +6,10 @@ pub mod services;
 use anyhow::{anyhow, Result};
 
 pub use config::{
-    default_config_path, ensure_config_exists, load_config, manifest_preview_json, save_config,
-    windows_service_config_path, AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig,
-    HttpBinding, MethodBinding, MethodConfig, PlatformConfig, RelayConfig, RuntimeConfig,
-    ServiceConfig, UploadConfig,
+    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists, load_config,
+    manifest_preview_json, save_config, windows_service_config_path, AgentConfig,
+    ComputerUseAction, ComputerUseBinding, DeviceConfig, HttpBinding, MethodBinding, MethodConfig,
+    PlatformConfig, RelayConfig, RuntimeConfig, ServiceConfig, UploadConfig,
 };
 pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
 

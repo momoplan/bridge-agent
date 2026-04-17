@@ -209,7 +209,7 @@ cargo run -- run
 
 ```json
 {
-  "agent_id": "devbox",
+  "agent_id": "dev_8f5b7bb6308f4b6f8c0d2cb4b5f8a1a4",
   "workspace_id": 642,
   "purpose": "computer_screenshot",
   "content_type": "image/png",

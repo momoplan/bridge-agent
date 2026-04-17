@@ -7,9 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
+const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
+const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -155,7 +158,7 @@ impl AgentConfig {
             upload: UploadConfig::default(),
             relay: RelayConfig {
                 url: DEFAULT_RELAY_URL.to_string(),
-                agent_id: "devbox".to_string(),
+                agent_id: generate_agent_id(),
                 token: String::new(),
                 reconnect_secs: default_reconnect_secs(),
             },
@@ -320,6 +323,22 @@ impl AgentConfig {
             services: self.service_definitions(),
         }
     }
+}
+
+pub fn ensure_browser_auth_agent_id(config: &mut AgentConfig) -> bool {
+    if is_legacy_default_agent_id(&config.relay.agent_id) {
+        config.relay.agent_id = generate_agent_id();
+        return true;
+    }
+    false
+}
+
+fn generate_agent_id() -> String {
+    format!("{GENERATED_AGENT_ID_PREFIX}{}", Uuid::new_v4().simple())
+}
+
+fn is_legacy_default_agent_id(agent_id: &str) -> bool {
+    agent_id.trim() == LEGACY_DEFAULT_AGENT_ID
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -731,9 +750,17 @@ fn project_config_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_config, manifest_preview_json, save_config, AgentConfig};
+    use super::{
+        ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config,
+        AgentConfig,
+    };
     use std::fs;
     use tempfile::tempdir;
+
+    fn assert_generated_agent_id(agent_id: &str) {
+        assert!(agent_id.starts_with("dev_"));
+        assert_ne!(agent_id, "devbox");
+    }
 
     #[test]
     fn example_config_is_valid() {
@@ -747,7 +774,8 @@ mod tests {
         let config = AgentConfig::example();
         save_config(&path, &config).unwrap();
         let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.relay.agent_id, "devbox");
+        assert_eq!(loaded.relay.agent_id, config.relay.agent_id);
+        assert_generated_agent_id(&loaded.relay.agent_id);
         assert_eq!(
             loaded.upload.prepare_url(&loaded.relay).as_deref(),
             Some("http://127.0.0.1:8080/api/bridge-agent/uploads/prepare")
@@ -809,6 +837,7 @@ mod tests {
         assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
         assert_eq!(loaded.upload.inline_limit_bytes, 8 * 1024 * 1024);
+        assert_eq!(loaded.relay.agent_id, "devbox");
         assert_eq!(loaded.services[0].name, "computer");
         assert!(loaded.services[0]
             .methods
@@ -886,5 +915,27 @@ mod tests {
             .iter()
             .any(|method| method.name == "screenshot"));
         assert!(computer.methods.iter().any(|method| method.name == "click"));
+    }
+
+    #[test]
+    fn browser_auth_migrates_legacy_default_agent_id() {
+        let mut config = AgentConfig::example();
+        config.relay.agent_id = "devbox".to_string();
+
+        let changed = ensure_browser_auth_agent_id(&mut config);
+
+        assert!(changed);
+        assert_generated_agent_id(&config.relay.agent_id);
+    }
+
+    #[test]
+    fn browser_auth_keeps_existing_custom_agent_id() {
+        let mut config = AgentConfig::example();
+        config.relay.agent_id = "dev_my_custom_box".to_string();
+
+        let changed = ensure_browser_auth_agent_id(&mut config);
+
+        assert!(!changed);
+        assert_eq!(config.relay.agent_id, "dev_my_custom_box");
     }
 }

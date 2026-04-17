@@ -1,9 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use bridge_agent::{
-    AgentConfig, AgentRuntimeManager, RuntimeSnapshot, default_config_path, ensure_config_exists,
-    install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
-    save_config as save_agent_config,
+    AgentConfig, AgentRuntimeManager, RuntimeSnapshot, default_config_path,
+    ensure_browser_auth_agent_id, ensure_config_exists, install_rustls_crypto_provider,
+    load_config as load_agent_config, manifest_preview_json, save_config as save_agent_config,
 };
 use reqwest::Client;
 use semver::Version;
@@ -290,7 +290,14 @@ fn open_desktop_permission_settings(permission: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn start_browser_auth(config: AgentConfig) -> Result<BrowserAuthStartResponse, String> {
+async fn start_browser_auth(
+    state: tauri::State<'_, DesktopState>,
+    config: AgentConfig,
+) -> Result<BrowserAuthStartResponse, String> {
+    let mut config = config;
+    if ensure_browser_auth_agent_id(&mut config) {
+        save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    }
     let client = Client::new();
     let manifest = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
