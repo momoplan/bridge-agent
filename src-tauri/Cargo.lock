@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "bridge-agent",
  "core-foundation",
