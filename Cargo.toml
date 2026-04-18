@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 
 [dependencies]
@@ -25,6 +25,12 @@ uuid = { version = "1", features = ["v4"] }
 core-graphics = { version = "0.24", features = ["highsierra"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-service = "0.7"
 
 [dev-dependencies]

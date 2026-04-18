@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -214,11 +214,12 @@ dependencies = [
  "url",
  "uuid",
  "windows-service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "bridge-agent",
  "core-foundation",

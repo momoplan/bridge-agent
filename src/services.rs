@@ -25,6 +25,29 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 #[cfg(target_os = "macos")]
 use core_graphics::geometry::CGPoint;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{GetLastError, LPARAM, RECT};
+#[cfg(windows)]
+use windows_sys::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+    CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC,
+    GetDIBits, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORENUMPROC, MONITORINFOEXW,
+    ReleaseDC, SRCCOPY, SelectObject,
+};
+#[cfg(windows)]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    SetCursorPos, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_LWIN, VK_MENU,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WHEEL_DELTA,
+};
 
 pub struct ServiceRegistry {
     services: BTreeMap<String, RuntimeService>,
@@ -396,7 +419,12 @@ impl ComputerMethod {
             execute_macos_computer_action(self, arguments).await
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            execute_windows_computer_action(self, arguments).await
+        }
+
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = arguments;
             Ok(ServiceOutcome {
@@ -550,6 +578,175 @@ fn default_mouse_button() -> String {
 
 fn default_wait_ms() -> u64 {
     500
+}
+
+#[cfg(windows)]
+async fn execute_windows_computer_action(
+    method: &ComputerMethod,
+    arguments: Value,
+) -> Result<ServiceOutcome> {
+    match &method.action {
+        ComputerUseAction::Screenshot => capture_windows_screenshot(method).await,
+        ComputerUseAction::Click => {
+            let args: ComputerMouseArgs = serde_json::from_value(arguments)?;
+            perform_windows_click(&args, false).await
+        }
+        ComputerUseAction::DoubleClick => {
+            let args: ComputerMouseArgs = serde_json::from_value(arguments)?;
+            perform_windows_click(&args, true).await
+        }
+        ComputerUseAction::Scroll => {
+            let args: ComputerScrollArgs = serde_json::from_value(arguments)?;
+            perform_windows_scroll(&args).await
+        }
+        ComputerUseAction::Type => {
+            let args: ComputerTypeArgs = serde_json::from_value(arguments)?;
+            perform_windows_type(&args).await
+        }
+        ComputerUseAction::Wait => {
+            let args: ComputerWaitArgs =
+                serde_json::from_value(arguments).unwrap_or(ComputerWaitArgs {
+                    ms: default_wait_ms(),
+                });
+            sleep(Duration::from_millis(args.ms)).await;
+            Ok(success_outcome(json!({ "waited_ms": args.ms })))
+        }
+        ComputerUseAction::Keypress => {
+            let args: ComputerKeypressArgs = serde_json::from_value(arguments)?;
+            perform_windows_keypress(&args).await
+        }
+        ComputerUseAction::Drag => {
+            let args: ComputerDragArgs = serde_json::from_value(arguments)?;
+            perform_windows_drag(&args).await
+        }
+        ComputerUseAction::Move => {
+            let args: ComputerMouseArgs = serde_json::from_value(arguments)?;
+            perform_windows_move(&args).await
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn capture_windows_screenshot(method: &ComputerMethod) -> Result<ServiceOutcome> {
+    let capture = capture_windows_monitor_png(method.display_id)?;
+    if capture.bytes.len() > method.upload.inline_limit_bytes {
+        return upload_screenshot(method, capture.bytes, capture.width, capture.height).await;
+    }
+
+    Ok(success_outcome(json!({
+        "result_type": "inline_image",
+        "mime_type": "image/png",
+        "width": capture.width,
+        "height": capture.height,
+        "display_id": capture.display_id,
+        "size_bytes": capture.bytes.len(),
+        "image_base64": BASE64_STANDARD.encode(capture.bytes),
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_click(
+    args: &ComputerMouseArgs,
+    double_click: bool,
+) -> Result<ServiceOutcome> {
+    with_windows_modifiers(&args.keys, || {
+        set_windows_cursor_position(args.x, args.y)?;
+        let (down, up) = windows_mouse_button_flags(&args.button)?;
+        send_windows_mouse_input(0, 0, down, 0)?;
+        send_windows_mouse_input(0, 0, up, 0)?;
+        if double_click {
+            std::thread::sleep(Duration::from_millis(80));
+            send_windows_mouse_input(0, 0, down, 0)?;
+            send_windows_mouse_input(0, 0, up, 0)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(success_outcome(json!({
+        "action": if double_click { "double_click" } else { "click" },
+        "x": args.x,
+        "y": args.y,
+        "button": args.button,
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_move(args: &ComputerMouseArgs) -> Result<ServiceOutcome> {
+    with_windows_modifiers(&args.keys, || set_windows_cursor_position(args.x, args.y))?;
+    Ok(success_outcome(json!({
+        "action": "move",
+        "x": args.x,
+        "y": args.y,
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_scroll(args: &ComputerScrollArgs) -> Result<ServiceOutcome> {
+    with_windows_modifiers(&args.keys, || {
+        set_windows_cursor_position(args.x, args.y)?;
+        if args.scroll_y != 0 {
+            let delta = scale_windows_wheel_delta(args.scroll_y)?;
+            send_windows_mouse_input(0, 0, MOUSEEVENTF_WHEEL, delta)?;
+        }
+        if args.scroll_x != 0 {
+            let delta = scale_windows_wheel_delta(args.scroll_x)?;
+            send_windows_mouse_input(0, 0, MOUSEEVENTF_HWHEEL, delta)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(success_outcome(json!({
+        "action": "scroll",
+        "x": args.x,
+        "y": args.y,
+        "scroll_x": args.scroll_x,
+        "scroll_y": args.scroll_y,
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_type(args: &ComputerTypeArgs) -> Result<ServiceOutcome> {
+    send_windows_unicode_text(&args.text)?;
+    Ok(success_outcome(json!({
+        "action": "type",
+        "length": args.text.chars().count(),
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_keypress(args: &ComputerKeypressArgs) -> Result<ServiceOutcome> {
+    if args.keys.is_empty() {
+        bail!("keypress requires at least one key");
+    }
+    send_windows_key_chord(&args.keys)?;
+    Ok(success_outcome(json!({
+        "action": "keypress",
+        "keys": args.keys,
+    })))
+}
+
+#[cfg(windows)]
+async fn perform_windows_drag(args: &ComputerDragArgs) -> Result<ServiceOutcome> {
+    if args.path.len() < 2 {
+        bail!("drag requires at least two path points");
+    }
+
+    with_windows_modifiers(&args.keys, || {
+        let start = &args.path[0];
+        set_windows_cursor_position(start.x, start.y)?;
+        send_windows_mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN, 0)?;
+        for point in args.path.iter().skip(1) {
+            set_windows_cursor_position(point.x, point.y)?;
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        send_windows_mouse_input(0, 0, MOUSEEVENTF_LEFTUP, 0)?;
+        Ok(())
+    })?;
+
+    Ok(success_outcome(json!({
+        "action": "drag",
+        "points": args.path.len(),
+    })))
 }
 
 #[cfg(target_os = "macos")]
@@ -1013,6 +1210,526 @@ fn apple_script_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct WindowsKey {
+    virtual_key: u16,
+}
+
+#[cfg(windows)]
+impl WindowsKey {
+    fn is_modifier(self) -> bool {
+        matches!(
+            self.virtual_key,
+            VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN
+        )
+    }
+}
+
+#[cfg(windows)]
+struct WindowsMonitorCapture {
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    display_id: Option<u32>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct WindowsMonitorBounds {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+#[cfg(windows)]
+fn with_windows_modifiers<F>(keys: &[String], action: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let modifiers: Vec<WindowsKey> = keys
+        .iter()
+        .map(|key| parse_windows_modifier_key(key))
+        .collect::<Result<Vec<_>>>()?;
+    for key in &modifiers {
+        send_windows_virtual_key(key.virtual_key, true)?;
+    }
+    let result = action();
+    for key in modifiers.into_iter().rev() {
+        let _ = send_windows_virtual_key(key.virtual_key, false);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn send_windows_key_chord(keys: &[String]) -> Result<()> {
+    let mut modifiers = Vec::new();
+    let mut regular_keys = Vec::new();
+
+    for key in keys {
+        let parsed = parse_windows_key(key)?;
+        if parsed.is_modifier() {
+            modifiers.push(parsed);
+        } else {
+            regular_keys.push(parsed);
+        }
+    }
+
+    for key in &modifiers {
+        send_windows_virtual_key(key.virtual_key, true)?;
+    }
+    if regular_keys.is_empty() {
+        for key in modifiers.iter().rev() {
+            send_windows_virtual_key(key.virtual_key, false)?;
+        }
+        return Ok(());
+    }
+    for key in &regular_keys {
+        send_windows_virtual_key(key.virtual_key, true)?;
+        send_windows_virtual_key(key.virtual_key, false)?;
+    }
+    for key in modifiers.iter().rev() {
+        send_windows_virtual_key(key.virtual_key, false)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_windows_unicode_text(text: &str) -> Result<()> {
+    for unit in text.encode_utf16() {
+        let down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: 0,
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: 0,
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        send_windows_inputs(&[down, up])?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_windows_virtual_key(virtual_key: u16, key_down: bool) -> Result<()> {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: virtual_key,
+                wScan: 0,
+                dwFlags: if key_down { 0 } else { KEYEVENTF_KEYUP },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_windows_inputs(&[input])
+}
+
+#[cfg(windows)]
+fn send_windows_mouse_input(dx: i32, dy: i32, flags: u32, mouse_data: u32) -> Result<()> {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: mouse_data,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_windows_inputs(&[input])
+}
+
+#[cfg(windows)]
+fn send_windows_inputs(inputs: &[INPUT]) -> Result<()> {
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent != inputs.len() as u32 {
+        let error = unsafe { GetLastError() };
+        bail!("SendInput failed with error {}", error);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_windows_cursor_position(x: f64, y: f64) -> Result<()> {
+    let x = round_f64_to_i32(x, "x")?;
+    let y = round_f64_to_i32(y, "y")?;
+    if unsafe { SetCursorPos(x, y) } == 0 {
+        let error = unsafe { GetLastError() };
+        bail!("SetCursorPos failed with error {}", error);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_mouse_button_flags(button: &str) -> Result<(u32, u32)> {
+    match button.trim().to_ascii_lowercase().as_str() {
+        "" | "left" => Ok((MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)),
+        "right" => Ok((MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)),
+        "middle" => Ok((MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)),
+        other => bail!("unsupported mouse button `{other}`"),
+    }
+}
+
+#[cfg(windows)]
+fn scale_windows_wheel_delta(amount: i64) -> Result<u32> {
+    let delta = amount
+        .checked_mul(WHEEL_DELTA as i64)
+        .ok_or_else(|| anyhow!("scroll delta is too large"))?;
+    let delta = i32::try_from(delta).map_err(|_| anyhow!("scroll delta is too large"))?;
+    Ok(delta as u32)
+}
+
+#[cfg(windows)]
+fn parse_windows_modifier_key(value: &str) -> Result<WindowsKey> {
+    match parse_windows_key(value)? {
+        key if key.is_modifier() => Ok(key),
+        _ => bail!("mouse action modifiers only support Shift / Ctrl / Alt / Win"),
+    }
+}
+
+#[cfg(windows)]
+fn parse_windows_key(value: &str) -> Result<WindowsKey> {
+    let virtual_key = match value.trim().to_ascii_uppercase().as_str() {
+        "SHIFT" => VK_SHIFT,
+        "CTRL" | "CONTROL" => VK_CONTROL,
+        "ALT" | "OPTION" => VK_MENU,
+        "META" | "COMMAND" | "CMD" | "WIN" | "WINDOWS" => VK_LWIN,
+        "ENTER" | "RETURN" => VK_RETURN,
+        "TAB" => VK_TAB,
+        "SPACE" => VK_SPACE,
+        "ESC" | "ESCAPE" => VK_ESCAPE,
+        "UP" | "ARROWUP" => VK_UP,
+        "DOWN" | "ARROWDOWN" => VK_DOWN,
+        "LEFT" | "ARROWLEFT" => VK_LEFT,
+        "RIGHT" | "ARROWRIGHT" => VK_RIGHT,
+        "HOME" => VK_HOME,
+        "END" => VK_END,
+        "PAGEUP" => VK_PRIOR,
+        "PAGEDOWN" => VK_NEXT,
+        "A" => 0x41,
+        "B" => 0x42,
+        "C" => 0x43,
+        "D" => 0x44,
+        "E" => 0x45,
+        "F" => 0x46,
+        "G" => 0x47,
+        "H" => 0x48,
+        "I" => 0x49,
+        "J" => 0x4A,
+        "K" => 0x4B,
+        "L" => 0x4C,
+        "M" => 0x4D,
+        "N" => 0x4E,
+        "O" => 0x4F,
+        "P" => 0x50,
+        "Q" => 0x51,
+        "R" => 0x52,
+        "S" => 0x53,
+        "T" => 0x54,
+        "U" => 0x55,
+        "V" => 0x56,
+        "W" => 0x57,
+        "X" => 0x58,
+        "Y" => 0x59,
+        "Z" => 0x5A,
+        "0" => 0x30,
+        "1" => 0x31,
+        "2" => 0x32,
+        "3" => 0x33,
+        "4" => 0x34,
+        "5" => 0x35,
+        "6" => 0x36,
+        "7" => 0x37,
+        "8" => 0x38,
+        "9" => 0x39,
+        other => bail!("unsupported key `{other}`"),
+    };
+    Ok(WindowsKey { virtual_key })
+}
+
+#[cfg(windows)]
+fn round_f64_to_i32(value: f64, label: &str) -> Result<i32> {
+    if !value.is_finite() {
+        bail!("{label} must be finite");
+    }
+    let rounded = value.round();
+    if rounded < i32::MIN as f64 || rounded > i32::MAX as f64 {
+        bail!("{label} is out of range");
+    }
+    Ok(rounded as i32)
+}
+
+#[cfg(windows)]
+fn capture_windows_monitor_png(display_id: Option<u32>) -> Result<WindowsMonitorCapture> {
+    let bounds = windows_monitor_bounds(display_id)?;
+    let width_u32 = u32::try_from(bounds.width).map_err(|_| anyhow!("invalid monitor width"))?;
+    let height_u32 =
+        u32::try_from(bounds.height).map_err(|_| anyhow!("invalid monitor height"))?;
+
+    let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
+    if screen_dc.is_null() {
+        bail!("GetDC failed");
+    }
+    let screen_dc_guard = ReleaseDcGuard { hdc: screen_dc };
+
+    let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
+    if memory_dc.is_null() {
+        bail!("CreateCompatibleDC failed");
+    }
+    let memory_dc_guard = DeleteDcGuard { hdc: memory_dc };
+
+    let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, bounds.width, bounds.height) };
+    if bitmap.is_null() {
+        bail!("CreateCompatibleBitmap failed");
+    }
+    let bitmap_guard = DeleteObjectGuard {
+        handle: bitmap as HGDIOBJ,
+    };
+
+    let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
+    if previous.is_null() {
+        bail!("SelectObject failed");
+    }
+    let selection_guard = SelectObjectGuard {
+        hdc: memory_dc,
+        previous,
+    };
+
+    if unsafe {
+        BitBlt(
+            memory_dc,
+            0,
+            0,
+            bounds.width,
+            bounds.height,
+            screen_dc,
+            bounds.left,
+            bounds.top,
+            SRCCOPY | CAPTUREBLT,
+        )
+    } == 0
+    {
+        let error = unsafe { GetLastError() };
+        bail!("BitBlt failed with error {}", error);
+    }
+
+    let mut bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: bounds.width,
+            biHeight: -bounds.height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: (width_u32 * height_u32 * 4),
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        ..Default::default()
+    };
+    let mut bgra = vec![0u8; (width_u32 as usize) * (height_u32 as usize) * 4];
+    let rows = unsafe {
+        GetDIBits(
+            memory_dc,
+            bitmap as HBITMAP,
+            0,
+            height_u32,
+            bgra.as_mut_ptr().cast(),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        )
+    };
+    if rows == 0 {
+        let error = unsafe { GetLastError() };
+        bail!("GetDIBits failed with error {}", error);
+    }
+
+    let _ = selection_guard;
+    let _ = bitmap_guard;
+    let _ = memory_dc_guard;
+    let _ = screen_dc_guard;
+
+    let mut rgba = vec![0u8; bgra.len()];
+    for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = 255;
+    }
+
+    let image = image::RgbaImage::from_raw(width_u32, height_u32, rgba)
+        .ok_or_else(|| anyhow!("failed to build RGBA image"))?;
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .context("failed to encode screenshot")?;
+
+    Ok(WindowsMonitorCapture {
+        bytes,
+        width: width_u32,
+        height: height_u32,
+        display_id,
+    })
+}
+
+#[cfg(windows)]
+fn windows_monitor_bounds(display_id: Option<u32>) -> Result<WindowsMonitorBounds> {
+    if let Some(display_id) = display_id {
+        let monitors = list_windows_monitors()?;
+        let bounds = monitors
+            .get(display_id as usize)
+            .copied()
+            .ok_or_else(|| anyhow!("display_id {} does not exist", display_id))?;
+        return Ok(bounds);
+    }
+
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if width <= 0 || height <= 0 {
+        bail!("virtual screen metrics are invalid");
+    }
+    Ok(WindowsMonitorBounds {
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
+#[cfg(windows)]
+fn list_windows_monitors() -> Result<Vec<WindowsMonitorBounds>> {
+    let mut monitors = Vec::new();
+    let ok = unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect_windows_monitor),
+            (&mut monitors as *mut Vec<WindowsMonitorBounds>) as LPARAM,
+        )
+    };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        bail!("EnumDisplayMonitors failed with error {}", error);
+    }
+    if monitors.is_empty() {
+        bail!("no monitors found");
+    }
+    Ok(monitors)
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn collect_windows_monitor(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    data: LPARAM,
+) -> i32 {
+    let monitors = &mut *(data as *mut Vec<WindowsMonitorBounds>);
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if GetMonitorInfoW(monitor, &mut info as *mut _ as *mut _) == 0 {
+        return 1;
+    }
+    let rect = info.monitorInfo.rcMonitor;
+    monitors.push(WindowsMonitorBounds {
+        left: rect.left,
+        top: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    });
+    1
+}
+
+#[cfg(windows)]
+struct ReleaseDcGuard {
+    hdc: HDC,
+}
+
+#[cfg(windows)]
+impl Drop for ReleaseDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseDC(std::ptr::null_mut(), self.hdc);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct DeleteDcGuard {
+    hdc: HDC,
+}
+
+#[cfg(windows)]
+impl Drop for DeleteDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.hdc);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct DeleteObjectGuard {
+    handle: HGDIOBJ,
+}
+
+#[cfg(windows)]
+impl Drop for DeleteObjectGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct SelectObjectGuard {
+    hdc: HDC,
+    previous: HGDIOBJ,
+}
+
+#[cfg(windows)]
+impl Drop for SelectObjectGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.hdc, self.previous);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

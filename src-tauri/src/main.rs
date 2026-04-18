@@ -582,7 +582,18 @@ fn read_desktop_permission_status() -> DesktopPermissionStatus {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        DesktopPermissionStatus {
+            platform: "windows".to_string(),
+            accessibility_granted: true,
+            screen_recording_granted: true,
+            accessibility_supported: true,
+            screen_recording_supported: true,
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         DesktopPermissionStatus {
             platform: std::env::consts::OS.to_string(),

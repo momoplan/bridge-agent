@@ -1926,16 +1926,18 @@ function renderOverviewPage() {
             value={
               desktopPermissions == null
                 ? "检查中"
-                : desktopPermissions.platform !== "macos"
-                  ? "当前平台未接入"
-                  : desktopPermissions.accessibilityGranted &&
-                      desktopPermissions.screenRecordingGranted
+                : desktopPermissions.accessibilityGranted &&
+                    desktopPermissions.screenRecordingGranted
                     ? "已就绪"
-                    : "权限未完整授权"
+                    : desktopPermissions.accessibilitySupported ||
+                        desktopPermissions.screenRecordingSupported
+                      ? "权限未完整授权"
+                      : "当前平台未接入"
             }
             tone={
               desktopPermissions != null &&
-              desktopPermissions.platform === "macos" &&
+              (desktopPermissions.accessibilitySupported ||
+                desktopPermissions.screenRecordingSupported) &&
               (!desktopPermissions.accessibilityGranted || !desktopPermissions.screenRecordingGranted)
                 ? "danger"
                 : "normal"
@@ -2470,7 +2472,9 @@ function formatDesktopPermissionValue(
   if (!status) {
     return "检查中";
   }
-  if (status.platform !== "macos") {
+  const supported =
+    permission === "screen_recording" ? status.screenRecordingSupported : status.accessibilitySupported;
+  if (!supported) {
     return `当前平台未接入，${unsupportedLabel}`;
   }
   if (permission === "screen_recording") {
