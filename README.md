@@ -197,7 +197,7 @@ cargo run -- run
 其中 `relay-origin` 会从 `relay.url` 自动推导：
 
 - `wss://relay.baijimu.com/ws/agent` -> `https://relay.baijimu.com/api/bridge-agent/uploads/prepare`
-- `ws://127.0.0.1:8080/ws/agent` -> `http://127.0.0.1:8080/api/bridge-agent/uploads/prepare`
+- `ws://127.0.0.1:8080/ws/agent` -> `http://127.0.0.1:8080/api/bridge-agent/uploads/prepare`（旧默认，仅兼容迁移）
 
 也可以通过 `upload.prepare_url` 显式覆盖。
 

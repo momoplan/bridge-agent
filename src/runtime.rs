@@ -431,10 +431,10 @@ mod tests {
 
     #[test]
     fn build_url_injects_token() {
-        let url = build_agent_url("ws://127.0.0.1:8080/ws/agent", "devbox", "secret").unwrap();
+        let url = build_agent_url("wss://relay.baijimu.com/ws/agent", "devbox", "secret").unwrap();
         assert_eq!(
             url.as_str(),
-            "ws://127.0.0.1:8080/ws/agent/devbox?token=secret"
+            "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
         );
     }
 }

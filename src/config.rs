@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
+const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
+const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
@@ -378,6 +379,7 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
     config.normalize();
+    migrate_legacy_defaults(&mut config);
     config.validate()?;
     Ok(config)
 }
@@ -401,6 +403,12 @@ pub fn ensure_config_exists(path: &Path) -> Result<()> {
         save_config(path, &AgentConfig::example())?;
     }
     Ok(())
+}
+
+fn migrate_legacy_defaults(config: &mut AgentConfig) {
+    if config.relay.url.trim() == LEGACY_DEFAULT_RELAY_URL {
+        config.relay.url = DEFAULT_RELAY_URL.to_string();
+    }
 }
 
 pub fn manifest_preview_json(config: &AgentConfig) -> Result<String> {
@@ -751,8 +759,7 @@ fn project_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config,
-        AgentConfig,
+        ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config, AgentConfig,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -778,7 +785,7 @@ mod tests {
         assert_generated_agent_id(&loaded.relay.agent_id);
         assert_eq!(
             loaded.upload.prepare_url(&loaded.relay).as_deref(),
-            Some("http://127.0.0.1:8080/api/bridge-agent/uploads/prepare")
+            Some("https://relay.baijimu.com/api/bridge-agent/uploads/prepare")
         );
         assert_eq!(loaded.services.len(), 2);
     }
@@ -836,6 +843,7 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
+        assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
         assert_eq!(loaded.upload.inline_limit_bytes, 8 * 1024 * 1024);
         assert_eq!(loaded.relay.agent_id, "devbox");
         assert_eq!(loaded.services[0].name, "computer");
@@ -862,7 +870,7 @@ mod tests {
     "timeout_secs": 60
   },
   "relay": {
-    "url": "ws://127.0.0.1:8080/ws/agent",
+    "url": "wss://relay.baijimu.com/ws/agent",
     "agent_id": "devbox",
     "token": "",
     "reconnect_secs": 3

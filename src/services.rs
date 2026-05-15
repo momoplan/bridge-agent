@@ -31,24 +31,23 @@ use core_graphics::geometry::CGPoint;
 use windows_sys::Win32::Foundation::{GetLastError, LPARAM, RECT};
 #[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
-    CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC,
-    GetDIBits, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFOEXW, ReleaseDC,
-    SRCCOPY, SelectObject,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, ReleaseDC, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR,
+    MONITORINFOEXW, SRCCOPY,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-    VK_TAB, VK_UP,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
+    VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SetCursorPos, WHEEL_DELTA,
+    GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WHEEL_DELTA,
 };
 
 pub struct ServiceRegistry {
@@ -918,7 +917,11 @@ async fn upload_screenshot(
     for (key, value) in &slot.headers {
         upload = upload.header(key, value);
     }
-    if !slot.headers.keys().any(|key| key.eq_ignore_ascii_case("content-type")) {
+    if !slot
+        .headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("content-type"))
+    {
         upload = upload.header(reqwest::header::CONTENT_TYPE, "image/png");
     }
 
@@ -1223,10 +1226,7 @@ struct WindowsKey {
 #[cfg(windows)]
 impl WindowsKey {
     fn is_modifier(self) -> bool {
-        matches!(
-            self.virtual_key,
-            VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN
-        )
+        matches!(self.virtual_key, VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN)
     }
 }
 
@@ -1496,8 +1496,7 @@ fn round_f64_to_i32(value: f64, label: &str) -> Result<i32> {
 fn capture_windows_monitor_png(display_id: Option<u32>) -> Result<WindowsMonitorCapture> {
     let bounds = windows_monitor_bounds(display_id)?;
     let width_u32 = u32::try_from(bounds.width).map_err(|_| anyhow!("invalid monitor width"))?;
-    let height_u32 =
-        u32::try_from(bounds.height).map_err(|_| anyhow!("invalid monitor height"))?;
+    let height_u32 = u32::try_from(bounds.height).map_err(|_| anyhow!("invalid monitor height"))?;
 
     let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
     if screen_dc.is_null() {
@@ -1596,7 +1595,10 @@ fn capture_windows_monitor_png(display_id: Option<u32>) -> Result<WindowsMonitor
         .ok_or_else(|| anyhow!("failed to build RGBA image"))?;
     let mut bytes = Vec::new();
     image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .context("failed to encode screenshot")?;
 
     Ok(WindowsMonitorCapture {
