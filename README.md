@@ -99,12 +99,13 @@
 
 - `computer.screenshot`
 - `computer.click`
+- `shellExec.shellExec`
 - `local-java-service.invokeApi`
 
 这里：
 
-- `computer` / `local-java-service` 是服务
-- `screenshot` / `click` / `invokeApi` 是方法
+- `computer` / `shellExec` / `local-java-service` 是服务
+- `screenshot` / `click` / `shellExec` / `invokeApi` 是方法
 
 外部不会看到：
 
@@ -168,6 +169,7 @@ cargo run -- init-config
 
 - 开一个 `computer.screenshot`
 - 再开一个 `computer.click`
+- 使用默认的 `shellExec.shellExec`
 - 或者开一个映射本地 Java 服务的 `local-java-service.invokeApi`
 
 3. 启动 agent
@@ -459,7 +461,7 @@ npm run tauri build -- --debug
 
 适合终端类服务，例如：
 
-- `terminal.exec`
+- `shellExec.shellExec`
 
 本地策略包括：
 

@@ -175,6 +175,7 @@ impl AgentConfig {
             },
             services: vec![
                 default_computer_service(),
+                default_shell_exec_service(),
                 ServiceConfig {
                     name: "local-java-service".to_string(),
                     description: "Example business service backed by a local HTTP endpoint."
@@ -199,7 +200,9 @@ impl AgentConfig {
     }
 
     pub fn normalize(&mut self) -> bool {
-        ensure_default_computer_methods(self)
+        let mut changed = ensure_default_computer_methods(self);
+        changed |= ensure_default_shell_exec_service(self);
+        changed
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -608,6 +611,44 @@ fn default_computer_service() -> ServiceConfig {
     }
 }
 
+fn default_shell_exec_service() -> ServiceConfig {
+    ServiceConfig {
+        name: "shellExec".to_string(),
+        description: "Run allowlisted shell commands on the local machine.".to_string(),
+        enabled: true,
+        methods: vec![default_shell_exec_method()],
+    }
+}
+
+fn default_shell_exec_method() -> MethodConfig {
+    MethodConfig {
+        name: "shellExec".to_string(),
+        description: "Run one allowlisted command with optional cwd and env.".to_string(),
+        enabled: true,
+        input_schema: shell_input_schema(),
+        binding: MethodBinding::ShellCommand(ShellCommandBinding {
+            root_dir: ".".to_string(),
+            allow_commands: default_shell_exec_allow_commands(),
+            default_timeout_secs: Some(default_timeout_secs()),
+            max_timeout_secs: Some(default_max_timeout_secs()),
+        }),
+    }
+}
+
+fn default_shell_exec_allow_commands() -> Vec<String> {
+    vec![
+        "cmd".to_string(),
+        "powershell".to_string(),
+        "pwsh".to_string(),
+        "sh".to_string(),
+        "bash".to_string(),
+        "echo".to_string(),
+        "pwd".to_string(),
+        "ls".to_string(),
+        "git".to_string(),
+    ]
+}
+
 fn ensure_default_computer_methods(config: &mut AgentConfig) -> bool {
     let default_service = default_computer_service();
     let default_names: BTreeSet<String> = default_service
@@ -653,6 +694,44 @@ fn ensure_default_computer_methods(config: &mut AgentConfig) -> bool {
     }
 
     config.services.insert(0, default_service);
+    true
+}
+
+fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
+    let default_service = default_shell_exec_service();
+    let default_method = default_shell_exec_method();
+
+    if let Some(service) = config
+        .services
+        .iter_mut()
+        .find(|service| service.name == default_service.name)
+    {
+        let mut changed = false;
+
+        if service.description.trim().is_empty() {
+            service.description = default_service.description;
+            changed = true;
+        }
+
+        if !service
+            .methods
+            .iter()
+            .any(|method| method.name == default_method.name)
+        {
+            service.methods.push(default_method);
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    let insert_index = config
+        .services
+        .iter()
+        .position(|service| service.name == "computer")
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    config.services.insert(insert_index, default_service);
     true
 }
 
@@ -787,7 +866,15 @@ mod tests {
             loaded.upload.prepare_url(&loaded.relay).as_deref(),
             Some("https://relay.baijimu.com/api/bridge-agent/uploads/prepare")
         );
-        assert_eq!(loaded.services.len(), 2);
+        assert_eq!(loaded.services.len(), 3);
+        assert!(loaded
+            .services
+            .iter()
+            .any(|service| service.name == "shellExec"
+                && service
+                    .methods
+                    .iter()
+                    .any(|method| method.name == "shellExec")));
     }
 
     #[test]
@@ -804,6 +891,7 @@ mod tests {
     fn manifest_preview_contains_enabled_service_only() {
         let payload = manifest_preview_json(&AgentConfig::example()).unwrap();
         assert!(payload.contains("\"computer\""));
+        assert!(payload.contains("\"shellExec\""));
         assert!(!payload.contains("\"local-java-service\""));
     }
 
@@ -851,6 +939,10 @@ mod tests {
             .methods
             .iter()
             .any(|method| method.name == "screenshot"));
+        assert!(loaded
+            .services
+            .iter()
+            .any(|service| service.name == "shellExec"));
     }
 
     #[test]

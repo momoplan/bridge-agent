@@ -2074,9 +2074,17 @@ mod tests {
         let current_dir = std::env::current_dir().unwrap();
         let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
         let definitions = registry.definitions();
-        assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].name, "computer");
-        assert_eq!(definitions[0].methods[0].name, "screenshot");
+        assert_eq!(definitions.len(), 2);
+        assert!(definitions.iter().any(|service| service.name == "computer"
+            && service
+                .methods
+                .iter()
+                .any(|method| method.name == "screenshot")));
+        assert!(definitions.iter().any(|service| service.name == "shellExec"
+            && service
+                .methods
+                .iter()
+                .any(|method| method.name == "shellExec")));
     }
 
     #[tokio::test]
