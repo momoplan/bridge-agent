@@ -70,6 +70,14 @@ pub struct RuntimeConfig {
     pub max_timeout_secs: u64,
     #[serde(default = "default_log_limit")]
     pub log_limit: usize,
+    #[serde(default = "default_log_file_enabled")]
+    pub log_file_enabled: bool,
+    #[serde(default)]
+    pub log_file_dir: Option<String>,
+    #[serde(default = "default_log_file_max_bytes")]
+    pub log_file_max_bytes: u64,
+    #[serde(default = "default_log_file_max_files")]
+    pub log_file_max_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +180,10 @@ impl AgentConfig {
                 default_timeout_secs: default_timeout_secs(),
                 max_timeout_secs: default_max_timeout_secs(),
                 log_limit: default_log_limit(),
+                log_file_enabled: default_log_file_enabled(),
+                log_file_dir: None,
+                log_file_max_bytes: default_log_file_max_bytes(),
+                log_file_max_files: default_log_file_max_files(),
             },
             services: vec![
                 default_computer_service(),
@@ -234,6 +246,14 @@ impl AgentConfig {
         }
         if self.runtime.log_limit == 0 {
             bail!("runtime.log_limit must be greater than zero");
+        }
+        if self.runtime.log_file_enabled {
+            if self.runtime.log_file_max_bytes < 1024 {
+                bail!("runtime.log_file_max_bytes must be at least 1024");
+            }
+            if self.runtime.log_file_max_files == 0 {
+                bail!("runtime.log_file_max_files must be greater than zero");
+            }
         }
 
         let mut service_names = BTreeSet::new();
@@ -754,6 +774,18 @@ fn default_reconnect_secs() -> u64 {
 
 fn default_log_limit() -> usize {
     500
+}
+
+fn default_log_file_enabled() -> bool {
+    true
+}
+
+fn default_log_file_max_bytes() -> u64 {
+    5 * 1024 * 1024
+}
+
+fn default_log_file_max_files() -> usize {
+    5
 }
 
 fn default_http_method() -> String {

@@ -14,6 +14,7 @@ interface RuntimeSnapshot {
   config_path: string | null;
   agent_id: string | null;
   relay_url: string | null;
+  log_file_path: string | null;
   last_error: string | null;
   last_event_at: number;
 }
@@ -52,6 +53,10 @@ interface RuntimeConfig {
   default_timeout_secs: number;
   max_timeout_secs: number;
   log_limit: number;
+  log_file_enabled: boolean;
+  log_file_dir?: string | null;
+  log_file_max_bytes: number;
+  log_file_max_files: number;
 }
 
 interface ShellBinding {
@@ -1182,6 +1187,43 @@ function App() {
                 }
               />
             </Field>
+            <Field label="文件日志">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={config.runtime.log_file_enabled}
+                  onChange={(event) => updateRuntime("log_file_enabled", event.target.checked)}
+                />
+                启用
+              </label>
+            </Field>
+            <Field label="日志目录" hint="留空使用系统默认目录。">
+              <input
+                value={config.runtime.log_file_dir ?? ""}
+                onChange={(event) => updateRuntime("log_file_dir", emptyToNull(event.target.value))}
+                placeholder="C:\\ProgramData\\Baijimu\\BridgeAgent\\logs"
+              />
+            </Field>
+            <Field label="单文件上限字节">
+              <input
+                type="number"
+                min={1024}
+                value={config.runtime.log_file_max_bytes}
+                onChange={(event) =>
+                  updateRuntime("log_file_max_bytes", safeNumber(event.target.value, 5 * 1024 * 1024))
+                }
+              />
+            </Field>
+            <Field label="轮转文件数">
+              <input
+                type="number"
+                min={1}
+                value={config.runtime.log_file_max_files}
+                onChange={(event) =>
+                  updateRuntime("log_file_max_files", safeNumber(event.target.value, 5))
+                }
+              />
+            </Field>
           </div>
         );
     }
@@ -1923,6 +1965,7 @@ function renderOverviewPage() {
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+          <InfoRow label="日志文件" value={runtime?.log_file_path ?? "未启用"} />
           <InfoRow
             label="桌面权限"
             value={

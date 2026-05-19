@@ -1,11 +1,12 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::logging::{FileLogConfig, FileLogSink};
 use crate::protocol::{AgentCapabilities, AgentMessage};
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
@@ -33,6 +34,7 @@ pub struct RuntimeSnapshot {
     pub config_path: Option<String>,
     pub agent_id: Option<String>,
     pub relay_url: Option<String>,
+    pub log_file_path: Option<String>,
     pub last_error: Option<String>,
     pub last_event_at: u64,
 }
@@ -53,6 +55,7 @@ pub struct AgentRuntimeManager {
 struct RuntimeInner {
     state: Mutex<ManagedState>,
     logs: Mutex<VecDeque<LogEntry>>,
+    file_log: Mutex<Option<FileLogSink>>,
 }
 
 struct ManagedState {
@@ -69,6 +72,7 @@ impl Default for ManagedState {
                 config_path: None,
                 agent_id: None,
                 relay_url: None,
+                log_file_path: None,
                 last_error: None,
                 last_event_at: now_ms(),
             },
@@ -91,10 +95,20 @@ impl AgentRuntimeManager {
     pub async fn start(&self, config: AgentConfig, config_path: &Path) -> Result<RuntimeSnapshot> {
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
-        let registry = Arc::new(ServiceRegistry::from_config(
-            &config,
-            &resolve_config_base_dir(config_path),
-        )?);
+        let config_base_dir = resolve_config_base_dir(config_path);
+        let registry = Arc::new(ServiceRegistry::from_config(&config, &config_base_dir)?);
+        let file_log = FileLogSink::from_config(
+            &FileLogConfig {
+                enabled: config.runtime.log_file_enabled,
+                dir: config.runtime.log_file_dir.as_ref().map(PathBuf::from),
+                max_bytes: config.runtime.log_file_max_bytes,
+                max_files: config.runtime.log_file_max_files,
+            },
+            &config_base_dir,
+        )?;
+        let log_file_path = file_log
+            .as_ref()
+            .map(|sink| sink.path().display().to_string());
         let ws_url = build_agent_url(
             &config.relay.url,
             &config.relay.agent_id,
@@ -105,6 +119,7 @@ impl AgentRuntimeManager {
             config_path: Some(config_path.display().to_string()),
             agent_id: Some(config.relay.agent_id.clone()),
             relay_url: Some(ws_url.to_string()),
+            log_file_path: log_file_path.clone(),
             last_error: None,
             last_event_at: now_ms(),
         };
@@ -112,6 +127,10 @@ impl AgentRuntimeManager {
         {
             let mut state = self.inner.state.lock().await;
             state.snapshot = snapshot;
+        }
+        {
+            let mut active_file_log = self.inner.file_log.lock().await;
+            *active_file_log = file_log;
         }
         self.push_log("info", "runtime starting", log_limit).await;
 
@@ -172,6 +191,12 @@ impl AgentRuntimeManager {
 
     pub async fn clear_logs(&self) {
         self.inner.logs.lock().await.clear();
+        let file_log = self.inner.file_log.lock().await.clone();
+        if let Some(file_log) = file_log {
+            if let Err(err) = file_log.clear() {
+                warn!("failed to clear file log: {err:#}");
+            }
+        }
     }
 
     async fn stop_if_running(&self) -> Result<()> {
@@ -196,15 +221,18 @@ impl AgentRuntimeManager {
 
     async fn push_log(&self, level: &str, message: &str, limit: usize) {
         emit_tracing(level, message);
-        let mut logs = self.inner.logs.lock().await;
-        logs.push_back(LogEntry {
+        let entry = LogEntry {
             timestamp_ms: now_ms(),
             level: level.to_string(),
             message: message.to_string(),
-        });
+        };
+        let mut logs = self.inner.logs.lock().await;
+        logs.push_back(entry.clone());
         while logs.len() > limit {
             logs.pop_front();
         }
+        drop(logs);
+        append_file_log(&self.inner, &entry).await;
     }
 }
 
@@ -324,22 +352,50 @@ impl RuntimeRunner {
                                 .with_context(|| format!("invalid relay message: {text}"))?;
                             match incoming {
                                 AgentMessage::InvokeRequest(request) => {
+                                    let service = request.service.clone();
+                                    let method = request.method.clone();
                                     self.push_log(
                                         "info",
-                                        &format!("invoke {}.{}", request.service, request.method),
+                                        &format!("invoke {service}.{method} started"),
                                     )
                                     .await;
-                                    let response = AgentMessage::InvokeResult(
-                                        self.registry
-                                            .invoke(
-                                                request.request_id,
-                                                &request.service,
-                                                &request.method,
-                                                request.arguments,
-                                                request.timeout_secs,
-                                            )
-                                            .await,
-                                    );
+                                    let result = self
+                                        .registry
+                                        .invoke(
+                                            request.request_id,
+                                            &service,
+                                            &method,
+                                            request.arguments,
+                                            request.timeout_secs,
+                                        )
+                                        .await;
+                                    if result.success {
+                                        self.push_log(
+                                            "info",
+                                            &format!(
+                                                "invoke {service}.{method} succeeded in {}ms",
+                                                result.duration_ms
+                                            ),
+                                        )
+                                        .await;
+                                    } else {
+                                        let error = result
+                                            .error
+                                            .as_ref()
+                                            .map(|err| {
+                                                format!("{}: {}", err.code, err.message)
+                                            })
+                                            .unwrap_or_else(|| "unknown error".to_string());
+                                        self.push_log(
+                                            "warn",
+                                            &format!(
+                                                "invoke {service}.{method} failed in {}ms: {error}",
+                                                result.duration_ms
+                                            ),
+                                        )
+                                        .await;
+                                    }
+                                    let response = AgentMessage::InvokeResult(result);
                                     write_json(&mut write, &response).await?;
                                 }
                                 AgentMessage::Error(err) => {
@@ -375,6 +431,7 @@ impl RuntimeRunner {
             config_path: Some(config_path),
             agent_id: Some(agent_id),
             relay_url: Some(relay_url),
+            log_file_path: state.snapshot.log_file_path.clone(),
             last_error,
             last_event_at: now_ms(),
         };
@@ -382,14 +439,26 @@ impl RuntimeRunner {
 
     async fn push_log(&self, level: &str, message: &str) {
         emit_tracing(level, message);
-        let mut logs = self.inner.logs.lock().await;
-        logs.push_back(LogEntry {
+        let entry = LogEntry {
             timestamp_ms: now_ms(),
             level: level.to_string(),
             message: message.to_string(),
-        });
+        };
+        let mut logs = self.inner.logs.lock().await;
+        logs.push_back(entry.clone());
         while logs.len() > self.log_limit {
             logs.pop_front();
+        }
+        drop(logs);
+        append_file_log(&self.inner, &entry).await;
+    }
+}
+
+async fn append_file_log(inner: &RuntimeInner, entry: &LogEntry) {
+    let file_log = inner.file_log.lock().await.clone();
+    if let Some(file_log) = file_log {
+        if let Err(err) = file_log.append(entry.timestamp_ms, &entry.level, &entry.message) {
+            warn!("failed to append file log: {err:#}");
         }
     }
 }

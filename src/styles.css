@@ -63,6 +63,20 @@ select:focus {
   box-shadow: 0 0 0 4px rgba(198, 93, 33, 0.1);
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  color: var(--text);
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+}
+
 .app-shell {
   padding: 28px;
 }

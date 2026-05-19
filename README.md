@@ -151,9 +151,27 @@ cargo run -- init-config
 - `relay.agent_id`
 - `relay.token`
 - `runtime.default_timeout_secs`
+- `runtime.log_file_enabled`
+- `runtime.log_file_dir`（可选；留空时使用系统默认日志目录）
 - `services[].methods[].binding`
 
 `binding.type` 只存在于本地配置里，用来决定本机怎么执行方法，不会进入 relay 协议。
+
+## 运行日志
+
+运行时日志会同时保存在桌面端“诊断 -> 日志”和本地文件里。文件日志默认开启，按大小轮转，适合排查 Windows service 或用户机器上的联调问题。
+
+默认日志路径：
+
+- Windows：`C:\ProgramData\Baijimu\BridgeAgent\logs\bridge-agent.log`
+- macOS / Linux：系统应用数据目录下的 `bridge-agent/logs/bridge-agent.log`
+
+可通过本地配置调整：
+
+- `runtime.log_file_enabled`
+- `runtime.log_file_dir`
+- `runtime.log_file_max_bytes`
+- `runtime.log_file_max_files`
 
 ## 快速开始
 
