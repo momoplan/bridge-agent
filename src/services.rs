@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
 use image::GenericImageView;
 use reqwest::{Client, Method};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
@@ -103,11 +103,62 @@ struct ServiceOutcome {
 
 #[derive(Debug, Deserialize)]
 struct ShellExecArgs {
-    command: Vec<String>,
+    #[serde(deserialize_with = "deserialize_shell_command")]
+    command: ShellCommand,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ShellCommand {
+    Args(Vec<String>),
+    Line(String),
+}
+
+impl ShellCommand {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Args(args) => args.is_empty(),
+            Self::Line(line) => line.trim().is_empty(),
+        }
+    }
+
+    fn into_args(self) -> Vec<String> {
+        match self {
+            Self::Args(args) => args,
+            Self::Line(line) => platform_shell_command(line),
+        }
+    }
+}
+
+fn deserialize_shell_command<'de, D>(deserializer: D) -> std::result::Result<ShellCommand, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Array(_) => serde_json::from_value(value)
+            .map(ShellCommand::Args)
+            .map_err(de::Error::custom),
+        Value::String(line) => Ok(ShellCommand::Line(line)),
+        _ => Err(de::Error::custom(
+            "command must be either an argv array of strings or a command line string",
+        )),
+    }
+}
+
+fn platform_shell_command(line: String) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec!["cmd".to_string(), "/C".to_string(), line]
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec!["sh".to_string(), "-lc".to_string(), line]
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -271,10 +322,11 @@ impl RuntimeMethod {
 
 impl ShellMethod {
     async fn exec(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
-        let args: ShellExecArgs = serde_json::from_value(arguments).with_context(|| {
-            format!(
-                "invalid arguments for {}.{}",
-                self.service_name, self.method_name
+        let args: ShellExecArgs = serde_json::from_value(arguments).map_err(|err| {
+            anyhow!(
+                "invalid arguments for {}.{}: {err}",
+                self.service_name,
+                self.method_name
             )
         })?;
 
@@ -286,7 +338,8 @@ impl ShellMethod {
             );
         }
 
-        let executable = &args.command[0];
+        let command_args = args.command.into_args();
+        let executable = &command_args[0];
         if !is_command_allowed(executable, &self.allow_commands) {
             return Ok(ServiceOutcome {
                 success: false,
@@ -306,7 +359,7 @@ impl ShellMethod {
 
         let mut command = Command::new(executable);
         command
-            .args(args.command.iter().skip(1))
+            .args(command_args.iter().skip(1))
             .current_dir(&cwd)
             .env_clear()
             .envs(env)
@@ -2031,7 +2084,9 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_command_allowed, resolve_cwd, sanitize_env, ServiceRegistry};
+    use super::{
+        is_command_allowed, resolve_cwd, sanitize_env, ServiceRegistry, ShellCommand, ShellExecArgs,
+    };
     use crate::config::AgentConfig;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -2056,6 +2111,48 @@ mod tests {
         let sanitized = sanitize_env(env);
         assert_eq!(sanitized.get("FOO_BAR"), Some(&"1".to_string()));
         assert!(!sanitized.contains_key("bad-key"));
+    }
+
+    #[test]
+    fn shell_args_accept_argv_array() {
+        let args: ShellExecArgs =
+            serde_json::from_value(json!({"command": ["cmd", "/C", "echo", "hello"]})).unwrap();
+        assert_eq!(
+            args.command,
+            ShellCommand::Args(vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                "echo".to_string(),
+                "hello".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn shell_args_accept_command_line_string() {
+        let args: ShellExecArgs =
+            serde_json::from_value(json!({"command": "where wechat-decrypt"})).unwrap();
+        let command_args = args.command.into_args();
+
+        #[cfg(windows)]
+        assert_eq!(
+            command_args,
+            vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                "where wechat-decrypt".to_string()
+            ]
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(
+            command_args,
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "where wechat-decrypt".to_string()
+            ]
+        );
     }
 
     #[test]

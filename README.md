@@ -470,6 +470,11 @@ npm run tauri build -- --debug
 - 超时限制
 - 环境变量白名单
 
+对外调用参数统一使用 argv 数组形式：
+
+- Windows 查询 PATH 或执行 shell 内建命令时，例如 `{"command":["cmd","/C","where","wechat-decrypt"]}`
+- 其他平台需要 shell 语义时，例如 `{"command":["sh","-lc","which wechat-decrypt"]}`
+
 ### 3. `http`
 
 适合把本地 Java / Node / Python 服务映射成业务方法，例如：

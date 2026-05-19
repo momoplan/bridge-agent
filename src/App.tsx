@@ -231,6 +231,8 @@ const SHELL_SCHEMA = {
   required: ["command"],
   properties: {
     command: {
+      description:
+        'Command argv array for direct execution. On Windows, run shell built-ins or PATH lookup through cmd /C, for example ["cmd", "/C", "where", "wechat-decrypt"].',
       type: "array",
       items: { type: "string" },
       minItems: 1

@@ -437,6 +437,7 @@ pub fn shell_input_schema() -> Value {
         "required": ["command"],
         "properties": {
             "command": {
+                "description": "Command argv array for direct execution. On Windows, run shell built-ins or PATH lookup through cmd /C, for example [\"cmd\", \"/C\", \"where\", \"wechat-decrypt\"].",
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1
@@ -893,6 +894,26 @@ mod tests {
         assert!(payload.contains("\"computer\""));
         assert!(payload.contains("\"shellExec\""));
         assert!(!payload.contains("\"local-java-service\""));
+    }
+
+    #[test]
+    fn shell_manifest_exposes_single_argv_command_schema() {
+        let manifest = AgentConfig::example().manifest_preview();
+        let shell_method = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "shellExec")
+            .and_then(|service| {
+                service
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "shellExec")
+            })
+            .unwrap();
+        let command_schema = &shell_method.input_schema["properties"]["command"];
+        assert_eq!(command_schema["type"], "array");
+        assert_eq!(command_schema["items"]["type"], "string");
+        assert!(command_schema.get("anyOf").is_none());
     }
 
     #[test]
