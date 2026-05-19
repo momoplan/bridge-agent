@@ -295,7 +295,9 @@ async fn start_browser_auth(
     config: AgentConfig,
 ) -> Result<BrowserAuthStartResponse, String> {
     let mut config = config;
-    if ensure_browser_auth_agent_id(&mut config) {
+    let normalized = config.normalize();
+    let agent_id_changed = ensure_browser_auth_agent_id(&mut config);
+    if normalized || agent_id_changed {
         save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
     }
     let client = Client::new();
