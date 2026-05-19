@@ -11,11 +11,13 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{interval_at, sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{error, info, warn};
 use url::Url;
+
+const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -335,12 +337,20 @@ impl RuntimeRunner {
             services: self.registry.definitions(),
         });
         write_json(&mut write, &capabilities).await?;
+        let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
+        let mut keepalive = interval_at(
+            tokio::time::Instant::now() + keepalive_interval,
+            keepalive_interval,
+        );
 
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     write.send(Message::Close(None)).await.ok();
                     break;
+                }
+                _ = keepalive.tick() => {
+                    write.send(Message::Ping(Vec::new().into())).await?;
                 }
                 message = read.next() => {
                     let Some(message) = message else {
