@@ -589,7 +589,7 @@ function App() {
         setMessage(
           status.updateAvailable
             ? status.autoDownloadAvailable
-              ? `发现新版本 ${status.latestVersion}，可以直接自动下载并安装。`
+              ? `发现新版本 ${status.latestVersion}，可以下载后自动退出、替换并重启。`
               : `发现新版本 ${status.latestVersion}，但当前平台需要跳转发布页手工下载。`
             : `当前已经是最新版本 ${status.currentVersion}`
         );
@@ -619,8 +619,8 @@ function App() {
       setDismissedUpdateVersion(result.version);
       setMessage(
         result.downloadedPath
-          ? `更新包 ${result.assetName ?? ""} 已下载到 ${result.downloadedPath}，并已打开安装。`
-          : `更新包 ${result.assetName ?? ""} 已下载并开始安装。`
+          ? `更新包 ${result.assetName ?? ""} 已下载到 ${result.downloadedPath}，应用即将退出并自动完成替换。`
+          : `更新包 ${result.assetName ?? ""} 已下载，应用即将退出并自动完成替换。`
       );
     } catch (err) {
       setError(readError(err));
@@ -2128,7 +2128,7 @@ function renderOverviewPage() {
                     onClick={() => void installAppUpdate()}
                     disabled={updateBusy}
                   >
-                    自动更新
+                    下载并安装
                   </button>
                 ) : (
                   <button

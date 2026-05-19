@@ -1,15 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use bridge_agent::{
-    AgentConfig, AgentRuntimeManager, RuntimeSnapshot, default_config_path,
-    ensure_browser_auth_agent_id, ensure_config_exists, install_rustls_crypto_provider,
-    load_config as load_agent_config, manifest_preview_json, save_config as save_agent_config,
+    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
+    install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
+    save_config as save_agent_config, AgentConfig, AgentRuntimeManager, RuntimeSnapshot,
 };
 use reqwest::Client;
 use semver::Version;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -266,8 +268,12 @@ fn open_desktop_permission_settings(permission: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let target = match permission.trim() {
-            "screen_recording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "screen_recording" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            "accessibility" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
             other => return Err(format!("不支持的权限类型: {other}")),
         };
 
@@ -307,15 +313,23 @@ async fn start_browser_auth(
     if let Some(workspace_id) = config.platform.workspace_id {
         payload.insert("workspaceId".to_string(), serde_json::json!(workspace_id));
     }
-    payload.insert("deviceId".to_string(), serde_json::json!(config.relay.agent_id));
-    payload.insert("deviceName".to_string(), serde_json::json!(config.device.name));
+    payload.insert(
+        "deviceId".to_string(),
+        serde_json::json!(config.relay.agent_id),
+    );
+    payload.insert(
+        "deviceName".to_string(),
+        serde_json::json!(config.device.name),
+    );
     payload.insert(
         "deviceDescription".to_string(),
-        serde_json::json!(config.device.description)
+        serde_json::json!(config.device.description),
     );
     payload.insert("serviceManifest".to_string(), serde_json::json!(manifest));
     let response = client
-        .post(format!("{base_url}/api/external-workspace-device-auth/start"))
+        .post(format!(
+            "{base_url}/api/external-workspace-device-auth/start"
+        ))
         .json(&payload)
         .send()
         .await
@@ -340,7 +354,9 @@ async fn poll_browser_auth(
     let client = Client::new();
     let base_url = config.platform.base_url.trim_end_matches('/');
     let response = client
-        .post(format!("{base_url}/api/external-workspace-device-auth/poll"))
+        .post(format!(
+            "{base_url}/api/external-workspace-device-auth/poll"
+        ))
         .json(&serde_json::json!({
             "deviceCode": device_code
         }))
@@ -353,7 +369,8 @@ async fn poll_browser_auth(
         return Err(format!("轮询浏览器授权失败: {payload}"));
     }
 
-    let payload: RawBrowserAuthPollResponse = response.json().await.map_err(|err| err.to_string())?;
+    let payload: RawBrowserAuthPollResponse =
+        response.json().await.map_err(|err| err.to_string())?;
     if payload.status != "authorized" {
         return Ok(BrowserAuthPollResponse {
             status: payload.status,
@@ -384,8 +401,8 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
-    let latest_version = parse_release_version(&release.tag_name)
-        .map_err(|err| format!("最新版本号无效: {err}"))?;
+    let latest_version =
+        parse_release_version(&release.tag_name).map_err(|err| format!("最新版本号无效: {err}"))?;
     let preferred_asset = select_release_asset(&release);
     let release_url = if release.html_url.trim().is_empty() {
         GITHUB_LATEST_RELEASE_PAGE.to_string()
@@ -411,12 +428,12 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
 }
 
 #[tauri::command]
-async fn install_app_update() -> Result<AppUpdateInstallResult, String> {
+async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallResult, String> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
-    let latest_version = parse_release_version(&release.tag_name)
-        .map_err(|err| format!("最新版本号无效: {err}"))?;
+    let latest_version =
+        parse_release_version(&release.tag_name).map_err(|err| format!("最新版本号无效: {err}"))?;
     let release_url = if release.html_url.trim().is_empty() {
         GITHUB_LATEST_RELEASE_PAGE.to_string()
     } else {
@@ -462,17 +479,40 @@ async fn install_app_update() -> Result<AppUpdateInstallResult, String> {
     if let Some(parent) = download_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("创建更新目录失败: {err}"))?;
     }
-    std::fs::write(&download_path, bytes.as_ref()).map_err(|err| format!("写入更新文件失败: {err}"))?;
+    std::fs::write(&download_path, bytes.as_ref())
+        .map_err(|err| format!("写入更新文件失败: {err}"))?;
     make_asset_ready_to_open(&download_path)?;
-    open::that(&download_path).map_err(|err| format!("打开安装包失败: {err}"))?;
 
-    Ok(AppUpdateInstallResult {
-        status: "downloaded".to_string(),
-        version: latest_version.to_string(),
-        asset_name: Some(asset.name.clone()),
-        downloaded_path: Some(download_path.display().to_string()),
-        release_url,
-    })
+    #[cfg(target_os = "macos")]
+    {
+        schedule_macos_app_update(&app, &download_path)?;
+        let app_to_exit = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1200));
+            app_to_exit.exit(0);
+        });
+
+        return Ok(AppUpdateInstallResult {
+            status: "downloaded".to_string(),
+            version: latest_version.to_string(),
+            asset_name: Some(asset.name.clone()),
+            downloaded_path: Some(download_path.display().to_string()),
+            release_url,
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        open::that(&download_path).map_err(|err| format!("打开安装包失败: {err}"))?;
+
+        Ok(AppUpdateInstallResult {
+            status: "downloaded".to_string(),
+            version: latest_version.to_string(),
+            asset_name: Some(asset.name.clone()),
+            downloaded_path: Some(download_path.display().to_string()),
+            release_url,
+        })
+    }
 }
 
 fn parse_release_version(tag_name: &str) -> Result<Version, String> {
@@ -518,7 +558,11 @@ fn select_release_asset(release: &GithubReleaseResponse) -> Option<&GithubReleas
     };
 
     for suffix in preferred_names {
-        if let Some(asset) = release.assets.iter().find(|asset| asset.name.ends_with(suffix)) {
+        if let Some(asset) = release
+            .assets
+            .iter()
+            .find(|asset| asset.name.ends_with(suffix))
+        {
             return Some(asset);
         }
     }
@@ -541,7 +585,8 @@ fn verify_asset_digest(asset: &GithubReleaseAsset, bytes: &[u8]) -> Result<(), S
 }
 
 fn resolve_update_download_path(asset_name: &str) -> Result<PathBuf, String> {
-    let base_dir = dirs::download_dir().unwrap_or_else(|| std::env::temp_dir().join("bridge-agent-downloads"));
+    let base_dir =
+        dirs::download_dir().unwrap_or_else(|| std::env::temp_dir().join("bridge-agent-downloads"));
     let path = base_dir.join("Bridge Agent Updates").join(asset_name);
     if path.as_os_str().is_empty() {
         return Err("无法确定更新文件保存路径".to_string());
@@ -567,13 +612,163 @@ fn make_asset_ready_to_open(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn schedule_macos_app_update(app: &tauri::AppHandle, dmg_path: &Path) -> Result<(), String> {
+    let current_bundle = current_macos_app_bundle()
+        .ok_or_else(|| "无法确定当前 macOS 应用包路径，不能自动替换更新。".to_string())?;
+    let target_bundle = if current_bundle.starts_with("/Volumes") {
+        PathBuf::from("/Applications").join(
+            current_bundle
+                .file_name()
+                .ok_or_else(|| "无法确定当前 macOS 应用包名称。".to_string())?,
+        )
+    } else {
+        current_bundle
+    };
+    let app_name = target_bundle
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Bridge Agent")
+        .to_string();
+    let bundle_identifier = app.config().identifier.clone();
+    let process_id = std::process::id().to_string();
+
+    let script_path = std::env::temp_dir().join(format!(
+        "bridge-agent-update-{}-{}.sh",
+        process_id,
+        env!("CARGO_PKG_VERSION")
+    ));
+    std::fs::write(&script_path, macos_update_script())
+        .map_err(|err| format!("写入 macOS 更新脚本失败: {err}"))?;
+    let mut permissions = std::fs::metadata(&script_path)
+        .map_err(|err| format!("读取 macOS 更新脚本权限失败: {err}"))?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script_path, permissions)
+        .map_err(|err| format!("设置 macOS 更新脚本权限失败: {err}"))?;
+
+    Command::new("/bin/sh")
+        .arg(&script_path)
+        .arg(dmg_path)
+        .arg(&target_bundle)
+        .arg(app_name)
+        .arg(process_id)
+        .arg(bundle_identifier)
+        .spawn()
+        .map_err(|err| format!("启动 macOS 更新安装器失败: {err}"))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    for ancestor in exe.ancestors() {
+        if ancestor
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_update_script() -> &'static str {
+    r#"#!/bin/sh
+set -u
+
+DMG_PATH="$1"
+TARGET_APP="$2"
+APP_NAME="$3"
+APP_PID="$4"
+BUNDLE_IDENTIFIER="$5"
+LOG_DIR="$HOME/Library/Logs"
+LOG_FILE="$LOG_DIR/Bridge Agent Updater.log"
+
+mkdir -p "$LOG_DIR"
+exec >> "$LOG_FILE" 2>&1
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting update from $DMG_PATH to $TARGET_APP"
+
+for _ in $(seq 1 60); do
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+if kill -0 "$APP_PID" 2>/dev/null; then
+  /usr/bin/osascript -e "tell application id \"$BUNDLE_IDENTIFIER\" to quit" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+fi
+
+if kill -0 "$APP_PID" 2>/dev/null; then
+  echo "application is still running; aborting update"
+  exit 1
+fi
+
+ATTACH_OUTPUT="$(/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly)"
+VOLUME="$(printf '%s\n' "$ATTACH_OUTPUT" | /usr/bin/awk '/\/Volumes\// {print substr($0, index($0, "/Volumes/")); exit}')"
+
+cleanup() {
+  if [ -n "${VOLUME:-}" ]; then
+    /usr/bin/hdiutil detach "$VOLUME" -quiet >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+if [ -z "${VOLUME:-}" ] || [ ! -d "$VOLUME" ]; then
+  echo "failed to mount update dmg"
+  exit 1
+fi
+
+SOURCE_APP="$(/usr/bin/find "$VOLUME" -maxdepth 1 -name "*.app" -type d | /usr/bin/head -n 1)"
+if [ -z "$SOURCE_APP" ] || [ ! -d "$SOURCE_APP" ]; then
+  echo "no .app bundle found in update dmg"
+  exit 1
+fi
+
+install_without_privilege() {
+  /bin/mkdir -p "$(/usr/bin/dirname "$TARGET_APP")" &&
+  /bin/rm -rf "$TARGET_APP" &&
+  /usr/bin/ditto "$SOURCE_APP" "$TARGET_APP"
+}
+
+install_with_privilege() {
+  /usr/bin/osascript - "$SOURCE_APP" "$TARGET_APP" <<'OSA'
+on run argv
+  set sourceApp to item 1 of argv
+  set targetApp to item 2 of argv
+  do shell script "/bin/rm -rf " & quoted form of targetApp & " && /usr/bin/ditto " & quoted form of sourceApp & " " & quoted form of targetApp with administrator privileges
+end run
+OSA
+}
+
+if ! install_without_privilege; then
+  echo "normal install failed; requesting administrator privilege"
+  install_with_privilege
+fi
+
+/usr/bin/xattr -dr com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1 || true
+/usr/bin/open "$TARGET_APP"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] update installed and relaunched $APP_NAME"
+"#
+}
+
 fn read_desktop_permission_status() -> DesktopPermissionStatus {
     #[cfg(target_os = "macos")]
     {
         let accessibility_granted = unsafe {
-            AXIsProcessTrusted()
-                || CGPreflightPostEventAccess()
-                || CGPreflightListenEventAccess()
+            AXIsProcessTrusted() || CGPreflightPostEventAccess() || CGPreflightListenEventAccess()
         };
         DesktopPermissionStatus {
             platform: "macos".to_string(),
