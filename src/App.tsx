@@ -417,6 +417,7 @@ function App() {
   const [configPath, setConfigPath] = useState("");
   const [manifestPreview, setManifestPreview] = useState("");
   const [config, setConfig] = useState<UiAgentConfig | null>(null);
+  const [savedServiceSignatures, setSavedServiceSignatures] = useState<string[]>([]);
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -516,6 +517,12 @@ function App() {
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const enabledServiceCount = config?.services.filter((service) => service.enabled).length ?? 0;
+  const exposedCapabilityCount =
+    config?.services.reduce(
+      (count, service) =>
+        count + (service.enabled ? service.methods.filter((method) => method.enabled).length : 0),
+      0
+    ) ?? 0;
   const enabledComputerMethodCount =
     config?.services.reduce(
       (count, service) =>
@@ -551,14 +558,68 @@ function App() {
     setExpandedMethodAdvancedKey((current) => (current === key ? null : key));
   }
 
+  function applyConfigDocument(document: ConfigDocument) {
+    const uiConfig = toUiConfig(document.config);
+    setConfigPath(document.config_path);
+    setManifestPreview(document.manifest_preview);
+    setConfig(uiConfig);
+    setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
+    setRuntime(document.runtime);
+  }
+
+  function applySavedServiceDocument(document: ConfigDocument, serviceIndex: number) {
+    const uiConfig = toUiConfig(document.config);
+    const savedService = uiConfig.services[serviceIndex];
+    setConfigPath(document.config_path);
+    setManifestPreview(document.manifest_preview);
+    setRuntime(document.runtime);
+    if (!savedService) {
+      applyConfigDocument(document);
+      return;
+    }
+    setConfig((current) => {
+      if (!current) {
+        return uiConfig;
+      }
+      const services = [...current.services];
+      services[serviceIndex] = savedService;
+      return { ...current, services };
+    });
+    setSavedServiceSignatures((current) => {
+      const signatures = [...current];
+      signatures[serviceIndex] = serviceSignature(savedService);
+      return signatures;
+    });
+  }
+
+  function applyDeletedServiceDocument(document: ConfigDocument, serviceIndex: number) {
+    const uiConfig = toUiConfig(document.config);
+    setConfigPath(document.config_path);
+    setManifestPreview(document.manifest_preview);
+    setRuntime(document.runtime);
+    setConfig((current) => {
+      if (!current) {
+        return uiConfig;
+      }
+      return {
+        ...current,
+        services: current.services.filter((_, index) => index !== serviceIndex)
+      };
+    });
+    setSavedServiceSignatures((current) => current.filter((_, index) => index !== serviceIndex));
+  }
+
+  function formatApplyMessage(base: string, snapshot: RuntimeSnapshot) {
+    return snapshot.status === "stopped"
+      ? `${base}，Agent 未运行，启动后生效`
+      : `${base}，已应用到正在运行的 Agent`;
+  }
+
   async function refreshAll() {
     try {
       setError("");
       const document = await invoke<ConfigDocument>("load_config");
-      setConfigPath(document.config_path);
-      setManifestPreview(document.manifest_preview);
-      setConfig(toUiConfig(document.config));
-      setRuntime(document.runtime);
+      applyConfigDocument(document);
       const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
       setLogs(latestLogs);
     } catch (err) {
@@ -636,7 +697,7 @@ function App() {
     }
   }
 
-  async function saveOnly() {
+  async function saveAll(applyToRuntime = false) {
     if (!config) {
       return;
     }
@@ -644,13 +705,70 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
-      const document = await invoke<ConfigDocument>("save_config", {
-        config: fromUiConfig(config)
+      const document = await invoke<ConfigDocument>(
+        applyToRuntime ? "save_config_and_apply" : "save_config",
+        {
+          config: fromUiConfig(config)
+        }
+      );
+      applyConfigDocument(document);
+      setMessage(applyToRuntime ? formatApplyMessage("全部配置已保存", document.runtime) : "配置已保存");
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveService(serviceIndex: number, applyToRuntime = false) {
+    if (!config?.services[serviceIndex]) {
+      return;
+    }
+    const service = config.services[serviceIndex];
+    try {
+      setBusy(true);
+      setMessage("");
+      setError("");
+      const document = await invoke<ConfigDocument>("save_service", {
+        serviceIndex,
+        service: fromUiService(service),
+        applyToRuntime
       });
-      setConfigPath(document.config_path);
-      setManifestPreview(document.manifest_preview);
-      setRuntime(document.runtime);
-      setMessage("配置已保存");
+      applySavedServiceDocument(document, serviceIndex);
+      setExpandedServiceIndex(Math.min(serviceIndex, document.config.services.length - 1));
+      const serviceName = service.name.trim() || "未命名服务";
+      setMessage(
+        applyToRuntime
+          ? formatApplyMessage(`服务 ${serviceName} 已保存`, document.runtime)
+          : `服务 ${serviceName} 已保存`
+      );
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSavedService(serviceIndex: number, applyToRuntime = false) {
+    if (!config?.services[serviceIndex]) {
+      return;
+    }
+    const serviceName = config.services[serviceIndex].name.trim() || "未命名服务";
+    try {
+      setBusy(true);
+      setMessage("");
+      setError("");
+      const document = await invoke<ConfigDocument>("delete_service", {
+        serviceIndex,
+        applyToRuntime
+      });
+      applyDeletedServiceDocument(document, serviceIndex);
+      setExpandedServiceIndex(document.config.services.length === 0 ? null : Math.max(0, serviceIndex - 1));
+      setMessage(
+        applyToRuntime
+          ? formatApplyMessage(`服务 ${serviceName} 已删除`, document.runtime)
+          : `服务 ${serviceName} 已删除`
+      );
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -669,6 +787,7 @@ function App() {
       const snapshot = await invoke<RuntimeSnapshot>("start_agent", {
         config: fromUiConfig(config)
       });
+      setSavedServiceSignatures(config.services.map(serviceSignature));
       setRuntime(snapshot);
       setMessage("Agent 已启动");
       await refreshRuntime();
@@ -701,10 +820,7 @@ function App() {
       setMessage("");
       setError("");
       const document = await invoke<ConfigDocument>("reset_example_config");
-      setConfigPath(document.config_path);
-      setManifestPreview(document.manifest_preview);
-      setConfig(toUiConfig(document.config));
-      setRuntime(document.runtime);
+      applyConfigDocument(document);
       setMessage("已恢复示例配置");
     } catch (err) {
       setError(readError(err));
@@ -798,7 +914,9 @@ function App() {
         deviceCode: browserAuth.deviceCode
       });
       if (result.status === "authorized" && result.config) {
-        setConfig(toUiConfig(result.config));
+        const uiConfig = toUiConfig(result.config);
+        setConfig(uiConfig);
+        setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
         setBrowserAuth(null);
         setMessage("浏览器授权成功，relay token 已自动写回配置");
         return;
@@ -1368,16 +1486,17 @@ function renderOverviewPage() {
         </Card>
 
         <Card
-          title="能力"
+          title="对外能力"
           action={
             <button className="secondary" onClick={() => setActivePage("services")}>
-              打开能力页
+              打开服务页
             </button>
           }
         >
           <div className="status-detail-grid">
-            <InfoRow label="总能力数" value={String(config.services.length)} />
-            <InfoRow label="已启用" value={String(enabledServiceCount)} />
+            <InfoRow label="服务总数" value={String(config.services.length)} />
+            <InfoRow label="已启用服务" value={String(enabledServiceCount)} />
+            <InfoRow label="已开放能力" value={String(exposedCapabilityCount)} />
             <InfoRow label="最近日志" value={latestLog ? formatTime(latestLog.timestamp_ms) : "暂无"} />
           </div>
         </Card>
@@ -1387,17 +1506,23 @@ function renderOverviewPage() {
 
   function renderServiceEditor(service: UiServiceConfig, serviceIndex: number) {
     const isComputer = isComputerService(service);
+    const isSystem = isSystemService(service);
+    const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
+    const servicePersisted = savedServiceSignatures[serviceIndex] != null;
 
     return (
       <Card
         title={service.name || "未命名服务"}
         description={
-          isComputer
+          isSystem
             ? "系统内置"
-            : service.description || "自定义本地能力"
+            : service.description || "自定义本地服务"
         }
         action={
           <div className="service-actions">
+            <span className={`service-save-state ${serviceDirty ? "dirty" : "clean"}`}>
+              {serviceDirty ? "未保存" : "已保存"}
+            </span>
             <label className="switch">
               <input
                 type="checkbox"
@@ -1411,21 +1536,36 @@ function renderOverviewPage() {
               />
               启用
             </label>
-            {!isComputer ? (
-              <button className="ghost danger" onClick={() => removeService(serviceIndex)}>
-                删除服务
+            <button className="secondary" onClick={() => void saveService(serviceIndex)} disabled={busy}>
+              保存服务
+            </button>
+            <button className="primary" onClick={() => void saveService(serviceIndex, true)} disabled={busy}>
+              保存并应用
+            </button>
+            {!isSystem ? (
+              <button
+                className="ghost danger"
+                onClick={() =>
+                  servicePersisted
+                    ? void deleteSavedService(serviceIndex, true)
+                    : removeService(serviceIndex)
+                }
+                disabled={busy}
+              >
+                {servicePersisted ? "删除并应用" : "移除草稿"}
               </button>
             ) : null}
           </div>
         }
       >
         <div className="service-editor-layout">
-          {isComputer ? (
+          {isSystem ? (
             <div className="service-readonly-banner">
-              <strong>系统能力</strong>
-              <p>`computer` 由应用自动维护，只展示可用动作，不做方法级编辑。</p>
+              <strong>系统服务</strong>
+              <p>{systemServiceNotice(service)}</p>
             </div>
-          ) : (
+          ) : null}
+          {!isSystem ? (
             <>
               <div className="form-grid">
                 <Field label="服务名">
@@ -1460,7 +1600,7 @@ function renderOverviewPage() {
                 </button>
               </div>
             </>
-          )}
+          ) : null}
           <div className="method-list">
             {service.methods.map((method, methodIndex) => (
               <div className="method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
@@ -1504,70 +1644,76 @@ function renderOverviewPage() {
                       >
                         {isMethodAdvancedOpen(serviceIndex, methodIndex) ? "收起高级设置" : "高级设置"}
                       </button>
-                      <button
-                        className="ghost danger"
-                        onClick={() => removeMethod(serviceIndex, methodIndex)}
-                      >
-                        删除方法
-                      </button>
+                      {!isSystem ? (
+                        <button
+                          className="ghost danger"
+                          onClick={() => removeMethod(serviceIndex, methodIndex)}
+                        >
+                          删除方法
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
 
                 {!isComputer ? (
                   <div className="form-grid">
-                    <Field label="方法名">
-                      <input
-                        value={method.name}
-                        onChange={(event) =>
-                          updateMethod(serviceIndex, methodIndex, (current) => ({
-                            ...current,
-                            name: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label="方法描述">
-                      <input
-                        value={method.description}
-                        onChange={(event) =>
-                          updateMethod(serviceIndex, methodIndex, (current) => ({
-                            ...current,
-                            description: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label="绑定类型">
-                      <select
-                        value={method.binding.type}
-                        disabled={method.binding.type === "computer_use"}
-                        onChange={(event) =>
-                          updateMethod(serviceIndex, methodIndex, (current) => ({
-                            ...current,
-                            input_schema_text:
-                              event.target.value === "shell_command"
-                                ? prettyJson(SHELL_SCHEMA)
-                                : prettyJson(HTTP_SCHEMA),
-                            binding:
-                              event.target.value === "shell_command"
-                                ? createShellMethod().binding
-                                : createHttpMethod().binding
-                          }))
-                        }
-                      >
-                        {method.binding.type === "computer_use" ? (
-                          <option value="computer_use">computer_use（内置）</option>
-                        ) : null}
-                        <option value="shell_command">shell_command</option>
-                        <option value="http">http</option>
-                      </select>
-                    </Field>
+                    {!isSystem ? (
+                      <>
+                        <Field label="方法名">
+                          <input
+                            value={method.name}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                name: event.target.value
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field label="方法描述">
+                          <input
+                            value={method.description}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                description: event.target.value
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field label="绑定类型">
+                          <select
+                            value={method.binding.type}
+                            disabled={method.binding.type === "computer_use"}
+                            onChange={(event) =>
+                              updateMethod(serviceIndex, methodIndex, (current) => ({
+                                ...current,
+                                input_schema_text:
+                                  event.target.value === "shell_command"
+                                    ? prettyJson(SHELL_SCHEMA)
+                                    : prettyJson(HTTP_SCHEMA),
+                                binding:
+                                  event.target.value === "shell_command"
+                                    ? createShellMethod().binding
+                                    : createHttpMethod().binding
+                              }))
+                            }
+                          >
+                            {method.binding.type === "computer_use" ? (
+                              <option value="computer_use">computer_use（内置）</option>
+                            ) : null}
+                            <option value="shell_command">shell_command</option>
+                            <option value="http">http</option>
+                          </select>
+                        </Field>
+                      </>
+                    ) : null}
 
                     {method.binding.type === "computer_use" ? (
                       <Field
-                        label="桌面能力"
-                        hint="内置能力由系统维护，不在普通服务里编辑。"
+                        label="桌面控制能力"
+                        hint="内置能力由系统服务维护，不在自定义服务里编辑。"
                       >
                         <input value={COMPUTER_METHOD_PRESETS[method.binding.action].label} readOnly />
                       </Field>
@@ -1762,18 +1908,20 @@ function renderOverviewPage() {
                       </div>
                     )}
 
-                    <Field label="输入 Schema JSON" wide>
-                      <textarea
-                        rows={8}
-                        value={method.input_schema_text}
-                        onChange={(event) =>
-                          updateMethod(serviceIndex, methodIndex, (current) => ({
-                            ...current,
-                            input_schema_text: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
+                    {!isSystem ? (
+                      <Field label="输入 Schema JSON" wide>
+                        <textarea
+                          rows={8}
+                          value={method.input_schema_text}
+                          onChange={(event) =>
+                            updateMethod(serviceIndex, methodIndex, (current) => ({
+                              ...current,
+                              input_schema_text: event.target.value
+                            }))
+                          }
+                        />
+                      </Field>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1789,85 +1937,15 @@ function renderOverviewPage() {
       return <div />;
     }
 
-    const systemServices = config.services
-      .map((service, serviceIndex) => ({ service, serviceIndex }))
-      .filter(({ service }) => isComputerService(service));
-    const customServices = config.services
-      .map((service, serviceIndex) => ({ service, serviceIndex }))
-      .filter(({ service }) => !isComputerService(service));
-
     return (
-      <div className="services-layout">
-        <Card
-          title="能力"
-          description="左侧选择能力，右侧查看或调整。"
-          action={
-            <button className="secondary" onClick={addService}>
-              新增自定义服务
-            </button>
-          }
-        >
-          <div className="service-nav-list">
-            {config.services.length === 0 ? (
-              <div className="empty-state">还没有能力，先新增一个。</div>
-            ) : (
-              <>
-                <div className="service-nav-section">系统能力</div>
-                {systemServices.map(({ service, serviceIndex }) => (
-                  <button
-                    className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
-                    key={`${service.name}-${serviceIndex}`}
-                    onClick={() => setExpandedServiceIndex(serviceIndex)}
-                  >
-                    <div>
-                      <strong>{service.name || "未命名服务"}</strong>
-                      <p>{describeServiceSummary(service)}</p>
-                    </div>
-                    <div className="service-nav-meta">
-                      <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
-                        {service.enabled ? "启用" : "停用"}
-                      </span>
-                      <small>{service.methods.length} 项动作</small>
-                    </div>
-                  </button>
-                ))}
-                <div className="service-nav-section">自定义服务</div>
-                {customServices.length === 0 ? (
-                  <div className="empty-state compact-empty-state">还没有自定义服务。</div>
-                ) : (
-                  customServices.map(({ service, serviceIndex }) => (
-                    <button
-                      className={`service-nav-item ${selectedServiceIndex === serviceIndex ? "active" : ""}`}
-                      key={`${service.name}-${serviceIndex}`}
-                      onClick={() => setExpandedServiceIndex(serviceIndex)}
-                    >
-                      <div>
-                        <strong>{service.name || "未命名服务"}</strong>
-                        <p>{describeServiceSummary(service)}</p>
-                      </div>
-                      <div className="service-nav-meta">
-                        <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
-                          {service.enabled ? "启用" : "停用"}
-                        </span>
-                        <small>{service.methods.length} 个接口</small>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </>
-            )}
-          </div>
-        </Card>
-
-        <div className="service-editor-panel">
-          {selectedService && selectedServiceIndex != null ? (
-            renderServiceEditor(selectedService, selectedServiceIndex)
-          ) : (
-            <Card title="能力详情" description="从左侧选择一项开始。">
-              <div className="empty-state">还没有可编辑的能力。</div>
-            </Card>
-          )}
-        </div>
+      <div className="service-editor-panel">
+        {selectedService && selectedServiceIndex != null ? (
+          renderServiceEditor(selectedService, selectedServiceIndex)
+        ) : (
+          <Card title="服务详情" description="从左侧服务菜单选择一项开始。">
+            <div className="empty-state">还没有服务，先新增一个自定义服务。</div>
+          </Card>
+        )}
       </div>
     );
   }
@@ -2052,17 +2130,41 @@ function renderOverviewPage() {
 
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
-    services: "能力",
+    services: "服务",
     connection: "连接",
     diagnostics: "诊断"
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
     overview: "",
-    services: "系统能力与本地服务",
+    services: "系统服务与自定义服务",
     connection: "连接、授权和运行参数",
     diagnostics: "系统、日志与清单"
   };
+  const sidebarSystemServices = config.services
+    .map((service, serviceIndex) => ({ service, serviceIndex }))
+    .filter(({ service }) => isSystemService(service));
+  const sidebarCustomServices = config.services
+    .map((service, serviceIndex) => ({ service, serviceIndex }))
+    .filter(({ service }) => !isSystemService(service));
+
+  function renderSidebarServiceItem(service: UiServiceConfig, serviceIndex: number) {
+    return (
+      <button
+        className={`sidebar-subnav-item ${
+          activePage === "services" && selectedServiceIndex === serviceIndex ? "active" : ""
+        }`}
+        key={`${service.name}-${serviceIndex}`}
+        onClick={() => {
+          setActivePage("services");
+          setExpandedServiceIndex(serviceIndex);
+        }}
+      >
+        <span>{service.name || "未命名服务"}</span>
+        <small>{service.enabled ? "启用" : "停用"} · {service.methods.length} 个方法</small>
+      </button>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -2086,9 +2188,35 @@ function renderOverviewPage() {
               className={`sidebar-nav-item ${activePage === "services" ? "active" : ""}`}
               onClick={() => setActivePage("services")}
             >
-              <span>能力</span>
+              <span>服务</span>
               <small>系统与自定义</small>
             </button>
+            {activePage === "services" ? (
+              <div className="sidebar-subnav">
+                {config.services.length === 0 ? (
+                  <div className="sidebar-subnav-empty">还没有服务</div>
+                ) : (
+                  <>
+                    {sidebarSystemServices.length > 0 ? (
+                      <>
+                        <div className="sidebar-subnav-section">系统服务</div>
+                        {sidebarSystemServices.map(({ service, serviceIndex }) =>
+                          renderSidebarServiceItem(service, serviceIndex)
+                        )}
+                      </>
+                    ) : null}
+                    {sidebarCustomServices.length > 0 ? (
+                      <>
+                        <div className="sidebar-subnav-section">自定义服务</div>
+                        {sidebarCustomServices.map(({ service, serviceIndex }) =>
+                          renderSidebarServiceItem(service, serviceIndex)
+                        )}
+                      </>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
             <button
               className={`sidebar-nav-item ${activePage === "connection" ? "active" : ""}`}
               onClick={() => setActivePage("connection")}
@@ -2107,10 +2235,6 @@ function renderOverviewPage() {
 
           <div className="sidebar-footer">
             <div className="sidebar-stat">
-              <span>已启用服务</span>
-              <strong>{enabledServiceCount}</strong>
-            </div>
-            <div className="sidebar-stat">
               <span>应用版本</span>
               <strong>{appUpdate?.currentVersion ?? "检查中"}</strong>
             </div>
@@ -2125,9 +2249,19 @@ function renderOverviewPage() {
               {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
             </div>
             <div className="page-actions">
+              {activePage === "services" ? (
+                <button className="secondary" onClick={addService}>
+                  新增自定义服务
+                </button>
+              ) : null}
               {activePage === "services" || activePage === "connection" ? (
-                <button className="primary" onClick={() => void saveOnly()} disabled={busy}>
-                  保存更改
+                <button className="secondary" onClick={() => void saveAll()} disabled={busy}>
+                  保存全部
+                </button>
+              ) : null}
+              {activePage === "services" ? (
+                <button className="primary" onClick={() => void saveAll(true)} disabled={busy}>
+                  保存全部并应用
                 </button>
               ) : null}
               {activePage === "connection" ? (
@@ -2373,38 +2507,42 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
       tags: splitCommaList(config.device.tags_text)
     },
     runtime: config.runtime,
-    services: config.services.map((service) => ({
-      name: service.name.trim(),
-      description: service.description.trim(),
-      enabled: service.enabled,
-      methods: service.methods.map((method) => ({
-        name: method.name.trim(),
-        description: method.description.trim(),
-        enabled: method.enabled,
-        input_schema: parseJson(method.input_schema_text),
-        binding:
-          method.binding.type === "shell_command"
+    services: config.services.map(fromUiService)
+  };
+}
+
+function fromUiService(service: UiServiceConfig): ServiceConfig {
+  return {
+    name: service.name.trim(),
+    description: service.description.trim(),
+    enabled: service.enabled,
+    methods: service.methods.map((method) => ({
+      name: method.name.trim(),
+      description: method.description.trim(),
+      enabled: method.enabled,
+      input_schema: parseJson(method.input_schema_text),
+      binding:
+        method.binding.type === "shell_command"
+          ? {
+              type: "shell_command",
+              root_dir: method.binding.root_dir.trim(),
+              allow_commands: splitCommaList(method.binding.allow_commands_text),
+              default_timeout_secs: toOptionalNumber(method.binding.default_timeout_secs),
+              max_timeout_secs: toOptionalNumber(method.binding.max_timeout_secs)
+            }
+          : method.binding.type === "http"
             ? {
-                type: "shell_command",
-                root_dir: method.binding.root_dir.trim(),
-                allow_commands: splitCommaList(method.binding.allow_commands_text),
-                default_timeout_secs: toOptionalNumber(method.binding.default_timeout_secs),
-                max_timeout_secs: toOptionalNumber(method.binding.max_timeout_secs)
+                type: "http",
+                url: method.binding.url.trim(),
+                http_method: method.binding.http_method.trim().toUpperCase(),
+                headers: textToHeaders(method.binding.headers_text),
+                timeout_secs: toOptionalNumber(method.binding.timeout_secs)
               }
-            : method.binding.type === "http"
-              ? {
-                  type: "http",
-                  url: method.binding.url.trim(),
-                  http_method: method.binding.http_method.trim().toUpperCase(),
-                  headers: textToHeaders(method.binding.headers_text),
-                  timeout_secs: toOptionalNumber(method.binding.timeout_secs)
-                }
-              : {
-                  type: "computer_use",
-                  action: method.binding.action,
-                  display_id: toOptionalNumber(method.binding.display_id)
-                }
-      }))
+            : {
+                type: "computer_use",
+                action: method.binding.action,
+                display_id: toOptionalNumber(method.binding.display_id)
+              }
     }))
   };
 }
@@ -2455,6 +2593,22 @@ function isComputerService(service: Pick<UiServiceConfig, "name">): boolean {
   return service.name.trim().toLowerCase() === "computer";
 }
 
+function isShellExecService(service: Pick<UiServiceConfig, "name">): boolean {
+  return service.name.trim().toLowerCase() === "shellexec";
+}
+
+function isSystemService(service: Pick<UiServiceConfig, "name">): boolean {
+  return isComputerService(service) || isShellExecService(service);
+}
+
+function systemServiceNotice(service: Pick<UiServiceConfig, "name">): string {
+  if (isShellExecService(service)) {
+    return "`shellExec` 由应用自动维护，不能删除或改名；可调整启用状态、命令权限、根目录和超时。";
+  }
+
+  return "`computer` 由应用自动维护，只展示对外开放的桌面控制能力，不做方法级编辑。";
+}
+
 function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
   if (type === "shell_command") {
     return "Shell";
@@ -2463,25 +2617,6 @@ function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
     return "HTTP";
   }
   return "Computer";
-}
-
-function describeServiceSummary(service: UiServiceConfig): string {
-  if (isComputerService(service)) {
-    return "桌面控制、截图、点击与输入";
-  }
-
-  const shellCount = service.methods.filter((method) => method.binding.type === "shell_command").length;
-  const httpCount = service.methods.filter((method) => method.binding.type === "http").length;
-  const summary: string[] = [];
-
-  if (shellCount > 0) {
-    summary.push(`Shell ${shellCount}`);
-  }
-  if (httpCount > 0) {
-    summary.push(`HTTP ${httpCount}`);
-  }
-
-  return summary.length > 0 ? summary.join(" · ") : "尚未配置接口";
 }
 
 function splitCommaList(value: string): string[] {
@@ -2558,6 +2693,10 @@ function parseJson(text: string): unknown {
 
 function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function serviceSignature(service: UiServiceConfig): string {
+  return JSON.stringify(service);
 }
 
 function safeNumber(value: string, fallback: number): number {

@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, sleep, Duration};
 use tokio_tungstenite::connect_async;
@@ -64,6 +64,12 @@ struct ManagedState {
     snapshot: RuntimeSnapshot,
     task: Option<JoinHandle<()>>,
     shutdown: Option<watch::Sender<bool>>,
+    apply: Option<mpsc::UnboundedSender<RuntimeRegistryUpdate>>,
+}
+
+struct RuntimeRegistryUpdate {
+    registry: ServiceRegistry,
+    services: Vec<crate::protocol::ServiceDefinition>,
 }
 
 impl Default for ManagedState {
@@ -80,6 +86,7 @@ impl Default for ManagedState {
             },
             task: None,
             shutdown: None,
+            apply: None,
         }
     }
 }
@@ -98,7 +105,10 @@ impl AgentRuntimeManager {
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
-        let registry = Arc::new(ServiceRegistry::from_config(&config, &config_base_dir)?);
+        let registry = Arc::new(RwLock::new(ServiceRegistry::from_config(
+            &config,
+            &config_base_dir,
+        )?));
         let file_log = FileLogSink::from_config(
             &FileLogConfig {
                 enabled: config.runtime.log_file_enabled,
@@ -137,6 +147,7 @@ impl AgentRuntimeManager {
         self.push_log("info", "runtime starting", log_limit).await;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let inner = Arc::clone(&self.inner);
         let config_path_string = config_path.display().to_string();
         let task = tokio::spawn(async move {
@@ -148,7 +159,7 @@ impl AgentRuntimeManager {
                 ws_url,
                 registry,
             };
-            if let Err(err) = runner.run(shutdown_rx).await {
+            if let Err(err) = runner.run(shutdown_rx, &mut apply_rx).await {
                 runner
                     .update_snapshot(
                         RuntimeStatus::Stopped,
@@ -166,8 +177,42 @@ impl AgentRuntimeManager {
 
         let mut state = self.inner.state.lock().await;
         state.shutdown = Some(shutdown_tx);
+        state.apply = Some(apply_tx);
         state.task = Some(task);
         Ok(state.snapshot.clone())
+    }
+
+    pub async fn apply_capabilities_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
+        let config = load_config(path)?;
+        let config_base_dir = resolve_config_base_dir(path);
+        let registry = ServiceRegistry::from_config(&config, &config_base_dir)?;
+        let services = registry.definitions();
+        let update = RuntimeRegistryUpdate { registry, services };
+
+        let snapshot = {
+            let mut state = self.inner.state.lock().await;
+            if state.snapshot.status == RuntimeStatus::Stopped {
+                return Ok(state.snapshot.clone());
+            }
+            let apply = state
+                .apply
+                .as_ref()
+                .context("runtime is running but cannot accept config updates")?
+                .clone();
+            apply
+                .send(update)
+                .context("failed to send runtime config update")?;
+            state.snapshot.last_event_at = now_ms();
+            state.snapshot.clone()
+        };
+
+        self.push_log(
+            "info",
+            "runtime capabilities update scheduled",
+            config.runtime.log_limit,
+        )
+        .await;
+        Ok(snapshot)
     }
 
     pub async fn stop(&self) -> Result<RuntimeSnapshot> {
@@ -202,19 +247,20 @@ impl AgentRuntimeManager {
     }
 
     async fn stop_if_running(&self) -> Result<()> {
-        let (shutdown, task) = {
+        let (shutdown, task, apply) = {
             let mut state = self.inner.state.lock().await;
             if state.snapshot.status == RuntimeStatus::Stopped {
                 return Ok(());
             }
             state.snapshot.status = RuntimeStatus::Stopping;
             state.snapshot.last_event_at = now_ms();
-            (state.shutdown.take(), state.task.take())
+            (state.shutdown.take(), state.task.take(), state.apply.take())
         };
 
         if let Some(shutdown) = shutdown {
             let _ = shutdown.send(true);
         }
+        drop(apply);
         if let Some(task) = task {
             let _ = task.await;
         }
@@ -244,11 +290,15 @@ struct RuntimeRunner {
     config: AgentConfig,
     config_path: String,
     ws_url: Url,
-    registry: Arc<ServiceRegistry>,
+    registry: Arc<RwLock<ServiceRegistry>>,
 }
 
 impl RuntimeRunner {
-    async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
+    async fn run(
+        &self,
+        mut shutdown_rx: watch::Receiver<bool>,
+        apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
+    ) -> Result<()> {
         loop {
             if *shutdown_rx.borrow() {
                 break;
@@ -277,7 +327,10 @@ impl RuntimeRunner {
                     .await;
                     self.push_log("info", "connected to relay").await;
 
-                    if let Err(err) = self.handle_connection(stream, &mut shutdown_rx).await {
+                    if let Err(err) = self
+                        .handle_connection(stream, &mut shutdown_rx, apply_rx)
+                        .await
+                    {
                         self.update_snapshot(
                             RuntimeStatus::Backoff,
                             Some(err.to_string()),
@@ -308,6 +361,9 @@ impl RuntimeRunner {
                 _ = shutdown_rx.changed() => {
                     break;
                 }
+                Some(update) = apply_rx.recv() => {
+                    self.apply_registry_update(update).await;
+                }
                 _ = sleep(Duration::from_secs(self.config.relay.reconnect_secs)) => {}
             }
         }
@@ -330,12 +386,10 @@ impl RuntimeRunner {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         shutdown_rx: &mut watch::Receiver<bool>,
+        apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
     ) -> Result<()> {
         let (mut write, mut read) = stream.split();
-        let capabilities = AgentMessage::Capabilities(AgentCapabilities {
-            agent_id: self.config.relay.agent_id.clone(),
-            services: self.registry.definitions(),
-        });
+        let capabilities = self.current_capabilities().await;
         write_json(&mut write, &capabilities).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
         let mut keepalive = interval_at(
@@ -348,6 +402,11 @@ impl RuntimeRunner {
                 _ = shutdown_rx.changed() => {
                     write.send(Message::Close(None)).await.ok();
                     break;
+                }
+                Some(update) = apply_rx.recv() => {
+                    let capabilities = self.apply_registry_update(update).await;
+                    write_json(&mut write, &capabilities).await?;
+                    self.push_log("info", "runtime capabilities updated and sent to relay").await;
                 }
                 _ = keepalive.tick() => {
                     write.send(Message::Ping(Vec::new().into())).await?;
@@ -371,6 +430,8 @@ impl RuntimeRunner {
                                     .await;
                                     let result = self
                                         .registry
+                                        .read()
+                                        .await
                                         .invoke(
                                             request.request_id,
                                             &service,
@@ -425,6 +486,24 @@ impl RuntimeRunner {
             }
         }
         Ok(())
+    }
+
+    async fn current_capabilities(&self) -> AgentMessage {
+        AgentMessage::Capabilities(AgentCapabilities {
+            agent_id: self.config.relay.agent_id.clone(),
+            services: self.registry.read().await.definitions(),
+        })
+    }
+
+    async fn apply_registry_update(&self, update: RuntimeRegistryUpdate) -> AgentMessage {
+        {
+            let mut registry = self.registry.write().await;
+            *registry = update.registry;
+        }
+        AgentMessage::Capabilities(AgentCapabilities {
+            agent_id: self.config.relay.agent_id.clone(),
+            services: update.services,
+        })
     }
 
     async fn update_snapshot(
