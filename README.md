@@ -157,7 +157,7 @@ cargo run -- init-config
 - `platform.base_url`
 - `platform.workspace_id`（授权成功后自动写回）
 - `upload.prepare_url`（可选；默认使用 relay 同域的 `/api/bridge-agent/uploads/prepare`）
-- `upload.inline_limit_bytes`（截图内联阈值，超过后改走上传）
+- `upload.inline_limit_bytes`（截图内联阈值，默认 262144 字节；超过后改走上传，避免大图 base64 进入同步调用响应）
 - `upload.timeout_secs`
 - `relay.url`
 - `relay.agent_id`
@@ -216,7 +216,7 @@ cargo run -- run
 
 ## 大截图上传协议
 
-当 `computer.screenshot` 结果超过 `upload.inline_limit_bytes` 时，`bridge-agent` 不再把整张图内联到 WebSocket 消息里，而是改走：
+当 `computer.screenshot` 结果超过 `upload.inline_limit_bytes` 时，`bridge-agent` 不再把整张图内联到 WebSocket 消息里，而是改走上传。默认阈值是 262144 字节，常规桌面截图通常会返回文件引用而不是完整 base64：
 
 1. `bridge-agent -> prepare upload`
 2. `bridge-agent -> 直传对象存储 / 文件服务`

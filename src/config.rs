@@ -14,6 +14,8 @@ const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
+const DEFAULT_INLINE_LIMIT_BYTES: usize = 256 * 1024;
+const LEGACY_INLINE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -431,6 +433,9 @@ pub fn ensure_config_exists(path: &Path) -> Result<()> {
 fn migrate_legacy_defaults(config: &mut AgentConfig) {
     if config.relay.url.trim() == LEGACY_DEFAULT_RELAY_URL {
         config.relay.url = DEFAULT_RELAY_URL.to_string();
+    }
+    if config.upload.inline_limit_bytes == LEGACY_INLINE_LIMIT_BYTES {
+        config.upload.inline_limit_bytes = DEFAULT_INLINE_LIMIT_BYTES;
     }
 }
 
@@ -851,7 +856,7 @@ fn default_prepare_url_from_relay(relay_url: &str) -> Option<String> {
 }
 
 fn default_inline_limit_bytes() -> usize {
-    8 * 1024 * 1024
+    DEFAULT_INLINE_LIMIT_BYTES
 }
 
 fn default_upload_timeout_secs() -> u64 {
@@ -985,7 +990,7 @@ mod tests {
         assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
         assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
-        assert_eq!(loaded.upload.inline_limit_bytes, 8 * 1024 * 1024);
+        assert_eq!(loaded.upload.inline_limit_bytes, 256 * 1024);
         assert_eq!(loaded.relay.agent_id, "devbox");
         assert_eq!(loaded.services[0].name, "computer");
         assert!(loaded.services[0]

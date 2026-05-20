@@ -228,6 +228,7 @@ interface UiAgentConfig {
 }
 
 type SettingsSection = "identity" | "connection" | "runtime";
+const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
 type AppPage = "overview" | "services" | "connection" | "diagnostics";
 type DetailPanel = "system" | "logs" | "manifest";
 
@@ -1255,7 +1256,7 @@ function App() {
                   min={1024}
                   value={config.upload.inline_limit_bytes}
                   onChange={(event) =>
-                    updateUpload("inline_limit_bytes", safeNumber(event.target.value, 8 * 1024 * 1024))
+                    updateUpload("inline_limit_bytes", safeNumber(event.target.value, DEFAULT_INLINE_LIMIT_BYTES))
                   }
                 />
               </Field>
