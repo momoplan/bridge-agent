@@ -1366,7 +1366,7 @@ function renderOverviewPage() {
             </div>
             <div className="hero-actions compact-actions">
               <button className="primary accent" onClick={() => void startAgent()} disabled={busy}>
-                启动
+                {runtime && runtime.status !== "stopped" ? "重启" : "启动"}
               </button>
               <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
                 停止

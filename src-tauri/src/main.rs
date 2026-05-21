@@ -12,7 +12,16 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, WindowEvent,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -31,10 +40,14 @@ const GITHUB_LATEST_RELEASE_API: &str =
 const GITHUB_LATEST_RELEASE_PAGE: &str = "https://github.com/momoplan/bridge-agent/releases/latest";
 const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
+const TRAY_ID: &str = "bridge-agent";
+const TRAY_MENU_SHOW: &str = "show";
+const TRAY_MENU_QUIT: &str = "quit";
 
 struct DesktopState {
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
+    quitting: Arc<AtomicBool>,
 }
 
 #[derive(Serialize)]
@@ -905,13 +918,110 @@ fn prompt_accessibility_permission() {
     let _ = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
 }
 
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "打开 Bridge Agent", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let icon = app.default_window_icon().cloned();
+
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip("Bridge Agent")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_MENU_SHOW => show_main_window(app),
+            TRAY_MENU_QUIT => quit_app(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => show_main_window(tray.app_handle()),
+            _ => {}
+        });
+
+    if let Some(icon) = icon {
+        tray = tray.icon(icon);
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(err) = window.show() {
+            eprintln!("failed to show main window: {err}");
+        }
+        if let Err(err) = window.unminimize() {
+            eprintln!("failed to unminimize main window: {err}");
+        }
+        if let Err(err) = window.set_focus() {
+            eprintln!("failed to focus main window: {err}");
+        }
+    }
+}
+
+fn quit_app(app: &tauri::AppHandle) {
+    let state = app.state::<DesktopState>();
+    if state.quitting.swap(true, Ordering::SeqCst) {
+        app.exit(0);
+        return;
+    }
+    let runtime = state.runtime.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = runtime.stop().await {
+            eprintln!("failed to stop runtime before exit: {err:#}");
+        }
+        app.exit(0);
+    });
+}
+
+fn auto_start_agent(runtime: AgentRuntimeManager, config_path: PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = ensure_config_exists(&config_path) {
+            eprintln!("failed to prepare bridge-agent config: {err:#}");
+            return;
+        }
+        if let Err(err) = runtime.start_from_path(&config_path).await {
+            eprintln!("failed to auto start bridge-agent runtime: {err:#}");
+        }
+    });
+}
+
 fn main() {
     install_rustls_crypto_provider().expect("failed to install rustls provider");
     let config_path = default_config_path().expect("failed to determine default config path");
+    let runtime = AgentRuntimeManager::new();
+    let quitting = Arc::new(AtomicBool::new(false));
     tauri::Builder::default()
         .manage(DesktopState {
-            runtime: AgentRuntimeManager::new(),
-            config_path,
+            runtime: runtime.clone(),
+            config_path: config_path.clone(),
+            quitting: Arc::clone(&quitting),
+        })
+        .setup(move |app| {
+            setup_tray(app)?;
+            auto_start_agent(runtime.clone(), config_path.clone());
+            Ok(())
+        })
+        .on_window_event(move |window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                if let Err(err) = window.hide() {
+                    eprintln!("failed to hide main window: {err}");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -934,6 +1044,15 @@ fn main() {
             check_app_update,
             install_app_update
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let state = app.state::<DesktopState>();
+                if !state.quitting.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    quit_app(app);
+                }
+            }
+        });
 }
