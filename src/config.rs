@@ -1,4 +1,4 @@
-use crate::protocol::{MethodDefinition, ServiceDefinition};
+use crate::protocol::{EventDefinition, MethodDefinition, ServiceDefinition};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -80,6 +81,12 @@ pub struct RuntimeConfig {
     pub log_file_max_bytes: u64,
     #[serde(default = "default_log_file_max_files")]
     pub log_file_max_files: usize,
+    #[serde(default = "default_event_server_enabled")]
+    pub event_server_enabled: bool,
+    #[serde(default = "default_event_server_bind")]
+    pub event_server_bind: String,
+    #[serde(default)]
+    pub event_server_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +95,10 @@ pub struct ServiceConfig {
     pub description: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
     pub methods: Vec<MethodConfig>,
+    #[serde(default)]
+    pub events: Vec<EventConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +110,16 @@ pub struct MethodConfig {
     #[serde(default = "default_object_schema")]
     pub input_schema: Value,
     pub binding: MethodBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventConfig {
+    pub name: String,
+    pub description: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_object_schema")]
+    pub payload_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +206,9 @@ impl AgentConfig {
                 log_file_dir: None,
                 log_file_max_bytes: default_log_file_max_bytes(),
                 log_file_max_files: default_log_file_max_files(),
+                event_server_enabled: default_event_server_enabled(),
+                event_server_bind: default_event_server_bind(),
+                event_server_token: None,
             },
             services: vec![
                 default_computer_service(),
@@ -207,6 +230,14 @@ impl AgentConfig {
                             headers: BTreeMap::new(),
                             timeout_secs: Some(20),
                         }),
+                    }],
+                    events: vec![EventConfig {
+                        name: "jobFinished".to_string(),
+                        description:
+                            "Emitted when the local service completes an asynchronous job."
+                                .to_string(),
+                        enabled: true,
+                        payload_schema: default_object_schema(),
                     }],
                 },
             ],
@@ -257,6 +288,26 @@ impl AgentConfig {
                 bail!("runtime.log_file_max_files must be greater than zero");
             }
         }
+        if self.runtime.event_server_enabled {
+            let bind: SocketAddr = self
+                .runtime
+                .event_server_bind
+                .parse()
+                .with_context(|| "runtime.event_server_bind must be a socket address")?;
+            if !bind.ip().is_loopback()
+                && self
+                    .runtime
+                    .event_server_token
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                bail!(
+                    "runtime.event_server_token is required when event_server_bind is not loopback"
+                );
+            }
+        }
 
         let mut service_names = BTreeSet::new();
         for service in &self.services {
@@ -268,6 +319,7 @@ impl AgentConfig {
             }
 
             let mut method_names = BTreeSet::new();
+            let mut event_names = BTreeSet::new();
             for method in &service.methods {
                 if method.name.trim().is_empty() {
                     bail!("method name cannot be empty in service `{}`", service.name);
@@ -316,6 +368,25 @@ impl AgentConfig {
                     MethodBinding::ComputerUse(_) => {}
                 }
             }
+            for event in &service.events {
+                if event.name.trim().is_empty() {
+                    bail!("event name cannot be empty in service `{}`", service.name);
+                }
+                if !event_names.insert(event.name.as_str()) {
+                    bail!(
+                        "duplicate event `{}` in service `{}`",
+                        event.name,
+                        service.name
+                    );
+                }
+                if method_names.contains(event.name.as_str()) {
+                    bail!(
+                        "event `{}` conflicts with method of the same name in service `{}`",
+                        event.name,
+                        service.name
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -338,8 +409,18 @@ impl AgentConfig {
                         input_schema: method.input_schema.clone(),
                     })
                     .collect(),
+                events: service
+                    .events
+                    .iter()
+                    .filter(|event| event.enabled)
+                    .map(|event| EventDefinition {
+                        name: event.name.clone(),
+                        description: event.description.clone(),
+                        payload_schema: event.payload_schema.clone(),
+                    })
+                    .collect(),
             })
-            .filter(|service| !service.methods.is_empty())
+            .filter(|service| !service.methods.is_empty() || !service.events.is_empty())
             .collect()
     }
 
@@ -634,6 +715,7 @@ fn default_computer_service() -> ServiceConfig {
                 ComputerUseAction::Wait,
             ),
         ],
+        events: Vec::new(),
     }
 }
 
@@ -643,6 +725,7 @@ fn default_shell_exec_service() -> ServiceConfig {
         description: "Run allowlisted shell commands on the local machine.".to_string(),
         enabled: true,
         methods: vec![default_shell_exec_method()],
+        events: Vec::new(),
     }
 }
 
@@ -793,6 +876,14 @@ fn default_log_file_max_files() -> usize {
     5
 }
 
+fn default_event_server_enabled() -> bool {
+    true
+}
+
+fn default_event_server_bind() -> String {
+    "127.0.0.1:18081".to_string()
+}
+
 fn default_http_method() -> String {
     "POST".to_string()
 }
@@ -877,7 +968,9 @@ fn project_config_path() -> Result<PathBuf> {
 mod tests {
     use super::{
         ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config, AgentConfig,
+        EventConfig, ServiceConfig,
     };
+    use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
@@ -951,6 +1044,37 @@ mod tests {
         assert_eq!(command_schema["type"], "array");
         assert_eq!(command_schema["items"]["type"], "string");
         assert!(command_schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn event_only_service_is_exposed_in_manifest() {
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "asyncJob".to_string(),
+            description: "Async job events.".to_string(),
+            enabled: true,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "finished".to_string(),
+                description: "Job finished.".to_string(),
+                enabled: true,
+                payload_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "jobId": { "type": "string" }
+                    }
+                }),
+            }],
+        });
+
+        let manifest = config.manifest_preview();
+        let service = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "asyncJob")
+            .unwrap();
+        assert!(service.methods.is_empty());
+        assert_eq!(service.events[0].name, "finished");
     }
 
     #[test]

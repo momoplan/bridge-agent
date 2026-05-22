@@ -1,6 +1,7 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink};
-use crate::protocol::{AgentCapabilities, AgentMessage};
+use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -18,6 +19,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
+const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +128,11 @@ impl AgentRuntimeManager {
             &config.relay.agent_id,
             &config.relay.token,
         )?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
+        let event_server =
+            LocalEventServer::bind(&config.runtime, Arc::clone(&registry), event_tx).await?;
         let snapshot = RuntimeSnapshot {
             status: RuntimeStatus::Starting,
             config_path: Some(config_path.display().to_string()),
@@ -146,20 +153,41 @@ impl AgentRuntimeManager {
         }
         self.push_log("info", "runtime starting", log_limit).await;
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let inner = Arc::clone(&self.inner);
         let config_path_string = config_path.display().to_string();
         let task = tokio::spawn(async move {
+            let event_server_task = event_server.map(|server| {
+                let bind_addr = server.bind_addr();
+                let server_inner = Arc::clone(&inner);
+                let server_shutdown_rx = shutdown_rx.clone();
+                tokio::spawn(async move {
+                    push_log_entry(
+                        &server_inner,
+                        log_limit,
+                        "info",
+                        &format!("local event server listening on {bind_addr}"),
+                    )
+                    .await;
+                    if let Err(err) = server.serve(server_shutdown_rx).await {
+                        push_log_entry(
+                            &server_inner,
+                            log_limit,
+                            "error",
+                            &format!("local event server stopped: {err:#}"),
+                        )
+                        .await;
+                    }
+                })
+            });
             let runner = RuntimeRunner {
-                inner,
+                inner: Arc::clone(&inner),
                 log_limit,
                 config,
                 config_path: config_path_string,
                 ws_url,
                 registry,
             };
-            if let Err(err) = runner.run(shutdown_rx, &mut apply_rx).await {
+            if let Err(err) = runner.run(shutdown_rx, &mut apply_rx, &mut event_rx).await {
                 runner
                     .update_snapshot(
                         RuntimeStatus::Stopped,
@@ -172,6 +200,12 @@ impl AgentRuntimeManager {
                 runner
                     .push_log("error", &format!("runtime stopped with error: {err:#}"))
                     .await;
+            }
+            if let Some(event_server_task) = event_server_task {
+                if !event_server_task.is_finished() {
+                    event_server_task.abort();
+                }
+                let _ = event_server_task.await;
             }
         });
 
@@ -268,19 +302,7 @@ impl AgentRuntimeManager {
     }
 
     async fn push_log(&self, level: &str, message: &str, limit: usize) {
-        emit_tracing(level, message);
-        let entry = LogEntry {
-            timestamp_ms: now_ms(),
-            level: level.to_string(),
-            message: message.to_string(),
-        };
-        let mut logs = self.inner.logs.lock().await;
-        logs.push_back(entry.clone());
-        while logs.len() > limit {
-            logs.pop_front();
-        }
-        drop(logs);
-        append_file_log(&self.inner, &entry).await;
+        push_log_entry(&self.inner, limit, level, message).await;
     }
 }
 
@@ -298,6 +320,7 @@ impl RuntimeRunner {
         &self,
         mut shutdown_rx: watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
+        event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
     ) -> Result<()> {
         loop {
             if *shutdown_rx.borrow() {
@@ -328,7 +351,7 @@ impl RuntimeRunner {
                     self.push_log("info", "connected to relay").await;
 
                     if let Err(err) = self
-                        .handle_connection(stream, &mut shutdown_rx, apply_rx)
+                        .handle_connection(stream, &mut shutdown_rx, apply_rx, event_rx)
                         .await
                     {
                         self.update_snapshot(
@@ -387,6 +410,7 @@ impl RuntimeRunner {
         >,
         shutdown_rx: &mut watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
+        event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
     ) -> Result<()> {
         let (mut write, mut read) = stream.split();
         let capabilities = self.current_capabilities().await;
@@ -407,6 +431,19 @@ impl RuntimeRunner {
                     let capabilities = self.apply_registry_update(update).await;
                     write_json(&mut write, &capabilities).await?;
                     self.push_log("info", "runtime capabilities updated and sent to relay").await;
+                }
+                Some(event) = event_rx.recv() => {
+                    let service = event.service.clone();
+                    let event_name = event.event.clone();
+                    let message = AgentMessage::EventEmitted(EventEmitted {
+                        event_id: Some(event.event_id),
+                        service: event.service,
+                        event: event.event,
+                        payload: event.payload,
+                        occurred_at: event.occurred_at,
+                    });
+                    write_json(&mut write, &message).await?;
+                    self.push_log("info", &format!("event {service}.{event_name} sent to relay")).await;
                 }
                 _ = keepalive.tick() => {
                     write.send(Message::Ping(Vec::new().into())).await?;
@@ -473,7 +510,9 @@ impl RuntimeRunner {
                                     self.push_log("warn", &format!("relay error: {}", err.message))
                                         .await;
                                 }
-                                AgentMessage::Capabilities(_) | AgentMessage::InvokeResult(_) => {}
+                                AgentMessage::Capabilities(_)
+                                | AgentMessage::InvokeResult(_)
+                                | AgentMessage::EventEmitted(_) => {}
                             }
                         }
                         Message::Ping(payload) => {
@@ -527,20 +566,24 @@ impl RuntimeRunner {
     }
 
     async fn push_log(&self, level: &str, message: &str) {
-        emit_tracing(level, message);
-        let entry = LogEntry {
-            timestamp_ms: now_ms(),
-            level: level.to_string(),
-            message: message.to_string(),
-        };
-        let mut logs = self.inner.logs.lock().await;
-        logs.push_back(entry.clone());
-        while logs.len() > self.log_limit {
-            logs.pop_front();
-        }
-        drop(logs);
-        append_file_log(&self.inner, &entry).await;
+        push_log_entry(&self.inner, self.log_limit, level, message).await;
     }
+}
+
+async fn push_log_entry(inner: &RuntimeInner, limit: usize, level: &str, message: &str) {
+    emit_tracing(level, message);
+    let entry = LogEntry {
+        timestamp_ms: now_ms(),
+        level: level.to_string(),
+        message: message.to_string(),
+    };
+    let mut logs = inner.logs.lock().await;
+    logs.push_back(entry.clone());
+    while logs.len() > limit {
+        logs.pop_front();
+    }
+    drop(logs);
+    append_file_log(inner, &entry).await;
 }
 
 async fn append_file_log(inner: &RuntimeInner, entry: &LogEntry) {

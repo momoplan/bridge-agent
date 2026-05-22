@@ -7,6 +7,7 @@ pub enum AgentMessage {
     Capabilities(AgentCapabilities),
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
+    EventEmitted(EventEmitted),
     Error(ProtocolError),
 }
 
@@ -21,6 +22,8 @@ pub struct ServiceDefinition {
     pub name: String,
     pub description: String,
     pub methods: Vec<MethodDefinition>,
+    #[serde(default)]
+    pub events: Vec<EventDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +31,26 @@ pub struct MethodDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub payload_schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEmitted {
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub service: String,
+    pub event: String,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub occurred_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -57,6 +57,9 @@ interface RuntimeConfig {
   log_file_dir?: string | null;
   log_file_max_bytes: number;
   log_file_max_files: number;
+  event_server_enabled: boolean;
+  event_server_bind: string;
+  event_server_token?: string | null;
 }
 
 interface ShellBinding {
@@ -102,11 +105,19 @@ interface MethodConfig {
   binding: MethodBinding;
 }
 
+interface EventConfig {
+  name: string;
+  description: string;
+  enabled: boolean;
+  payload_schema: unknown;
+}
+
 interface ServiceConfig {
   name: string;
   description: string;
   enabled: boolean;
   methods: MethodConfig[];
+  events: EventConfig[];
 }
 
 interface AgentConfig {
@@ -200,11 +211,19 @@ interface UiMethodConfig {
   binding: UiMethodBinding;
 }
 
+interface UiEventConfig {
+  name: string;
+  description: string;
+  enabled: boolean;
+  payload_schema_text: string;
+}
+
 interface UiServiceConfig {
   name: string;
   description: string;
   enabled: boolean;
   methods: UiMethodConfig[];
+  events: UiEventConfig[];
 }
 
 interface UiAgentConfig {
@@ -521,7 +540,11 @@ function App() {
   const exposedCapabilityCount =
     config?.services.reduce(
       (count, service) =>
-        count + (service.enabled ? service.methods.filter((method) => method.enabled).length : 0),
+        count +
+        (service.enabled
+          ? service.methods.filter((method) => method.enabled).length +
+            service.events.filter((event) => event.enabled).length
+          : 0),
       0
     ) ?? 0;
   const enabledComputerMethodCount =
@@ -1036,7 +1059,8 @@ function App() {
                 name: "new-service",
                 description: "Describe this business service.",
                 enabled: true,
-                methods: [createShellMethod()]
+                methods: [createShellMethod()],
+                events: []
               }
             ]
           }
@@ -1077,10 +1101,24 @@ function App() {
     }));
   }
 
+  function addEvent(serviceIndex: number) {
+    updateService(serviceIndex, (service) => ({
+      ...service,
+      events: [...service.events, createEvent()]
+    }));
+  }
+
   function removeMethod(serviceIndex: number, methodIndex: number) {
     updateService(serviceIndex, (service) => ({
       ...service,
       methods: service.methods.filter((_, index) => index !== methodIndex)
+    }));
+  }
+
+  function removeEvent(serviceIndex: number, eventIndex: number) {
+    updateService(serviceIndex, (service) => ({
+      ...service,
+      events: service.events.filter((_, index) => index !== eventIndex)
     }));
   }
 
@@ -1093,6 +1131,19 @@ function App() {
       ...service,
       methods: service.methods.map((method, index) =>
         index === methodIndex ? updater(method) : method
+      )
+    }));
+  }
+
+  function updateEvent(
+    serviceIndex: number,
+    eventIndex: number,
+    updater: (event: UiEventConfig) => UiEventConfig
+  ) {
+    updateService(serviceIndex, (service) => ({
+      ...service,
+      events: service.events.map((event, index) =>
+        index === eventIndex ? updater(event) : event
       )
     }));
   }
@@ -1338,6 +1389,30 @@ function App() {
                 onChange={(event) =>
                   updateRuntime("log_file_max_files", safeNumber(event.target.value, 5))
                 }
+              />
+            </Field>
+            <Field label="本地事件入口">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={config.runtime.event_server_enabled}
+                  onChange={(event) => updateRuntime("event_server_enabled", event.target.checked)}
+                />
+                启用
+              </label>
+            </Field>
+            <Field label="事件入口监听地址">
+              <input
+                value={config.runtime.event_server_bind}
+                onChange={(event) => updateRuntime("event_server_bind", event.target.value)}
+                placeholder="127.0.0.1:18081"
+              />
+            </Field>
+            <Field label="事件入口 Token" hint="留空时只依赖本机监听地址。">
+              <input
+                type="password"
+                value={config.runtime.event_server_token ?? ""}
+                onChange={(event) => updateRuntime("event_server_token", emptyToNull(event.target.value))}
               />
             </Field>
           </div>
@@ -1589,6 +1664,9 @@ function renderOverviewPage() {
                 </button>
                 <button className="secondary" onClick={() => addMethod(serviceIndex, "http")}>
                   新增 HTTP 方法
+                </button>
+                <button className="secondary" onClick={() => addEvent(serviceIndex)}>
+                  新增事件
                 </button>
               </div>
             </>
@@ -1919,6 +1997,85 @@ function renderOverviewPage() {
               </div>
             ))}
           </div>
+          <div className="method-list">
+            {service.events.map((eventConfig, eventIndex) => (
+              <div className="method-card" key={`${service.name}-${eventConfig.name}-event-${eventIndex}`}>
+                <div className="method-topline">
+                  <div className="method-copy">
+                    <div className="method-title-row">
+                      <h4>{eventConfig.name || "未命名事件"}</h4>
+                      <span className="method-badge">Event</span>
+                      <span className={`service-badge ${eventConfig.enabled ? "enabled" : "disabled"}`}>
+                        {eventConfig.enabled ? "启用" : "停用"}
+                      </span>
+                    </div>
+                    <p>{eventConfig.description || "本地自定义服务可通过本机事件入口发送。"}</p>
+                  </div>
+                  {!isSystem ? (
+                    <div className="service-actions">
+                      <label className="switch">
+                        <input
+                          type="checkbox"
+                          checked={eventConfig.enabled}
+                          onChange={(event) =>
+                            updateEvent(serviceIndex, eventIndex, (current) => ({
+                              ...current,
+                              enabled: event.target.checked
+                            }))
+                          }
+                        />
+                        启用
+                      </label>
+                      <button
+                        className="ghost danger"
+                        onClick={() => removeEvent(serviceIndex, eventIndex)}
+                      >
+                        删除事件
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                {!isSystem ? (
+                  <div className="form-grid">
+                    <Field label="事件名">
+                      <input
+                        value={eventConfig.name}
+                        onChange={(event) =>
+                          updateEvent(serviceIndex, eventIndex, (current) => ({
+                            ...current,
+                            name: event.target.value
+                          }))
+                        }
+                      />
+                    </Field>
+                    <Field label="事件描述">
+                      <input
+                        value={eventConfig.description}
+                        onChange={(event) =>
+                          updateEvent(serviceIndex, eventIndex, (current) => ({
+                            ...current,
+                            description: event.target.value
+                          }))
+                        }
+                      />
+                    </Field>
+                    <Field label="Payload Schema JSON" wide>
+                      <textarea
+                        rows={6}
+                        value={eventConfig.payload_schema_text}
+                        onChange={(event) =>
+                          updateEvent(serviceIndex, eventIndex, (current) => ({
+                            ...current,
+                            payload_schema_text: event.target.value
+                          }))
+                        }
+                      />
+                    </Field>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
         </div>
       </Card>
     );
@@ -2153,7 +2310,9 @@ function renderOverviewPage() {
         }}
       >
         <span>{service.name || "未命名服务"}</span>
-        <small>{service.enabled ? "启用" : "停用"} · {service.methods.length} 个方法</small>
+        <small>
+          {service.enabled ? "启用" : "停用"} · {service.methods.length} 个方法 · {service.events.length} 个事件
+        </small>
       </button>
     );
   }
@@ -2444,6 +2603,12 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
       name: service.name,
       description: service.description,
       enabled: service.enabled,
+      events: (service.events ?? []).map((eventConfig) => ({
+        name: eventConfig.name,
+        description: eventConfig.description,
+        enabled: eventConfig.enabled,
+        payload_schema_text: prettyJson(eventConfig.payload_schema)
+      })),
       methods: service.methods.map((method) => ({
         name: method.name,
         description: method.description,
@@ -2503,6 +2668,12 @@ function fromUiService(service: UiServiceConfig): ServiceConfig {
     name: service.name.trim(),
     description: service.description.trim(),
     enabled: service.enabled,
+    events: service.events.map((eventConfig) => ({
+      name: eventConfig.name.trim(),
+      description: eventConfig.description.trim(),
+      enabled: eventConfig.enabled,
+      payload_schema: parseJson(eventConfig.payload_schema_text)
+    })),
     methods: service.methods.map((method) => ({
       name: method.name.trim(),
       description: method.description.trim(),
@@ -2573,6 +2744,15 @@ function createHttpMethod(): UiMethodConfig {
       headers_text: "",
       timeout_secs: ""
     }
+  };
+}
+
+function createEvent(): UiEventConfig {
+  return {
+    name: "jobFinished",
+    description: "Emitted when the local service completes an asynchronous job.",
+    enabled: true,
+    payload_schema_text: prettyJson(EMPTY_OBJECT_SCHEMA)
   };
 }
 

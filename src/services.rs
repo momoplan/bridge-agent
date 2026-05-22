@@ -2,7 +2,7 @@ use crate::config::{
     AgentConfig, ComputerUseAction, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig,
     ServiceConfig, ShellCommandBinding, UploadConfig,
 };
-use crate::protocol::{InvokeError, InvokeResult, ServiceDefinition};
+use crate::protocol::{EventDefinition, InvokeError, InvokeResult, ServiceDefinition};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
@@ -10,7 +10,7 @@ use image::GenericImageView;
 use reqwest::{Client, Method};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(target_os = "macos")]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,7 @@ pub struct ServiceRegistry {
 struct RuntimeService {
     definition: ServiceDefinition,
     methods: BTreeMap<String, RuntimeMethod>,
+    events: BTreeSet<String>,
 }
 
 enum RuntimeMethod {
@@ -256,7 +257,7 @@ impl ServiceRegistry {
                 continue;
             }
             let runtime_service = build_runtime_service(service, config, config_base_dir)?;
-            if !runtime_service.methods.is_empty() {
+            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
                 services.insert(service.name.clone(), runtime_service);
             }
         }
@@ -269,6 +270,13 @@ impl ServiceRegistry {
             .values()
             .map(|service| service.definition.clone())
             .collect()
+    }
+
+    pub fn has_event(&self, service: &str, event: &str) -> bool {
+        self.services
+            .get(service)
+            .map(|service_definition| service_definition.events.contains(event))
+            .unwrap_or(false)
     }
 
     pub async fn invoke(
@@ -501,6 +509,8 @@ fn build_runtime_service(
 ) -> Result<RuntimeService> {
     let mut methods = BTreeMap::new();
     let mut method_definitions = Vec::new();
+    let mut events = BTreeSet::new();
+    let mut event_definitions = Vec::new();
 
     for method in &service.methods {
         if !method.enabled {
@@ -515,13 +525,27 @@ fn build_runtime_service(
         });
     }
 
+    for event in &service.events {
+        if !event.enabled {
+            continue;
+        }
+        events.insert(event.name.clone());
+        event_definitions.push(EventDefinition {
+            name: event.name.clone(),
+            description: event.description.clone(),
+            payload_schema: event.payload_schema.clone(),
+        });
+    }
+
     Ok(RuntimeService {
         definition: ServiceDefinition {
             name: service.name.clone(),
             description: service.description.clone(),
             methods: method_definitions,
+            events: event_definitions,
         },
         methods,
+        events,
     })
 }
 
@@ -2087,7 +2111,7 @@ mod tests {
     use super::{
         is_command_allowed, resolve_cwd, sanitize_env, ServiceRegistry, ShellCommand, ShellExecArgs,
     };
-    use crate::config::AgentConfig;
+    use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
@@ -2182,6 +2206,31 @@ mod tests {
                 .methods
                 .iter()
                 .any(|method| method.name == "shellExec")));
+    }
+
+    #[tokio::test]
+    async fn registry_exposes_event_only_service_definitions() {
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "asyncJob".to_string(),
+            description: "Async job events.".to_string(),
+            enabled: true,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "finished".to_string(),
+                description: "Job finished.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+        let definitions = registry.definitions();
+        assert!(registry.has_event("asyncJob", "finished"));
+        assert!(definitions.iter().any(|service| service.name == "asyncJob"
+            && service.methods.is_empty()
+            && service.events.iter().any(|event| event.name == "finished")));
     }
 
     #[tokio::test]

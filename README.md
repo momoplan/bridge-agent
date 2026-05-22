@@ -113,11 +113,13 @@
 - `computer.click`
 - `shellExec.shellExec`
 - `local-java-service.invokeApi`
+- `local-java-service.jobFinished`（事件）
 
 这里：
 
 - `computer` / `shellExec` / `local-java-service` 是服务
 - `screenshot` / `click` / `shellExec` / `invokeApi` 是方法
+- `jobFinished` 是事件
 
 外部不会看到：
 
@@ -129,13 +131,15 @@
 注意：
 
 - `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
-- relay 看到的是 `services[].methods[]`，例如 `computer.screenshot`
+- relay 看到的是 `services[].methods[]` 和 `services[].events[]`，例如 `computer.screenshot`、`local-java-service.jobFinished`
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
+- 自定义本地服务发送事件时，不直接连 relay；它请求 bridge-agent 的本机事件入口，由 bridge-agent 校验事件声明后通过现有 websocket 上报 relay
 
 ## 项目结构
 
 - `src/lib.rs`
 - `src/config.rs`
+- `src/event_server.rs`
 - `src/runtime.rs`
 - `src/services.rs`
 - `src/main.rs`
@@ -165,9 +169,63 @@ cargo run -- init-config
 - `runtime.default_timeout_secs`
 - `runtime.log_file_enabled`
 - `runtime.log_file_dir`（可选；留空时使用系统默认日志目录）
+- `runtime.event_server_enabled`（默认启用）
+- `runtime.event_server_bind`（默认 `127.0.0.1:18081`）
+- `runtime.event_server_token`（可选；如果监听非 loopback 地址则必须配置）
 - `services[].methods[].binding`
+- `services[].events[]`
 
 `binding.type` 只存在于本地配置里，用来决定本机怎么执行方法，不会进入 relay 协议。
+
+## 自定义服务事件
+
+设备上的服务可以在配置里声明事件：
+
+```json
+{
+  "name": "local-java-service",
+  "description": "Example business service backed by a local HTTP endpoint.",
+  "enabled": true,
+  "methods": [],
+  "events": [
+    {
+      "name": "jobFinished",
+      "description": "Emitted when a local job finishes.",
+      "enabled": true,
+      "payload_schema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  ]
+}
+```
+
+运行时 bridge-agent 会在本机启动事件入口，默认地址是 `127.0.0.1:18081`。自定义服务发送事件：
+
+```bash
+curl -X POST http://127.0.0.1:18081/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "service": "local-java-service",
+    "event": "jobFinished",
+    "payload": {
+      "jobId": "job-1",
+      "status": "success"
+    }
+  }'
+```
+
+如果配置了 `runtime.event_server_token`，请求需要带：
+
+```bash
+curl -X POST http://127.0.0.1:18081/v1/events \
+  -H 'Authorization: Bearer <event-server-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"local-java-service","event":"jobFinished","payload":{}}'
+```
+
+bridge-agent 只接受已声明且已启用的 `service.event`，接收后返回 `202 Accepted`，并通过 agent 与 relay 的 websocket 发送 `event_emitted` 消息。后续由 relay 按订阅关系把事件投递到订阅方 URL。
 
 ## 运行日志
 
