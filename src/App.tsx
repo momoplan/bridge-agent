@@ -2440,7 +2440,7 @@ function renderOverviewPage() {
                   当前 {visibleAppUpdate.currentVersion}，可升级到 {visibleAppUpdate.latestVersion}
                 </strong>
                 <p>
-                  {visibleAppUpdate.releaseName || "GitHub Release"}
+                  {visibleAppUpdate.releaseName || "平台发布"}
                   {visibleAppUpdate.publishedAt
                     ? `，发布于 ${formatReleaseTime(visibleAppUpdate.publishedAt)}`
                     : ""}

@@ -99,10 +99,27 @@ jobs:
               ;;
           esac
 
+      - name: Validate release service config
+        shell: bash
+        env:
+          BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
+          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
+          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in BRIDGE_AGENT_UPDATE_API_URL BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+
       - name: Build and publish release bundles
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
+          BRIDGE_AGENT_RELEASE_PAGE_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_PAGE_URL }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: "Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)"
@@ -124,3 +141,92 @@ jobs:
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-alpha') || contains(env.RELEASE_TAG, '-beta') || contains(env.RELEASE_TAG, '-rc') }}
           args: ${{ matrix.tauri_args }}
+
+      - name: Upload release bundles to domestic release service
+        shell: bash
+        env:
+          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
+          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+          RELEASE_TARGET: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+
+          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
+          version="${RELEASE_TAG#bridge-agent-v}"
+          asset_dir="$RUNNER_TEMP/bridge-agent-release-assets"
+          mkdir -p "$asset_dir"
+
+          curl -fsS --retry 3 --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"Bridge Agent $RELEASE_TAG\",\"source\":\"github-actions\"}" \
+            "$api/releases/$RELEASE_TAG"
+
+          find src-tauri/target -type f \( \
+            -name '*.dmg' -o \
+            -name '*.msi' -o \
+            -name '*.exe' -o \
+            -name '*.AppImage' -o \
+            -name '*.deb' \
+          \) -print0 | while IFS= read -r -d '' file; do
+            cp "$file" "$asset_dir/"
+          done
+
+          asset_count="$(find "$asset_dir" -type f | wc -l | tr -d ' ')"
+          if [ "$asset_count" = "0" ]; then
+            echo "No release bundles found under src-tauri/target" >&2
+            exit 1
+          fi
+
+          find "$asset_dir" -type f -print0 | while IFS= read -r -d '' asset; do
+            node .github/scripts/upload-release-asset.mjs \
+              "$api" \
+              "$RELEASE_TAG" \
+              "$version" \
+              "$RELEASE_TARGET" \
+              "$asset"
+          done
+
+  publish-update-service:
+    name: Publish update service metadata
+    runs-on: ubuntu-22.04
+    needs: release
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          case "$RELEASE_TAG" in
+            bridge-agent-v*) ;;
+            *)
+              echo "Invalid release tag: $RELEASE_TAG" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Publish release to update service
+        shell: bash
+        env:
+          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
+          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
+          version="${RELEASE_TAG#bridge-agent-v}"
+
+          curl -fsS --retry 3 --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\"}" \
+            "$api/releases/$RELEASE_TAG/publish"

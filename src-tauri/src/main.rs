@@ -35,10 +35,6 @@ use core_foundation::dictionary::CFDictionary;
 #[cfg(target_os = "macos")]
 use core_foundation::string::CFString;
 
-const GITHUB_LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/momoplan/bridge-agent/releases/latest";
-const GITHUB_LATEST_RELEASE_PAGE: &str = "https://github.com/momoplan/bridge-agent/releases/latest";
-const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
@@ -131,19 +127,32 @@ struct DesktopPermissionStatus {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct GithubReleaseResponse {
-    tag_name: String,
-    html_url: String,
-    name: Option<String>,
+#[serde(rename_all = "camelCase")]
+struct UpdateReleaseResponse {
+    #[serde(default, alias = "tag_name")]
+    tag_name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default, alias = "html_url")]
+    release_url: Option<String>,
+    #[serde(default, alias = "name")]
+    release_name: Option<String>,
+    #[serde(default, alias = "published_at")]
     published_at: Option<String>,
-    assets: Vec<GithubReleaseAsset>,
+    #[serde(default, alias = "update_available")]
+    update_available: Option<bool>,
+    #[serde(default)]
+    assets: Vec<UpdateReleaseAsset>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct GithubReleaseAsset {
+#[serde(rename_all = "camelCase")]
+struct UpdateReleaseAsset {
     name: String,
-    browser_download_url: String,
+    #[serde(alias = "download_url", alias = "browser_download_url")]
+    download_url: String,
     digest: Option<String>,
+    sha256: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -484,23 +493,21 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
-    let latest_version =
-        parse_release_version(&release.tag_name).map_err(|err| format!("最新版本号无效: {err}"))?;
+    let latest_version = release_version(&release)?;
     let preferred_asset = select_release_asset(&release);
-    let release_url = if release.html_url.trim().is_empty() {
-        GITHUB_LATEST_RELEASE_PAGE.to_string()
-    } else {
-        release.html_url.clone()
-    };
-    let release_name = release.name.clone();
+    let release_url = release_page_url(&release);
+    let release_name = release.release_name.clone();
     let published_at = release.published_at.clone();
     let asset_name = preferred_asset.map(|asset| asset.name.clone());
     let auto_download_available = preferred_asset.is_some();
+    let update_available = release
+        .update_available
+        .unwrap_or(latest_version > current_version);
 
     Ok(AppUpdateStatus {
         current_version: current_version.to_string(),
         latest_version: Some(latest_version.to_string()),
-        update_available: latest_version > current_version,
+        update_available,
         release_url,
         release_name,
         published_at,
@@ -515,15 +522,13 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
-    let latest_version =
-        parse_release_version(&release.tag_name).map_err(|err| format!("最新版本号无效: {err}"))?;
-    let release_url = if release.html_url.trim().is_empty() {
-        GITHUB_LATEST_RELEASE_PAGE.to_string()
-    } else {
-        release.html_url.clone()
-    };
+    let latest_version = release_version(&release)?;
+    let release_url = release_page_url(&release);
 
-    if latest_version <= current_version {
+    let update_available = release
+        .update_available
+        .unwrap_or(latest_version > current_version);
+    if !update_available || latest_version <= current_version {
         return Ok(AppUpdateInstallResult {
             status: "up_to_date".to_string(),
             version: current_version.to_string(),
@@ -540,7 +545,7 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         )
     })?;
     let response = Client::new()
-        .get(&asset.browser_download_url)
+        .get(&asset.download_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
         .send()
         .await
@@ -607,11 +612,54 @@ fn parse_release_version(tag_name: &str) -> Result<Version, String> {
     Version::parse(normalized).map_err(|err| err.to_string())
 }
 
-async fn fetch_latest_release() -> Result<GithubReleaseResponse, String> {
+fn configured_update_api_url() -> Result<String, String> {
+    let Some(url) = option_env!("BRIDGE_AGENT_UPDATE_API_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Err("当前应用未配置更新服务地址，请使用正式发布包或重新构建客户端。".to_string());
+    };
+    Ok(url.to_string())
+}
+
+fn configured_release_page_url() -> Option<String> {
+    option_env!("BRIDGE_AGENT_RELEASE_PAGE_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn release_page_url(release: &UpdateReleaseResponse) -> String {
+    release
+        .release_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(configured_release_page_url)
+        .unwrap_or_default()
+}
+
+fn release_version(release: &UpdateReleaseResponse) -> Result<Version, String> {
+    let raw_version = release
+        .version
+        .as_deref()
+        .or(release.tag_name.as_deref())
+        .ok_or_else(|| "更新服务未返回最新版本号".to_string())?;
+    parse_release_version(raw_version).map_err(|err| format!("最新版本号无效: {err}"))
+}
+
+async fn fetch_latest_release() -> Result<UpdateReleaseResponse, String> {
+    let update_api_url = configured_update_api_url()?;
     let response = Client::new()
-        .get(GITHUB_LATEST_RELEASE_API)
+        .get(update_api_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
-        .header(reqwest::header::ACCEPT, GITHUB_API_ACCEPT)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .query(&[
+            ("platform", std::env::consts::OS),
+            ("arch", std::env::consts::ARCH),
+            ("currentVersion", env!("CARGO_PKG_VERSION")),
+        ])
         .send()
         .await
         .map_err(|err| format!("检查更新失败: {err}"))?;
@@ -632,7 +680,7 @@ fn current_update_target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn select_release_asset(release: &GithubReleaseResponse) -> Option<&GithubReleaseAsset> {
+fn select_release_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleaseAsset> {
     let preferred_names = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", _) => vec!["_universal.dmg", ".dmg"],
         ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi", ".exe"],
@@ -653,11 +701,8 @@ fn select_release_asset(release: &GithubReleaseResponse) -> Option<&GithubReleas
     None
 }
 
-fn verify_asset_digest(asset: &GithubReleaseAsset, bytes: &[u8]) -> Result<(), String> {
-    let Some(expected_digest) = asset.digest.as_deref() else {
-        return Ok(());
-    };
-    let Some(expected_hash) = expected_digest.strip_prefix("sha256:") else {
+fn verify_asset_digest(asset: &UpdateReleaseAsset, bytes: &[u8]) -> Result<(), String> {
+    let Some(expected_hash) = expected_asset_sha256(asset) else {
         return Ok(());
     };
     let actual_hash = format!("{:x}", Sha256::digest(bytes));
@@ -665,6 +710,21 @@ fn verify_asset_digest(asset: &GithubReleaseAsset, bytes: &[u8]) -> Result<(), S
         return Err(format!("更新文件校验失败: {}", asset.name));
     }
     Ok(())
+}
+
+fn expected_asset_sha256(asset: &UpdateReleaseAsset) -> Option<&str> {
+    if let Some(sha256) = asset.sha256.as_deref() {
+        let sha256 = sha256.trim();
+        if !sha256.is_empty() {
+            return Some(sha256);
+        }
+    }
+    asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.trim().strip_prefix("sha256:"))
+        .map(str::trim)
+        .filter(|sha256| !sha256.is_empty())
 }
 
 fn resolve_update_download_path(asset_name: &str) -> Result<PathBuf, String> {
