@@ -698,7 +698,7 @@ function App() {
     }
   }
 
-  async function saveAll(applyToRuntime = false) {
+  async function saveConfig() {
     if (!config) {
       return;
     }
@@ -706,14 +706,11 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
-      const document = await invoke<ConfigDocument>(
-        applyToRuntime ? "save_config_and_apply" : "save_config",
-        {
-          config: fromUiConfig(config)
-        }
-      );
+      const document = await invoke<ConfigDocument>("save_config", {
+        config: fromUiConfig(config)
+      });
       applyConfigDocument(document);
-      setMessage(applyToRuntime ? formatApplyMessage("全部配置已保存", document.runtime) : "配置已保存");
+      setMessage("配置已保存");
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -1560,12 +1557,6 @@ function renderOverviewPage() {
         }
       >
         <div className="service-editor-layout">
-          {isSystem ? (
-            <div className="service-readonly-banner">
-              <strong>系统服务</strong>
-              <p>{systemServiceNotice(service)}</p>
-            </div>
-          ) : null}
           {!isSystem ? (
             <>
               <div className="form-grid">
@@ -2255,14 +2246,9 @@ function renderOverviewPage() {
                   新增自定义服务
                 </button>
               ) : null}
-              {activePage === "services" || activePage === "connection" ? (
-                <button className="secondary" onClick={() => void saveAll()} disabled={busy}>
-                  保存全部
-                </button>
-              ) : null}
-              {activePage === "services" ? (
-                <button className="primary" onClick={() => void saveAll(true)} disabled={busy}>
-                  保存全部并应用
+              {activePage === "connection" ? (
+                <button className="secondary" onClick={() => void saveConfig()} disabled={busy}>
+                  保存配置
                 </button>
               ) : null}
               {activePage === "connection" ? (
@@ -2600,14 +2586,6 @@ function isShellExecService(service: Pick<UiServiceConfig, "name">): boolean {
 
 function isSystemService(service: Pick<UiServiceConfig, "name">): boolean {
   return isComputerService(service) || isShellExecService(service);
-}
-
-function systemServiceNotice(service: Pick<UiServiceConfig, "name">): string {
-  if (isShellExecService(service)) {
-    return "`shellExec` 由应用自动维护，不能删除或改名；可调整启用状态、命令权限、根目录和超时。";
-  }
-
-  return "`computer` 由应用自动维护，只展示对外开放的桌面控制能力，不做方法级编辑。";
 }
 
 function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {

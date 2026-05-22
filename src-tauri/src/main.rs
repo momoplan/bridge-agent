@@ -4,7 +4,7 @@ use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
     save_config as save_agent_config, AgentConfig, AgentRuntimeManager, RuntimeSnapshot,
-    RuntimeStatus, ServiceConfig,
+    ServiceConfig,
 };
 use reqwest::Client;
 use semver::Version;
@@ -180,31 +180,6 @@ async fn save_config(
     save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let runtime = state.runtime.snapshot().await;
-    Ok(ConfigDocument {
-        config_path: state.config_path.display().to_string(),
-        manifest_preview,
-        config,
-        runtime,
-    })
-}
-
-#[tauri::command]
-async fn save_config_and_apply(
-    state: tauri::State<'_, DesktopState>,
-    config: AgentConfig,
-) -> Result<ConfigDocument, String> {
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
-    let runtime = if state.runtime.snapshot().await.status == RuntimeStatus::Stopped {
-        state.runtime.snapshot().await
-    } else {
-        state
-            .runtime
-            .start_from_path(&state.config_path)
-            .await
-            .map_err(|err| err.to_string())?
-    };
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
@@ -1026,7 +1001,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
-            save_config_and_apply,
             save_service,
             delete_service,
             start_agent,
