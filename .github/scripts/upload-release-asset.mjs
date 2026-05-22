@@ -19,6 +19,9 @@ if (!token) {
 
 const apiBase = apiBaseArg.replace(/\/+$/, "");
 const assetName = basename(filePath);
+if (!isAllowedReleaseAsset(assetName, target)) {
+  throw new Error(`Refusing to upload non-release bundle for ${target}: ${assetName}`);
+}
 const bytes = await readFile(filePath);
 const { size } = await stat(filePath);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -117,4 +120,20 @@ function contentTypeFor(name) {
     return "application/vnd.debian.binary-package";
   }
   return "application/octet-stream";
+}
+
+function isAllowedReleaseAsset(name, target) {
+  if (name.includes("/") || name.includes("\\")) {
+    return false;
+  }
+  if (target === "macOS Universal") {
+    return name.endsWith(".dmg");
+  }
+  if (target === "Windows x64") {
+    return name.endsWith(".msi");
+  }
+  if (target === "Linux x64") {
+    return name.endsWith(".AppImage") || name.endsWith(".deb");
+  }
+  return false;
 }

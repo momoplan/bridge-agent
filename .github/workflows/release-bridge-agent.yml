@@ -163,19 +163,33 @@ jobs:
             --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"Bridge Agent $RELEASE_TAG\",\"source\":\"github-actions\"}" \
             "$api/releases/$RELEASE_TAG"
 
-          find src-tauri/target -type f \( \
-            -name '*.dmg' -o \
-            -name '*.msi' -o \
-            -name '*.exe' -o \
-            -name '*.AppImage' -o \
-            -name '*.deb' \
-          \) -print0 | while IFS= read -r -d '' file; do
+          shopt -s nullglob
+          case "$RELEASE_TARGET" in
+            "macOS Universal")
+              bundle_files=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+              ;;
+            "Windows x64")
+              bundle_files=(src-tauri/target/release/bundle/msi/*.msi)
+              ;;
+            "Linux x64")
+              bundle_files=(
+                src-tauri/target/release/bundle/appimage/*.AppImage
+                src-tauri/target/release/bundle/deb/*.deb
+              )
+              ;;
+            *)
+              echo "Unsupported release target: $RELEASE_TARGET" >&2
+              exit 1
+              ;;
+          esac
+
+          for file in "${bundle_files[@]}"; do
             cp "$file" "$asset_dir/"
           done
 
           asset_count="$(find "$asset_dir" -type f | wc -l | tr -d ' ')"
           if [ "$asset_count" = "0" ]; then
-            echo "No release bundles found under src-tauri/target" >&2
+            echo "No release bundles found for $RELEASE_TARGET" >&2
             exit 1
           fi
 
