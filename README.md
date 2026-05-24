@@ -532,7 +532,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 
 - `POST /releases/{tag}`：创建或更新待发布版本
 - `POST /releases/{tag}/assets/prepare`：为单个平台安装包申请 OSS 预签名上传地址
-- `POST /releases/{tag}/assets/complete`：安装包上传 OSS 成功后，回写 `downloadUrl`、`objectKey`、`sha256`、`sizeBytes`
+- `POST /releases/{tag}/assets/complete`：安装包上传 OSS 成功后，回写固定公开 `downloadUrl`、`objectKey`、`sha256`、`sizeBytes`
 - `POST /releases/{tag}/publish`：在所有平台产物上传完成后，把这个版本设为可被客户端检查到的最新版本
 
 `assets/prepare` 请求体示例：
@@ -559,9 +559,12 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
     "x-oss-content-sha256": "UNSIGNED-PAYLOAD"
   },
   "objectKey": "bridge-agent/releases/bridge-agent-v0.1.28/Bridge%20Agent_0.1.28_universal.dmg",
-  "downloadUrl": "https://download.baijimu.com/bridge-agent/releases/bridge-agent-v0.1.28/Bridge%20Agent_0.1.28_universal.dmg"
+  "downloadUrl": "https://download.baijimu.com/bridge-agent/releases/bridge-agent-v0.1.28/Bridge%20Agent_0.1.28_universal.dmg",
+  "resourceUrl": "https://download.baijimu.com/bridge-agent/releases/bridge-agent-v0.1.28/Bridge%20Agent_0.1.28_universal.dmg"
 }
 ```
+
+`downloadUrl` / `resourceUrl` 必须是长期可访问的公开固定地址；预签名 URL 只用于 `uploadUrl`，不能写入 release 元数据。
 
 ## 打包分发
 

@@ -68,7 +68,7 @@ await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/comple
   contentType,
   sizeBytes: size,
   objectKey: prepare.objectKey ?? prepare.object_key,
-  downloadUrl: prepare.downloadUrl ?? prepare.download_url,
+  downloadUrl: prepare.resourceUrl ?? prepare.resource_url ?? prepare.downloadUrl ?? prepare.download_url,
 });
 
 console.log(`Uploaded ${assetName} (${size} bytes, sha256:${sha256})`);
