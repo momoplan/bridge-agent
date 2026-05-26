@@ -227,6 +227,76 @@ curl -X POST http://127.0.0.1:18081/v1/events \
 
 bridge-agent 只接受已声明且已启用的 `service.event`，接收后返回 `202 Accepted`，并通过 agent 与 relay 的 websocket 发送 `event_emitted` 消息。后续由 relay 按订阅关系把事件投递到订阅方 URL。
 
+## 本机服务注册
+
+bridge-agent 支持本机程序把自己注册成 bridge-agent 服务。这个入口只给 bridge-agent 所在机器上的本地程序、脚本或 AI 生成工具使用，不给 relay 反向调用。
+
+新生成的默认配置会开启本机服务注册，并写入 `runtime.service_registration_token`。已有配置如果要开启，需要手动增加：
+
+```json
+{
+  "runtime": {
+    "service_registration_enabled": true,
+    "service_registration_token": "replace-with-a-local-secret"
+  }
+}
+```
+
+服务注册复用本机 API server，默认地址仍是 `127.0.0.1:18081`。注册一个本地 HTTP 程序：
+
+```bash
+curl -X POST http://127.0.0.1:18081/v1/services \
+  -H "Authorization: Bearer $BRIDGE_AGENT_SERVICE_REGISTRATION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "reportTool",
+    "description": "AI generated report service.",
+    "transport": {
+      "type": "http",
+      "baseUrl": "http://127.0.0.1:39127"
+    },
+    "methods": [
+      {
+        "name": "generate",
+        "description": "Generate a report.",
+        "path": "/invoke/generate",
+        "httpMethod": "POST",
+        "timeoutSecs": 60,
+        "input_schema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    ],
+    "events": [
+      {
+        "name": "finished",
+        "description": "Report generation finished."
+      }
+    ],
+    "replace": true
+  }'
+```
+
+注册成功后，bridge-agent 会把服务写入 `agent-config.json`，刷新正在运行的 runtime registry，并通过现有 WebSocket 重新上报 capabilities。外部 agent 看到的是普通的 `reportTool.generate`，不会看到本机 HTTP binding 细节。
+
+管理接口：
+
+- `GET /v1/services`：列出本机配置里的服务
+- `POST /v1/services`：新增服务；同名服务默认拒绝，`replace: true` 时覆盖
+- `PUT /v1/services/{name}`：按名称覆盖服务
+- `DELETE /v1/services/{name}`：删除服务并热刷新 capabilities
+
+也可以用 CLI 脚本化修改配置：
+
+```bash
+bridge-agent register-service --file service-registration.json --replace
+bridge-agent list-services
+bridge-agent unregister-service reportTool
+```
+
+CLI 直接修改配置文件，适合安装脚本或 agent 未运行时使用；如果需要正在运行的 agent 立即上报 relay，优先调用本机 `/v1/services` API。
+
 ## 运行日志
 
 运行时日志会同时保存在桌面端“诊断 -> 日志”和本地文件里。文件日志默认开启，按大小轮转，适合排查 Windows service 或用户机器上的联调问题。

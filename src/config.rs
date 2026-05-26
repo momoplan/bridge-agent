@@ -8,6 +8,7 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use url::Url;
 use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
@@ -87,6 +88,10 @@ pub struct RuntimeConfig {
     pub event_server_bind: String,
     #[serde(default)]
     pub event_server_token: Option<String>,
+    #[serde(default)]
+    pub service_registration_enabled: bool,
+    #[serde(default)]
+    pub service_registration_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +214,8 @@ impl AgentConfig {
                 event_server_enabled: default_event_server_enabled(),
                 event_server_bind: default_event_server_bind(),
                 event_server_token: None,
+                service_registration_enabled: true,
+                service_registration_token: Some(generate_registration_token()),
             },
             services: vec![
                 default_computer_service(),
@@ -306,6 +313,26 @@ impl AgentConfig {
                 bail!(
                     "runtime.event_server_token is required when event_server_bind is not loopback"
                 );
+            }
+        }
+        if self.runtime.service_registration_enabled {
+            let bind: SocketAddr = self
+                .runtime
+                .event_server_bind
+                .parse()
+                .with_context(|| "runtime.event_server_bind must be a socket address")?;
+            if !bind.ip().is_loopback() {
+                bail!("runtime.service_registration_enabled requires event_server_bind to be loopback");
+            }
+            if self
+                .runtime
+                .service_registration_token
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                bail!("runtime.service_registration_token is required when service registration is enabled");
             }
         }
 
@@ -432,6 +459,133 @@ impl AgentConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceRegistration {
+    pub name: String,
+    pub description: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub transport: RegistrationTransport,
+    #[serde(default)]
+    pub methods: Vec<RegistrationMethod>,
+    #[serde(default)]
+    pub events: Vec<EventConfig>,
+    #[serde(default)]
+    pub replace: bool,
+    #[serde(default)]
+    pub managed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RegistrationTransport {
+    Http {
+        #[serde(alias = "baseUrl")]
+        base_url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrationMethod {
+    pub name: String,
+    pub description: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_object_schema")]
+    pub input_schema: Value,
+    #[serde(default, alias = "path")]
+    pub path: String,
+    #[serde(default = "default_http_method", alias = "httpMethod")]
+    pub http_method: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, alias = "timeoutSecs")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl ServiceRegistration {
+    pub fn into_service_config(self) -> Result<ServiceConfig> {
+        if self.name.trim().is_empty() {
+            bail!("service name cannot be empty");
+        }
+        if self.methods.is_empty() && self.events.is_empty() {
+            bail!("service registration must include at least one method or event");
+        }
+
+        let methods = match self.transport {
+            RegistrationTransport::Http { base_url, headers } => {
+                let base_url = normalize_registration_base_url(&base_url)?;
+                self.methods
+                    .into_iter()
+                    .map(|method| method.into_http_method_config(&base_url, &headers))
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
+
+        Ok(ServiceConfig {
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+            enabled: self.enabled,
+            methods,
+            events: self.events,
+        })
+    }
+}
+
+impl RegistrationMethod {
+    fn into_http_method_config(
+        self,
+        base_url: &Url,
+        transport_headers: &BTreeMap<String, String>,
+    ) -> Result<MethodConfig> {
+        if self.name.trim().is_empty() {
+            bail!("method name cannot be empty");
+        }
+        let mut headers = transport_headers.clone();
+        headers.extend(self.headers);
+
+        Ok(MethodConfig {
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+            enabled: self.enabled,
+            input_schema: self.input_schema,
+            binding: MethodBinding::Http(HttpBinding {
+                url: join_registration_url(base_url, &self.path)?,
+                http_method: self.http_method.trim().to_uppercase(),
+                headers,
+                timeout_secs: self.timeout_secs,
+            }),
+        })
+    }
+}
+
+fn normalize_registration_base_url(base_url: &str) -> Result<Url> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        bail!("transport.baseUrl cannot be empty");
+    }
+    let url =
+        Url::parse(base_url).with_context(|| format!("invalid transport.baseUrl `{base_url}`"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        bail!("transport.baseUrl must use http or https");
+    }
+    Ok(url)
+}
+
+fn join_registration_url(base_url: &Url, path: &str) -> Result<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(base_url.as_str().trim_end_matches('/').to_string());
+    }
+    let path = path.trim_start_matches('/');
+    Ok(base_url
+        .join(path)
+        .with_context(|| format!("invalid method path `{path}`"))?
+        .to_string())
+}
+
 pub fn ensure_browser_auth_agent_id(config: &mut AgentConfig) -> bool {
     if is_legacy_default_agent_id(&config.relay.agent_id) {
         config.relay.agent_id = generate_agent_id();
@@ -442,6 +596,10 @@ pub fn ensure_browser_auth_agent_id(config: &mut AgentConfig) -> bool {
 
 fn generate_agent_id() -> String {
     format!("{GENERATED_AGENT_ID_PREFIX}{}", Uuid::new_v4().simple())
+}
+
+fn generate_registration_token() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
 fn is_legacy_default_agent_id(agent_id: &str) -> bool {
@@ -968,7 +1126,7 @@ fn project_config_path() -> Result<PathBuf> {
 mod tests {
     use super::{
         ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config, AgentConfig,
-        EventConfig, ServiceConfig,
+        EventConfig, MethodBinding, ServiceConfig, ServiceRegistration,
     };
     use serde_json::json;
     use std::fs;
@@ -1075,6 +1233,56 @@ mod tests {
             .unwrap();
         assert!(service.methods.is_empty());
         assert_eq!(service.events[0].name, "finished");
+    }
+
+    #[test]
+    fn public_service_registration_builds_http_service_config() {
+        let registration: ServiceRegistration = serde_json::from_value(json!({
+            "name": "reportTool",
+            "description": "AI generated report service.",
+            "transport": {
+                "type": "http",
+                "baseUrl": "http://127.0.0.1:39127/api/",
+                "headers": {
+                    "x-tool": "report"
+                }
+            },
+            "methods": [
+                {
+                    "name": "generate",
+                    "description": "Generate a report.",
+                    "path": "/invoke/generate",
+                    "timeoutSecs": 60,
+                    "input_schema": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                }
+            ],
+            "events": [
+                {
+                    "name": "finished",
+                    "description": "Report generation finished."
+                }
+            ],
+            "replace": true
+        }))
+        .unwrap();
+
+        let replace = registration.replace;
+        let service = registration.into_service_config().unwrap();
+        assert!(replace);
+        assert_eq!(service.name, "reportTool");
+        assert_eq!(service.events[0].name, "finished");
+        match &service.methods[0].binding {
+            MethodBinding::Http(binding) => {
+                assert_eq!(binding.url, "http://127.0.0.1:39127/api/invoke/generate");
+                assert_eq!(binding.http_method, "POST");
+                assert_eq!(binding.timeout_secs, Some(60));
+                assert_eq!(binding.headers.get("x-tool").unwrap(), "report");
+            }
+            other => panic!("unexpected binding: {other:?}"),
+        }
     }
 
     #[test]

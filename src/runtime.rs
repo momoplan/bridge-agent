@@ -69,9 +69,9 @@ struct ManagedState {
     apply: Option<mpsc::UnboundedSender<RuntimeRegistryUpdate>>,
 }
 
-struct RuntimeRegistryUpdate {
-    registry: ServiceRegistry,
-    services: Vec<crate::protocol::ServiceDefinition>,
+pub(crate) struct RuntimeRegistryUpdate {
+    pub(crate) registry: ServiceRegistry,
+    pub(crate) services: Vec<crate::protocol::ServiceDefinition>,
 }
 
 impl Default for ManagedState {
@@ -131,8 +131,14 @@ impl AgentRuntimeManager {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
-        let event_server =
-            LocalEventServer::bind(&config.runtime, Arc::clone(&registry), event_tx).await?;
+        let event_server = LocalEventServer::bind(
+            &config.runtime,
+            config_path.to_path_buf(),
+            Arc::clone(&registry),
+            event_tx,
+            apply_tx.clone(),
+        )
+        .await?;
         let snapshot = RuntimeSnapshot {
             status: RuntimeStatus::Starting,
             config_path: Some(config_path.display().to_string()),

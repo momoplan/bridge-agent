@@ -60,6 +60,8 @@ interface RuntimeConfig {
   event_server_enabled: boolean;
   event_server_bind: string;
   event_server_token?: string | null;
+  service_registration_enabled: boolean;
+  service_registration_token?: string | null;
 }
 
 interface ShellBinding {
