@@ -88,7 +88,7 @@ pub struct RuntimeConfig {
     pub event_server_bind: String,
     #[serde(default)]
     pub event_server_token: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_service_registration_enabled")]
     pub service_registration_enabled: bool,
     #[serde(default)]
     pub service_registration_token: Option<String>,
@@ -254,6 +254,7 @@ impl AgentConfig {
     pub fn normalize(&mut self) -> bool {
         let mut changed = ensure_default_computer_methods(self);
         changed |= ensure_default_shell_exec_service(self);
+        changed |= ensure_service_registration_defaults(self);
         changed
     }
 
@@ -642,9 +643,12 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
-    config.normalize();
-    migrate_legacy_defaults(&mut config);
+    let mut changed = config.normalize();
+    changed |= migrate_legacy_defaults(&mut config);
     config.validate()?;
+    if changed {
+        save_config(path, &config)?;
+    }
     Ok(config)
 }
 
@@ -669,13 +673,17 @@ pub fn ensure_config_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn migrate_legacy_defaults(config: &mut AgentConfig) {
+fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
+    let mut changed = false;
     if config.relay.url.trim() == LEGACY_DEFAULT_RELAY_URL {
         config.relay.url = DEFAULT_RELAY_URL.to_string();
+        changed = true;
     }
     if config.upload.inline_limit_bytes == LEGACY_INLINE_LIMIT_BYTES {
         config.upload.inline_limit_bytes = DEFAULT_INLINE_LIMIT_BYTES;
+        changed = true;
     }
+    changed
 }
 
 pub fn manifest_preview_json(config: &AgentConfig) -> Result<String> {
@@ -1002,6 +1010,33 @@ fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
     true
 }
 
+fn ensure_service_registration_defaults(config: &mut AgentConfig) -> bool {
+    if !config.runtime.service_registration_enabled {
+        return false;
+    }
+
+    if let Ok(bind) = config.runtime.event_server_bind.parse::<SocketAddr>() {
+        if !bind.ip().is_loopback() {
+            config.runtime.service_registration_enabled = false;
+            return true;
+        }
+    }
+
+    if config
+        .runtime
+        .service_registration_token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        config.runtime.service_registration_token = Some(generate_registration_token());
+        return true;
+    }
+
+    false
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -1040,6 +1075,10 @@ fn default_event_server_enabled() -> bool {
 
 fn default_event_server_bind() -> String {
     "127.0.0.1:18081".to_string()
+}
+
+fn default_service_registration_enabled() -> bool {
+    true
 }
 
 fn default_http_method() -> String {
@@ -1324,6 +1363,14 @@ mod tests {
         assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
         assert_eq!(loaded.upload.inline_limit_bytes, 256 * 1024);
         assert_eq!(loaded.relay.agent_id, "devbox");
+        assert!(loaded.runtime.service_registration_enabled);
+        assert!(loaded
+            .runtime
+            .service_registration_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty()));
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert!(migrated.contains("service_registration_token"));
         assert_eq!(loaded.services[0].name, "computer");
         assert!(loaded.services[0]
             .methods
@@ -1333,6 +1380,20 @@ mod tests {
             .services
             .iter()
             .any(|service| service.name == "shellExec"));
+    }
+
+    #[test]
+    fn non_loopback_event_server_disables_service_registration_migration() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.runtime.event_server_bind = "0.0.0.0:18081".to_string();
+        config.runtime.event_server_token = Some("event-secret".to_string());
+        config.runtime.service_registration_token = None;
+        save_config(&path, &config).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        assert!(!loaded.runtime.service_registration_enabled);
     }
 
     #[test]
