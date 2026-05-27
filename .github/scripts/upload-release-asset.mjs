@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
 import { basename } from "node:path";
 
 const [apiBaseArg, tagName, version, target, filePath] = process.argv.slice(2);
@@ -48,15 +50,12 @@ if (!hasHeader(uploadHeaders, "content-type")) {
   uploadHeaders["content-type"] = contentType;
 }
 
-const uploadResponse = await fetch(uploadUrl, {
-  method: uploadMethod,
-  headers: uploadHeaders,
-  body: bytes,
-});
-if (!uploadResponse.ok) {
-  throw new Error(
-    `OSS upload failed for ${assetName}: ${uploadResponse.status} ${await uploadResponse.text()}`,
-  );
+const uploadResponse = await retry(
+  () => uploadBinary(uploadUrl, uploadMethod, uploadHeaders, bytes),
+  `OSS upload for ${assetName}`,
+);
+if (uploadResponse.status < 200 || uploadResponse.status >= 300) {
+  throw new Error(`OSS upload failed for ${assetName}: ${uploadResponse.status} ${uploadResponse.body}`);
 }
 
 await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/complete`, {
@@ -74,18 +73,74 @@ await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/comple
 console.log(`Uploaded ${assetName} (${size} bytes, sha256:${sha256})`);
 
 async function postJson(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const response = await retry(
+    () =>
+      fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60_000),
+      }),
+    `POST ${url}`,
+  );
   if (!response.ok) {
     throw new Error(`${url} failed: ${response.status} ${await response.text()}`);
   }
   return response.json();
+}
+
+async function retry(operation, label, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) {
+        break;
+      }
+      const delayMs = attempt * 5000;
+      console.warn(`${label} failed on attempt ${attempt}/${attempts}: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
+async function uploadBinary(url, method, headers, body) {
+  const parsed = new URL(url);
+  const client = parsed.protocol === "http:" ? http : https;
+  return new Promise((resolve, reject) => {
+    const request = client.request(
+      parsed,
+      {
+        method,
+        headers: {
+          ...headers,
+          "content-length": body.length,
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+
+    request.setTimeout(20 * 60 * 1000, () => {
+      request.destroy(new Error(`upload timed out after 1200s`));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 function normalizeHeaders(headers) {
