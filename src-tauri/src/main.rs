@@ -990,6 +990,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    show_dock_icon(app);
     if let Some(window) = app.get_webview_window("main") {
         if let Err(err) = window.show() {
             eprintln!("failed to show main window: {err}");
@@ -1002,6 +1003,33 @@ fn show_main_window(app: &tauri::AppHandle) {
         }
     }
 }
+
+fn hide_to_tray(window: &tauri::Window) {
+    if let Err(err) = window.hide() {
+        eprintln!("failed to hide main window: {err}");
+    }
+    hide_dock_icon(window.app_handle());
+}
+
+#[cfg(target_os = "macos")]
+fn show_dock_icon(app: &tauri::AppHandle) {
+    if let Err(err) = app.set_dock_visibility(true) {
+        eprintln!("failed to show dock icon: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_dock_icon(_app: &tauri::AppHandle) {}
+
+#[cfg(target_os = "macos")]
+fn hide_dock_icon(app: &tauri::AppHandle) {
+    if let Err(err) = app.set_dock_visibility(false) {
+        eprintln!("failed to hide dock icon: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_dock_icon(_app: &tauri::AppHandle) {}
 
 fn quit_app(app: &tauri::AppHandle) {
     let state = app.state::<DesktopState>();
@@ -1053,9 +1081,7 @@ fn main() {
                     return;
                 }
                 api.prevent_close();
-                if let Err(err) = window.hide() {
-                    eprintln!("failed to hide main window: {err}");
-                }
+                hide_to_tray(window);
             }
         })
         .invoke_handler(tauri::generate_handler![
