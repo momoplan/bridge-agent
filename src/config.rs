@@ -911,16 +911,30 @@ fn default_shell_exec_method() -> MethodConfig {
 }
 
 fn default_shell_exec_allow_commands() -> Vec<String> {
+    default_shell_exec_core_commands()
+        .into_iter()
+        .chain(default_shell_exec_runtime_commands())
+        .map(str::to_string)
+        .collect()
+}
+
+fn default_shell_exec_core_commands() -> Vec<&'static str> {
     vec![
-        "cmd".to_string(),
-        "powershell".to_string(),
-        "pwsh".to_string(),
-        "sh".to_string(),
-        "bash".to_string(),
-        "echo".to_string(),
-        "pwd".to_string(),
-        "ls".to_string(),
-        "git".to_string(),
+        "cmd",
+        "powershell",
+        "pwsh",
+        "sh",
+        "bash",
+        "echo",
+        "pwd",
+        "ls",
+        "git",
+    ]
+}
+
+fn default_shell_exec_runtime_commands() -> Vec<&'static str> {
+    vec![
+        "node", "npm", "npx", "pnpm", "yarn", "python3", "python", "pip3", "pip", "uv",
     ]
 }
 
@@ -997,6 +1011,16 @@ fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
             changed = true;
         }
 
+        if let Some(method) = service
+            .methods
+            .iter_mut()
+            .find(|method| method.name == default_shell_exec_method().name)
+        {
+            if let MethodBinding::ShellCommand(binding) = &mut method.binding {
+                changed |= ensure_default_shell_exec_runtime_allowlist(binding);
+            }
+        }
+
         return changed;
     }
 
@@ -1008,6 +1032,39 @@ fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
         .unwrap_or(0);
     config.services.insert(insert_index, default_service);
     true
+}
+
+fn ensure_default_shell_exec_runtime_allowlist(binding: &mut ShellCommandBinding) -> bool {
+    if binding
+        .allow_commands
+        .iter()
+        .any(|command| command.trim() == "*")
+    {
+        return false;
+    }
+
+    let existing = binding
+        .allow_commands
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let has_legacy_default = default_shell_exec_core_commands()
+        .into_iter()
+        .all(|command| existing.contains(command));
+    let already_allows_shell = existing.contains("sh") || existing.contains("bash");
+
+    if !has_legacy_default && !already_allows_shell {
+        return false;
+    }
+
+    let mut changed = false;
+    for command in default_shell_exec_runtime_commands() {
+        if !existing.contains(command) {
+            binding.allow_commands.push(command.to_string());
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn ensure_service_registration_defaults(config: &mut AgentConfig) -> bool {
@@ -1164,8 +1221,9 @@ fn project_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_browser_auth_agent_id, load_config, manifest_preview_json, save_config, AgentConfig,
-        EventConfig, MethodBinding, ServiceConfig, ServiceRegistration,
+        default_shell_exec_allow_commands, ensure_browser_auth_agent_id, load_config,
+        manifest_preview_json, save_config, AgentConfig, EventConfig, MethodBinding, ServiceConfig,
+        ServiceRegistration,
     };
     use serde_json::json;
     use std::fs;
@@ -1203,6 +1261,67 @@ mod tests {
                     .methods
                     .iter()
                     .any(|method| method.name == "shellExec")));
+    }
+
+    #[test]
+    fn default_shell_exec_allowlist_includes_common_runtimes() {
+        let allowlist = default_shell_exec_allow_commands();
+        for command in ["node", "npm", "npx", "python3", "python", "pip3", "uv"] {
+            assert!(allowlist.contains(&command.to_string()));
+        }
+    }
+
+    #[test]
+    fn load_config_migrates_legacy_shell_exec_runtime_allowlist() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        let shell_method = config
+            .services
+            .iter_mut()
+            .find(|service| service.name == "shellExec")
+            .and_then(|service| {
+                service
+                    .methods
+                    .iter_mut()
+                    .find(|method| method.name == "shellExec")
+            })
+            .unwrap();
+
+        if let MethodBinding::ShellCommand(binding) = &mut shell_method.binding {
+            binding.allow_commands = vec![
+                "cmd".to_string(),
+                "powershell".to_string(),
+                "pwsh".to_string(),
+                "sh".to_string(),
+                "bash".to_string(),
+                "echo".to_string(),
+                "pwd".to_string(),
+                "ls".to_string(),
+                "git".to_string(),
+            ];
+        }
+
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        let allowlist = loaded
+            .services
+            .iter()
+            .find(|service| service.name == "shellExec")
+            .and_then(|service| {
+                service
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "shellExec")
+            })
+            .and_then(|method| match &method.binding {
+                MethodBinding::ShellCommand(binding) => Some(&binding.allow_commands),
+                _ => None,
+            })
+            .unwrap();
+
+        assert!(allowlist.contains(&"node".to_string()));
+        assert!(allowlist.contains(&"python3".to_string()));
     }
 
     #[test]

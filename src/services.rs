@@ -11,8 +11,8 @@ use reqwest::{Client, Method};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(target_os = "macos")]
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -364,6 +364,7 @@ impl ShellMethod {
             .unwrap_or(self.default_timeout_secs)
             .min(self.max_timeout_secs);
         let env = sanitize_env(args.env);
+        let path_for_diagnostics = env.get("PATH").cloned().unwrap_or_default();
 
         let mut command = Command::new(executable);
         command
@@ -376,9 +377,31 @@ impl ShellMethod {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = command
-            .spawn()
-            .with_context(|| format!("failed to spawn `{executable}` in {}", cwd.display()))?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                let message = format!("failed to spawn `{executable}` in {}: {err}", cwd.display());
+                let stderr = if err.kind() == ErrorKind::NotFound {
+                    format!("{message}\nPATH={path_for_diagnostics}")
+                } else {
+                    message.clone()
+                };
+
+                return Ok(ServiceOutcome {
+                    success: false,
+                    data: Some(serde_json::to_value(ShellExecData {
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr,
+                        timed_out: false,
+                    })?),
+                    error: Some(InvokeError {
+                        code: "COMMAND_SPAWN_FAILED".to_string(),
+                        message,
+                    }),
+                });
+            }
+        };
 
         match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
             Ok(output) => {
@@ -2051,7 +2074,9 @@ fn scalar_to_query_string(value: &Value) -> String {
 
 pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut base = BTreeMap::new();
-    for key in ["PATH", "HOME", "LANG", "LC_ALL"] {
+    for key in [
+        "HOME", "LANG", "LC_ALL", "LOGNAME", "SHELL", "TMPDIR", "USER",
+    ] {
         if let Ok(value) = std::env::var(key) {
             base.insert(key.to_string(), value);
         }
@@ -2064,7 +2089,156 @@ pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
         base.insert(key, value);
     }
 
+    let home = base.get("HOME").map(PathBuf::from);
+    let path = base
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok());
+    base.insert(
+        "PATH".to_string(),
+        shell_exec_path(path.as_deref(), home.as_deref()).unwrap_or_else(default_system_path),
+    );
+
     base
+}
+
+fn shell_exec_path(current_path: Option<&str>, home: Option<&Path>) -> Option<String> {
+    let mut paths = Vec::new();
+    for candidate in shell_toolchain_path_candidates(home) {
+        push_path_if_present(&mut paths, candidate);
+    }
+
+    if let Some(current_path) = current_path {
+        for path in std::env::split_paths(current_path) {
+            push_path_if_present(&mut paths, path);
+        }
+    }
+
+    if paths.is_empty() {
+        return None;
+    }
+
+    std::env::join_paths(paths)
+        .ok()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+fn shell_toolchain_path_candidates(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(home) = home {
+        for relative in [
+            ".volta/bin",
+            ".pyenv/shims",
+            ".asdf/shims",
+            ".local/share/mise/shims",
+            ".mise/shims",
+            ".cargo/bin",
+            ".bun/bin",
+            ".deno/bin",
+            ".local/bin",
+            "bin",
+            "miniconda3/bin",
+            "anaconda3/bin",
+        ] {
+            candidates.push(home.join(relative));
+        }
+
+        candidates.extend(versioned_node_bin_dirs(&home.join(".nvm/versions/node")));
+        candidates.extend(versioned_node_bin_dirs(&home.join(".fnm/node-versions")));
+        candidates.extend(versioned_node_bin_dirs(
+            &home.join(".local/share/fnm/node-versions"),
+        ));
+    }
+
+    for absolute in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/opt/local/bin",
+        "/opt/local/sbin",
+        "/opt/anaconda3/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        candidates.push(PathBuf::from(absolute));
+    }
+
+    candidates
+}
+
+fn versioned_node_bin_dirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut dirs = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| {
+            let version = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(node_version_key)
+                .unwrap_or_default();
+            let bin = path.join("bin");
+            let fnm_bin = path.join("installation/bin");
+            (version, bin, fnm_bin)
+        })
+        .collect::<Vec<_>>();
+
+    dirs.sort_by(|left, right| right.0.cmp(&left.0));
+
+    dirs.into_iter()
+        .flat_map(|(_, bin, fnm_bin)| [bin, fnm_bin])
+        .collect()
+}
+
+fn node_version_key(raw: &str) -> (u64, u64, u64, String) {
+    let trimmed = raw.trim_start_matches('v');
+    let mut parts = trimmed.split('.');
+    let major = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|value| {
+            value
+                .chars()
+                .take_while(|char| char.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    (major, minor, patch, raw.to_string())
+}
+
+fn push_path_if_present(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidate.is_dir() {
+        return;
+    }
+
+    if !paths.iter().any(|path| path == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn default_system_path() -> String {
+    if cfg!(windows) {
+        String::new()
+    } else {
+        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+    }
 }
 
 pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
@@ -2109,12 +2283,15 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_command_allowed, resolve_cwd, sanitize_env, ServiceRegistry, ShellCommand, ShellExecArgs,
+        is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, ServiceRegistry,
+        ShellCommand, ShellExecArgs,
     };
     use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn allowlist_accepts_basename() {
@@ -2135,6 +2312,31 @@ mod tests {
         let sanitized = sanitize_env(env);
         assert_eq!(sanitized.get("FOO_BAR"), Some(&"1".to_string()));
         assert!(!sanitized.contains_key("bad-key"));
+    }
+
+    #[test]
+    fn shell_exec_path_prefers_local_toolchains_before_system_path() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join(".volta/bin")).unwrap();
+        fs::create_dir_all(home.join(".pyenv/shims")).unwrap();
+        fs::create_dir_all(home.join(".nvm/versions/node/v18.19.1/bin")).unwrap();
+        fs::create_dir_all(home.join(".nvm/versions/node/v20.11.0/bin")).unwrap();
+
+        let path = shell_exec_path(Some("/usr/bin:/bin:/usr/bin"), Some(home)).unwrap();
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(parts[0], home.join(".volta/bin"));
+        assert_eq!(parts[1], home.join(".pyenv/shims"));
+        assert_eq!(parts[2], home.join(".nvm/versions/node/v20.11.0/bin"));
+        assert_eq!(parts[3], home.join(".nvm/versions/node/v18.19.1/bin"));
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|path| *path == Path::new("/usr/bin"))
+                .count(),
+            1
+        );
     }
 
     #[test]

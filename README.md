@@ -717,6 +717,8 @@ npm run tauri build -- --debug
 - 超时限制
 - 环境变量白名单
 
+桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shellExec` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。macOS 如果只有 Apple 的 `/usr/bin/python3` shim，且本机尚未同意 Xcode license，该系统命令仍会被 Xcode license 拦截；此时需要用户同意 Xcode license，或安装 Homebrew / pyenv / conda 等独立 Python。
+
 对外调用参数统一使用 argv 数组形式：
 
 - Windows 查询 PATH 或执行 shell 内建命令时，例如 `{"command":["cmd","/C","where","wechat-decrypt"]}`
