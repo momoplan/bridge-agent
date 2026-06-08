@@ -1,24 +1,24 @@
 :root {
   color-scheme: light;
-  --bg: #f3efe6;
-  --bg-strong: #fffaf0;
-  --panel: rgba(255, 250, 240, 0.82);
+  --bg: #f6f7f9;
+  --bg-strong: #ffffff;
+  --panel: rgba(255, 255, 255, 0.84);
   --panel-strong: #ffffff;
-  --line: rgba(44, 39, 32, 0.12);
-  --text: #211c17;
-  --muted: #6b6259;
-  --accent: #c65d21;
-  --accent-strong: #7d2f18;
-  --accent-soft: rgba(198, 93, 33, 0.12);
-  --success: #177245;
-  --warn: #9b6700;
-  --danger: #982b2b;
-  --shadow: 0 24px 60px rgba(71, 43, 22, 0.12);
-  font-family: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+  --line: rgba(30, 42, 68, 0.12);
+  --text: #1e2a44;
+  --muted: #666666;
+  --accent: #16a3a7;
+  --accent-strong: #1e2a44;
+  --accent-soft: rgba(22, 163, 167, 0.12);
+  --success: #4caf50;
+  --warn: #ff9800;
+  --danger: #f44336;
+  --shadow: 0 24px 60px rgba(30, 42, 68, 0.08);
+  font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(198, 93, 33, 0.2), transparent 30%),
-    radial-gradient(circle at top right, rgba(32, 113, 104, 0.12), transparent 28%),
-    linear-gradient(180deg, #f1ebdf 0%, #efe5d4 44%, #ece6dc 100%);
+    radial-gradient(circle at top left, rgba(22, 163, 167, 0.16), transparent 30%),
+    radial-gradient(circle at top right, rgba(30, 42, 68, 0.08), transparent 28%),
+    linear-gradient(180deg, #f6f7f9 0%, #eef8f8 44%, #f6f7f9 100%);
   color: var(--text);
 }
 
@@ -59,8 +59,8 @@ input:focus,
 textarea:focus,
 select:focus {
   outline: none;
-  border-color: rgba(198, 93, 33, 0.45);
-  box-shadow: 0 0 0 4px rgba(198, 93, 33, 0.1);
+  border-color: rgba(22, 163, 167, 0.45);
+  box-shadow: 0 0 0 4px rgba(22, 163, 167, 0.1);
 }
 
 .checkbox-row {
@@ -119,10 +119,43 @@ select:focus {
   align-content: start;
 }
 
+.sidebar-brand {
+  display: grid;
+  gap: 12px;
+}
+
+.sidebar-brand-heading {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.sidebar-brand-logo {
+  display: block;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  box-shadow: 0 12px 28px rgba(30, 42, 68, 0.12);
+}
+
 .sidebar-brand h1 {
-  margin: 0 0 12px;
-  font-size: 28px;
-  line-height: 1.05;
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.sidebar-brand .eyebrow {
+  margin-bottom: 5px;
+  letter-spacing: 0.14em;
+}
+
+.sidebar-device-name {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .sidebar-nav {
@@ -153,9 +186,9 @@ select:focus {
 }
 
 .sidebar-nav-item.active {
-  background: rgba(255, 247, 238, 0.95);
-  border-color: rgba(198, 93, 33, 0.22);
-  box-shadow: 0 14px 26px rgba(125, 47, 24, 0.08);
+  background: rgba(205, 236, 236, 0.72);
+  border-color: rgba(22, 163, 167, 0.22);
+  box-shadow: 0 14px 26px rgba(30, 42, 68, 0.08);
 }
 
 .sidebar-subnav {
@@ -202,8 +235,8 @@ select:focus {
 }
 
 .sidebar-subnav-item.active {
-  background: rgba(255, 247, 238, 0.78);
-  border-color: rgba(198, 93, 33, 0.18);
+  background: rgba(205, 236, 236, 0.56);
+  border-color: rgba(22, 163, 167, 0.18);
 }
 
 .sidebar-subnav-empty {
@@ -327,7 +360,7 @@ select:focus {
   padding: 16px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.66);
-  border: 1px solid rgba(44, 39, 32, 0.08);
+  border: 1px solid rgba(30, 42, 68, 0.08);
 }
 
 .registered-service-runtime-main {
@@ -411,7 +444,7 @@ select:focus {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
-  background: rgba(44, 39, 32, 0.08);
+  background: rgba(30, 42, 68, 0.08);
   color: var(--accent-strong);
 }
 
@@ -422,7 +455,7 @@ select:focus {
 }
 
 .active-toggle {
-  box-shadow: 0 10px 20px rgba(125, 47, 24, 0.08);
+  box-shadow: 0 10px 20px rgba(30, 42, 68, 0.08);
 }
 
 .method-advanced {
@@ -430,7 +463,7 @@ select:focus {
   gap: 16px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(44, 39, 32, 0.08);
+  border-top: 1px solid rgba(30, 42, 68, 0.08);
 }
 
 .method-advanced-head strong,
@@ -462,8 +495,8 @@ select:focus {
   padding: 16px 18px;
   margin-bottom: 18px;
   border-radius: 20px;
-  background: linear-gradient(135deg, rgba(198, 93, 33, 0.12), rgba(255, 247, 238, 0.92));
-  border: 1px solid rgba(198, 93, 33, 0.2);
+  background: linear-gradient(135deg, rgba(22, 163, 167, 0.12), rgba(255, 255, 255, 0.92));
+  border: 1px solid rgba(22, 163, 167, 0.2);
 }
 
 .update-banner strong {
@@ -529,7 +562,7 @@ select:focus {
 
 .status-connecting,
 .status-starting {
-  background: rgba(198, 93, 33, 0.14);
+  background: rgba(22, 163, 167, 0.14);
   color: var(--accent-strong);
 }
 
@@ -578,9 +611,9 @@ select:focus {
 }
 
 .primary {
-  background: linear-gradient(135deg, #c65d21, #a13e1b);
-  color: #fff7ee;
-  box-shadow: 0 14px 24px rgba(161, 62, 27, 0.22);
+  background: linear-gradient(135deg, #16a3a7, #0e7f83);
+  color: #FFFFFF;
+  box-shadow: 0 14px 24px rgba(22, 163, 167, 0.22);
 }
 
 .primary.accent {
@@ -597,7 +630,7 @@ select:focus {
 .ghost {
   background: transparent;
   color: var(--muted);
-  border: 1px dashed rgba(44, 39, 32, 0.18);
+  border: 1px dashed rgba(30, 42, 68, 0.18);
 }
 
 .ghost.danger {
@@ -689,12 +722,12 @@ select:focus {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.7);
   color: var(--muted);
-  border: 1px solid rgba(44, 39, 32, 0.08);
+  border: 1px solid rgba(30, 42, 68, 0.08);
 }
 
 .section-tab.active {
-  background: rgba(198, 93, 33, 0.12);
-  border-color: rgba(198, 93, 33, 0.28);
+  background: rgba(22, 163, 167, 0.12);
+  border-color: rgba(22, 163, 167, 0.28);
   color: var(--accent-strong);
 }
 
@@ -716,7 +749,7 @@ select:focus {
 }
 
 .service-card.expanded {
-  box-shadow: 0 16px 30px rgba(125, 47, 24, 0.08);
+  box-shadow: 0 16px 30px rgba(30, 42, 68, 0.08);
 }
 
 .service-summary-button {
@@ -775,7 +808,7 @@ select:focus {
 .service-details {
   margin-top: 18px;
   padding-top: 18px;
-  border-top: 1px solid rgba(44, 39, 32, 0.08);
+  border-top: 1px solid rgba(30, 42, 68, 0.08);
 }
 
 .method-card {
@@ -805,7 +838,7 @@ select:focus {
 
 .service-save-state.dirty {
   color: var(--accent-strong);
-  background: rgba(198, 93, 33, 0.12);
+  background: rgba(22, 163, 167, 0.12);
 }
 
 .permission-actions {
@@ -837,7 +870,7 @@ select:focus {
   margin-bottom: 14px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.66);
-  border: 1px solid rgba(198, 93, 33, 0.14);
+  border: 1px solid rgba(22, 163, 167, 0.14);
 }
 
 .permission-banner strong {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import bjmLogoLight from "./assets/brand/bjm-logo-light.svg";
 
 type RuntimeStatus =
   | "stopped"
@@ -2451,8 +2452,14 @@ function renderOverviewPage() {
       <div className="desktop-shell">
         <aside className="sidebar">
           <div className="sidebar-brand">
-            <p className="eyebrow">Bridge Agent</p>
-            <h1>{config.device.name}</h1>
+            <div className="sidebar-brand-heading">
+              <img className="sidebar-brand-logo" src={bjmLogoLight} alt="" aria-hidden="true" />
+              <div>
+                <p className="eyebrow">Bridge Agent</p>
+                <h1>百积木桥接客户端</h1>
+              </div>
+            </div>
+            <p className="sidebar-device-name">{config.device.name}</p>
             <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
           </div>
 
