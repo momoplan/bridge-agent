@@ -11,8 +11,9 @@ pub use config::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists, load_config,
     manifest_preview_json, save_config, windows_service_config_path, AgentConfig,
     ComputerUseAction, ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, MethodBinding,
-    MethodConfig, PlatformConfig, RegistrationMethod, RegistrationTransport, RelayConfig,
-    RuntimeConfig, ServiceConfig, ServiceRegistration, UploadConfig,
+    MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
+    RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
+    ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
 

@@ -318,6 +318,44 @@ select:focus {
   gap: 18px;
 }
 
+.registered-service-runtime {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(44, 39, 32, 0.08);
+}
+
+.registered-service-runtime-main {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.registered-service-runtime-main strong,
+.registered-service-runtime-main p {
+  display: block;
+}
+
+.registered-service-runtime-main p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.registered-service-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .method-topline {
   display: flex;
   justify-content: space-between;
@@ -471,6 +509,22 @@ select:focus {
 .status-online {
   background: rgba(23, 114, 69, 0.12);
   color: var(--success);
+}
+
+.status-healthy {
+  background: rgba(23, 114, 69, 0.12);
+  color: var(--success);
+}
+
+.status-unhealthy {
+  background: rgba(152, 43, 43, 0.12);
+  color: var(--danger);
+}
+
+.status-unknown,
+.status-not_configured {
+  background: rgba(33, 28, 23, 0.08);
+  color: var(--muted);
 }
 
 .status-connecting,
@@ -900,6 +954,8 @@ select:focus {
 @media (max-width: 860px) {
   .page-header,
   .overview-status-row,
+  .registered-service-runtime,
+  .registered-service-runtime-main,
   .permission-banner,
   .update-banner,
   .card-head {

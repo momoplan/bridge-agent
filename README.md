@@ -255,6 +255,17 @@ curl -X POST http://127.0.0.1:18081/v1/services \
       "type": "http",
       "baseUrl": "http://127.0.0.1:39127"
     },
+    "healthCheck": {
+      "type": "http",
+      "path": "/health",
+      "timeoutSecs": 2,
+      "expectStatus": 200
+    },
+    "startCommand": {
+      "type": "shell_command",
+      "command": ["report-tool", "start"],
+      "timeoutSecs": 15
+    },
     "methods": [
       {
         "name": "generate",
@@ -279,6 +290,11 @@ curl -X POST http://127.0.0.1:18081/v1/services \
 ```
 
 注册成功后，bridge-agent 会把服务写入 `agent-config.json`，刷新正在运行的 runtime registry，并通过现有 WebSocket 重新上报 capabilities。外部 agent 看到的是普通的 `reportTool.generate`，不会看到本机 HTTP binding 细节。
+
+`healthCheck` 和 `startCommand` 是本机客户端使用的注册服务运行信息，不会上报给 relay capabilities：
+
+- `healthCheck.type=http`：支持 `path` 相对 `transport.baseUrl`，也支持直接传完整 `url`；`timeoutSecs` 默认由客户端控制，`expectStatus` 默认按 200 判断。
+- `startCommand.type=shell_command`：`command` 是 argv 数组，命令应当是“触发启动后退出”的动作，例如调用系统服务管理器；不要注册一个长期前台运行且不退出的命令。
 
 管理接口：
 

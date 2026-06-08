@@ -100,6 +100,10 @@ pub struct ServiceConfig {
     pub description: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default, alias = "healthCheck")]
+    pub health_check: Option<ServiceHealthCheck>,
+    #[serde(default, alias = "startCommand")]
+    pub start_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<MethodConfig>,
     #[serde(default)]
@@ -125,6 +129,38 @@ pub struct EventConfig {
     pub enabled: bool,
     #[serde(default = "default_object_schema")]
     pub payload_schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServiceHealthCheck {
+    Http {
+        url: String,
+        #[serde(default = "default_http_method")]
+        http_method: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default, alias = "timeoutSecs")]
+        timeout_secs: Option<u64>,
+        #[serde(default, alias = "expectStatus")]
+        expect_status: Option<u16>,
+        #[serde(default, alias = "bodyContains")]
+        body_contains: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServiceStartCommand {
+    ShellCommand {
+        command: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default, alias = "timeoutSecs")]
+        timeout_secs: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +261,8 @@ impl AgentConfig {
                     description: "Example business service backed by a local HTTP endpoint."
                         .to_string(),
                     enabled: false,
+                    health_check: None,
+                    start_command: None,
                     methods: vec![MethodConfig {
                         name: "invokeApi".to_string(),
                         description: "Forward invocation arguments to a local HTTP service."
@@ -467,6 +505,10 @@ pub struct ServiceRegistration {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     pub transport: RegistrationTransport,
+    #[serde(default, alias = "healthCheck")]
+    pub health_check: Option<RegistrationHealthCheck>,
+    #[serde(default, alias = "startCommand")]
+    pub start_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<RegistrationMethod>,
     #[serde(default)]
@@ -485,6 +527,27 @@ pub enum RegistrationTransport {
         base_url: String,
         #[serde(default)]
         headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RegistrationHealthCheck {
+    Http {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default = "default_http_method", alias = "httpMethod")]
+        http_method: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default, alias = "timeoutSecs")]
+        timeout_secs: Option<u64>,
+        #[serde(default, alias = "expectStatus")]
+        expect_status: Option<u16>,
+        #[serde(default, alias = "bodyContains")]
+        body_contains: Option<String>,
     },
 }
 
@@ -515,13 +578,19 @@ impl ServiceRegistration {
             bail!("service registration must include at least one method or event");
         }
 
-        let methods = match self.transport {
+        let (methods, health_check) = match self.transport {
             RegistrationTransport::Http { base_url, headers } => {
                 let base_url = normalize_registration_base_url(&base_url)?;
-                self.methods
+                let health_check = self
+                    .health_check
+                    .map(|health_check| health_check.into_service_health_check(&base_url, &headers))
+                    .transpose()?;
+                let methods = self
+                    .methods
                     .into_iter()
                     .map(|method| method.into_http_method_config(&base_url, &headers))
-                    .collect::<Result<Vec<_>>>()?
+                    .collect::<Result<Vec<_>>>()?;
+                (methods, health_check)
             }
         };
 
@@ -529,9 +598,50 @@ impl ServiceRegistration {
             name: self.name.trim().to_string(),
             description: self.description.trim().to_string(),
             enabled: self.enabled,
+            health_check,
+            start_command: self.start_command,
             methods,
             events: self.events,
         })
+    }
+}
+
+impl RegistrationHealthCheck {
+    fn into_service_health_check(
+        self,
+        base_url: &Url,
+        transport_headers: &BTreeMap<String, String>,
+    ) -> Result<ServiceHealthCheck> {
+        match self {
+            RegistrationHealthCheck::Http {
+                path,
+                url,
+                http_method,
+                headers,
+                timeout_secs,
+                expect_status,
+                body_contains,
+            } => {
+                let resolved_url = match url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(url) => normalize_registration_base_url(url)?.to_string(),
+                    None => join_registration_url(base_url, path.as_deref().unwrap_or("/health"))?,
+                };
+                let mut resolved_headers = transport_headers.clone();
+                resolved_headers.extend(headers);
+                Ok(ServiceHealthCheck::Http {
+                    url: resolved_url,
+                    http_method: http_method.trim().to_uppercase(),
+                    headers: resolved_headers,
+                    timeout_secs,
+                    expect_status,
+                    body_contains,
+                })
+            }
+        }
     }
 }
 
@@ -834,6 +944,8 @@ fn default_computer_service() -> ServiceConfig {
         name: "computer".to_string(),
         description: "Computer control operations exposed as business methods.".to_string(),
         enabled: true,
+        health_check: None,
+        start_command: None,
         methods: vec![
             computer_method(
                 "screenshot",
@@ -890,6 +1002,8 @@ fn default_shell_exec_service() -> ServiceConfig {
         name: "shellExec".to_string(),
         description: "Run allowlisted shell commands on the local machine.".to_string(),
         enabled: true,
+        health_check: None,
+        start_command: None,
         methods: vec![default_shell_exec_method()],
         events: Vec::new(),
     }
@@ -1223,7 +1337,7 @@ mod tests {
     use super::{
         default_shell_exec_allow_commands, ensure_browser_auth_agent_id, load_config,
         manifest_preview_json, save_config, AgentConfig, EventConfig, MethodBinding, ServiceConfig,
-        ServiceRegistration,
+        ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
     };
     use serde_json::json;
     use std::fs;
@@ -1369,6 +1483,8 @@ mod tests {
             name: "asyncJob".to_string(),
             description: "Async job events.".to_string(),
             enabled: true,
+            health_check: None,
+            start_command: None,
             methods: Vec::new(),
             events: vec![EventConfig {
                 name: "finished".to_string(),
@@ -1405,6 +1521,17 @@ mod tests {
                     "x-tool": "report"
                 }
             },
+            "healthCheck": {
+                "type": "http",
+                "path": "/health",
+                "timeoutSecs": 2,
+                "expectStatus": 200
+            },
+            "startCommand": {
+                "type": "shell_command",
+                "command": ["report-tool", "start"],
+                "timeoutSecs": 10
+            },
             "methods": [
                 {
                     "name": "generate",
@@ -1432,6 +1559,31 @@ mod tests {
         assert!(replace);
         assert_eq!(service.name, "reportTool");
         assert_eq!(service.events[0].name, "finished");
+        match service.health_check.as_ref().unwrap() {
+            ServiceHealthCheck::Http {
+                url,
+                timeout_secs,
+                expect_status,
+                ..
+            } => {
+                assert_eq!(url, "http://127.0.0.1:39127/api/health");
+                assert_eq!(*timeout_secs, Some(2));
+                assert_eq!(*expect_status, Some(200));
+            }
+        }
+        match service.start_command.as_ref().unwrap() {
+            ServiceStartCommand::ShellCommand {
+                command,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(
+                    command,
+                    &vec!["report-tool".to_string(), "start".to_string()]
+                );
+                assert_eq!(*timeout_secs, Some(10));
+            }
+        }
         match &service.methods[0].binding {
             MethodBinding::Http(binding) => {
                 assert_eq!(binding.url, "http://127.0.0.1:39127/api/invoke/generate");

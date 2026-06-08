@@ -114,10 +114,34 @@ interface EventConfig {
   payload_schema: unknown;
 }
 
+interface ServiceHealthCheckHttp {
+  type: "http";
+  url: string;
+  http_method: string;
+  headers: Record<string, string>;
+  timeout_secs?: number | null;
+  expect_status?: number | null;
+  body_contains?: string | null;
+}
+
+type ServiceHealthCheck = ServiceHealthCheckHttp;
+
+interface ServiceStartShellCommand {
+  type: "shell_command";
+  command: string[];
+  cwd?: string | null;
+  env: Record<string, string>;
+  timeout_secs?: number | null;
+}
+
+type ServiceStartCommand = ServiceStartShellCommand;
+
 interface ServiceConfig {
   name: string;
   description: string;
   enabled: boolean;
+  health_check?: ServiceHealthCheck | null;
+  start_command?: ServiceStartCommand | null;
   methods: MethodConfig[];
   events: EventConfig[];
 }
@@ -224,8 +248,30 @@ interface UiServiceConfig {
   name: string;
   description: string;
   enabled: boolean;
+  health_check: ServiceHealthCheck | null;
+  start_command: ServiceStartCommand | null;
   methods: UiMethodConfig[];
   events: UiEventConfig[];
+}
+
+type RegisteredServiceState = "not_configured" | "healthy" | "unhealthy" | "unknown";
+
+interface RegisteredServiceStatus {
+  service: string;
+  status: RegisteredServiceState;
+  detail: string | null;
+  checkedAtMs: number;
+  healthCheckConfigured: boolean;
+  startCommandConfigured: boolean;
+}
+
+interface StartRegisteredServiceResult {
+  service: string;
+  success: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
 }
 
 interface UiAgentConfig {
@@ -448,8 +494,10 @@ function App() {
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
+  const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [desktopPermissionBusy, setDesktopPermissionBusy] = useState<"accessibility" | "screen_recording" | null>(
     null
   );
@@ -474,6 +522,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    void refreshRegisteredServiceStatuses();
+  }, []);
+
+  useEffect(() => {
     const handleWindowFocus = () => {
       void refreshDesktopPermissions();
     };
@@ -495,6 +547,13 @@ function App() {
     const timer = window.setInterval(() => {
       void refreshRuntime();
     }, 1500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshRegisteredServiceStatuses();
+    }, 5000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -648,6 +707,7 @@ function App() {
       applyConfigDocument(document);
       const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
       setLogs(latestLogs);
+      await refreshRegisteredServiceStatuses();
     } catch (err) {
       setError(readError(err));
     }
@@ -672,6 +732,40 @@ function App() {
       setDesktopPermissions(status);
     } catch (err) {
       console.warn("读取桌面权限状态失败", err);
+    }
+  }
+
+  async function refreshRegisteredServiceStatuses() {
+    try {
+      const statuses = await invoke<RegisteredServiceStatus[]>("registered_service_statuses");
+      setRegisteredServiceStatuses(statuses);
+    } catch (err) {
+      console.warn("读取注册服务状态失败", err);
+    }
+  }
+
+  async function startRegisteredService(serviceName: string) {
+    try {
+      setServiceStartBusy(serviceName);
+      setMessage("");
+      setError("");
+      const result = await invoke<StartRegisteredServiceResult>("start_registered_service", {
+        service: serviceName
+      });
+      if (result.success) {
+        setMessage(`服务 ${serviceName} 的启动命令已执行`);
+      } else {
+        setError(
+          `服务 ${serviceName} 启动命令执行失败` +
+            (result.exitCode == null ? "" : `，退出码 ${result.exitCode}`) +
+            (result.stderr.trim() ? `：${result.stderr.trim()}` : "")
+        );
+      }
+      await refreshRegisteredServiceStatuses();
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setServiceStartBusy(null);
     }
   }
 
@@ -1061,6 +1155,8 @@ function App() {
                 name: "new-service",
                 description: "Describe this business service.",
                 enabled: true,
+                health_check: null,
+                start_command: null,
                 methods: [createShellMethod()],
                 events: []
               }
@@ -1584,6 +1680,8 @@ function renderOverviewPage() {
     const isSystem = isSystemService(service);
     const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
     const servicePersisted = savedServiceSignatures[serviceIndex] != null;
+    const runtimeStatus = registeredServiceStatuses.find((status) => status.service === service.name);
+    const hasRuntimeControls = service.health_check != null || service.start_command != null;
 
     return (
       <Card
@@ -1633,6 +1731,35 @@ function renderOverviewPage() {
           </div>
         }
       >
+        {hasRuntimeControls ? (
+          <div className="registered-service-runtime">
+            <div className="registered-service-runtime-main">
+              <div>
+                <strong>服务运行</strong>
+                <p>{runtimeStatus?.detail ?? "等待状态检查"}</p>
+              </div>
+              <div className={`status-pill status-${runtimeStatus?.status ?? "unknown"}`}>
+                {formatRegisteredServiceStatus(runtimeStatus?.status ?? "unknown")}
+              </div>
+            </div>
+            <div className="registered-service-runtime-actions">
+              {service.health_check ? (
+                <button className="ghost" onClick={() => void refreshRegisteredServiceStatuses()}>
+                  检查状态
+                </button>
+              ) : null}
+              {service.start_command ? (
+                <button
+                  className="secondary"
+                  onClick={() => void startRegisteredService(service.name)}
+                  disabled={serviceStartBusy != null}
+                >
+                  {serviceStartBusy === service.name ? "启动中" : "启动服务"}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div className="service-editor-layout">
           {!isSystem ? (
             <>
@@ -2605,6 +2732,8 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
       name: service.name,
       description: service.description,
       enabled: service.enabled,
+      health_check: service.health_check ?? null,
+      start_command: service.start_command ?? null,
       events: (service.events ?? []).map((eventConfig) => ({
         name: eventConfig.name,
         description: eventConfig.description,
@@ -2670,6 +2799,8 @@ function fromUiService(service: UiServiceConfig): ServiceConfig {
     name: service.name.trim(),
     description: service.description.trim(),
     enabled: service.enabled,
+    health_check: service.health_check,
+    start_command: service.start_command,
     events: service.events.map((eventConfig) => ({
       name: eventConfig.name.trim(),
       description: eventConfig.description.trim(),
@@ -2822,6 +2953,16 @@ function formatDesktopPermissionValue(
     return status.screenRecordingGranted ? "已授权" : "未授权";
   }
   return status.accessibilityGranted ? "已授权" : "未授权";
+}
+
+function formatRegisteredServiceStatus(status: RegisteredServiceState): string {
+  const labels: Record<RegisteredServiceState, string> = {
+    not_configured: "未配置",
+    healthy: "可用",
+    unhealthy: "不可用",
+    unknown: "未知"
+  };
+  return labels[status];
 }
 
 function headersToText(headers: Record<string, string>): string {

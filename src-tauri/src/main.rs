@@ -4,7 +4,7 @@ use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
     save_config as save_agent_config, AgentConfig, AgentRuntimeManager, RuntimeSnapshot,
-    ServiceConfig,
+    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -16,12 +16,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+use tokio::process::Command as AsyncCommand;
+use tokio::time::timeout;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -124,6 +126,37 @@ struct DesktopPermissionStatus {
     screen_recording_granted: bool,
     accessibility_supported: bool,
     screen_recording_supported: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RegisteredServiceState {
+    NotConfigured,
+    Healthy,
+    Unhealthy,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredServiceStatus {
+    service: String,
+    status: RegisteredServiceState,
+    detail: Option<String>,
+    checked_at_ms: u64,
+    health_check_configured: bool,
+    start_command_configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartRegisteredServiceResult {
+    service: String,
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -329,6 +362,50 @@ fn open_in_browser(url: String) -> Result<(), String> {
 #[tauri::command]
 fn desktop_permission_status() -> Result<DesktopPermissionStatus, String> {
     Ok(read_desktop_permission_status())
+}
+
+#[tauri::command]
+async fn registered_service_statuses(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<RegisteredServiceStatus>, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut statuses = Vec::new();
+
+    for service in config.services {
+        if service.health_check.is_none() && service.start_command.is_none() {
+            continue;
+        }
+        statuses.push(check_registered_service(&client, service).await);
+    }
+
+    Ok(statuses)
+}
+
+#[tauri::command]
+async fn start_registered_service(
+    state: tauri::State<'_, DesktopState>,
+    service: String,
+) -> Result<StartRegisteredServiceResult, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let requested_service = service.trim();
+    if requested_service.is_empty() {
+        return Err("服务名不能为空".to_string());
+    }
+    let service_config = config
+        .services
+        .into_iter()
+        .find(|candidate| candidate.name == requested_service)
+        .ok_or_else(|| format!("服务 `{requested_service}` 未注册"))?;
+    let Some(start_command) = service_config.start_command else {
+        return Err(format!("服务 `{requested_service}` 没有注册启动命令"));
+    };
+    run_start_command(service_config.name, start_command).await
 }
 
 #[tauri::command]
@@ -945,6 +1022,156 @@ fn read_desktop_permission_status() -> DesktopPermissionStatus {
     }
 }
 
+async fn check_registered_service(client: &Client, service: ServiceConfig) -> RegisteredServiceStatus {
+    let health_check_configured = service.health_check.is_some();
+    let start_command_configured = service.start_command.is_some();
+    let Some(health_check) = service.health_check else {
+        return RegisteredServiceStatus {
+            service: service.name,
+            status: RegisteredServiceState::NotConfigured,
+            detail: Some("没有注册 healthCheck".to_string()),
+            checked_at_ms: now_ms(),
+            health_check_configured,
+            start_command_configured,
+        };
+    };
+
+    match health_check {
+        ServiceHealthCheck::Http {
+            url,
+            http_method,
+            headers,
+            timeout_secs,
+            expect_status,
+            body_contains,
+        } => {
+            let method = http_method
+                .parse::<reqwest::Method>()
+                .unwrap_or(reqwest::Method::GET);
+            let mut request = client
+                .request(method, &url)
+                .timeout(Duration::from_secs(timeout_secs.unwrap_or(3).max(1)));
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let expected_status = expect_status.unwrap_or(200);
+                    if status.as_u16() != expected_status {
+                        return RegisteredServiceStatus {
+                            service: service.name,
+                            status: RegisteredServiceState::Unhealthy,
+                            detail: Some(format!(
+                                "health HTTP {}，期望 {}",
+                                status.as_u16(),
+                                expected_status
+                            )),
+                            checked_at_ms: now_ms(),
+                            health_check_configured,
+                            start_command_configured,
+                        };
+                    }
+                    if let Some(expected_text) = body_contains.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                        match response.text().await {
+                            Ok(body) if body.contains(expected_text) => {}
+                            Ok(_) => {
+                                return RegisteredServiceStatus {
+                                    service: service.name,
+                                    status: RegisteredServiceState::Unhealthy,
+                                    detail: Some("health 响应内容不符合 bodyContains".to_string()),
+                                    checked_at_ms: now_ms(),
+                                    health_check_configured,
+                                    start_command_configured,
+                                };
+                            }
+                            Err(err) => {
+                                return RegisteredServiceStatus {
+                                    service: service.name,
+                                    status: RegisteredServiceState::Unknown,
+                                    detail: Some(format!("读取 health 响应失败: {err}")),
+                                    checked_at_ms: now_ms(),
+                                    health_check_configured,
+                                    start_command_configured,
+                                };
+                            }
+                        }
+                    }
+                    RegisteredServiceStatus {
+                        service: service.name,
+                        status: RegisteredServiceState::Healthy,
+                        detail: Some(format!("health HTTP {}", status.as_u16())),
+                        checked_at_ms: now_ms(),
+                        health_check_configured,
+                        start_command_configured,
+                    }
+                }
+                Err(err) => RegisteredServiceStatus {
+                    service: service.name,
+                    status: RegisteredServiceState::Unhealthy,
+                    detail: Some(format!("health 检查失败: {err}")),
+                    checked_at_ms: now_ms(),
+                    health_check_configured,
+                    start_command_configured,
+                },
+            }
+        }
+    }
+}
+
+async fn run_start_command(
+    service: String,
+    start_command: ServiceStartCommand,
+) -> Result<StartRegisteredServiceResult, String> {
+    match start_command {
+        ServiceStartCommand::ShellCommand {
+            command,
+            cwd,
+            env,
+            timeout_secs,
+        } => {
+            if command.is_empty() || command[0].trim().is_empty() {
+                return Err(format!("服务 `{service}` 的启动命令为空"));
+            }
+            let mut process = AsyncCommand::new(&command[0]);
+            process.args(command.iter().skip(1));
+            if let Some(cwd) = cwd.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                process.current_dir(cwd);
+            }
+            process.envs(env);
+            process.kill_on_drop(true);
+
+            let timeout_secs = timeout_secs.unwrap_or(15).max(1);
+            match timeout(Duration::from_secs(timeout_secs), process.output()).await {
+                Ok(Ok(output)) => Ok(StartRegisteredServiceResult {
+                    service,
+                    success: output.status.success(),
+                    exit_code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    timed_out: false,
+                }),
+                Ok(Err(err)) => Err(format!("启动服务 `{service}` 失败: {err}")),
+                Err(_) => Ok(StartRegisteredServiceResult {
+                    service,
+                    success: false,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: format!("timed out after {timeout_secs}s"),
+                    timed_out: true,
+                }),
+            }
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 #[cfg(target_os = "macos")]
 fn prompt_accessibility_permission() {
     let key = CFString::new("AXTrustedCheckOptionPrompt");
@@ -1097,6 +1324,8 @@ fn main() {
             reset_example_config,
             open_in_browser,
             desktop_permission_status,
+            registered_service_statuses,
+            start_registered_service,
             request_desktop_permission,
             open_desktop_permission_settings,
             start_browser_auth,
