@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
@@ -222,6 +224,7 @@ struct ComputerDragArgs {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PrepareUploadRequest {
     agent_id: String,
     content_type: String,
@@ -233,6 +236,7 @@ struct PrepareUploadRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PrepareUploadResponse {
     file_id: String,
     upload_url: String,
@@ -2074,9 +2078,7 @@ fn scalar_to_query_string(value: &Value) -> String {
 
 pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut base = BTreeMap::new();
-    for key in [
-        "HOME", "LANG", "LC_ALL", "LOGNAME", "SHELL", "TMPDIR", "USER",
-    ] {
+    for key in shell_env_passthrough_keys() {
         if let Ok(value) = std::env::var(key) {
             base.insert(key.to_string(), value);
         }
@@ -2089,7 +2091,7 @@ pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
         base.insert(key, value);
     }
 
-    let home = base.get("HOME").map(PathBuf::from);
+    let home = shell_home_dir(&base);
     let path = base
         .get("PATH")
         .cloned()
@@ -2102,10 +2104,62 @@ pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
     base
 }
 
+fn shell_env_passthrough_keys() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "APPDATA",
+            "COMSPEC",
+            "HOME",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "LANG",
+            "LOCALAPPDATA",
+            "NUMBER_OF_PROCESSORS",
+            "OS",
+            "PATHEXT",
+            "PROCESSOR_ARCHITECTURE",
+            "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL",
+            "PROCESSOR_REVISION",
+            "PROGRAMDATA",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+            "PROGRAMW6432",
+            "SYSTEMDRIVE",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "USERDOMAIN",
+            "USERNAME",
+            "USERPROFILE",
+            "WINDIR",
+        ]
+    } else {
+        &[
+            "HOME", "LANG", "LC_ALL", "LOGNAME", "SHELL", "TMPDIR", "USER",
+        ]
+    }
+}
+
+fn shell_home_dir(base: &BTreeMap<String, String>) -> Option<PathBuf> {
+    base.get("HOME")
+        .or_else(|| base.get("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn shell_exec_path(current_path: Option<&str>, home: Option<&Path>) -> Option<String> {
     let mut paths = Vec::new();
     for candidate in shell_toolchain_path_candidates(home) {
         push_path_if_present(&mut paths, candidate);
+    }
+
+    #[cfg(windows)]
+    {
+        for registry_path in windows_registry_path_values() {
+            for path in std::env::split_paths(&registry_path) {
+                push_path_if_present(&mut paths, path);
+            }
+        }
     }
 
     if let Some(current_path) = current_path {
@@ -2144,11 +2198,41 @@ fn shell_toolchain_path_candidates(home: Option<&Path>) -> Vec<PathBuf> {
             candidates.push(home.join(relative));
         }
 
+        #[cfg(windows)]
+        {
+            for relative in [
+                "scoop/shims",
+                "scoop/apps/git/current/cmd",
+                "scoop/apps/git/current/bin",
+                "AppData/Local/Programs/Git/cmd",
+                "AppData/Local/Programs/Git/bin",
+                "AppData/Local/Programs/Git/usr/bin",
+            ] {
+                candidates.push(home.join(relative));
+            }
+        }
+
         candidates.extend(versioned_node_bin_dirs(&home.join(".nvm/versions/node")));
         candidates.extend(versioned_node_bin_dirs(&home.join(".fnm/node-versions")));
         candidates.extend(versioned_node_bin_dirs(
             &home.join(".local/share/fnm/node-versions"),
         ));
+    }
+
+    #[cfg(windows)]
+    {
+        for env_key in ["PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)"] {
+            if let Ok(program_files) = std::env::var(env_key) {
+                let root = PathBuf::from(program_files).join("Git");
+                candidates.push(root.join("cmd"));
+                candidates.push(root.join("bin"));
+                candidates.push(root.join("usr/bin"));
+                candidates.push(root.join("mingw64/bin"));
+            }
+        }
+        if let Ok(program_data) = std::env::var("PROGRAMDATA") {
+            candidates.push(PathBuf::from(program_data).join("chocolatey/bin"));
+        }
     }
 
     for absolute in [
@@ -2233,9 +2317,98 @@ fn push_path_if_present(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     }
 }
 
+#[cfg(windows)]
+fn windows_registry_path_values() -> Vec<String> {
+    [
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        r"HKCU\Environment",
+    ]
+    .into_iter()
+    .filter_map(windows_registry_path_value)
+    .collect()
+}
+
+#[cfg(windows)]
+fn windows_registry_path_value(key: &str) -> Option<String> {
+    let output = StdCommand::new(windows_system32_exe("reg.exe"))
+        .args(["query", key, "/v", "Path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(parse_reg_path_line)
+}
+
+#[cfg(windows)]
+fn parse_reg_path_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("Path") {
+        return None;
+    }
+
+    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+    let value_index = parts
+        .iter()
+        .position(|part| *part == "REG_SZ" || *part == "REG_EXPAND_SZ")?
+        + 1;
+    if value_index >= parts.len() {
+        return None;
+    }
+    let raw = parts[value_index..].join(" ");
+    Some(expand_windows_env_vars(&raw))
+}
+
+#[cfg(windows)]
+fn expand_windows_env_vars(value: &str) -> String {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            expanded.push('%');
+            expanded.push_str(after_start);
+            return expanded;
+        };
+        let key = &after_start[..end];
+        match std::env::var(key) {
+            Ok(env_value) => expanded.push_str(&env_value),
+            Err(_) => {
+                expanded.push('%');
+                expanded.push_str(key);
+                expanded.push('%');
+            }
+        }
+        rest = &after_start[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+#[cfg(windows)]
+fn windows_system32_exe(file_name: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join(file_name)
+}
+
 fn default_system_path() -> String {
     if cfg!(windows) {
-        String::new()
+        let root = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("WINDIR"))
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        std::env::join_paths([
+            PathBuf::from(&root).join("System32"),
+            PathBuf::from(&root),
+            PathBuf::from(&root).join("System32/WindowsPowerShell/v1.0"),
+        ])
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default()
     } else {
         "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
     }
@@ -2283,8 +2456,8 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, ServiceRegistry,
-        ShellCommand, ShellExecArgs,
+        is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, PrepareUploadRequest,
+        ServiceRegistry, ShellCommand, ShellExecArgs,
     };
     use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use serde_json::json;
@@ -2379,6 +2552,26 @@ mod tests {
                 "where wechat-decrypt".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn prepare_upload_request_uses_relay_camel_case_schema() {
+        let payload = serde_json::to_value(PrepareUploadRequest {
+            agent_id: "devbox".to_string(),
+            content_type: "image/png".to_string(),
+            file_name: "shot.png".to_string(),
+            size_bytes: 123,
+            workspace_id: Some(42),
+            purpose: "computer_screenshot".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(payload["agentId"], "devbox");
+        assert_eq!(payload["contentType"], "image/png");
+        assert_eq!(payload["fileName"], "shot.png");
+        assert_eq!(payload["sizeBytes"], 123);
+        assert_eq!(payload["workspaceId"], 42);
+        assert!(payload.get("agent_id").is_none());
     }
 
     #[test]
