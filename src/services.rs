@@ -17,9 +17,13 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::process::Command;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
+use tokio::sync::{oneshot, Mutex};
+use tokio::time::{sleep, Duration};
+use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -75,6 +79,7 @@ struct ShellMethod {
     allow_commands: Vec<String>,
     default_timeout_secs: u64,
     max_timeout_secs: u64,
+    executions: ShellExecutionStore,
 }
 
 struct HttpMethod {
@@ -112,6 +117,15 @@ struct ShellExecArgs {
     cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default, alias = "timeoutSeconds", alias = "timeout_secs")]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellExecutionIdArgs {
+    #[serde(alias = "execution_id")]
+    execution_id: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -170,6 +184,81 @@ struct ShellExecData {
     stdout: String,
     stderr: String,
     timed_out: bool,
+}
+
+#[derive(Clone, Default)]
+struct ShellExecutionStore {
+    entries: Arc<Mutex<BTreeMap<String, ShellExecutionRecord>>>,
+}
+
+struct ShellExecutionRecord {
+    execution_id: String,
+    command: Vec<String>,
+    cwd: String,
+    status: ShellExecutionStatus,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+    success: Option<bool>,
+    error: Option<InvokeError>,
+    timeout_secs: u64,
+    started_at_epoch_ms: u64,
+    completed_at_epoch_ms: Option<u64>,
+    duration_ms: Option<u64>,
+    cancel_requested: bool,
+    cancel_tx: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ShellExecutionStatus {
+    Running,
+    Succeeded,
+    Failed,
+    TimedOut,
+    Canceled,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellExecutionSnapshot {
+    execution_id: String,
+    command: Vec<String>,
+    cwd: String,
+    status: ShellExecutionStatus,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+    success: Option<bool>,
+    error: Option<InvokeError>,
+    timeout_secs: u64,
+    started_at_epoch_ms: u64,
+    completed_at_epoch_ms: Option<u64>,
+    duration_ms: Option<u64>,
+    cancel_requested: bool,
+}
+
+#[derive(Debug)]
+struct PreparedShellExec {
+    command_args: Vec<String>,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+    timeout_secs: u64,
+    path_for_diagnostics: String,
+}
+
+struct CompletedShellExec {
+    status: ShellExecutionStatus,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+    success: bool,
+    error: Option<InvokeError>,
+    duration_ms: u64,
+    completed_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,12 +344,14 @@ struct PrepareUploadResponse {
 impl ServiceRegistry {
     pub fn from_config(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
         let mut services = BTreeMap::new();
+        let shell_executions = ShellExecutionStore::default();
 
         for service in &config.services {
             if !service.enabled {
                 continue;
             }
-            let runtime_service = build_runtime_service(service, config, config_base_dir)?;
+            let runtime_service =
+                build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
             if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
                 services.insert(service.name.clone(), runtime_service);
             }
@@ -325,7 +416,7 @@ impl ServiceRegistry {
 impl RuntimeMethod {
     async fn invoke(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
         match self {
-            Self::Shell(method) => method.exec(arguments, timeout_secs).await,
+            Self::Shell(method) => method.invoke(arguments, timeout_secs).await,
             Self::Http(method) => method.invoke(arguments, timeout_secs).await,
             Self::Computer(method) => method.invoke(arguments).await,
         }
@@ -333,7 +424,125 @@ impl RuntimeMethod {
 }
 
 impl ShellMethod {
+    async fn invoke(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
+        match self.method_name.as_str() {
+            "startExecution" => self.start_execution(arguments, timeout_secs).await,
+            "getExecution" => self.get_execution(arguments).await,
+            "cancelExecution" => self.cancel_execution(arguments).await,
+            _ => self.exec(arguments, timeout_secs).await,
+        }
+    }
+
     async fn exec(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
+        let prepared = match self.prepare_execution(arguments, timeout_secs)? {
+            Ok(prepared) => prepared,
+            Err(outcome) => return Ok(outcome),
+        };
+        let completed = run_shell_command(prepared, None).await;
+
+        Ok(ServiceOutcome {
+            success: completed.success,
+            data: Some(serde_json::to_value(ShellExecData {
+                exit_code: completed.exit_code,
+                stdout: completed.stdout,
+                stderr: completed.stderr,
+                timed_out: completed.timed_out,
+            })?),
+            error: completed.error,
+        })
+    }
+
+    async fn start_execution(
+        &self,
+        arguments: Value,
+        timeout_secs: Option<u64>,
+    ) -> Result<ServiceOutcome> {
+        let prepared = match self.prepare_execution(arguments, timeout_secs)? {
+            Ok(prepared) => prepared,
+            Err(outcome) => return Ok(outcome),
+        };
+        let snapshot = self.executions.start(prepared).await;
+
+        Ok(ServiceOutcome {
+            success: true,
+            data: Some(serde_json::to_value(snapshot).context("serialize execution snapshot")?),
+            error: None,
+        })
+    }
+
+    async fn get_execution(&self, arguments: Value) -> Result<ServiceOutcome> {
+        let args: ShellExecutionIdArgs = serde_json::from_value(arguments).map_err(|err| {
+            anyhow!(
+                "invalid arguments for {}.{}: {err}",
+                self.service_name,
+                self.method_name
+            )
+        })?;
+        let execution_id = args.execution_id.trim();
+        if execution_id.is_empty() {
+            bail!(
+                "{}.{} requires executionId",
+                self.service_name,
+                self.method_name
+            );
+        }
+
+        match self.executions.get(execution_id).await {
+            Some(snapshot) => Ok(ServiceOutcome {
+                success: true,
+                data: Some(serde_json::to_value(snapshot).context("serialize execution snapshot")?),
+                error: None,
+            }),
+            None => Ok(ServiceOutcome {
+                success: false,
+                data: None,
+                error: Some(InvokeError {
+                    code: "EXECUTION_NOT_FOUND".to_string(),
+                    message: format!("execution `{execution_id}` was not found"),
+                }),
+            }),
+        }
+    }
+
+    async fn cancel_execution(&self, arguments: Value) -> Result<ServiceOutcome> {
+        let args: ShellExecutionIdArgs = serde_json::from_value(arguments).map_err(|err| {
+            anyhow!(
+                "invalid arguments for {}.{}: {err}",
+                self.service_name,
+                self.method_name
+            )
+        })?;
+        let execution_id = args.execution_id.trim();
+        if execution_id.is_empty() {
+            bail!(
+                "{}.{} requires executionId",
+                self.service_name,
+                self.method_name
+            );
+        }
+
+        match self.executions.cancel(execution_id).await {
+            Some(snapshot) => Ok(ServiceOutcome {
+                success: true,
+                data: Some(serde_json::to_value(snapshot).context("serialize execution snapshot")?),
+                error: None,
+            }),
+            None => Ok(ServiceOutcome {
+                success: false,
+                data: None,
+                error: Some(InvokeError {
+                    code: "EXECUTION_NOT_FOUND".to_string(),
+                    message: format!("execution `{execution_id}` was not found"),
+                }),
+            }),
+        }
+    }
+
+    fn prepare_execution(
+        &self,
+        arguments: Value,
+        request_timeout_secs: Option<u64>,
+    ) -> Result<std::result::Result<PreparedShellExec, ServiceOutcome>> {
         let args: ShellExecArgs = serde_json::from_value(arguments).map_err(|err| {
             anyhow!(
                 "invalid arguments for {}.{}: {err}",
@@ -341,7 +550,6 @@ impl ShellMethod {
                 self.method_name
             )
         })?;
-
         if args.command.is_empty() {
             bail!(
                 "{}.{} requires a non-empty command",
@@ -353,89 +561,336 @@ impl ShellMethod {
         let command_args = args.command.into_args();
         let executable = &command_args[0];
         if !is_command_allowed(executable, &self.allow_commands) {
-            return Ok(ServiceOutcome {
+            return Ok(Err(ServiceOutcome {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
                     code: "COMMAND_NOT_ALLOWED".to_string(),
                     message: format!("command `{executable}` is not in allowlist"),
                 }),
-            });
+            }));
         }
 
         let cwd = resolve_cwd(&self.root_dir, args.cwd.as_deref())?;
-        let timeout_secs = timeout_secs
+        let timeout_secs = request_timeout_secs
+            .or(args.timeout_secs)
             .unwrap_or(self.default_timeout_secs)
             .min(self.max_timeout_secs);
         let env = sanitize_env(args.env);
         let path_for_diagnostics = env.get("PATH").cloned().unwrap_or_default();
 
-        let mut command = Command::new(executable);
-        command
-            .args(command_args.iter().skip(1))
-            .current_dir(&cwd)
-            .env_clear()
-            .envs(env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        Ok(Ok(PreparedShellExec {
+            command_args,
+            cwd,
+            env,
+            timeout_secs,
+            path_for_diagnostics,
+        }))
+    }
+}
 
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let message = format!("failed to spawn `{executable}` in {}: {err}", cwd.display());
-                let stderr = if err.kind() == ErrorKind::NotFound {
-                    format!("{message}\nPATH={path_for_diagnostics}")
-                } else {
-                    message.clone()
-                };
-
-                return Ok(ServiceOutcome {
-                    success: false,
-                    data: Some(serde_json::to_value(ShellExecData {
-                        exit_code: None,
-                        stdout: String::new(),
-                        stderr,
-                        timed_out: false,
-                    })?),
-                    error: Some(InvokeError {
-                        code: "COMMAND_SPAWN_FAILED".to_string(),
-                        message,
-                    }),
-                });
-            }
+impl ShellExecutionStore {
+    async fn start(&self, prepared: PreparedShellExec) -> ShellExecutionSnapshot {
+        let execution_id = Uuid::new_v4().to_string();
+        let started_at_epoch_ms = current_epoch_ms();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let record = ShellExecutionRecord {
+            execution_id: execution_id.clone(),
+            command: prepared.command_args.clone(),
+            cwd: prepared.cwd.display().to_string(),
+            status: ShellExecutionStatus::Running,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            success: None,
+            error: None,
+            timeout_secs: prepared.timeout_secs,
+            started_at_epoch_ms,
+            completed_at_epoch_ms: None,
+            duration_ms: None,
+            cancel_requested: false,
+            cancel_tx: Some(cancel_tx),
         };
+        let snapshot = record.snapshot();
+        let store = self.clone();
+        let task_execution_id = execution_id.clone();
 
-        match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
-            Ok(output) => {
-                let output = output?;
-                Ok(ServiceOutcome {
-                    success: output.status.success(),
-                    data: Some(serde_json::to_value(ShellExecData {
-                        exit_code: output.status.code(),
-                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                        timed_out: false,
-                    })?),
-                    error: None,
-                })
+        self.insert(record).await;
+
+        tokio::spawn(async move {
+            let completed = run_shell_command(prepared, Some(cancel_rx)).await;
+            store.complete(&task_execution_id, completed).await;
+        });
+
+        snapshot
+    }
+
+    async fn insert(&self, record: ShellExecutionRecord) {
+        let mut entries = self.entries.lock().await;
+        entries.insert(record.execution_id.clone(), record);
+        prune_shell_executions(&mut entries);
+    }
+
+    async fn get(&self, execution_id: &str) -> Option<ShellExecutionSnapshot> {
+        let entries = self.entries.lock().await;
+        entries
+            .get(execution_id)
+            .map(ShellExecutionRecord::snapshot)
+    }
+
+    async fn cancel(&self, execution_id: &str) -> Option<ShellExecutionSnapshot> {
+        let mut entries = self.entries.lock().await;
+        let record = entries.get_mut(execution_id)?;
+        if matches!(record.status, ShellExecutionStatus::Running) {
+            record.cancel_requested = true;
+            if let Some(cancel_tx) = record.cancel_tx.take() {
+                let _ = cancel_tx.send(());
             }
-            Err(_) => Ok(ServiceOutcome {
-                success: false,
-                data: Some(serde_json::to_value(ShellExecData {
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    timed_out: true,
-                })?),
-                error: Some(InvokeError {
-                    code: "TIMEOUT".to_string(),
-                    message: format!("timed out after {timeout_secs}s"),
-                }),
-            }),
+        }
+        Some(record.snapshot())
+    }
+
+    async fn complete(&self, execution_id: &str, completed: CompletedShellExec) {
+        let mut entries = self.entries.lock().await;
+        if let Some(record) = entries.get_mut(execution_id) {
+            record.status = completed.status;
+            record.exit_code = completed.exit_code;
+            record.stdout = completed.stdout;
+            record.stderr = completed.stderr;
+            record.timed_out = completed.timed_out;
+            record.success = Some(completed.success);
+            record.error = completed.error;
+            record.completed_at_epoch_ms = Some(completed.completed_at_epoch_ms);
+            record.duration_ms = Some(completed.duration_ms);
+            record.cancel_tx = None;
+        }
+        prune_shell_executions(&mut entries);
+    }
+}
+
+impl ShellExecutionRecord {
+    fn snapshot(&self) -> ShellExecutionSnapshot {
+        ShellExecutionSnapshot {
+            execution_id: self.execution_id.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            status: self.status.clone(),
+            exit_code: self.exit_code,
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            timed_out: self.timed_out,
+            success: self.success,
+            error: self.error.clone(),
+            timeout_secs: self.timeout_secs,
+            started_at_epoch_ms: self.started_at_epoch_ms,
+            completed_at_epoch_ms: self.completed_at_epoch_ms,
+            duration_ms: self.duration_ms,
+            cancel_requested: self.cancel_requested,
         }
     }
+}
+
+fn prune_shell_executions(entries: &mut BTreeMap<String, ShellExecutionRecord>) {
+    const MAX_SHELL_EXECUTIONS: usize = 100;
+    if entries.len() <= MAX_SHELL_EXECUTIONS {
+        return;
+    }
+
+    let mut removable = entries
+        .values()
+        .filter(|record| !matches!(record.status, ShellExecutionStatus::Running))
+        .map(|record| (record.started_at_epoch_ms, record.execution_id.clone()))
+        .collect::<Vec<_>>();
+    removable.sort_by_key(|(started_at, _)| *started_at);
+
+    for (_, execution_id) in removable {
+        if entries.len() <= MAX_SHELL_EXECUTIONS {
+            break;
+        }
+        entries.remove(&execution_id);
+    }
+}
+
+async fn run_shell_command(
+    prepared: PreparedShellExec,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+) -> CompletedShellExec {
+    let started = Instant::now();
+    let completed_at = || current_epoch_ms();
+
+    let mut command = Command::new(&prepared.command_args[0]);
+    command
+        .args(prepared.command_args.iter().skip(1))
+        .current_dir(&prepared.cwd)
+        .env_clear()
+        .envs(prepared.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let executable = &prepared.command_args[0];
+            let message = format!(
+                "failed to spawn `{executable}` in {}: {err}",
+                prepared.cwd.display()
+            );
+            let stderr = if err.kind() == ErrorKind::NotFound {
+                format!("{message}\nPATH={}", prepared.path_for_diagnostics)
+            } else {
+                message.clone()
+            };
+
+            return CompletedShellExec {
+                status: ShellExecutionStatus::Failed,
+                exit_code: None,
+                stdout: String::new(),
+                stderr,
+                timed_out: false,
+                success: false,
+                error: Some(InvokeError {
+                    code: "COMMAND_SPAWN_FAILED".to_string(),
+                    message,
+                }),
+                duration_ms: started.elapsed().as_millis() as u64,
+                completed_at_epoch_ms: completed_at(),
+            };
+        }
+    };
+
+    wait_for_shell_command(child, prepared.timeout_secs, cancel_rx, started).await
+}
+
+async fn wait_for_shell_command(
+    mut child: Child,
+    timeout_secs: u64,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+    started: Instant,
+) -> CompletedShellExec {
+    let stdout_task = child.stdout.take().map(|mut stdout| {
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let _ = stdout.read_to_end(&mut buffer).await;
+            buffer
+        })
+    });
+    let stderr_task = child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer).await;
+            buffer
+        })
+    });
+
+    let wait_result = if let Some(mut cancel_rx) = cancel_rx {
+        tokio::select! {
+            result = child.wait() => ShellWaitResult::Exited(result),
+            _ = sleep(Duration::from_secs(timeout_secs)) => {
+                let _ = child.kill().await;
+                ShellWaitResult::TimedOut(child.wait().await)
+            }
+            _ = &mut cancel_rx => {
+                let _ = child.kill().await;
+                ShellWaitResult::Canceled(child.wait().await)
+            }
+        }
+    } else {
+        tokio::select! {
+            result = child.wait() => ShellWaitResult::Exited(result),
+            _ = sleep(Duration::from_secs(timeout_secs)) => {
+                let _ = child.kill().await;
+                ShellWaitResult::TimedOut(child.wait().await)
+            }
+        }
+    };
+
+    let stdout = join_output(stdout_task).await;
+    let stderr = join_output(stderr_task).await;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let completed_at_epoch_ms = current_epoch_ms();
+
+    match wait_result {
+        ShellWaitResult::Exited(Ok(status)) => CompletedShellExec {
+            status: if status.success() {
+                ShellExecutionStatus::Succeeded
+            } else {
+                ShellExecutionStatus::Failed
+            },
+            exit_code: status.code(),
+            stdout,
+            stderr,
+            timed_out: false,
+            success: status.success(),
+            error: None,
+            duration_ms,
+            completed_at_epoch_ms,
+        },
+        ShellWaitResult::TimedOut(status) => CompletedShellExec {
+            status: ShellExecutionStatus::TimedOut,
+            exit_code: status.ok().and_then(|status| status.code()),
+            stdout,
+            stderr,
+            timed_out: true,
+            success: false,
+            error: Some(InvokeError {
+                code: "TIMEOUT".to_string(),
+                message: format!("timed out after {timeout_secs}s"),
+            }),
+            duration_ms,
+            completed_at_epoch_ms,
+        },
+        ShellWaitResult::Canceled(status) => CompletedShellExec {
+            status: ShellExecutionStatus::Canceled,
+            exit_code: status.ok().and_then(|status| status.code()),
+            stdout,
+            stderr,
+            timed_out: false,
+            success: false,
+            error: Some(InvokeError {
+                code: "CANCELED".to_string(),
+                message: "execution was canceled".to_string(),
+            }),
+            duration_ms,
+            completed_at_epoch_ms,
+        },
+        ShellWaitResult::Exited(Err(err)) => CompletedShellExec {
+            status: ShellExecutionStatus::Failed,
+            exit_code: None,
+            stdout,
+            stderr,
+            timed_out: false,
+            success: false,
+            error: Some(InvokeError {
+                code: "COMMAND_WAIT_FAILED".to_string(),
+                message: err.to_string(),
+            }),
+            duration_ms,
+            completed_at_epoch_ms,
+        },
+    }
+}
+
+enum ShellWaitResult {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    TimedOut(std::io::Result<std::process::ExitStatus>),
+    Canceled(std::io::Result<std::process::ExitStatus>),
+}
+
+async fn join_output(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> String {
+    match task {
+        Some(task) => String::from_utf8_lossy(&task.await.unwrap_or_default()).into_owned(),
+        None => String::new(),
+    }
+}
+
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl HttpMethod {
@@ -533,6 +988,7 @@ fn build_runtime_service(
     service: &ServiceConfig,
     config: &AgentConfig,
     config_base_dir: &Path,
+    shell_executions: ShellExecutionStore,
 ) -> Result<RuntimeService> {
     let mut methods = BTreeMap::new();
     let mut method_definitions = Vec::new();
@@ -543,7 +999,13 @@ fn build_runtime_service(
         if !method.enabled {
             continue;
         }
-        let runtime_method = build_runtime_method(service, method, config, config_base_dir)?;
+        let runtime_method = build_runtime_method(
+            service,
+            method,
+            config,
+            config_base_dir,
+            shell_executions.clone(),
+        )?;
         methods.insert(method.name.clone(), runtime_method);
         method_definitions.push(crate::protocol::MethodDefinition {
             name: method.name.clone(),
@@ -581,6 +1043,7 @@ fn build_runtime_method(
     method: &MethodConfig,
     config: &AgentConfig,
     config_base_dir: &Path,
+    shell_executions: ShellExecutionStore,
 ) -> Result<RuntimeMethod> {
     match &method.binding {
         MethodBinding::ShellCommand(binding) => Ok(RuntimeMethod::Shell(build_shell_method(
@@ -589,6 +1052,7 @@ fn build_runtime_method(
             binding,
             config,
             config_base_dir,
+            shell_executions,
         )?)),
         MethodBinding::Http(binding) => Ok(RuntimeMethod::Http(build_http_method(
             service, method, binding, config,
@@ -605,6 +1069,7 @@ fn build_shell_method(
     binding: &ShellCommandBinding,
     config: &AgentConfig,
     config_base_dir: &Path,
+    shell_executions: ShellExecutionStore,
 ) -> Result<ShellMethod> {
     let raw_root = PathBuf::from(&binding.root_dir);
     let joined_root = if raw_root.is_absolute() {
@@ -632,6 +1097,7 @@ fn build_shell_method(
         max_timeout_secs: binding
             .max_timeout_secs
             .unwrap_or(config.runtime.max_timeout_secs),
+        executions: shell_executions,
     })
 }
 
@@ -2465,6 +2931,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+    use tokio::time::{sleep, Duration};
 
     #[test]
     fn allowlist_accepts_basename() {
@@ -2601,6 +3068,57 @@ mod tests {
                 .methods
                 .iter()
                 .any(|method| method.name == "shellExec")));
+        assert!(definitions.iter().any(|service| service.name == "shellExec"
+            && service
+                .methods
+                .iter()
+                .any(|method| method.name == "startExecution")));
+    }
+
+    #[tokio::test]
+    async fn shell_execution_can_be_started_and_polled() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+        let start = registry
+            .invoke(
+                "req-start".to_string(),
+                "shellExec",
+                "startExecution",
+                json!({"command": ["echo", "bridge-agent-ok"]}),
+                Some(5),
+            )
+            .await;
+        assert!(start.success);
+        let execution_id = start.data.unwrap()["executionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut status = String::new();
+        let mut stdout = String::new();
+        for _ in 0..20 {
+            let result = registry
+                .invoke(
+                    "req-get".to_string(),
+                    "shellExec",
+                    "getExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(result.success);
+            let data = result.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            if status != "RUNNING" {
+                assert_eq!(data["exitCode"].as_i64(), Some(0));
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(status, "SUCCEEDED");
+        assert!(stdout.contains("bridge-agent-ok"));
     }
 
     #[tokio::test]

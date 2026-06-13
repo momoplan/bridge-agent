@@ -833,6 +833,16 @@ pub fn shell_input_schema() -> Value {
     })
 }
 
+pub fn shell_execution_id_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["executionId"],
+        "properties": {
+            "executionId": {"type": "string"}
+        }
+    })
+}
+
 pub fn computer_action_input_schema(action: &ComputerUseAction) -> Value {
     match action {
         ComputerUseAction::Screenshot => json!({
@@ -1004,9 +1014,18 @@ fn default_shell_exec_service() -> ServiceConfig {
         enabled: true,
         health_check: None,
         start_command: None,
-        methods: vec![default_shell_exec_method()],
+        methods: default_shell_exec_methods(),
         events: Vec::new(),
     }
+}
+
+fn default_shell_exec_methods() -> Vec<MethodConfig> {
+    vec![
+        default_shell_exec_method(),
+        default_shell_start_execution_method(),
+        default_shell_get_execution_method(),
+        default_shell_cancel_execution_method(),
+    ]
 }
 
 fn default_shell_exec_method() -> MethodConfig {
@@ -1015,6 +1034,54 @@ fn default_shell_exec_method() -> MethodConfig {
         description: "Run one allowlisted command with optional cwd and env.".to_string(),
         enabled: true,
         input_schema: shell_input_schema(),
+        binding: MethodBinding::ShellCommand(ShellCommandBinding {
+            root_dir: ".".to_string(),
+            allow_commands: default_shell_exec_allow_commands(),
+            default_timeout_secs: Some(default_timeout_secs()),
+            max_timeout_secs: Some(default_max_timeout_secs()),
+        }),
+    }
+}
+
+fn default_shell_start_execution_method() -> MethodConfig {
+    MethodConfig {
+        name: "startExecution".to_string(),
+        description:
+            "Start one allowlisted shell command and return an executionId for status polling."
+                .to_string(),
+        enabled: true,
+        input_schema: shell_input_schema(),
+        binding: MethodBinding::ShellCommand(ShellCommandBinding {
+            root_dir: ".".to_string(),
+            allow_commands: default_shell_exec_allow_commands(),
+            default_timeout_secs: Some(default_timeout_secs()),
+            max_timeout_secs: Some(default_max_timeout_secs()),
+        }),
+    }
+}
+
+fn default_shell_get_execution_method() -> MethodConfig {
+    MethodConfig {
+        name: "getExecution".to_string(),
+        description: "Get status, output, exit code, and timing for a shell executionId."
+            .to_string(),
+        enabled: true,
+        input_schema: shell_execution_id_schema(),
+        binding: MethodBinding::ShellCommand(ShellCommandBinding {
+            root_dir: ".".to_string(),
+            allow_commands: default_shell_exec_allow_commands(),
+            default_timeout_secs: Some(default_timeout_secs()),
+            max_timeout_secs: Some(default_max_timeout_secs()),
+        }),
+    }
+}
+
+fn default_shell_cancel_execution_method() -> MethodConfig {
+    MethodConfig {
+        name: "cancelExecution".to_string(),
+        description: "Request cancellation for a running shell executionId.".to_string(),
+        enabled: true,
+        input_schema: shell_execution_id_schema(),
         binding: MethodBinding::ShellCommand(ShellCommandBinding {
             root_dir: ".".to_string(),
             allow_commands: default_shell_exec_allow_commands(),
@@ -1102,7 +1169,6 @@ fn ensure_default_computer_methods(config: &mut AgentConfig) -> bool {
 
 fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
     let default_service = default_shell_exec_service();
-    let default_method = default_shell_exec_method();
 
     if let Some(service) = config
         .services
@@ -1116,20 +1182,19 @@ fn ensure_default_shell_exec_service(config: &mut AgentConfig) -> bool {
             changed = true;
         }
 
-        if !service
+        let existing_names = service
             .methods
             .iter()
-            .any(|method| method.name == default_method.name)
-        {
-            service.methods.push(default_method);
-            changed = true;
+            .map(|method| method.name.clone())
+            .collect::<BTreeSet<_>>();
+        for default_method in default_service.methods {
+            if !existing_names.contains(&default_method.name) {
+                service.methods.push(default_method);
+                changed = true;
+            }
         }
 
-        if let Some(method) = service
-            .methods
-            .iter_mut()
-            .find(|method| method.name == default_shell_exec_method().name)
-        {
+        for method in &mut service.methods {
             if let MethodBinding::ShellCommand(binding) = &mut method.binding {
                 changed |= ensure_default_shell_exec_runtime_allowlist(binding);
             }
@@ -1375,6 +1440,23 @@ mod tests {
                     .methods
                     .iter()
                     .any(|method| method.name == "shellExec")));
+        let shell_methods = loaded
+            .services
+            .iter()
+            .find(|service| service.name == "shellExec")
+            .unwrap()
+            .methods
+            .iter()
+            .map(|method| method.name.as_str())
+            .collect::<Vec<_>>();
+        for method in [
+            "shellExec",
+            "startExecution",
+            "getExecution",
+            "cancelExecution",
+        ] {
+            assert!(shell_methods.contains(&method));
+        }
     }
 
     #[test]
@@ -1474,6 +1556,22 @@ mod tests {
         assert_eq!(command_schema["type"], "array");
         assert_eq!(command_schema["items"]["type"], "string");
         assert!(command_schema.get("anyOf").is_none());
+
+        let get_execution_method = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "shellExec")
+            .and_then(|service| {
+                service
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "getExecution")
+            })
+            .unwrap();
+        assert_eq!(
+            get_execution_method.input_schema["properties"]["executionId"]["type"],
+            "string"
+        );
     }
 
     #[test]
