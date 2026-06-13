@@ -253,39 +253,7 @@ impl AgentConfig {
                 service_registration_enabled: true,
                 service_registration_token: Some(generate_registration_token()),
             },
-            services: vec![
-                default_computer_service(),
-                default_shell_exec_service(),
-                ServiceConfig {
-                    name: "local-java-service".to_string(),
-                    description: "Example business service backed by a local HTTP endpoint."
-                        .to_string(),
-                    enabled: false,
-                    health_check: None,
-                    start_command: None,
-                    methods: vec![MethodConfig {
-                        name: "invokeApi".to_string(),
-                        description: "Forward invocation arguments to a local HTTP service."
-                            .to_string(),
-                        enabled: true,
-                        input_schema: default_object_schema(),
-                        binding: MethodBinding::Http(HttpBinding {
-                            url: "http://127.0.0.1:8081/api/invoke".to_string(),
-                            http_method: "POST".to_string(),
-                            headers: BTreeMap::new(),
-                            timeout_secs: Some(20),
-                        }),
-                    }],
-                    events: vec![EventConfig {
-                        name: "jobFinished".to_string(),
-                        description:
-                            "Emitted when the local service completes an asynchronous job."
-                                .to_string(),
-                        enabled: true,
-                        payload_schema: default_object_schema(),
-                    }],
-                },
-            ],
+            services: vec![default_computer_service(), default_shell_exec_service()],
         }
     }
 
@@ -793,7 +761,55 @@ fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
         config.upload.inline_limit_bytes = DEFAULT_INLINE_LIMIT_BYTES;
         changed = true;
     }
+    changed |= remove_legacy_default_local_java_service(config);
     changed
+}
+
+fn remove_legacy_default_local_java_service(config: &mut AgentConfig) -> bool {
+    let initial_len = config.services.len();
+    config
+        .services
+        .retain(|service| !is_legacy_default_local_java_service(service));
+    config.services.len() != initial_len
+}
+
+fn is_legacy_default_local_java_service(service: &ServiceConfig) -> bool {
+    if service.name != "local-java-service"
+        || service.description != "Example business service backed by a local HTTP endpoint."
+        || service.enabled
+        || service.health_check.is_some()
+        || service.start_command.is_some()
+        || service.methods.len() != 1
+        || service.events.len() != 1
+    {
+        return false;
+    }
+
+    let method = &service.methods[0];
+    let method_matches = method.name == "invokeApi"
+        && method.description == "Forward invocation arguments to a local HTTP service."
+        && method.enabled
+        && method.input_schema == default_object_schema()
+        && matches!(
+            &method.binding,
+            MethodBinding::Http(HttpBinding {
+                url,
+                http_method,
+                headers,
+                timeout_secs
+            }) if url == "http://127.0.0.1:8081/api/invoke"
+                && http_method == "POST"
+                && headers.is_empty()
+                && *timeout_secs == Some(20)
+        );
+
+    let event = &service.events[0];
+    let event_matches = event.name == "jobFinished"
+        && event.description == "Emitted when the local service completes an asynchronous job."
+        && event.enabled
+        && event.payload_schema == default_object_schema();
+
+    method_matches && event_matches
 }
 
 pub fn manifest_preview_json(config: &AgentConfig) -> Result<String> {
@@ -1401,10 +1417,11 @@ fn project_config_path() -> Result<PathBuf> {
 mod tests {
     use super::{
         default_shell_exec_allow_commands, ensure_browser_auth_agent_id, load_config,
-        manifest_preview_json, save_config, AgentConfig, EventConfig, MethodBinding, ServiceConfig,
-        ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
+        manifest_preview_json, save_config, AgentConfig, EventConfig, HttpBinding, MethodBinding,
+        MethodConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1431,7 +1448,7 @@ mod tests {
             loaded.upload.prepare_url(&loaded.relay).as_deref(),
             Some("https://relay.baijimu.com/api/bridge-agent/uploads/prepare")
         );
-        assert_eq!(loaded.services.len(), 3);
+        assert_eq!(loaded.services.len(), 2);
         assert!(loaded
             .services
             .iter()
@@ -1456,6 +1473,84 @@ mod tests {
             "cancelExecution",
         ] {
             assert!(shell_methods.contains(&method));
+        }
+    }
+
+    #[test]
+    fn example_config_contains_only_builtin_services() {
+        let config = AgentConfig::example();
+        let service_names = config
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(service_names, vec!["computer", "shellExec"]);
+    }
+
+    #[test]
+    fn load_config_removes_legacy_disabled_local_java_example() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(legacy_default_local_java_service(false));
+
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+
+        assert!(!loaded
+            .services
+            .iter()
+            .any(|service| service.name == "local-java-service"));
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains("local-java-service"));
+    }
+
+    #[test]
+    fn load_config_keeps_user_modified_local_java_service() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(legacy_default_local_java_service(true));
+
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+
+        assert!(loaded
+            .services
+            .iter()
+            .any(|service| service.name == "local-java-service"));
+    }
+
+    fn legacy_default_local_java_service(enabled: bool) -> ServiceConfig {
+        ServiceConfig {
+            name: "local-java-service".to_string(),
+            description: "Example business service backed by a local HTTP endpoint.".to_string(),
+            enabled,
+            health_check: None,
+            start_command: None,
+            methods: vec![MethodConfig {
+                name: "invokeApi".to_string(),
+                description: "Forward invocation arguments to a local HTTP service.".to_string(),
+                enabled: true,
+                input_schema: super::default_object_schema(),
+                binding: MethodBinding::Http(HttpBinding {
+                    url: "http://127.0.0.1:8081/api/invoke".to_string(),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(20),
+                }),
+            }],
+            events: vec![EventConfig {
+                name: "jobFinished".to_string(),
+                description: "Emitted when the local service completes an asynchronous job."
+                    .to_string(),
+                enabled: true,
+                payload_schema: super::default_object_schema(),
+            }],
         }
     }
 

@@ -97,8 +97,8 @@
 
 产品语境里可以把概念分成两层：
 
-- 服务：本机配置和协议里的对象，例如 `computer`、`shellExec`、`local-java-service`
-- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`invokeApi`
+- 服务：本机配置和协议里的对象，例如 `computer`、`shellExec`，以及用户注册的自定义服务
+- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`shellExec`
 - 对外能力：启用后的 `service.method`，也就是外部 agent 最终能调用的能力
 
 所以桌面端配置页以“服务”为主概念；“能力”只用于描述已经对外开放的调用结果。
@@ -112,14 +112,11 @@
 - `computer.screenshot`
 - `computer.click`
 - `shellExec.shellExec`
-- `local-java-service.invokeApi`
-- `local-java-service.jobFinished`（事件）
 
 这里：
 
-- `computer` / `shellExec` / `local-java-service` 是服务
-- `screenshot` / `click` / `shellExec` / `invokeApi` 是方法
-- `jobFinished` 是事件
+- `computer` / `shellExec` 是默认系统服务
+- `screenshot` / `click` / `shellExec` 是方法
 
 外部不会看到：
 
@@ -131,7 +128,7 @@
 注意：
 
 - `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
-- relay 看到的是 `services[].methods[]` 和 `services[].events[]`，例如 `computer.screenshot`、`local-java-service.jobFinished`
+- relay 看到的是 `services[].methods[]` 和 `services[].events[]`，例如 `computer.screenshot`、`reportTool.finished`
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
 - 自定义本地服务发送事件时，不直接连 relay；它请求 bridge-agent 的本机事件入口，由 bridge-agent 校验事件声明后通过现有 websocket 上报 relay
 
@@ -183,14 +180,14 @@ cargo run -- init-config
 
 ```json
 {
-  "name": "local-java-service",
-  "description": "Example business service backed by a local HTTP endpoint.",
+  "name": "reportTool",
+  "description": "Local report generation service.",
   "enabled": true,
   "methods": [],
   "events": [
     {
-      "name": "jobFinished",
-      "description": "Emitted when a local job finishes.",
+      "name": "finished",
+      "description": "Emitted when report generation finishes.",
       "enabled": true,
       "payload_schema": {
         "type": "object",
@@ -207,8 +204,8 @@ cargo run -- init-config
 curl -X POST http://127.0.0.1:18081/v1/events \
   -H 'Content-Type: application/json' \
   -d '{
-    "service": "local-java-service",
-    "event": "jobFinished",
+    "service": "reportTool",
+    "event": "finished",
     "payload": {
       "jobId": "job-1",
       "status": "success"
@@ -222,7 +219,7 @@ curl -X POST http://127.0.0.1:18081/v1/events \
 curl -X POST http://127.0.0.1:18081/v1/events \
   -H 'Authorization: Bearer <event-server-token>' \
   -H 'Content-Type: application/json' \
-  -d '{"service":"local-java-service","event":"jobFinished","payload":{}}'
+  -d '{"service":"reportTool","event":"finished","payload":{}}'
 ```
 
 bridge-agent 只接受已声明且已启用的 `service.event`，接收后返回 `202 Accepted`，并通过 agent 与 relay 的 websocket 发送 `event_emitted` 消息。后续由 relay 按订阅关系把事件投递到订阅方 URL。
@@ -344,7 +341,7 @@ cargo run -- init-config
 - 开一个 `computer.screenshot`
 - 再开一个 `computer.click`
 - 使用默认的 `shellExec.shellExec`
-- 或者开一个映射本地 Java 服务的 `local-java-service.invokeApi`
+- 或者注册一个映射本地 HTTP 服务的自定义方法，例如 `reportTool.generate`
 
 3. 启动 agent
 
@@ -744,7 +741,7 @@ npm run tauri build -- --debug
 
 适合把本地 Java / Node / Python 服务映射成业务方法，例如：
 
-- `local-java-service.invokeApi`
+- `reportTool.generate`
 
 当前行为：
 
