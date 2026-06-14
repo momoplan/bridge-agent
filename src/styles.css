@@ -955,6 +955,17 @@ select:focus {
   background: rgba(22, 163, 167, 0.12);
 }
 
+.service-local-notice {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(23, 114, 69, 0.1);
+  color: var(--success);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .permission-actions {
   display: flex;
   flex-wrap: wrap;

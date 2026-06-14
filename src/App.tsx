@@ -526,6 +526,7 @@ function App() {
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
+  const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
   const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
   const [desktopPermissionBusy, setDesktopPermissionBusy] = useState<"accessibility" | "screen_recording" | null>(
@@ -680,6 +681,7 @@ function App() {
     setConfig(uiConfig);
     setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
     setRuntime(document.runtime);
+    setServiceNotices({});
     setServiceJsonDrafts({});
     setServiceJsonErrors({});
   }
@@ -706,6 +708,11 @@ function App() {
       const signatures = [...current];
       signatures[serviceIndex] = serviceSignature(savedService);
       return signatures;
+    });
+    setServiceNotices((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
     });
     setServiceJsonDrafts((current) => {
       const next = { ...current };
@@ -734,6 +741,7 @@ function App() {
       };
     });
     setSavedServiceSignatures((current) => current.filter((_, index) => index !== serviceIndex));
+    setServiceNotices((current) => reindexRecordAfterDelete(current, serviceIndex));
     setServiceJsonDrafts((current) => reindexRecordAfterDelete(current, serviceIndex));
     setServiceJsonErrors((current) => reindexRecordAfterDelete(current, serviceIndex));
   }
@@ -900,11 +908,12 @@ function App() {
       applySavedServiceDocument(document, serviceIndex);
       setExpandedServiceIndex(Math.min(serviceIndex, document.config.services.length - 1));
       const serviceName = service.name.trim() || "未命名服务";
-      setMessage(
-        applyToRuntime
+      setServiceNotices((current) => ({
+        ...current,
+        [serviceIndex]: applyToRuntime
           ? formatApplyMessage(`服务 ${serviceName} 已保存`, document.runtime)
           : `服务 ${serviceName} 已保存`
-      );
+      }));
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       setError(readError(err));
@@ -2144,6 +2153,7 @@ function renderOverviewPage() {
     const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
     const servicePersisted = savedServiceSignatures[serviceIndex] != null;
     const hasRuntimeControls = service.health_check != null || service.start_command != null;
+    const serviceNotice = serviceNotices[serviceIndex];
 
     return (
       <Card
@@ -2193,6 +2203,7 @@ function renderOverviewPage() {
           </div>
         }
       >
+        {serviceNotice ? <div className="service-local-notice">{serviceNotice}</div> : null}
         {hasRuntimeControls ? renderServiceRuntimePanel(service, serviceIndex, isSystem) : null}
         <div className="service-editor-layout">
           {!isSystem ? (
