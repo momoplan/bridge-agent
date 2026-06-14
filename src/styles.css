@@ -470,6 +470,16 @@ select:focus {
   line-height: 1.5;
 }
 
+.service-permission-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px solid rgba(22, 163, 167, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
 .service-json-section {
   display: grid;
   gap: 12px;
@@ -591,6 +601,31 @@ select:focus {
 
 .compact-banner {
   margin-bottom: 0;
+}
+
+.attention-list {
+  display: grid;
+  gap: 10px;
+}
+
+.attention-item {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.attention-item strong {
+  color: var(--text);
+}
+
+.attention-item span {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .eyebrow {
@@ -1100,6 +1135,11 @@ select:focus {
   border-radius: 16px;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.7);
+}
+
+.compact-empty {
+  padding: 14px;
+  border-radius: 8px;
 }
 
 @media (max-width: 1180px) {

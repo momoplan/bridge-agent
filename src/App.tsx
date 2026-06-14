@@ -324,8 +324,8 @@ interface UiAgentConfig {
 
 type SettingsSection = "identity" | "connection" | "runtime";
 const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
-type AppPage = "overview" | "services" | "connection" | "diagnostics";
-type DetailPanel = "system" | "logs" | "manifest";
+type AppPage = "overview" | "services" | "diagnostics";
+type DetailPanel = "system" | "settings" | "logs" | "manifest";
 
 const SHELL_SCHEMA = {
   type: "object",
@@ -1656,10 +1656,14 @@ function App() {
     }
   }
 
-function renderOverviewPage() {
+  function renderOverviewPage() {
     if (!config) {
       return <div />;
     }
+    const needsAuthorization = !config.platform.workspace_id || !config.relay.token;
+    const hasRuntimeError = Boolean(runtime?.last_error);
+    const hasUpdate = Boolean(appUpdate?.updateAvailable);
+    const hasAttention = needsAuthorization || hasRuntimeError || hasDesktopPermissionGap || hasUpdate;
 
     return (
       <div className="overview-grid">
@@ -1694,9 +1698,10 @@ function renderOverviewPage() {
           </div>
         </Card>
 
-        <Card title="连接">
+        <Card title="状态">
           <div className="status-detail-grid">
-            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+            <InfoRow label="连接状态" value={statusLabel} />
+            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
             <InfoRow
               label="最近错误"
               value={runtime?.last_error || "无"}
@@ -1716,82 +1721,46 @@ function renderOverviewPage() {
           </div>
         </Card>
 
-        <Card
-          title="桌面权限"
-          action={
-            <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
-              刷新状态
-            </button>
-          }
-        >
-          <div className="status-detail-grid">
-            <InfoRow
-              label="屏幕录制"
-              value={formatDesktopPermissionValue(
-                desktopPermissions,
-                "screen_recording",
-                "用于截图"
-              )}
-              tone={
-                desktopPermissions?.screenRecordingSupported &&
-                !desktopPermissions.screenRecordingGranted
-                  ? "danger"
-                  : "normal"
-              }
-            />
-            <InfoRow
-              label="辅助功能"
-              value={formatDesktopPermissionValue(
-                desktopPermissions,
-                "accessibility",
-                "用于点击、输入和拖拽"
-              )}
-              tone={
-                desktopPermissions?.accessibilitySupported &&
-                !desktopPermissions.accessibilityGranted
-                  ? "danger"
-                  : "normal"
-              }
-            />
-          </div>
-          {desktopPermissions?.platform === "macos" ? (
-            <div className="permission-actions">
-              {!desktopPermissions.screenRecordingGranted ? (
-                <button
-                  className="secondary"
-                  onClick={() => void requestDesktopPermission("screen_recording")}
-                  disabled={desktopPermissionBusy != null}
-                >
-                  {desktopPermissionBusy === "screen_recording" ? "请求中" : "请求屏幕录制"}
+        <Card title="需要处理">
+          {hasAttention ? (
+            <div className="attention-list">
+              {needsAuthorization ? (
+                <button className="attention-item" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                  <strong>需要浏览器授权</strong>
+                  <span>完成授权后会自动写回工作区和连接凭证。</span>
                 </button>
               ) : null}
-              {!desktopPermissions.accessibilityGranted ? (
+              {hasDesktopPermissionGap ? (
                 <button
-                  className="secondary"
-                  onClick={() => void requestDesktopPermission("accessibility")}
-                  disabled={desktopPermissionBusy != null}
+                  className="attention-item"
+                  onClick={() => {
+                    setActivePage("services");
+                    const computerIndex = config.services.findIndex(isComputerService);
+                    if (computerIndex >= 0) {
+                      setExpandedServiceIndex(computerIndex);
+                    }
+                  }}
                 >
-                  {desktopPermissionBusy === "accessibility" ? "请求中" : "请求辅助功能"}
+                  <strong>桌面控制服务需要权限</strong>
+                  <span>打开 computer 服务处理屏幕录制和辅助功能授权。</span>
                 </button>
               ) : null}
-              {!desktopPermissions.screenRecordingGranted ? (
-                <button
-                  className="ghost"
-                  onClick={() => void openDesktopPermissionSettings("screen_recording")}
-                >
-                  打开屏幕录制设置
+              {hasRuntimeError ? (
+                <button className="attention-item" onClick={() => setActivePage("diagnostics")}>
+                  <strong>运行错误</strong>
+                  <span>{runtime?.last_error}</span>
                 </button>
               ) : null}
-              {!desktopPermissions.accessibilityGranted ? (
-                <button
-                  className="ghost"
-                  onClick={() => void openDesktopPermissionSettings("accessibility")}
-                >
-                  打开辅助功能设置
+              {hasUpdate ? (
+                <button className="attention-item" onClick={() => void installAppUpdate()} disabled={updateBusy}>
+                  <strong>发现新版本 {appUpdate?.latestVersion}</strong>
+                  <span>下载并安装最新版本。</span>
                 </button>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            <div className="empty-state compact-empty">当前没有需要处理的问题。</div>
+          )}
         </Card>
 
         <Card
@@ -2118,6 +2087,86 @@ function renderOverviewPage() {
     );
   }
 
+  function renderComputerPermissionPanel(service: UiServiceConfig) {
+    if (!service.enabled) {
+      return null;
+    }
+
+    return (
+      <div className="service-permission-panel">
+        <div className="runtime-config-head">
+          <div>
+            <strong>桌面控制权限</strong>
+            <small>computer 服务启用后，截图需要屏幕录制；点击、输入和拖拽需要辅助功能。</small>
+          </div>
+          <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
+            刷新状态
+          </button>
+        </div>
+        <div className="status-detail-grid">
+          <InfoRow
+            label="屏幕录制"
+            value={formatDesktopPermissionValue(desktopPermissions, "screen_recording", "用于截图")}
+            tone={
+              desktopPermissions?.screenRecordingSupported &&
+              !desktopPermissions.screenRecordingGranted
+                ? "danger"
+                : "normal"
+            }
+          />
+          <InfoRow
+            label="辅助功能"
+            value={formatDesktopPermissionValue(desktopPermissions, "accessibility", "用于点击、输入和拖拽")}
+            tone={
+              desktopPermissions?.accessibilitySupported &&
+              !desktopPermissions.accessibilityGranted
+                ? "danger"
+                : "normal"
+            }
+          />
+        </div>
+        {desktopPermissions?.platform === "macos" ? (
+          <div className="permission-actions">
+            {!desktopPermissions.screenRecordingGranted ? (
+              <button
+                className="secondary"
+                onClick={() => void requestDesktopPermission("screen_recording")}
+                disabled={desktopPermissionBusy != null}
+              >
+                {desktopPermissionBusy === "screen_recording" ? "请求中" : "请求屏幕录制"}
+              </button>
+            ) : null}
+            {!desktopPermissions.accessibilityGranted ? (
+              <button
+                className="secondary"
+                onClick={() => void requestDesktopPermission("accessibility")}
+                disabled={desktopPermissionBusy != null}
+              >
+                {desktopPermissionBusy === "accessibility" ? "请求中" : "请求辅助功能"}
+              </button>
+            ) : null}
+            {!desktopPermissions.screenRecordingGranted ? (
+              <button
+                className="ghost"
+                onClick={() => void openDesktopPermissionSettings("screen_recording")}
+              >
+                打开屏幕录制设置
+              </button>
+            ) : null}
+            {!desktopPermissions.accessibilityGranted ? (
+              <button
+                className="ghost"
+                onClick={() => void openDesktopPermissionSettings("accessibility")}
+              >
+                打开辅助功能设置
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderServiceDefinitionJson(service: UiServiceConfig, serviceIndex: number) {
     const draft = serviceJsonDrafts[serviceIndex] ?? serviceCapabilitiesJson(service);
     const error = serviceJsonErrors[serviceIndex];
@@ -2204,6 +2253,7 @@ function renderOverviewPage() {
         }
       >
         {serviceNotice ? <div className="service-local-notice">{serviceNotice}</div> : null}
+        {isComputer ? renderComputerPermissionPanel(service) : null}
         {hasRuntimeControls ? renderServiceRuntimePanel(service, serviceIndex, isSystem) : null}
         <div className="service-editor-layout">
           {!isSystem ? (
@@ -2603,39 +2653,6 @@ function renderOverviewPage() {
     );
   }
 
-  function renderConnectionPage() {
-    return (
-      <Card title="连接" description="设备、授权与运行参数。">
-        <div className="status-detail-grid connection-summary-grid">
-          <InfoRow label="工作区" value={config?.platform.workspace_id || "未授权"} />
-          <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
-          <InfoRow label="Relay" value={runtime?.relay_url ?? config?.relay.url ?? "-"} />
-        </div>
-        <div className="section-tabs">
-          <button
-            className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
-            onClick={() => setActiveSettingsSection("identity")}
-          >
-            设备
-          </button>
-          <button
-            className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
-            onClick={() => setActiveSettingsSection("connection")}
-          >
-            连接
-          </button>
-          <button
-            className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
-            onClick={() => setActiveSettingsSection("runtime")}
-          >
-            运行
-          </button>
-        </div>
-        {renderSettingsSection()}
-      </Card>
-    );
-  }
-
   function renderDetailPanel() {
     if (!config) {
       return <div />;
@@ -2677,6 +2694,52 @@ function renderOverviewPage() {
       );
     }
 
+    if (activeDetailPanel === "settings") {
+      return (
+        <Card
+          title="高级设置"
+          description="设备身份、授权连接和本机运行参数。"
+          action={
+            <div className="service-actions">
+              <button className="secondary" onClick={() => void saveConfig()} disabled={busy}>
+                保存配置
+              </button>
+              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                浏览器授权
+              </button>
+            </div>
+          }
+        >
+          <div className="status-detail-grid connection-summary-grid">
+            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
+            <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
+            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+          </div>
+          <div className="section-tabs">
+            <button
+              className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("identity")}
+            >
+              设备
+            </button>
+            <button
+              className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("connection")}
+            >
+              连接
+            </button>
+            <button
+              className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("runtime")}
+            >
+              运行
+            </button>
+          </div>
+          {renderSettingsSection()}
+        </Card>
+      );
+    }
+
     return (
       <Card title="系统" description="版本与运行状态。">
         <div className="status-detail-grid">
@@ -2697,28 +2760,6 @@ function renderOverviewPage() {
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
           <InfoRow label="日志文件" value={runtime?.log_file_path ?? "未启用"} />
-          <InfoRow
-            label="桌面权限"
-            value={
-              desktopPermissions == null
-                ? "检查中"
-                : desktopPermissions.accessibilityGranted &&
-                    desktopPermissions.screenRecordingGranted
-                    ? "已就绪"
-                    : desktopPermissions.accessibilitySupported ||
-                        desktopPermissions.screenRecordingSupported
-                      ? "权限未完整授权"
-                      : "当前平台未接入"
-            }
-            tone={
-              desktopPermissions != null &&
-              (desktopPermissions.accessibilitySupported ||
-                desktopPermissions.screenRecordingSupported) &&
-              (!desktopPermissions.accessibilityGranted || !desktopPermissions.screenRecordingGranted)
-                ? "danger"
-                : "normal"
-            }
-          />
           <InfoRow label="配置文件" value={configPath} />
           <InfoRow
             label="最近错误"
@@ -2739,6 +2780,12 @@ function renderOverviewPage() {
             onClick={() => setActiveDetailPanel("system")}
           >
             系统
+          </button>
+          <button
+            className={`section-tab ${activeDetailPanel === "settings" ? "active" : ""}`}
+            onClick={() => setActiveDetailPanel("settings")}
+          >
+            设置
           </button>
           <button
             className={`section-tab ${activeDetailPanel === "logs" ? "active" : ""}`}
@@ -2784,14 +2831,12 @@ function renderOverviewPage() {
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
     services: "服务",
-    connection: "连接",
     diagnostics: "诊断"
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
     overview: "",
     services: "系统服务与自定义服务",
-    connection: "连接、授权和运行参数",
     diagnostics: "系统、日志与清单"
   };
   const sidebarSystemServices = config.services
@@ -2896,13 +2941,6 @@ function renderOverviewPage() {
               </div>
             ) : null}
             <button
-              className={`sidebar-nav-item ${activePage === "connection" ? "active" : ""}`}
-              onClick={() => setActivePage("connection")}
-            >
-              <span>连接</span>
-              <small>{config.platform.workspace_id || "未授权"}</small>
-            </button>
-            <button
               className={`sidebar-nav-item ${activePage === "diagnostics" ? "active" : ""}`}
               onClick={() => setActivePage("diagnostics")}
             >
@@ -2927,16 +2965,6 @@ function renderOverviewPage() {
               {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
             </div>
             <div className="page-actions">
-              {activePage === "connection" ? (
-                <button className="secondary" onClick={() => void saveConfig()} disabled={busy}>
-                  保存配置
-                </button>
-              ) : null}
-              {activePage === "connection" ? (
-                <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
-                  浏览器授权
-                </button>
-              ) : null}
               {activePage === "diagnostics" ? (
                 <button
                   className="secondary"
@@ -2997,42 +3025,6 @@ function renderOverviewPage() {
             </div>
           ) : null}
 
-          {hasDesktopPermissionGap ? (
-            <div className="permission-banner">
-              <div>
-                <strong>桌面控制权限未准备完成</strong>
-                <p>
-                  当前已启用 {enabledComputerMethodCount} 个桌面控制方法，但
-                  {!desktopPermissions?.screenRecordingGranted ? " 屏幕录制" : ""}
-                  {!desktopPermissions?.screenRecordingGranted &&
-                  !desktopPermissions?.accessibilityGranted
-                    ? " 和"
-                    : ""}
-                  {!desktopPermissions?.accessibilityGranted ? " 辅助功能" : ""}
-                  还没有授权。
-                </p>
-              </div>
-              <div className="permission-actions">
-                {!desktopPermissions?.screenRecordingGranted ? (
-                  <button
-                    className="secondary"
-                    onClick={() => void openDesktopPermissionSettings("screen_recording")}
-                  >
-                    屏幕录制设置
-                  </button>
-                ) : null}
-                {!desktopPermissions?.accessibilityGranted ? (
-                  <button
-                    className="secondary"
-                    onClick={() => void openDesktopPermissionSettings("accessibility")}
-                  >
-                    辅助功能设置
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
           {message ? <div className="alert success">{message}</div> : null}
           {error ? <div className="alert error">{error}</div> : null}
           {runtime?.last_error && activePage !== "diagnostics" ? (
@@ -3045,7 +3037,6 @@ function renderOverviewPage() {
           <div className="page-body">
             {activePage === "overview" ? renderOverviewPage() : null}
             {activePage === "services" ? renderServicesPage() : null}
-            {activePage === "connection" ? renderConnectionPage() : null}
             {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
           </div>
         </section>
