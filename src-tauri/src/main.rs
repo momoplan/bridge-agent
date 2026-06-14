@@ -325,6 +325,18 @@ async fn runtime_snapshot(
 }
 
 #[tauri::command]
+async fn apply_saved_config_to_runtime(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<RuntimeSnapshot, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    state
+        .runtime
+        .apply_capabilities_from_path(&state.config_path)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn list_logs(
     state: tauri::State<'_, DesktopState>,
     limit: Option<usize>,
@@ -1319,6 +1331,7 @@ fn main() {
             start_agent,
             stop_agent,
             runtime_snapshot,
+            apply_saved_config_to_runtime,
             list_logs,
             clear_logs,
             reset_example_config,

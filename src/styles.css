@@ -358,7 +358,7 @@ select:focus {
   align-items: flex-start;
   margin-bottom: 18px;
   padding: 16px;
-  border-radius: 18px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.66);
   border: 1px solid rgba(30, 42, 68, 0.08);
 }
@@ -380,6 +380,13 @@ select:focus {
   color: var(--muted);
   line-height: 1.5;
   word-break: break-word;
+}
+
+.registered-service-runtime-meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .registered-service-runtime-actions {
@@ -561,7 +568,8 @@ select:focus {
 }
 
 .status-connecting,
-.status-starting {
+.status-starting,
+.status-startable {
   background: rgba(22, 163, 167, 0.14);
   color: var(--accent-strong);
 }

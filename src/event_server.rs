@@ -409,13 +409,14 @@ async fn apply_config_update(
 ) -> Result<(), EventApiError> {
     let config_base_dir = resolve_config_base_dir(&state.config_path);
     let registry = ServiceRegistry::from_config(config, &config_base_dir).map_err(bad_request)?;
-    let services = registry.definitions();
+    let relay_registry = ServiceRegistry::from_config_checked(config, &config_base_dir)
+        .await
+        .map_err(bad_request)?;
+    let services = relay_registry.definitions();
     {
         let mut current = state.registry.write().await;
         *current = registry;
     }
-    let relay_registry =
-        ServiceRegistry::from_config(config, &config_base_dir).map_err(bad_request)?;
     state
         .apply_tx
         .send(RuntimeRegistryUpdate {

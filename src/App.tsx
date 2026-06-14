@@ -754,7 +754,9 @@ function App() {
         service: serviceName
       });
       if (result.success) {
-        setMessage(`服务 ${serviceName} 的启动命令已执行`);
+        const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
+        setRuntime(snapshot);
+        setMessage(formatApplyMessage(`服务 ${serviceName} 的启动命令已执行`, snapshot));
       } else {
         setError(
           `服务 ${serviceName} 启动命令执行失败` +
@@ -1683,6 +1685,13 @@ function renderOverviewPage() {
     const servicePersisted = savedServiceSignatures[serviceIndex] != null;
     const runtimeStatus = registeredServiceStatuses.find((status) => status.service === service.name);
     const hasRuntimeControls = service.health_check != null || service.start_command != null;
+    const statusIsStartableOnly =
+      (runtimeStatus != null && !runtimeStatus.healthCheckConfigured && runtimeStatus.startCommandConfigured) ||
+      (runtimeStatus == null && service.health_check == null && service.start_command != null);
+    const runtimeStatusClass = statusIsStartableOnly ? "startable" : runtimeStatus?.status ?? "unknown";
+    const runtimeStatusLabel = statusIsStartableOnly
+      ? "可启动"
+      : formatRegisteredServiceStatus(runtimeStatus?.status ?? "unknown");
 
     return (
       <Card
@@ -1737,10 +1746,15 @@ function renderOverviewPage() {
             <div className="registered-service-runtime-main">
               <div>
                 <strong>服务运行</strong>
-                <p>{runtimeStatus?.detail ?? "等待状态检查"}</p>
+                <p>{formatRegisteredServiceDetail(service, runtimeStatus)}</p>
+                {runtimeStatus ? (
+                  <span className="registered-service-runtime-meta">
+                    上次检查 {formatTime(runtimeStatus.checkedAtMs)}
+                  </span>
+                ) : null}
               </div>
-              <div className={`status-pill status-${runtimeStatus?.status ?? "unknown"}`}>
-                {formatRegisteredServiceStatus(runtimeStatus?.status ?? "unknown")}
+              <div className={`status-pill status-${runtimeStatusClass}`}>
+                {runtimeStatusLabel}
               </div>
             </div>
             <div className="registered-service-runtime-actions">
@@ -2960,6 +2974,18 @@ function formatDesktopPermissionValue(
     return status.screenRecordingGranted ? "已授权" : "未授权";
   }
   return status.accessibilityGranted ? "已授权" : "未授权";
+}
+
+function formatRegisteredServiceDetail(
+  service: UiServiceConfig,
+  status: RegisteredServiceStatus | undefined
+): string {
+  const hasStartCommand = status?.startCommandConfigured ?? service.start_command != null;
+  const hasHealthCheck = status?.healthCheckConfigured ?? service.health_check != null;
+  if (!hasHealthCheck && hasStartCommand) {
+    return "已配置启动命令；未配置 healthCheck，无法自动确认运行状态";
+  }
+  return status?.detail ?? "等待状态检查";
 }
 
 function formatRegisteredServiceStatus(status: RegisteredServiceState): string {

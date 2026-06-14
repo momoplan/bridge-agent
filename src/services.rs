@@ -1,6 +1,6 @@
 use crate::config::{
     AgentConfig, ComputerUseAction, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig,
-    ServiceConfig, ShellCommandBinding, UploadConfig,
+    ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding, UploadConfig,
 };
 use crate::protocol::{EventDefinition, InvokeError, InvokeResult, ServiceDefinition};
 use anyhow::{anyhow, bail, Context, Result};
@@ -23,6 +23,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
@@ -360,6 +361,35 @@ impl ServiceRegistry {
         Ok(Self { services })
     }
 
+    pub async fn from_config_checked(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
+        let mut services = BTreeMap::new();
+        let shell_executions = ShellExecutionStore::default();
+        let health_client = Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .context("build registered service health client")?;
+
+        for service in &config.services {
+            if !service.enabled {
+                continue;
+            }
+            if !ensure_registered_service_ready(service, &health_client).await {
+                warn!(
+                    service = %service.name,
+                    "registered service is not healthy; omitting from runtime capabilities"
+                );
+                continue;
+            }
+            let runtime_service =
+                build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
+            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
+                services.insert(service.name.clone(), runtime_service);
+            }
+        }
+
+        Ok(Self { services })
+    }
+
     pub fn definitions(&self) -> Vec<ServiceDefinition> {
         self.services
             .values()
@@ -419,6 +449,156 @@ impl RuntimeMethod {
             Self::Shell(method) => method.invoke(arguments, timeout_secs).await,
             Self::Http(method) => method.invoke(arguments, timeout_secs).await,
             Self::Computer(method) => method.invoke(arguments).await,
+        }
+    }
+}
+
+async fn ensure_registered_service_ready(service: &ServiceConfig, client: &Client) -> bool {
+    let Some(health_check) = service.health_check.as_ref() else {
+        return true;
+    };
+
+    match check_registered_service_health(service, health_check, client).await {
+        Ok(()) => return true,
+        Err(err) => {
+            info!(service = %service.name, error = %err, "registered service health check failed");
+        }
+    }
+
+    let Some(start_command) = service.start_command.as_ref() else {
+        return false;
+    };
+
+    match run_registered_service_start_command(service, start_command).await {
+        Ok(completed) if completed.success => {
+            info!(
+                service = %service.name,
+                duration_ms = completed.duration_ms,
+                "registered service start command completed"
+            );
+        }
+        Ok(completed) => {
+            warn!(
+                service = %service.name,
+                exit_code = ?completed.exit_code,
+                timed_out = completed.timed_out,
+                stderr = %completed.stderr.trim(),
+                "registered service start command failed"
+            );
+            return false;
+        }
+        Err(err) => {
+            warn!(service = %service.name, error = %err, "registered service start command failed");
+            return false;
+        }
+    }
+
+    for _ in 0..20 {
+        if check_registered_service_health(service, health_check, client)
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    false
+}
+
+async fn check_registered_service_health(
+    service: &ServiceConfig,
+    health_check: &ServiceHealthCheck,
+    client: &Client,
+) -> Result<()> {
+    match health_check {
+        ServiceHealthCheck::Http {
+            url,
+            http_method,
+            headers,
+            timeout_secs,
+            expect_status,
+            body_contains,
+        } => {
+            let method = http_method
+                .parse::<Method>()
+                .with_context(|| format!("invalid health check method for `{}`", service.name))?;
+            let mut request = client
+                .request(method, url)
+                .timeout(Duration::from_secs(timeout_secs.unwrap_or(3).max(1)));
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("health check request failed for `{}`", service.name))?;
+            let expected_status = expect_status.unwrap_or(200);
+            let status = response.status();
+            if status.as_u16() != expected_status {
+                bail!(
+                    "health check for `{}` returned HTTP {}, expected {}",
+                    service.name,
+                    status.as_u16(),
+                    expected_status
+                );
+            }
+
+            if let Some(expected_text) = body_contains
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let body = response
+                    .text()
+                    .await
+                    .with_context(|| format!("read health check body for `{}`", service.name))?;
+                if !body.contains(expected_text) {
+                    bail!(
+                        "health check body for `{}` did not contain expected text",
+                        service.name
+                    );
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+async fn run_registered_service_start_command(
+    service: &ServiceConfig,
+    start_command: &ServiceStartCommand,
+) -> Result<CompletedShellExec> {
+    match start_command {
+        ServiceStartCommand::ShellCommand {
+            command,
+            cwd,
+            env,
+            timeout_secs,
+        } => {
+            if command.is_empty() || command[0].trim().is_empty() {
+                bail!("service `{}` start command is empty", service.name);
+            }
+
+            let cwd = match cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(cwd) => PathBuf::from(cwd),
+                None => std::env::current_dir().context("resolve current directory")?,
+            };
+            let path_for_diagnostics = std::env::var("PATH").unwrap_or_default();
+            let prepared = PreparedShellExec {
+                command_args: command.clone(),
+                cwd,
+                env: env.clone(),
+                timeout_secs: timeout_secs.unwrap_or(15).max(1),
+                path_for_diagnostics,
+            };
+            Ok(run_shell_command(prepared, None).await)
         }
     }
 }
@@ -2925,12 +3105,17 @@ mod tests {
         is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, PrepareUploadRequest,
         ServiceRegistry, ShellCommand, ShellExecArgs,
     };
-    use crate::config::{AgentConfig, EventConfig, ServiceConfig};
+    use crate::config::{
+        AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
+        ServiceHealthCheck,
+    };
+    use axum::{routing::get, Router};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
     use tokio::time::{sleep, Duration};
 
     #[test]
@@ -3146,6 +3331,101 @@ mod tests {
         assert!(definitions.iter().any(|service| service.name == "asyncJob"
             && service.methods.is_empty()
             && service.events.iter().any(|event| event.name == "finished")));
+    }
+
+    #[tokio::test]
+    async fn checked_registry_omits_unhealthy_registered_service() {
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "wechatLocal".to_string(),
+            description: "Local WeChat collector.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:1/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: None,
+            methods: vec![MethodConfig {
+                name: "getRecentSessions".to_string(),
+                description: "Recent sessions.".to_string(),
+                enabled: true,
+                input_schema: json!({"type": "object"}),
+                binding: MethodBinding::Http(HttpBinding {
+                    url: "http://127.0.0.1:1/invoke/getRecentSessions".to_string(),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(1),
+                }),
+            }],
+            events: vec![EventConfig {
+                name: "messageReceived".to_string(),
+                description: "Message received.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
+            .await
+            .unwrap();
+        assert!(!registry
+            .definitions()
+            .iter()
+            .any(|service| service.name == "wechatLocal"));
+        assert!(!registry.has_event("wechatLocal", "messageReceived"));
+    }
+
+    #[tokio::test]
+    async fn checked_registry_keeps_healthy_registered_service() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/health", get(|| async { "ok" })),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "healthyTool".to_string(),
+            description: "Healthy HTTP tool.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: format!("http://{addr}/health"),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: Some("ok".to_string()),
+            }),
+            start_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "finished".to_string(),
+                description: "Finished.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
+            .await
+            .unwrap();
+        assert!(registry.has_event("healthyTool", "finished"));
+        assert!(registry
+            .definitions()
+            .iter()
+            .any(|service| service.name == "healthyTool"));
+        server.abort();
     }
 
     #[tokio::test]

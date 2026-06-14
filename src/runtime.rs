@@ -107,10 +107,9 @@ impl AgentRuntimeManager {
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
-        let registry = Arc::new(RwLock::new(ServiceRegistry::from_config(
-            &config,
-            &config_base_dir,
-        )?));
+        let registry = Arc::new(RwLock::new(
+            ServiceRegistry::from_config_checked(&config, &config_base_dir).await?,
+        ));
         let file_log = FileLogSink::from_config(
             &FileLogConfig {
                 enabled: config.runtime.log_file_enabled,
@@ -225,7 +224,7 @@ impl AgentRuntimeManager {
     pub async fn apply_capabilities_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
         let config = load_config(path)?;
         let config_base_dir = resolve_config_base_dir(path);
-        let registry = ServiceRegistry::from_config(&config, &config_base_dir)?;
+        let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir).await?;
         let services = registry.definitions();
         let update = RuntimeRegistryUpdate { registry, services };
 
