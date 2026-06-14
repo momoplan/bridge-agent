@@ -245,14 +245,41 @@ interface UiEventConfig {
   payload_schema_text: string;
 }
 
+interface UiServiceHealthCheckHttp {
+  type: "http";
+  url: string;
+  http_method: string;
+  headers_text: string;
+  timeout_secs: string;
+  expect_status: string;
+  body_contains: string;
+}
+
+type UiServiceHealthCheck = UiServiceHealthCheckHttp;
+
+interface UiServiceStartShellCommand {
+  type: "shell_command";
+  command_text: string;
+  cwd: string;
+  env_text: string;
+  timeout_secs: string;
+}
+
+type UiServiceStartCommand = UiServiceStartShellCommand;
+
 interface UiServiceConfig {
   name: string;
   description: string;
   enabled: boolean;
-  health_check: ServiceHealthCheck | null;
-  start_command: ServiceStartCommand | null;
+  health_check: UiServiceHealthCheck | null;
+  start_command: UiServiceStartCommand | null;
   methods: UiMethodConfig[];
   events: UiEventConfig[];
+}
+
+interface ServiceCapabilitiesDocument {
+  methods: MethodConfig[];
+  events: EventConfig[];
 }
 
 type RegisteredServiceState = "not_configured" | "healthy" | "unhealthy" | "unknown";
@@ -499,6 +526,8 @@ function App() {
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
+  const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
+  const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
   const [desktopPermissionBusy, setDesktopPermissionBusy] = useState<"accessibility" | "screen_recording" | null>(
     null
   );
@@ -651,6 +680,8 @@ function App() {
     setConfig(uiConfig);
     setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
     setRuntime(document.runtime);
+    setServiceJsonDrafts({});
+    setServiceJsonErrors({});
   }
 
   function applySavedServiceDocument(document: ConfigDocument, serviceIndex: number) {
@@ -676,6 +707,16 @@ function App() {
       signatures[serviceIndex] = serviceSignature(savedService);
       return signatures;
     });
+    setServiceJsonDrafts((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
+    });
+    setServiceJsonErrors((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
+    });
   }
 
   function applyDeletedServiceDocument(document: ConfigDocument, serviceIndex: number) {
@@ -693,6 +734,8 @@ function App() {
       };
     });
     setSavedServiceSignatures((current) => current.filter((_, index) => index !== serviceIndex));
+    setServiceJsonDrafts((current) => reindexRecordAfterDelete(current, serviceIndex));
+    setServiceJsonErrors((current) => reindexRecordAfterDelete(current, serviceIndex));
   }
 
   function formatApplyMessage(base: string, snapshot: RuntimeSnapshot) {
@@ -862,6 +905,7 @@ function App() {
           ? formatApplyMessage(`服务 ${serviceName} 已保存`, document.runtime)
           : `服务 ${serviceName} 已保存`
       );
+      await refreshRegisteredServiceStatuses();
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -889,6 +933,7 @@ function App() {
           ? formatApplyMessage(`服务 ${serviceName} 已删除`, document.runtime)
           : `服务 ${serviceName} 已删除`
       );
+      await refreshRegisteredServiceStatuses();
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -1143,6 +1188,87 @@ function App() {
       );
       return { ...current, services };
     });
+  }
+
+  function updateServiceHealthCheck(
+    serviceIndex: number,
+    updater: (healthCheck: UiServiceHealthCheck) => UiServiceHealthCheck
+  ) {
+    updateService(serviceIndex, (service) => {
+      const current = service.health_check ?? createServiceHealthCheck();
+      return {
+        ...service,
+        health_check: updater(current)
+      };
+    });
+  }
+
+  function updateServiceStartCommand(
+    serviceIndex: number,
+    updater: (startCommand: UiServiceStartCommand) => UiServiceStartCommand
+  ) {
+    updateService(serviceIndex, (service) => {
+      const current = service.start_command ?? createServiceStartCommand();
+      return {
+        ...service,
+        start_command: updater(current)
+      };
+    });
+  }
+
+  function updateServiceJsonDraft(serviceIndex: number, value: string) {
+    setServiceJsonDrafts((current) => ({
+      ...current,
+      [serviceIndex]: value
+    }));
+    setServiceJsonErrors((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
+    });
+  }
+
+  function resetServiceJsonDraft(serviceIndex: number) {
+    setServiceJsonDrafts((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
+    });
+    setServiceJsonErrors((current) => {
+      const next = { ...current };
+      delete next[serviceIndex];
+      return next;
+    });
+  }
+
+  function applyServiceJsonDraft(serviceIndex: number) {
+    const service = config?.services[serviceIndex];
+    if (!service) {
+      return;
+    }
+    try {
+      const draft = serviceJsonDrafts[serviceIndex] ?? serviceCapabilitiesJson(service);
+      const parsed = parseJson(draft) as Partial<ServiceCapabilitiesDocument>;
+      if (!Array.isArray(parsed.methods)) {
+        throw new Error("能力定义 JSON 必须包含 methods 数组");
+      }
+      if (parsed.events != null && !Array.isArray(parsed.events)) {
+        throw new Error("能力定义 JSON 的 events 必须是数组");
+      }
+      const methods = parsed.methods.map(toUiMethod);
+      const events = (parsed.events ?? []).map(toUiEvent);
+      updateService(serviceIndex, (current) => ({
+        ...current,
+        methods,
+        events
+      }));
+      resetServiceJsonDraft(serviceIndex);
+    } catch (err) {
+      setServiceJsonErrors((current) => ({
+        ...current,
+        [serviceIndex]: readError(err)
+      }));
+    }
   }
 
   function addService() {
@@ -1678,13 +1804,21 @@ function renderOverviewPage() {
     );
   }
 
-  function renderServiceEditor(service: UiServiceConfig, serviceIndex: number) {
-    const isComputer = isComputerService(service);
-    const isSystem = isSystemService(service);
-    const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
-    const servicePersisted = savedServiceSignatures[serviceIndex] != null;
+  function serviceRuntimeView(service: UiServiceConfig): {
+    status: RegisteredServiceStatus | undefined;
+    statusClass: string;
+    statusLabel: string;
+    detail: string;
+  } {
     const runtimeStatus = registeredServiceStatuses.find((status) => status.service === service.name);
-    const hasRuntimeControls = service.health_check != null || service.start_command != null;
+    if (!service.health_check && !service.start_command && !runtimeStatus) {
+      return {
+        status: undefined,
+        statusClass: "not_configured",
+        statusLabel: formatRegisteredServiceStatus("not_configured"),
+        detail: formatRegisteredServiceDetail(service, undefined)
+      };
+    }
     const statusIsStartableOnly =
       (runtimeStatus != null && !runtimeStatus.healthCheckConfigured && runtimeStatus.startCommandConfigured) ||
       (runtimeStatus == null && service.health_check == null && service.start_command != null);
@@ -1692,6 +1826,324 @@ function renderOverviewPage() {
     const runtimeStatusLabel = statusIsStartableOnly
       ? "可启动"
       : formatRegisteredServiceStatus(runtimeStatus?.status ?? "unknown");
+    return {
+      status: runtimeStatus,
+      statusClass: runtimeStatusClass,
+      statusLabel: runtimeStatusLabel,
+      detail: formatRegisteredServiceDetail(service, runtimeStatus)
+    };
+  }
+
+  function renderServiceRuntimePanel(service: UiServiceConfig, serviceIndex: number, isSystem: boolean) {
+    const runtimeView = serviceRuntimeView(service);
+
+    return (
+      <div className="registered-service-runtime">
+        <div className="registered-service-runtime-main">
+          <div>
+            <strong>服务运行</strong>
+            <p>{runtimeView.detail}</p>
+            {runtimeView.status ? (
+              <span className="registered-service-runtime-meta">
+                上次检查 {formatTime(runtimeView.status.checkedAtMs)}
+              </span>
+            ) : null}
+          </div>
+          <div className={`status-pill status-${runtimeView.statusClass}`}>
+            {runtimeView.statusLabel}
+          </div>
+        </div>
+        <div className="registered-service-runtime-actions">
+          {service.health_check ? (
+            <button className="ghost" onClick={() => void refreshRegisteredServiceStatuses()}>
+              检查状态
+            </button>
+          ) : !isSystem ? (
+            <button
+              className="ghost"
+              onClick={() =>
+                updateService(serviceIndex, (current) => ({
+                  ...current,
+                  health_check: createServiceHealthCheck()
+                }))
+              }
+            >
+              配置检查
+            </button>
+          ) : null}
+          {service.start_command ? (
+            <button
+              className="secondary"
+              onClick={() => void startRegisteredService(service.name)}
+              disabled={serviceStartBusy != null}
+            >
+              {serviceStartBusy === service.name ? "启动中" : "启动服务"}
+            </button>
+          ) : !isSystem ? (
+            <button
+              className="secondary"
+              onClick={() =>
+                updateService(serviceIndex, (current) => ({
+                  ...current,
+                  start_command: createServiceStartCommand()
+                }))
+              }
+            >
+              配置启动
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderServiceRuntimeConfig(service: UiServiceConfig, serviceIndex: number, isSystem: boolean) {
+    if (isSystem) {
+      return null;
+    }
+
+    return (
+      <div className="runtime-config-section">
+        <div className="method-advanced-head">
+          <strong>运行配置</strong>
+          <small>健康检查决定状态展示；启动命令决定“启动服务”按钮的执行内容。</small>
+        </div>
+
+        <div className="runtime-config-block">
+          <div className="runtime-config-head">
+            <div>
+              <strong>健康检查</strong>
+              <small>{service.health_check ? "已启用 HTTP 状态检查" : "未配置，无法自动判断是否可用"}</small>
+            </div>
+            {service.health_check ? (
+              <button
+                className="ghost danger"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    health_check: null
+                  }))
+                }
+              >
+                移除检查
+              </button>
+            ) : (
+              <button
+                className="secondary"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    health_check: createServiceHealthCheck()
+                  }))
+                }
+              >
+                添加检查
+              </button>
+            )}
+          </div>
+          {service.health_check ? (
+            <div className="form-grid">
+              <Field label="检查 URL" wide>
+                <input
+                  value={service.health_check.url}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      url: event.target.value
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="HTTP 方法">
+                <input
+                  value={service.health_check.http_method}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      http_method: event.target.value.toUpperCase()
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="期望状态码">
+                <input
+                  value={service.health_check.expect_status}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      expect_status: event.target.value
+                    }))
+                  }
+                  placeholder="默认任意 2xx"
+                />
+              </Field>
+              <Field label="超时秒数">
+                <input
+                  value={service.health_check.timeout_secs}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      timeout_secs: event.target.value
+                    }))
+                  }
+                  placeholder="默认 3"
+                />
+              </Field>
+              <Field label="响应包含">
+                <input
+                  value={service.health_check.body_contains}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      body_contains: event.target.value
+                    }))
+                  }
+                  placeholder="可选"
+                />
+              </Field>
+              <Field label="请求头" wide>
+                <textarea
+                  rows={4}
+                  value={service.health_check.headers_text}
+                  onChange={(event) =>
+                    updateServiceHealthCheck(serviceIndex, (current) => ({
+                      ...current,
+                      headers_text: event.target.value
+                    }))
+                  }
+                  placeholder={"Authorization: Bearer xxx\nX-App: local-service"}
+                />
+              </Field>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="runtime-config-block">
+          <div className="runtime-config-head">
+            <div>
+              <strong>启动命令</strong>
+              <small>{service.start_command ? "已启用服务启动按钮" : "未配置，服务详情不会执行启动动作"}</small>
+            </div>
+            {service.start_command ? (
+              <button
+                className="ghost danger"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    start_command: null
+                  }))
+                }
+              >
+                移除启动
+              </button>
+            ) : (
+              <button
+                className="secondary"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    start_command: createServiceStartCommand()
+                  }))
+                }
+              >
+                添加启动
+              </button>
+            )}
+          </div>
+          {service.start_command ? (
+            <div className="form-grid">
+              <Field label="命令参数" hint="每行一个参数；第一行是可执行文件。" wide>
+                <textarea
+                  rows={5}
+                  value={service.start_command.command_text}
+                  onChange={(event) =>
+                    updateServiceStartCommand(serviceIndex, (current) => ({
+                      ...current,
+                      command_text: event.target.value
+                    }))
+                  }
+                  placeholder={"npm\nrun\ndev"}
+                />
+              </Field>
+              <Field label="工作目录">
+                <input
+                  value={service.start_command.cwd}
+                  onChange={(event) =>
+                    updateServiceStartCommand(serviceIndex, (current) => ({
+                      ...current,
+                      cwd: event.target.value
+                    }))
+                  }
+                  placeholder="留空继承 Agent 进程目录"
+                />
+              </Field>
+              <Field label="超时秒数">
+                <input
+                  value={service.start_command.timeout_secs}
+                  onChange={(event) =>
+                    updateServiceStartCommand(serviceIndex, (current) => ({
+                      ...current,
+                      timeout_secs: event.target.value
+                    }))
+                  }
+                  placeholder="默认 20"
+                />
+              </Field>
+              <Field label="环境变量" wide>
+                <textarea
+                  rows={4}
+                  value={service.start_command.env_text}
+                  onChange={(event) =>
+                    updateServiceStartCommand(serviceIndex, (current) => ({
+                      ...current,
+                      env_text: event.target.value
+                    }))
+                  }
+                  placeholder={"NODE_ENV: development\nPORT: 8081"}
+                />
+              </Field>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderServiceDefinitionJson(service: UiServiceConfig, serviceIndex: number) {
+    const draft = serviceJsonDrafts[serviceIndex] ?? serviceCapabilitiesJson(service);
+    const error = serviceJsonErrors[serviceIndex];
+
+    return (
+      <div className="service-json-section">
+        <div className="method-advanced-head">
+          <strong>能力定义 JSON</strong>
+          <small>统一编辑 methods 和 events；保存服务时会按同一套配置校验写入。</small>
+        </div>
+        <textarea
+          className="json-editor"
+          rows={18}
+          value={draft}
+          onChange={(event) => updateServiceJsonDraft(serviceIndex, event.target.value)}
+        />
+        {error ? <div className="json-error">{error}</div> : null}
+        <div className="json-editor-actions">
+          <button className="secondary" onClick={() => applyServiceJsonDraft(serviceIndex)}>
+            应用 JSON
+          </button>
+          <button className="ghost" onClick={() => resetServiceJsonDraft(serviceIndex)}>
+            重置
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderServiceEditor(service: UiServiceConfig, serviceIndex: number) {
+    const isComputer = isComputerService(service);
+    const isSystem = isSystemService(service);
+    const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
+    const servicePersisted = savedServiceSignatures[serviceIndex] != null;
+    const hasRuntimeControls = service.health_check != null || service.start_command != null;
 
     return (
       <Card
@@ -1741,40 +2193,7 @@ function renderOverviewPage() {
           </div>
         }
       >
-        {hasRuntimeControls ? (
-          <div className="registered-service-runtime">
-            <div className="registered-service-runtime-main">
-              <div>
-                <strong>服务运行</strong>
-                <p>{formatRegisteredServiceDetail(service, runtimeStatus)}</p>
-                {runtimeStatus ? (
-                  <span className="registered-service-runtime-meta">
-                    上次检查 {formatTime(runtimeStatus.checkedAtMs)}
-                  </span>
-                ) : null}
-              </div>
-              <div className={`status-pill status-${runtimeStatusClass}`}>
-                {runtimeStatusLabel}
-              </div>
-            </div>
-            <div className="registered-service-runtime-actions">
-              {service.health_check ? (
-                <button className="ghost" onClick={() => void refreshRegisteredServiceStatuses()}>
-                  检查状态
-                </button>
-              ) : null}
-              {service.start_command ? (
-                <button
-                  className="secondary"
-                  onClick={() => void startRegisteredService(service.name)}
-                  disabled={serviceStartBusy != null}
-                >
-                  {serviceStartBusy === service.name ? "启动中" : "启动服务"}
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+        {hasRuntimeControls ? renderServiceRuntimePanel(service, serviceIndex, isSystem) : null}
         <div className="service-editor-layout">
           {!isSystem ? (
             <>
@@ -1802,17 +2221,8 @@ function renderOverviewPage() {
                   />
                 </Field>
               </div>
-              <div className="method-toolbar">
-                <button className="secondary" onClick={() => addMethod(serviceIndex, "shell_command")}>
-                  新增 Shell 方法
-                </button>
-                <button className="secondary" onClick={() => addMethod(serviceIndex, "http")}>
-                  新增 HTTP 方法
-                </button>
-                <button className="secondary" onClick={() => addEvent(serviceIndex)}>
-                  新增事件
-                </button>
-              </div>
+              {renderServiceRuntimeConfig(service, serviceIndex, isSystem)}
+              {renderServiceDefinitionJson(service, serviceIndex)}
             </>
           ) : null}
           <div className="method-list">
@@ -1823,7 +2233,7 @@ function renderOverviewPage() {
                     <div className="method-title-row">
                       <h4>{method.name || "未命名方法"}</h4>
                       <span className="method-badge">{formatMethodTypeLabel(method.binding.type)}</span>
-                      {isComputer ? (
+                      {method.enabled != null ? (
                         <span className={`service-badge ${method.enabled ? "enabled" : "disabled"}`}>
                           {method.enabled ? "启用" : "停用"}
                         </span>
@@ -1837,7 +2247,7 @@ function renderOverviewPage() {
                       </div>
                     ) : null}
                   </div>
-                  {!isComputer ? (
+                  {isSystem && !isComputer ? (
                     <div className="service-actions">
                       <label className="switch">
                         <input
@@ -1870,7 +2280,7 @@ function renderOverviewPage() {
                   ) : null}
                 </div>
 
-                {!isComputer ? (
+                {isSystem && !isComputer ? (
                   <div className="form-grid">
                     {!isSystem ? (
                       <>
@@ -1983,7 +2393,7 @@ function renderOverviewPage() {
                   </div>
                 ) : null}
 
-                {!isComputer && isMethodAdvancedOpen(serviceIndex, methodIndex) ? (
+                {isSystem && !isComputer && isMethodAdvancedOpen(serviceIndex, methodIndex) ? (
                   <div className="method-advanced">
                     <div className="method-advanced-head">
                       <strong>高级设置</strong>
@@ -2155,68 +2565,7 @@ function renderOverviewPage() {
                     </div>
                     <p>{eventConfig.description || "本地自定义服务可通过本机事件入口发送。"}</p>
                   </div>
-                  {!isSystem ? (
-                    <div className="service-actions">
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={eventConfig.enabled}
-                          onChange={(event) =>
-                            updateEvent(serviceIndex, eventIndex, (current) => ({
-                              ...current,
-                              enabled: event.target.checked
-                            }))
-                          }
-                        />
-                        启用
-                      </label>
-                      <button
-                        className="ghost danger"
-                        onClick={() => removeEvent(serviceIndex, eventIndex)}
-                      >
-                        删除事件
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
-                {!isSystem ? (
-                  <div className="form-grid">
-                    <Field label="事件名">
-                      <input
-                        value={eventConfig.name}
-                        onChange={(event) =>
-                          updateEvent(serviceIndex, eventIndex, (current) => ({
-                            ...current,
-                            name: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label="事件描述">
-                      <input
-                        value={eventConfig.description}
-                        onChange={(event) =>
-                          updateEvent(serviceIndex, eventIndex, (current) => ({
-                            ...current,
-                            description: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label="Payload Schema JSON" wide>
-                      <textarea
-                        rows={6}
-                        value={eventConfig.payload_schema_text}
-                        onChange={(event) =>
-                          updateEvent(serviceIndex, eventIndex, (current) => ({
-                            ...current,
-                            payload_schema_text: event.target.value
-                          }))
-                        }
-                      />
-                    </Field>
-                  </div>
-                ) : null}
               </div>
             ))}
           </div>
@@ -2442,6 +2791,8 @@ function renderOverviewPage() {
     .filter(({ service }) => !isSystemService(service));
 
   function renderSidebarServiceItem(service: UiServiceConfig, serviceIndex: number) {
+    const runtimeView = serviceRuntimeView(service);
+    const hasRuntimeInfo = service.health_check != null || service.start_command != null;
     return (
       <button
         className={`sidebar-subnav-item ${
@@ -2453,7 +2804,14 @@ function renderOverviewPage() {
           setExpandedServiceIndex(serviceIndex);
         }}
       >
-        <span>{service.name || "未命名服务"}</span>
+        <span className="sidebar-service-title">
+          <span>{service.name || "未命名服务"}</span>
+          {hasRuntimeInfo ? (
+            <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
+              {runtimeView.statusLabel}
+            </span>
+          ) : null}
+        </span>
         <small>
           {service.enabled ? "启用" : "停用"} · {service.methods.length} 个方法 · {service.events.length} 个事件
         </small>
@@ -2495,7 +2853,12 @@ function renderOverviewPage() {
             {activePage === "services" ? (
               <div className="sidebar-subnav">
                 {config.services.length === 0 ? (
-                  <div className="sidebar-subnav-empty">还没有服务</div>
+                  <>
+                    <div className="sidebar-subnav-empty">还没有服务</div>
+                    <button className="sidebar-subnav-add" onClick={addService}>
+                      新增自定义服务
+                    </button>
+                  </>
                 ) : (
                   <>
                     {sidebarSystemServices.length > 0 ? (
@@ -2514,6 +2877,9 @@ function renderOverviewPage() {
                         )}
                       </>
                     ) : null}
+                    <button className="sidebar-subnav-add" onClick={addService}>
+                      新增自定义服务
+                    </button>
                   </>
                 )}
               </div>
@@ -2550,11 +2916,6 @@ function renderOverviewPage() {
               {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
             </div>
             <div className="page-actions">
-              {activePage === "services" ? (
-                <button className="secondary" onClick={addService}>
-                  新增自定义服务
-                </button>
-              ) : null}
               {activePage === "connection" ? (
                 <button className="secondary" onClick={() => void saveConfig()} disabled={busy}>
                   保存配置
@@ -2749,47 +3110,7 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
       tags_text: config.device.tags.join(", ")
     },
     runtime: config.runtime,
-    services: config.services.map((service) => ({
-      name: service.name,
-      description: service.description,
-      enabled: service.enabled,
-      health_check: service.health_check ?? null,
-      start_command: service.start_command ?? null,
-      events: (service.events ?? []).map((eventConfig) => ({
-        name: eventConfig.name,
-        description: eventConfig.description,
-        enabled: eventConfig.enabled,
-        payload_schema_text: prettyJson(eventConfig.payload_schema)
-      })),
-      methods: service.methods.map((method) => ({
-        name: method.name,
-        description: method.description,
-        enabled: method.enabled,
-        input_schema_text: prettyJson(method.input_schema),
-        binding:
-          method.binding.type === "shell_command"
-            ? {
-                type: "shell_command",
-                root_dir: method.binding.root_dir,
-                allow_commands_text: method.binding.allow_commands.join(", "),
-                default_timeout_secs: toOptionalText(method.binding.default_timeout_secs),
-                max_timeout_secs: toOptionalText(method.binding.max_timeout_secs)
-              }
-            : method.binding.type === "http"
-              ? {
-                  type: "http",
-                  url: method.binding.url,
-                  http_method: method.binding.http_method,
-                  headers_text: headersToText(method.binding.headers),
-                  timeout_secs: toOptionalText(method.binding.timeout_secs)
-                }
-              : {
-                  type: "computer_use",
-                  action: method.binding.action,
-                  display_id: toOptionalText(method.binding.display_id)
-                }
-      }))
-    }))
+    services: config.services.map(toUiService)
   };
 }
 
@@ -2815,47 +3136,115 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
   };
 }
 
+function toUiService(service: ServiceConfig): UiServiceConfig {
+  return {
+    name: service.name,
+    description: service.description,
+    enabled: service.enabled,
+    health_check: service.health_check ? toUiServiceHealthCheck(service.health_check) : null,
+    start_command: service.start_command ? toUiServiceStartCommand(service.start_command) : null,
+    events: (service.events ?? []).map(toUiEvent),
+    methods: service.methods.map(toUiMethod)
+  };
+}
+
 function fromUiService(service: UiServiceConfig): ServiceConfig {
   return {
     name: service.name.trim(),
     description: service.description.trim(),
     enabled: service.enabled,
-    health_check: service.health_check,
-    start_command: service.start_command,
-    events: service.events.map((eventConfig) => ({
-      name: eventConfig.name.trim(),
-      description: eventConfig.description.trim(),
-      enabled: eventConfig.enabled,
-      payload_schema: parseJson(eventConfig.payload_schema_text)
-    })),
-    methods: service.methods.map((method) => ({
-      name: method.name.trim(),
-      description: method.description.trim(),
-      enabled: method.enabled,
-      input_schema: parseJson(method.input_schema_text),
-      binding:
-        method.binding.type === "shell_command"
+    health_check: service.health_check ? fromUiServiceHealthCheck(service.health_check) : null,
+    start_command: service.start_command ? fromUiServiceStartCommand(service.start_command) : null,
+    events: service.events.map(fromUiEvent),
+    methods: service.methods.map(fromUiMethod)
+  };
+}
+
+function serviceCapabilitiesJson(service: UiServiceConfig): string {
+  const document: ServiceCapabilitiesDocument = {
+    methods: service.methods.map(fromUiMethod),
+    events: service.events.map(fromUiEvent)
+  };
+  return prettyJson(document);
+}
+
+function toUiMethod(method: MethodConfig): UiMethodConfig {
+  return {
+    name: method.name,
+    description: method.description,
+    enabled: method.enabled,
+    input_schema_text: prettyJson(method.input_schema),
+    binding:
+      method.binding.type === "shell_command"
+        ? {
+            type: "shell_command",
+            root_dir: method.binding.root_dir,
+            allow_commands_text: method.binding.allow_commands.join(", "),
+            default_timeout_secs: toOptionalText(method.binding.default_timeout_secs),
+            max_timeout_secs: toOptionalText(method.binding.max_timeout_secs)
+          }
+        : method.binding.type === "http"
           ? {
-              type: "shell_command",
-              root_dir: method.binding.root_dir.trim(),
-              allow_commands: splitCommaList(method.binding.allow_commands_text),
-              default_timeout_secs: toOptionalNumber(method.binding.default_timeout_secs),
-              max_timeout_secs: toOptionalNumber(method.binding.max_timeout_secs)
+              type: "http",
+              url: method.binding.url,
+              http_method: method.binding.http_method,
+              headers_text: headersToText(method.binding.headers),
+              timeout_secs: toOptionalText(method.binding.timeout_secs)
             }
-          : method.binding.type === "http"
-            ? {
-                type: "http",
-                url: method.binding.url.trim(),
-                http_method: method.binding.http_method.trim().toUpperCase(),
-                headers: textToHeaders(method.binding.headers_text),
-                timeout_secs: toOptionalNumber(method.binding.timeout_secs)
-              }
-            : {
-                type: "computer_use",
-                action: method.binding.action,
-                display_id: toOptionalNumber(method.binding.display_id)
-              }
-    }))
+          : {
+              type: "computer_use",
+              action: method.binding.action,
+              display_id: toOptionalText(method.binding.display_id)
+            }
+  };
+}
+
+function fromUiMethod(method: UiMethodConfig): MethodConfig {
+  return {
+    name: method.name.trim(),
+    description: method.description.trim(),
+    enabled: method.enabled,
+    input_schema: parseJson(method.input_schema_text),
+    binding:
+      method.binding.type === "shell_command"
+        ? {
+            type: "shell_command",
+            root_dir: method.binding.root_dir.trim(),
+            allow_commands: splitCommaList(method.binding.allow_commands_text),
+            default_timeout_secs: toOptionalNumber(method.binding.default_timeout_secs),
+            max_timeout_secs: toOptionalNumber(method.binding.max_timeout_secs)
+          }
+        : method.binding.type === "http"
+          ? {
+              type: "http",
+              url: method.binding.url.trim(),
+              http_method: method.binding.http_method.trim().toUpperCase(),
+              headers: textToHeaders(method.binding.headers_text),
+              timeout_secs: toOptionalNumber(method.binding.timeout_secs)
+            }
+          : {
+              type: "computer_use",
+              action: method.binding.action,
+              display_id: toOptionalNumber(method.binding.display_id)
+            }
+  };
+}
+
+function toUiEvent(eventConfig: EventConfig): UiEventConfig {
+  return {
+    name: eventConfig.name,
+    description: eventConfig.description,
+    enabled: eventConfig.enabled,
+    payload_schema_text: prettyJson(eventConfig.payload_schema)
+  };
+}
+
+function fromUiEvent(eventConfig: UiEventConfig): EventConfig {
+  return {
+    name: eventConfig.name.trim(),
+    description: eventConfig.description.trim(),
+    enabled: eventConfig.enabled,
+    payload_schema: parseJson(eventConfig.payload_schema_text)
   };
 }
 
@@ -2910,6 +3299,76 @@ function createEvent(): UiEventConfig {
   };
 }
 
+function createServiceHealthCheck(): UiServiceHealthCheck {
+  return {
+    type: "http",
+    url: "http://127.0.0.1:8081/health",
+    http_method: "GET",
+    headers_text: "",
+    timeout_secs: "3",
+    expect_status: "200",
+    body_contains: ""
+  };
+}
+
+function createServiceStartCommand(): UiServiceStartCommand {
+  return {
+    type: "shell_command",
+    command_text: "npm\nrun\ndev",
+    cwd: "",
+    env_text: "",
+    timeout_secs: "20"
+  };
+}
+
+function toUiServiceHealthCheck(healthCheck: ServiceHealthCheck): UiServiceHealthCheck {
+  return {
+    type: "http",
+    url: healthCheck.url,
+    http_method: healthCheck.http_method,
+    headers_text: headersToText(healthCheck.headers),
+    timeout_secs: toOptionalText(healthCheck.timeout_secs),
+    expect_status: toOptionalText(healthCheck.expect_status),
+    body_contains: healthCheck.body_contains ?? ""
+  };
+}
+
+function fromUiServiceHealthCheck(healthCheck: UiServiceHealthCheck): ServiceHealthCheck {
+  return {
+    type: "http",
+    url: healthCheck.url.trim(),
+    http_method: healthCheck.http_method.trim().toUpperCase(),
+    headers: textToHeaders(healthCheck.headers_text),
+    timeout_secs: toOptionalNumber(healthCheck.timeout_secs),
+    expect_status: toOptionalNumber(healthCheck.expect_status),
+    body_contains: emptyToNull(healthCheck.body_contains)
+  };
+}
+
+function toUiServiceStartCommand(startCommand: ServiceStartCommand): UiServiceStartCommand {
+  return {
+    type: "shell_command",
+    command_text: startCommand.command.join("\n"),
+    cwd: startCommand.cwd ?? "",
+    env_text: headersToText(startCommand.env),
+    timeout_secs: toOptionalText(startCommand.timeout_secs)
+  };
+}
+
+function fromUiServiceStartCommand(startCommand: UiServiceStartCommand): ServiceStartCommand {
+  const command = splitLineList(startCommand.command_text);
+  if (command.length === 0) {
+    throw new Error("启动命令不能为空");
+  }
+  return {
+    type: "shell_command",
+    command,
+    cwd: emptyToNull(startCommand.cwd),
+    env: textToHeaders(startCommand.env_text),
+    timeout_secs: toOptionalNumber(startCommand.timeout_secs)
+  };
+}
+
 function isComputerService(service: Pick<UiServiceConfig, "name">): boolean {
   return service.name.trim().toLowerCase() === "computer";
 }
@@ -2937,6 +3396,28 @@ function splitCommaList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function splitLineList(value: string): string[] {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function reindexRecordAfterDelete(
+  record: Record<number, string>,
+  deletedIndex: number
+): Record<number, string> {
+  const next: Record<number, string> = {};
+  for (const [rawIndex, value] of Object.entries(record)) {
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index === deletedIndex) {
+      continue;
+    }
+    next[index > deletedIndex ? index - 1 : index] = value;
+  }
+  return next;
 }
 
 function isFullShellAccess(binding: UiShellBinding): boolean {
@@ -2982,6 +3463,9 @@ function formatRegisteredServiceDetail(
 ): string {
   const hasStartCommand = status?.startCommandConfigured ?? service.start_command != null;
   const hasHealthCheck = status?.healthCheckConfigured ?? service.health_check != null;
+  if (!hasHealthCheck && !hasStartCommand) {
+    return "未配置 healthCheck 或启动命令，当前只能作为能力清单服务展示";
+  }
   if (!hasHealthCheck && hasStartCommand) {
     return "已配置启动命令；未配置 healthCheck，无法自动确认运行状态";
   }

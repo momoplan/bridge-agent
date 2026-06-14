@@ -227,6 +227,34 @@ select:focus {
   white-space: nowrap;
 }
 
+.sidebar-subnav-item .sidebar-service-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.sidebar-subnav-item .sidebar-service-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-subnav-item .sidebar-service-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .sidebar-subnav-item small,
 .sidebar-subnav-empty {
   margin-top: 4px;
@@ -241,6 +269,18 @@ select:focus {
 
 .sidebar-subnav-empty {
   padding: 10px 12px;
+}
+
+.sidebar-subnav-add {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px dashed rgba(22, 163, 167, 0.34);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.44);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: left;
 }
 
 .sidebar-footer {
@@ -390,6 +430,72 @@ select:focus {
 }
 
 .registered-service-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.runtime-config-section {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.runtime-config-block {
+  display: grid;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(30, 42, 68, 0.08);
+}
+
+.runtime-config-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.runtime-config-head strong,
+.runtime-config-head small {
+  display: block;
+}
+
+.runtime-config-head small {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.service-json-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.json-editor {
+  min-height: 360px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.json-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(152, 43, 43, 0.1);
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.json-editor-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -997,6 +1103,7 @@ select:focus {
   .overview-status-row,
   .registered-service-runtime,
   .registered-service-runtime-main,
+  .runtime-config-head,
   .permission-banner,
   .update-banner,
   .card-head {
