@@ -2839,6 +2839,7 @@ function App() {
     services: "系统服务与自定义服务",
     diagnostics: "系统、日志与清单"
   };
+  const showPageHeader = activePage !== "services";
   const sidebarSystemServices = config.services
     .map((service, serviceIndex) => ({ service, serviceIndex }))
     .filter(({ service }) => isSystemService(service));
@@ -2958,29 +2959,31 @@ function App() {
         </aside>
 
         <section className="main-panel">
-          <header className="page-header">
-            <div>
-              <p className="eyebrow">{pageTitleMap[activePage]}</p>
-              <h2>{pageTitleMap[activePage]}</h2>
-              {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
-            </div>
-            <div className="page-actions">
-              {activePage === "diagnostics" ? (
-                <button
-                  className="secondary"
-                  onClick={() => void checkAppUpdate(true)}
-                  disabled={updateBusy}
-                >
-                  检查更新
-                </button>
-              ) : null}
-              {activePage === "diagnostics" ? (
-                <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
-                  恢复示例
-                </button>
-              ) : null}
-            </div>
-          </header>
+          {showPageHeader ? (
+            <header className="page-header">
+              <div>
+                <p className="eyebrow">{pageTitleMap[activePage]}</p>
+                <h2>{pageTitleMap[activePage]}</h2>
+                {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
+              </div>
+              <div className="page-actions">
+                {activePage === "diagnostics" ? (
+                  <button
+                    className="secondary"
+                    onClick={() => void checkAppUpdate(true)}
+                    disabled={updateBusy}
+                  >
+                    检查更新
+                  </button>
+                ) : null}
+                {activePage === "diagnostics" ? (
+                  <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
+                    恢复示例
+                  </button>
+                ) : null}
+              </div>
+            </header>
+          ) : null}
 
           {visibleAppUpdate ? (
             <div className="update-banner">
