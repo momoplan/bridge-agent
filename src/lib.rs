@@ -1,4 +1,5 @@
 pub mod config;
+pub mod connector;
 mod event_server;
 pub mod logging;
 pub mod protocol;
@@ -14,6 +15,11 @@ pub use config::{
     MethodBinding, MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
     RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
     ServiceRegistration, ServiceStartCommand, UploadConfig,
+};
+pub use connector::{
+    connectors_dir, install_connector_from_path, list_connectors, show_connector, start_connector,
+    uninstall_connector, ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest,
+    ConnectorStartResult, ConnectorSummary,
 };
 pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
 

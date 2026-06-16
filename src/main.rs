@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use bridge_agent::{
-    default_config_path, ensure_config_exists, install_rustls_crypto_provider, load_config,
-    save_config, AgentConfig, AgentRuntimeManager, ServiceConfig, ServiceRegistration,
+    default_config_path, ensure_config_exists, install_connector_from_path,
+    install_rustls_crypto_provider, list_connectors, load_config, save_config, show_connector,
+    start_connector, uninstall_connector, AgentConfig, AgentRuntimeManager, ServiceConfig,
+    ServiceRegistration,
 };
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -45,6 +47,35 @@ enum Command {
         #[arg(long, env = "WS_BRIDGE_CONFIG")]
         config: Option<PathBuf>,
     },
+    Connector {
+        #[command(subcommand)]
+        command: ConnectorCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConnectorCommand {
+    Install {
+        source: PathBuf,
+        #[arg(long, env = "WS_BRIDGE_CONFIG")]
+        config: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        replace: bool,
+    },
+    Uninstall {
+        id: String,
+        #[arg(long, env = "WS_BRIDGE_CONFIG")]
+        config: Option<PathBuf>,
+    },
+    List,
+    Show {
+        id: String,
+    },
+    Start {
+        id: String,
+        #[arg(long, env = "WS_BRIDGE_CONFIG")]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +102,7 @@ async fn main() -> Result<()> {
             unregister_service_command(name, config).await
         }
         Command::ListServices { config } => list_services_command(config).await,
+        Command::Connector { command } => connector_command(command).await,
     }
 }
 
@@ -168,6 +200,39 @@ async fn list_services_command(config: Option<PathBuf>) -> Result<()> {
     ensure_config_exists(&config_path)?;
     let config = load_config(&config_path)?;
     println!("{}", serde_json::to_string_pretty(&config.services)?);
+    Ok(())
+}
+
+async fn connector_command(command: ConnectorCommand) -> Result<()> {
+    match command {
+        ConnectorCommand::Install {
+            source,
+            config,
+            replace,
+        } => {
+            let config_path = config.unwrap_or(default_config_path()?);
+            let result = install_connector_from_path(&source, &config_path, replace)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ConnectorCommand::Uninstall { id, config } => {
+            let config_path = config.unwrap_or(default_config_path()?);
+            let result = uninstall_connector(&id, &config_path)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ConnectorCommand::List => {
+            println!("{}", serde_json::to_string_pretty(&list_connectors()?)?);
+        }
+        ConnectorCommand::Show { id } => {
+            println!("{}", serde_json::to_string_pretty(&show_connector(&id)?)?);
+        }
+        ConnectorCommand::Start { id, config } => {
+            let config_path = config.unwrap_or(default_config_path()?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&start_connector(&id, &config_path)?)?
+            );
+        }
+    }
     Ok(())
 }
 

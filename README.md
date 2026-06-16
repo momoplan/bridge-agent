@@ -91,6 +91,18 @@
 - 已接浏览器授权启动和轮询，授权成功后会把 `agent token` 自动写回本地配置
 - 可打包为桌面应用分发
 
+## 下一步：百积木 Local Connector
+
+`bridge-agent` 后续应产品化为“百积木 Local”：本地能力宿主负责设备授权、relay 长连、Connector 安装、服务注册、生命周期、健康检查和调用审计。
+
+Codex、Claude Code、WeChat、Desktop Control 等能力不应硬编码进宿主，而应作为可安装 Connector：
+
+- Codex Connector：连接本机 `codex app-server`，提供结构化 thread/turn/event 远控。
+- WeChat Connector：连接本机微信采集器，注册 `wechatLocal` 查询方法和消息事件。
+- Desktop Connector：提供截图、点击、键盘、滚动等桌面能力。
+
+规范草案见仓库根目录的 `BRIDGE_LOCAL_CONNECTOR_SPEC.md`。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
+
 ## 对外暴露的模型
 
 外部看到的是业务服务模型，而不是本地实现细节。
