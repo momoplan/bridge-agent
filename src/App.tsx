@@ -178,6 +178,10 @@ interface ConfigDocument {
   runtime: RuntimeSnapshot;
 }
 
+interface ConfigRecoveryDocument extends ConfigDocument {
+  archived_path: string | null;
+}
+
 interface AppUpdateStatus {
   currentVersion: string;
   latestVersion: string | null;
@@ -996,6 +1000,25 @@ function App() {
       const document = await invoke<ConfigDocument>("reset_example_config");
       applyConfigDocument(document);
       setMessage("已恢复示例配置");
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recoverInvalidConfig() {
+    try {
+      setBusy(true);
+      setMessage("");
+      setError("");
+      const document = await invoke<ConfigRecoveryDocument>("recover_invalid_config");
+      applyConfigDocument(document);
+      setMessage(
+        document.archived_path
+          ? `已恢复默认配置，原配置已保留到 ${document.archived_path}`
+          : "已创建默认配置"
+      );
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -2822,7 +2845,22 @@ function App() {
           <p className="eyebrow">Bridge Agent</p>
           <h1>正在加载</h1>
           <p>读取配置和运行状态。</p>
-          {error ? <div className="alert error">{error}</div> : null}
+          {error ? (
+            <>
+              <div className="alert error">{error}</div>
+              <div className="loading-actions">
+                <button className="primary" onClick={() => void recoverInvalidConfig()} disabled={busy}>
+                  {busy ? "恢复中" : "恢复默认配置"}
+                </button>
+                <button className="secondary" onClick={() => void refreshAll()} disabled={busy}>
+                  重试加载
+                </button>
+              </div>
+              <p className="loading-hint">
+                恢复时会先把当前配置文件重命名保留，再生成新的默认配置。
+              </p>
+            </>
+          ) : null}
         </section>
       </main>
     );

@@ -6,8 +6,10 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
@@ -18,6 +20,9 @@ const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
 const DEFAULT_INLINE_LIMIT_BYTES: usize = 256 * 1024;
 const LEGACY_INLINE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const CONFIG_BACKUP_SUFFIX: &str = "bak";
+const INVALID_CONFIG_MARKER: &str = "invalid";
+const TEMP_CONFIG_MARKER: &str = "tmp";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -218,6 +223,12 @@ pub struct ComputerUseBinding {
 pub struct ManifestPreview {
     pub device: DeviceConfig,
     pub services: Vec<ServiceDefinition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigRecovery {
+    pub archived_path: Option<PathBuf>,
+    pub config: AgentConfig,
 }
 
 impl AgentConfig {
@@ -739,8 +750,7 @@ pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
             .with_context(|| format!("failed to create config dir {}", parent.display()))?;
     }
     let content = serde_json::to_string_pretty(&config)?;
-    fs::write(path, format!("{content}\n"))
-        .with_context(|| format!("failed to write config {}", path.display()))?;
+    write_config_atomically(path, format!("{content}\n").as_bytes())?;
     Ok(())
 }
 
@@ -749,6 +759,153 @@ pub fn ensure_config_exists(path: &Path) -> Result<()> {
         save_config(path, &AgentConfig::example())?;
     }
     Ok(())
+}
+
+pub fn reset_invalid_config(path: &Path) -> Result<ConfigRecovery> {
+    let archived_path = if path.exists() {
+        Some(archive_existing_config(path)?)
+    } else {
+        None
+    };
+    let config = AgentConfig::example();
+    save_config(path, &config)?;
+    Ok(ConfigRecovery {
+        archived_path,
+        config,
+    })
+}
+
+fn write_config_atomically(path: &Path, content: &[u8]) -> Result<()> {
+    let temp_path = unique_sibling_path(path, TEMP_CONFIG_MARKER);
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to create temp config {}", temp_path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("failed to write temp config {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush temp config {}", temp_path.display()))?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    if path.exists() {
+        let backup_path = backup_config_path(path);
+        fs::copy(path, &backup_path).with_context(|| {
+            format!(
+                "failed to backup config {} to {}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+    }
+
+    if let Err(err) = replace_file(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+fn backup_config_path(path: &Path) -> PathBuf {
+    sibling_path(path, CONFIG_BACKUP_SUFFIX)
+}
+
+fn archive_existing_config(path: &Path) -> Result<PathBuf> {
+    let archived_path = unique_sibling_path(path, INVALID_CONFIG_MARKER);
+    fs::rename(path, &archived_path).with_context(|| {
+        format!(
+            "failed to archive config {} to {}",
+            path.display(),
+            archived_path.display()
+        )
+    })?;
+    Ok(archived_path)
+}
+
+fn unique_sibling_path(path: &Path, marker: &str) -> PathBuf {
+    let timestamp = current_timestamp_millis();
+    for attempt in 0..1000 {
+        let suffix = if attempt == 0 {
+            format!("{marker}-{timestamp}")
+        } else {
+            format!("{marker}-{timestamp}-{attempt}")
+        };
+        let candidate = sibling_path(path, &suffix);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    sibling_path(
+        path,
+        &format!("{marker}-{timestamp}-{}", uuid::Uuid::new_v4().simple()),
+    )
+}
+
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| DEFAULT_CONFIG_FILE_NAME.into());
+    let name = format!("{file_name}.{suffix}");
+    path.with_file_name(name)
+}
+
+fn current_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let from_wide = wide_path(from);
+    let to_wide = wide_path(to);
+    let replaced = unsafe {
+        MoveFileExW(
+            from_wide.as_ptr(),
+            to_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to replace config {} with {}",
+                to.display(),
+                from.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to).with_context(|| {
+        format!(
+            "failed to replace config {} with {}",
+            to.display(),
+            from.display()
+        )
+    })
 }
 
 fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
@@ -1417,8 +1574,9 @@ fn project_config_path() -> Result<PathBuf> {
 mod tests {
     use super::{
         default_shell_exec_allow_commands, ensure_browser_auth_agent_id, load_config,
-        manifest_preview_json, save_config, AgentConfig, EventConfig, HttpBinding, MethodBinding,
-        MethodConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
+        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, EventConfig,
+        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
+        ServiceRegistration, ServiceStartCommand,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1474,6 +1632,40 @@ mod tests {
         ] {
             assert!(shell_methods.contains(&method));
         }
+    }
+
+    #[test]
+    fn save_config_preserves_last_config_backup() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.device.name = "first".to_string();
+        save_config(&path, &config).unwrap();
+
+        config.device.name = "second".to_string();
+        save_config(&path, &config).unwrap();
+
+        let backup_path = path.with_file_name("agent-config.json.bak");
+        let backup = fs::read_to_string(backup_path).unwrap();
+        assert!(backup.contains("\"name\": \"first\""));
+        let current = load_config(&path).unwrap();
+        assert_eq!(current.device.name, "second");
+    }
+
+    #[test]
+    fn reset_invalid_config_archives_bad_file_and_recreates_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        fs::write(&path, "{").unwrap();
+
+        let recovery = reset_invalid_config(&path).unwrap();
+
+        let archived_path = recovery.archived_path.unwrap();
+        assert!(archived_path.exists());
+        assert_eq!(fs::read_to_string(archived_path).unwrap(), "{");
+        assert_generated_agent_id(&recovery.config.relay.agent_id);
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.services.len(), 2);
     }
 
     #[test]

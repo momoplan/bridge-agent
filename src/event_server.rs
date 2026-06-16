@@ -12,13 +12,19 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch, RwLock};
+use tokio::time::sleep;
 use uuid::Uuid;
+
+const PORT_RECLAIM_BIND_RETRIES: usize = 20;
+const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalEventEmitRequest {
@@ -137,7 +143,7 @@ impl LocalEventServer {
             .event_server_bind
             .parse()
             .with_context(|| "runtime.event_server_bind must be a socket address")?;
-        let listener = TcpListener::bind(bind)
+        let listener = bind_event_listener(bind)
             .await
             .with_context(|| format!("failed to bind local event server on {bind}"))?;
         let bind = listener.local_addr()?;
@@ -195,6 +201,336 @@ impl LocalEventServer {
             .await
             .context("local event server stopped unexpectedly")
     }
+}
+
+async fn bind_event_listener(bind: SocketAddr) -> Result<TcpListener> {
+    let first_err = match TcpListener::bind(bind).await {
+        Ok(listener) => return Ok(listener),
+        Err(err) => err,
+    };
+
+    if first_err.kind() != ErrorKind::AddrInUse {
+        return Err(first_err.into());
+    }
+
+    let Some(reclaimed) = reclaim_occupied_event_port(bind).await? else {
+        return Err(first_err.into());
+    };
+
+    for _ in 0..PORT_RECLAIM_BIND_RETRIES {
+        match TcpListener::bind(bind).await {
+            Ok(listener) => return Ok(listener),
+            Err(err) if err.kind() == ErrorKind::AddrInUse => {
+                sleep(PORT_RECLAIM_RETRY_DELAY).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    TcpListener::bind(bind).await.with_context(|| {
+        format!(
+            "local event server port is still occupied after stopping {} (pid {})",
+            reclaimed.image_name, reclaimed.pid
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OccupiedPortOwner {
+    pid: u32,
+    image_name: String,
+}
+
+async fn reclaim_occupied_event_port(bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
+    if !bind.ip().is_loopback() || bind.port() == 0 {
+        return Ok(None);
+    }
+
+    let Some(owner) = find_occupied_tcp_listener(bind)? else {
+        return Ok(None);
+    };
+
+    if owner.pid == std::process::id() {
+        return Ok(None);
+    }
+
+    if !is_bridge_agent_process_name(&owner.image_name) {
+        anyhow::bail!(
+            "local event server port {bind} is already occupied by {} (pid {}), not a Bridge Agent process",
+            owner.image_name,
+            owner.pid
+        );
+    }
+
+    terminate_process(owner.pid, &owner.image_name)?;
+    Ok(Some(owner))
+}
+
+#[cfg(windows)]
+fn find_occupied_tcp_listener(bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
+    let netstat = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .context("failed to inspect TCP listeners with netstat")?;
+    if !netstat.status.success() {
+        anyhow::bail!(
+            "netstat failed while inspecting local event server port: {}",
+            String::from_utf8_lossy(&netstat.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&netstat.stdout);
+    let Some(pid) = parse_listening_pid(&stdout, bind) else {
+        return Ok(None);
+    };
+    let image_name = lookup_process_image_name(pid)?;
+    Ok(Some(OccupiedPortOwner { pid, image_name }))
+}
+
+#[cfg(unix)]
+fn find_occupied_tcp_listener(bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
+    let port_filter = format!("-iTCP:{}", bind.port());
+    let lsof = std::process::Command::new("lsof")
+        .args(["-nP", &port_filter, "-sTCP:LISTEN", "-F", "pcn"])
+        .output()
+        .context("failed to inspect TCP listeners with lsof")?;
+    if !lsof.status.success() {
+        if lsof.stdout.is_empty() && lsof.stderr.is_empty() {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "lsof failed while inspecting local event server port: {}",
+            String::from_utf8_lossy(&lsof.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&lsof.stdout);
+    Ok(parse_lsof_listening_owner(&stdout, bind))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn find_occupied_tcp_listener(_bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn lookup_process_image_name(pid: u32) -> Result<String> {
+    let filter = format!("PID eq {pid}");
+    let tasklist = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+        .with_context(|| format!("failed to inspect process {pid} with tasklist"))?;
+    if !tasklist.status.success() {
+        anyhow::bail!(
+            "tasklist failed while inspecting process {pid}: {}",
+            String::from_utf8_lossy(&tasklist.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&tasklist.stdout);
+    parse_tasklist_image_name(&stdout).with_context(|| format!("failed to identify process {pid}"))
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32, image_name: &str) -> Result<()> {
+    let pid_arg = pid.to_string();
+    let taskkill = std::process::Command::new("taskkill")
+        .args(["/PID", &pid_arg, "/T", "/F"])
+        .output()
+        .with_context(|| format!("failed to stop {image_name} (pid {pid}) with taskkill"))?;
+    if !taskkill.status.success() {
+        anyhow::bail!(
+            "failed to stop {} (pid {}): {}",
+            image_name,
+            pid,
+            String::from_utf8_lossy(&taskkill.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32, image_name: &str) -> Result<()> {
+    let pid_arg = pid.to_string();
+    let kill = std::process::Command::new("kill")
+        .args(["-TERM", &pid_arg])
+        .output()
+        .with_context(|| format!("failed to stop {image_name} (pid {pid}) with kill"))?;
+    if !kill.status.success() {
+        anyhow::bail!(
+            "failed to stop {} (pid {}): {}",
+            image_name,
+            pid,
+            String::from_utf8_lossy(&kill.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn terminate_process(pid: u32, image_name: &str) -> Result<()> {
+    anyhow::bail!("cannot stop {image_name} (pid {pid}) on this platform")
+}
+
+#[cfg(any(windows, test))]
+fn parse_listening_pid(netstat_output: &str, bind: SocketAddr) -> Option<u32> {
+    for line in netstat_output.lines() {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        if columns.len() < 5 {
+            continue;
+        }
+        if !columns[0].eq_ignore_ascii_case("TCP") {
+            continue;
+        }
+        if !columns[3].eq_ignore_ascii_case("LISTENING") {
+            continue;
+        }
+        if !local_endpoint_covers_bind(columns[1], bind) {
+            continue;
+        }
+        if let Ok(pid) = columns[4].parse::<u32>() {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[cfg(any(unix, test))]
+fn parse_lsof_listening_owner(lsof_output: &str, bind: SocketAddr) -> Option<OccupiedPortOwner> {
+    #[derive(Default)]
+    struct CurrentOwner {
+        pid: Option<u32>,
+        image_name: Option<String>,
+        matches_bind: bool,
+    }
+
+    impl CurrentOwner {
+        fn into_match(self) -> Option<OccupiedPortOwner> {
+            if !self.matches_bind {
+                return None;
+            }
+            Some(OccupiedPortOwner {
+                pid: self.pid?,
+                image_name: self.image_name?,
+            })
+        }
+    }
+
+    let mut current = CurrentOwner::default();
+    for line in lsof_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(pid) = line.strip_prefix('p') {
+            if let Some(owner) = current.into_match() {
+                return Some(owner);
+            }
+            current = CurrentOwner {
+                pid: pid.parse().ok(),
+                ..CurrentOwner::default()
+            };
+            continue;
+        }
+
+        if let Some(command) = line.strip_prefix('c') {
+            current.image_name = Some(command.to_string());
+            continue;
+        }
+
+        if let Some(name) = line.strip_prefix('n') {
+            if lsof_name_covers_bind(name, bind) {
+                current.matches_bind = true;
+            }
+        }
+    }
+
+    current.into_match()
+}
+
+#[cfg(any(unix, test))]
+fn lsof_name_covers_bind(name: &str, bind: SocketAddr) -> bool {
+    name.split_whitespace()
+        .map(|token| token.trim_end_matches(',').trim_end_matches(';'))
+        .any(|token| local_endpoint_covers_bind(token, bind))
+}
+
+#[cfg(any(windows, test))]
+fn parse_tasklist_image_name(tasklist_output: &str) -> Option<String> {
+    tasklist_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("INFO:"))
+        .find_map(first_csv_field)
+}
+
+#[cfg(any(windows, test))]
+fn first_csv_field(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix('"') {
+        let mut field = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    chars.next();
+                    continue;
+                }
+                return Some(field);
+            }
+            field.push(ch);
+        }
+        return None;
+    }
+    line.split(',').next().map(str::trim).map(ToOwned::to_owned)
+}
+
+#[cfg(any(windows, unix, test))]
+fn local_endpoint_covers_bind(endpoint: &str, bind: SocketAddr) -> bool {
+    let Some((host, port)) = split_endpoint(endpoint) else {
+        return false;
+    };
+    if port != bind.port() {
+        return false;
+    }
+    let host = host.trim_matches(['[', ']']);
+    if host == "*" {
+        return true;
+    }
+    let Ok(endpoint_ip) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    if endpoint_ip.is_unspecified() {
+        return true;
+    }
+    endpoint_ip == bind.ip()
+}
+
+#[cfg(any(windows, unix, test))]
+fn split_endpoint(endpoint: &str) -> Option<(&str, u16)> {
+    let endpoint = endpoint.trim();
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        let close = rest.rfind(']')?;
+        let host = &rest[..close];
+        let port = rest.get(close + 1..)?.strip_prefix(':')?.parse().ok()?;
+        return Some((host, port));
+    }
+
+    let (host, port) = endpoint.rsplit_once(':')?;
+    Some((host, port.parse().ok()?))
+}
+
+fn is_bridge_agent_process_name(image_name: &str) -> bool {
+    let normalized = image_name
+        .trim()
+        .trim_matches('"')
+        .to_ascii_lowercase()
+        .replace([' ', '_', '-'], "");
+    matches!(
+        normalized.as_str(),
+        "bridgeagent" | "bridgeagent.exe" | "bridgeagentservice" | "bridgeagentservice.exe"
+    )
 }
 
 async fn emit_event(
@@ -498,10 +834,14 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::LocalEventServer;
+    use super::{
+        is_bridge_agent_process_name, local_endpoint_covers_bind, parse_listening_pid,
+        parse_lsof_listening_owner, parse_tasklist_image_name, LocalEventServer,
+    };
     use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
     use crate::services::ServiceRegistry;
     use serde_json::json;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::{mpsc, watch, RwLock};
@@ -563,6 +903,99 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn parse_listening_pid_matches_ipv4_loopback_listener() {
+        let output = r#"
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:18081        0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:18082        0.0.0.0:0              LISTENING       5678
+"#;
+        let bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
+
+        assert_eq!(parse_listening_pid(output, bind), Some(1234));
+    }
+
+    #[test]
+    fn parse_listening_pid_treats_unspecified_listener_as_occupying_bind() {
+        let output = r#"
+  TCP    0.0.0.0:18081          0.0.0.0:0              LISTENING       4321
+  TCP    [::]:18082             [::]:0                 LISTENING       5678
+"#;
+        let ipv4_bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
+        let ipv6_bind: SocketAddr = "[::1]:18082".parse().unwrap();
+
+        assert_eq!(parse_listening_pid(output, ipv4_bind), Some(4321));
+        assert_eq!(parse_listening_pid(output, ipv6_bind), Some(5678));
+    }
+
+    #[test]
+    fn local_endpoint_does_not_match_different_loopback_address() {
+        let bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
+
+        assert!(!local_endpoint_covers_bind("127.0.0.2:18081", bind));
+        assert!(!local_endpoint_covers_bind("127.0.0.1:18082", bind));
+    }
+
+    #[test]
+    fn parse_tasklist_image_name_reads_csv_first_field() {
+        let output = r#""Bridge Agent.exe","1234","Console","1","64,000 K""#;
+
+        assert_eq!(
+            parse_tasklist_image_name(output),
+            Some("Bridge Agent.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_lsof_owner_matches_loopback_listener() {
+        let output = r#"
+p1234
+cBridge Agent
+n127.0.0.1:18081
+p5678
+cnode
+n127.0.0.1:18082
+"#;
+        let bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
+
+        assert_eq!(
+            parse_lsof_listening_owner(output, bind),
+            Some(super::OccupiedPortOwner {
+                pid: 1234,
+                image_name: "Bridge Agent".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_lsof_owner_treats_unspecified_listener_as_occupying_bind() {
+        let output = r#"
+p4321
+cbridge-agent
+n*:18081
+"#;
+        let bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
+
+        assert_eq!(
+            parse_lsof_listening_owner(output, bind),
+            Some(super::OccupiedPortOwner {
+                pid: 4321,
+                image_name: "bridge-agent".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn bridge_agent_process_name_allows_only_known_hosts() {
+        assert!(is_bridge_agent_process_name("Bridge Agent"));
+        assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent"));
+        assert!(is_bridge_agent_process_name("bridge-agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
+        assert!(!is_bridge_agent_process_name("node.exe"));
+        assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
     }
 
     #[tokio::test]

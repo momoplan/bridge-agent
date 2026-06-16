@@ -112,6 +112,20 @@ select:focus {
   padding: 28px;
 }
 
+.loading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.loading-hint {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .sidebar {
   padding: 22px;
   display: grid;

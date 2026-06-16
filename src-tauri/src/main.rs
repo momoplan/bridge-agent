@@ -3,8 +3,8 @@
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
-    save_config as save_agent_config, AgentConfig, AgentRuntimeManager, RuntimeSnapshot,
-    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    reset_invalid_config, save_config as save_agent_config, AgentConfig, AgentRuntimeManager,
+    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -51,6 +51,15 @@ struct DesktopState {
 #[derive(Serialize)]
 struct ConfigDocument {
     config_path: String,
+    manifest_preview: String,
+    config: AgentConfig,
+    runtime: RuntimeSnapshot,
+}
+
+#[derive(Serialize)]
+struct ConfigRecoveryDocument {
+    config_path: String,
+    archived_path: Option<String>,
     manifest_preview: String,
     config: AgentConfig,
     runtime: RuntimeSnapshot,
@@ -362,6 +371,24 @@ async fn reset_example_config(
         config_path: state.config_path.display().to_string(),
         manifest_preview,
         config,
+        runtime,
+    })
+}
+
+#[tauri::command]
+async fn recover_invalid_config(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<ConfigRecoveryDocument, String> {
+    let recovery = reset_invalid_config(&state.config_path).map_err(|err| err.to_string())?;
+    let manifest_preview = manifest_preview_json(&recovery.config).map_err(|err| err.to_string())?;
+    let runtime = state.runtime.snapshot().await;
+    Ok(ConfigRecoveryDocument {
+        config_path: state.config_path.display().to_string(),
+        archived_path: recovery
+            .archived_path
+            .map(|path| path.display().to_string()),
+        manifest_preview,
+        config: recovery.config,
         runtime,
     })
 }
@@ -1338,6 +1365,7 @@ fn main() {
             list_logs,
             clear_logs,
             reset_example_config,
+            recover_invalid_config,
             open_in_browser,
             desktop_permission_status,
             registered_service_statuses,

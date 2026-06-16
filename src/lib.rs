@@ -9,9 +9,9 @@ use anyhow::{anyhow, Result};
 
 pub use config::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists, load_config,
-    manifest_preview_json, save_config, windows_service_config_path, AgentConfig,
-    ComputerUseAction, ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, MethodBinding,
-    MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
+    manifest_preview_json, reset_invalid_config, save_config, windows_service_config_path,
+    AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding,
+    MethodBinding, MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
     RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
     ServiceRegistration, ServiceStartCommand, UploadConfig,
 };

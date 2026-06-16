@@ -4,9 +4,12 @@ use crate::logging::{FileLogConfig, FileLogSink};
 use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +23,7 @@ use url::Url;
 
 const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
+const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +111,7 @@ impl AgentRuntimeManager {
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
+        let runtime_lock = RuntimeInstanceLock::acquire(config_path, &config.relay.agent_id)?;
         let registry = Arc::new(RwLock::new(
             ServiceRegistry::from_config_checked(&config, &config_base_dir).await?,
         ));
@@ -161,6 +166,7 @@ impl AgentRuntimeManager {
         let inner = Arc::clone(&self.inner);
         let config_path_string = config_path.display().to_string();
         let task = tokio::spawn(async move {
+            let _runtime_lock = runtime_lock;
             let event_server_task = event_server.map(|server| {
                 let bind_addr = server.bind_addr();
                 let server_inner = Arc::clone(&inner);
@@ -631,9 +637,214 @@ fn emit_tracing(level: &str, message: &str) {
     }
 }
 
+#[derive(Debug)]
+struct RuntimeInstanceLock {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeLockDocument {
+    pid: u32,
+    agent_id: String,
+    config_path: String,
+    started_at_ms: u64,
+}
+
+impl RuntimeInstanceLock {
+    fn acquire(config_path: &Path, agent_id: &str) -> Result<Self> {
+        let lock_path = runtime_lock_path(config_path, agent_id);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create runtime lock dir {}", parent.display())
+            })?;
+        }
+
+        for _ in 0..3 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    let document = RuntimeLockDocument {
+                        pid: std::process::id(),
+                        agent_id: agent_id.to_string(),
+                        config_path: config_path.display().to_string(),
+                        started_at_ms: now_ms(),
+                    };
+                    let content = serde_json::to_vec_pretty(&document)?;
+                    file.write_all(&content).with_context(|| {
+                        format!("failed to write runtime lock {}", lock_path.display())
+                    })?;
+                    file.write_all(b"\n").with_context(|| {
+                        format!("failed to write runtime lock {}", lock_path.display())
+                    })?;
+                    file.sync_all().with_context(|| {
+                        format!("failed to flush runtime lock {}", lock_path.display())
+                    })?;
+                    return Ok(Self { path: lock_path });
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if remove_stale_runtime_lock(&lock_path)? {
+                        continue;
+                    }
+                    if let Ok(existing) = read_runtime_lock(&lock_path) {
+                        anyhow::bail!(
+                            "bridge-agent runtime is already running for agent `{}` with config `{}` (pid {}, lock {})",
+                            existing.agent_id,
+                            existing.config_path,
+                            existing.pid,
+                            lock_path.display()
+                        );
+                    }
+                    anyhow::bail!(
+                        "bridge-agent runtime lock already exists at {}",
+                        lock_path.display()
+                    );
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("failed to create runtime lock {}", lock_path.display())
+                    });
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "failed to acquire runtime lock after removing stale lock {}",
+            lock_path.display()
+        )
+    }
+}
+
+impl Drop for RuntimeInstanceLock {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if err.kind() != ErrorKind::NotFound {
+                warn!(
+                    "failed to remove runtime lock {}: {err:#}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
+fn runtime_lock_path(config_path: &Path, agent_id: &str) -> PathBuf {
+    let config_base_dir = resolve_config_base_dir(config_path);
+    let config_file = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent-config.json");
+    let fingerprint =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config_path.display().to_string());
+    let fingerprint = &fingerprint[..fingerprint.len().min(16)];
+    let name = format!(
+        "{}-{}-{fingerprint}.lock",
+        sanitize_lock_component(config_file),
+        sanitize_lock_component(agent_id)
+    );
+    config_base_dir.join(RUNTIME_LOCK_DIR).join(name)
+}
+
+fn sanitize_lock_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "runtime".to_string()
+    } else {
+        sanitized.chars().take(48).collect()
+    }
+}
+
+fn remove_stale_runtime_lock(path: &Path) -> Result<bool> {
+    let Some(document) = read_runtime_lock(path).ok() else {
+        fs::remove_file(path).with_context(|| {
+            format!(
+                "failed to remove unreadable runtime lock {}",
+                path.display()
+            )
+        })?;
+        return Ok(true);
+    };
+    if process_is_running(document.pid) {
+        return Ok(false);
+    }
+    fs::remove_file(path).with_context(|| {
+        format!(
+            "failed to remove stale runtime lock {} for pid {}",
+            path.display(),
+            document.pid
+        )
+    })?;
+    Ok(true)
+}
+
+fn read_runtime_lock(path: &Path) -> Result<RuntimeLockDocument> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read runtime lock {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse runtime lock {}", path.display()))
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.is_empty() && !line.starts_with("INFO:"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_running(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_agent_url;
+    use super::{
+        build_agent_url, read_runtime_lock, runtime_lock_path, RuntimeInstanceLock,
+        RuntimeLockDocument,
+    };
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn build_url_injects_token() {
@@ -642,5 +853,37 @@ mod tests {
             url.as_str(),
             "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
         );
+    }
+
+    #[test]
+    fn runtime_lock_rejects_second_owner_until_released() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+
+        let first = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
+        let second = RuntimeInstanceLock::acquire(&config_path, "dev_1");
+        assert!(second.is_err());
+
+        drop(first);
+        RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
+    }
+
+    #[test]
+    fn runtime_lock_removes_stale_owner() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let lock_path = runtime_lock_path(&config_path, "dev_1");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let stale = RuntimeLockDocument {
+            pid: u32::MAX,
+            agent_id: "dev_1".to_string(),
+            config_path: config_path.display().to_string(),
+            started_at_ms: 1,
+        };
+        fs::write(&lock_path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+
+        let lock = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
+        let active = read_runtime_lock(&lock.path).unwrap();
+        assert_eq!(active.pid, std::process::id());
     }
 }
