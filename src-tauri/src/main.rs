@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    ActivationPolicy, Manager, WindowEvent,
 };
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
@@ -39,6 +39,10 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 #[cfg(target_os = "macos")]
 use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSApplication;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
 const TRAY_ID: &str = "bridge-agent";
@@ -1396,17 +1400,30 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
-    show_dock_icon(app);
+    activate_app(app);
     if let Some(window) = app.get_webview_window("main") {
-        if let Err(err) = window.show() {
-            eprintln!("failed to show main window: {err}");
+        restore_main_window(&window);
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        activate_app(&app);
+        if let Some(window) = app.get_webview_window("main") {
+            restore_main_window(&window);
         }
-        if let Err(err) = window.unminimize() {
-            eprintln!("failed to unminimize main window: {err}");
-        }
-        if let Err(err) = window.set_focus() {
-            eprintln!("failed to focus main window: {err}");
-        }
+    });
+}
+
+fn restore_main_window(window: &tauri::WebviewWindow) {
+    if let Err(err) = window.show() {
+        eprintln!("failed to show main window: {err}");
+    }
+    if let Err(err) = window.unminimize() {
+        eprintln!("failed to unminimize main window: {err}");
+    }
+    if let Err(err) = window.set_focus() {
+        eprintln!("failed to focus main window: {err}");
     }
 }
 
@@ -1418,19 +1435,35 @@ fn hide_to_tray(window: &tauri::Window) {
 }
 
 #[cfg(target_os = "macos")]
-fn show_dock_icon(app: &tauri::AppHandle) {
+fn activate_app(app: &tauri::AppHandle) {
+    if let Err(err) = app.set_activation_policy(ActivationPolicy::Regular) {
+        eprintln!("failed to set regular activation policy: {err}");
+    }
     if let Err(err) = app.set_dock_visibility(true) {
         eprintln!("failed to show dock icon: {err}");
+    }
+    if let Err(err) = app.run_on_main_thread(move || {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            ns_app.activate();
+            #[allow(deprecated)]
+            ns_app.activateIgnoringOtherApps(true);
+        }
+    }) {
+        eprintln!("failed to activate app on main thread: {err}");
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn show_dock_icon(_app: &tauri::AppHandle) {}
+fn activate_app(_app: &tauri::AppHandle) {}
 
 #[cfg(target_os = "macos")]
 fn hide_dock_icon(app: &tauri::AppHandle) {
     if let Err(err) = app.set_dock_visibility(false) {
         eprintln!("failed to hide dock icon: {err}");
+    }
+    if let Err(err) = app.set_activation_policy(ActivationPolicy::Accessory) {
+        eprintln!("failed to set accessory activation policy: {err}");
     }
 }
 

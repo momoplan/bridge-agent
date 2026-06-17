@@ -795,18 +795,14 @@ function App() {
     return apps;
   }, [config, connectorApps]);
   const selectedLocalApp =
-    localApps.find((app) => app.id === selectedLocalAppId) ?? localApps[0] ?? null;
+    selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
   const enabledLocalAppCount = localApps.filter((app) =>
     app.serviceIndexes.some((serviceIndex) => config?.services[serviceIndex]?.enabled)
   ).length;
 
   useEffect(() => {
-    if (localApps.length === 0) {
-      setSelectedLocalAppId(null);
-      return;
-    }
     setSelectedLocalAppId((current) =>
-      current && localApps.some((app) => app.id === current) ? current : localApps[0].id
+      current && localApps.some((app) => app.id === current) ? current : null
     );
   }, [localApps]);
 
@@ -1026,6 +1022,9 @@ function App() {
   }
 
   async function startLocalApp(app: LocalAppItem) {
+    if (!hasLocalAppStartCommand(app)) {
+      return;
+    }
     try {
       setConnectorBusy(app.id);
       setMessage("");
@@ -3086,6 +3085,87 @@ function App() {
     );
   }
 
+  function renderLocalAppPanel() {
+    if (!config) {
+      return <div />;
+    }
+    const groupedApps: Array<{ title: string; apps: LocalAppItem[] }> = [
+      { title: "已安装应用", apps: localApps.filter((app) => app.kind === "connector") },
+      { title: "内置应用", apps: localApps.filter((app) => app.kind === "built_in") },
+      { title: "自定义应用", apps: localApps.filter((app) => app.kind === "custom") }
+    ].filter((group) => group.apps.length > 0);
+
+    return (
+      <div className="local-app-panel">
+        <div className="local-app-panel-head">
+          <div>
+            <p className="eyebrow">本地应用</p>
+            <h2>应用</h2>
+            <p>安装 connector，查看本机能力和授权状态。</p>
+          </div>
+          <button className="primary" onClick={() => setInstallPanelOpen(true)}>
+            安装应用
+          </button>
+        </div>
+        {groupedApps.length > 0 ? (
+          <div className="local-app-groups">
+            {groupedApps.map((group) => (
+              <section className="local-app-group" key={group.title}>
+                <div className="method-advanced-head">
+                  <strong>{group.title}</strong>
+                  <small>{group.apps.length} 个应用</small>
+                </div>
+                <div className="local-app-grid">
+                  {group.apps.map((app) => renderLocalAppCard(app))}
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <Card title="还没有应用" description="从应用市场安装 connector，或从本地目录安装开发中的应用。">
+            <div className="empty-state">还没有安装应用。</div>
+          </Card>
+        )}
+      </div>
+    );
+  }
+
+  function renderLocalAppCard(app: LocalAppItem) {
+    if (!config) {
+      return null;
+    }
+    const primaryService = app.serviceIndexes.length > 0 ? config.services[app.serviceIndexes[0]] : null;
+    const runtimeView = primaryService ? serviceRuntimeView(primaryService) : null;
+    const hasStartCommand = hasLocalAppStartCommand(app);
+    return (
+      <button
+        className="local-app-card"
+        key={app.id}
+        onClick={() => {
+          setSelectedLocalAppId(app.id);
+          if (app.serviceIndexes.length > 0) {
+            setExpandedServiceIndex(app.serviceIndexes[0]);
+          }
+        }}
+      >
+        <div className="local-app-card-top">
+          <strong>{app.name}</strong>
+          {runtimeView ? (
+            <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
+              {runtimeView.statusLabel}
+            </span>
+          ) : null}
+        </div>
+        <p>{app.description}</p>
+        <div className="local-app-card-meta">
+          <span>{formatLocalAppKind(app.kind)}</span>
+          <span>{countLocalAppCapabilities(app, config)} 项能力</span>
+          {hasStartCommand ? <span>可启动</span> : null}
+        </div>
+      </button>
+    );
+  }
+
   function renderAppsPage() {
     if (!config) {
       return <div />;
@@ -3106,9 +3186,14 @@ function App() {
               description={app.description}
               action={
                 <div className="service-actions">
-                  <button className="primary" onClick={() => void startLocalApp(app)} disabled={connectorBusy != null}>
-                    {connectorBusy === app.id ? "启动中" : "启动应用"}
+                  <button className="secondary" onClick={() => setSelectedLocalAppId(null)}>
+                    返回应用
                   </button>
+                  {hasLocalAppStartCommand(app) ? (
+                    <button className="primary" onClick={() => void startLocalApp(app)} disabled={connectorBusy != null}>
+                      {connectorBusy === app.id ? "启动中" : "启动应用"}
+                    </button>
+                  ) : null}
                   {app.kind === "connector" ? (
                     <button
                       className="ghost danger"
@@ -3148,20 +3233,17 @@ function App() {
             ) : null}
           </>
         ) : (
-          <Card
-            title="本地应用"
-            description="从应用市场安装 connector，或从本地目录安装开发中的应用。"
-            action={
-              <button className="primary" onClick={() => setInstallPanelOpen(true)}>
-                安装应用
-              </button>
-            }
-          >
-            <div className="empty-state">还没有安装应用。</div>
-          </Card>
+          renderLocalAppPanel()
         )}
       </div>
     );
+  }
+
+  function hasLocalAppStartCommand(app: LocalAppItem) {
+    if (!config) {
+      return false;
+    }
+    return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.start_command));
   }
 
   function countLocalAppCapabilities(app: LocalAppItem, agentConfig: UiAgentConfig) {
@@ -3370,7 +3452,6 @@ function App() {
     );
   }
 
-  const loadedConfig = config;
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
     apps: "本地应用",
@@ -3383,43 +3464,6 @@ function App() {
     diagnostics: "系统、日志与清单"
   };
   const showPageHeader = activePage !== "apps";
-  const sidebarInstalledApps = localApps.filter((app) => app.kind === "connector");
-  const sidebarBuiltInApps = localApps.filter((app) => app.kind === "built_in");
-  const sidebarCustomApps = localApps.filter((app) => app.kind === "custom");
-
-  function renderSidebarAppItem(app: LocalAppItem) {
-    const primaryService = app.serviceIndexes.length > 0 ? loadedConfig.services[app.serviceIndexes[0]] : null;
-    const runtimeView = primaryService ? serviceRuntimeView(primaryService) : null;
-    const hasRuntimeInfo =
-      primaryService?.health_check != null || primaryService?.start_command != null || app.kind === "connector";
-    return (
-      <button
-        className={`sidebar-subnav-item ${
-          activePage === "apps" && selectedLocalApp?.id === app.id ? "active" : ""
-        }`}
-        key={app.id}
-        onClick={() => {
-          setActivePage("apps");
-          setSelectedLocalAppId(app.id);
-          if (app.serviceIndexes.length > 0) {
-            setExpandedServiceIndex(app.serviceIndexes[0]);
-          }
-        }}
-      >
-        <span className="sidebar-service-title">
-          <span>{app.name || "未命名应用"}</span>
-          {hasRuntimeInfo && runtimeView ? (
-            <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
-              {runtimeView.statusLabel}
-            </span>
-          ) : null}
-        </span>
-        <small>
-          {formatLocalAppKind(app.kind)} · {countLocalAppCapabilities(app, loadedConfig)} 项能力
-        </small>
-      </button>
-    );
-  }
 
   return (
     <main className="app-shell">
@@ -3447,47 +3491,14 @@ function App() {
             </button>
             <button
               className={`sidebar-nav-item ${activePage === "apps" ? "active" : ""}`}
-              onClick={() => setActivePage("apps")}
+              onClick={() => {
+                setActivePage("apps");
+                setSelectedLocalAppId(null);
+              }}
             >
               <span>应用</span>
               <small>市场与本机</small>
             </button>
-            {activePage === "apps" ? (
-              <div className="sidebar-subnav">
-                {localApps.length === 0 ? (
-                  <>
-                    <div className="sidebar-subnav-empty">还没有应用</div>
-                    <button className="sidebar-subnav-add" onClick={() => setInstallPanelOpen(true)}>
-                      安装应用
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button className="sidebar-subnav-add" onClick={() => setInstallPanelOpen(true)}>
-                      安装应用
-                    </button>
-                    {sidebarInstalledApps.length > 0 ? (
-                      <>
-                        <div className="sidebar-subnav-section">已安装应用</div>
-                        {sidebarInstalledApps.map((app) => renderSidebarAppItem(app))}
-                      </>
-                    ) : null}
-                    {sidebarBuiltInApps.length > 0 ? (
-                      <>
-                        <div className="sidebar-subnav-section">内置应用</div>
-                        {sidebarBuiltInApps.map((app) => renderSidebarAppItem(app))}
-                      </>
-                    ) : null}
-                    {sidebarCustomApps.length > 0 ? (
-                      <>
-                        <div className="sidebar-subnav-section">自定义应用</div>
-                        {sidebarCustomApps.map((app) => renderSidebarAppItem(app))}
-                      </>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            ) : null}
             <button
               className={`sidebar-nav-item ${activePage === "diagnostics" ? "active" : ""}`}
               onClick={() => setActivePage("diagnostics")}

@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "axum",
@@ -416,11 +416,13 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "bridge-agent",
  "core-foundation",
  "dirs",
+ "objc2",
+ "objc2-app-kit",
  "open",
  "reqwest 0.12.28",
  "semver",
