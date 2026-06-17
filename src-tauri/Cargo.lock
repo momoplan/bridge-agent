@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.39"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "axum",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.39"
+version = "0.1.41"
 dependencies = [
  "bridge-agent",
  "core-foundation",
@@ -430,6 +430,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
 ]
 

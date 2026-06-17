@@ -91,33 +91,34 @@
 - 已接浏览器授权启动和轮询，授权成功后会把 `agent token` 自动写回本地配置
 - 可打包为桌面应用分发
 
-## 下一步：百积木 Local Connector
+## 本地应用和 Connector
 
-`bridge-agent` 后续应产品化为“百积木 Local”：本地能力宿主负责设备授权、relay 长连、Connector 安装、服务注册、生命周期、健康检查和调用审计。
+`bridge-agent` 桌面端把最终用户看到的概念统一为“本地应用”：本地能力宿主负责设备授权、relay 长连、Connector 安装、生命周期、健康检查和调用审计。
 
-Codex、Claude Code、WeChat、Desktop Control 等能力不应硬编码进宿主，而应作为可安装 Connector：
+Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿主，而应优先作为可安装 Connector 或内置应用：
 
 - Codex Connector：连接本机 `codex app-server`，提供结构化 thread/turn/event 远控。
 - WeChat Connector：连接本机微信采集器，注册 `wechatLocal` 查询方法和消息事件。
-- Desktop Connector：提供截图、点击、键盘、滚动等桌面能力。
+- Desktop Control：提供截图、点击、键盘、滚动等桌面能力，当前作为内置应用随客户端分发。
 
 规范草案见仓库根目录的 `BRIDGE_LOCAL_CONNECTOR_SPEC.md`。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
 ## 对外暴露的模型
 
-外部看到的是业务服务模型，而不是本地实现细节。
+外部协议仍然看到业务服务模型，而不是本地实现细节。桌面端产品界面不再把“服务”作为普通用户主入口，而是把服务归入应用里的内部运行项和能力组。
 
 产品语境里可以把概念分成两层：
 
-- 服务：本机配置和协议里的对象，例如 `computer`、`shellExec`，以及用户注册的自定义服务
-- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`shellExec`
-- 对外能力：启用后的 `service.method`，也就是外部 agent 最终能调用的能力
+- 本地应用：用户安装、启动、卸载和授权的对象，例如 Codex Connector、WeChat Connector、桌面控制。
+- 服务：本机配置和协议里的内部对象，例如 `computer`、`shellExec`，以及 Connector 注册的运行项。
+- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`shellExec`。
+- 对外能力：启用后的 `service.method`，也就是外部 agent 最终能调用的能力。
 
-所以桌面端配置页以“服务”为主概念；“能力”只用于描述已经对外开放的调用结果。
+所以桌面端默认以“应用”为主概念；“服务”只在开发者配置、CLI、本机注册 API 和协议说明里出现。
 
-当前桌面端把 `computer` 和 `shellExec` 作为系统服务展示：它们由应用默认配置维护，不能删除或改名；用户可以启停服务，其中 `shellExec` 还允许调整命令权限、根目录和超时。其他由用户新增的 HTTP / Shell 服务属于自定义服务。
+当前桌面端把 `computer` 和 `shellExec` 归到内置应用：它们由应用默认配置维护，不能删除或改名；用户可以启停应用，其中 `shellExec` 还允许在开发者配置里调整命令权限、根目录和超时。其他由用户新增的 HTTP / Shell 服务会显示为自定义应用。
 
-服务配置按服务独立保存。点击“保存服务”只把当前服务合并回本地配置文件，不会覆盖其他服务的未保存草稿；点击“保存并应用”会在保存后刷新正在运行的 runtime registry，并通过当前 WebSocket 连接重新上报 capabilities。Agent 未运行时，保存仍会落盘，下一次启动后生效。
+开发者配置仍按内部服务独立保存。点击“保存配置”只把当前运行项合并回本地配置文件，不会覆盖其他运行项的未保存草稿；点击“保存并应用”会在保存后刷新正在运行的 runtime registry，并通过当前 WebSocket 连接重新上报 capabilities。Agent 未运行时，保存仍会落盘，下一次启动后生效。
 
 例如：
 

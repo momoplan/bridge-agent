@@ -2,9 +2,12 @@
 
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    install_rustls_crypto_provider, load_config as load_agent_config, manifest_preview_json,
-    reset_invalid_config, save_config as save_agent_config, AgentConfig, AgentRuntimeManager,
-    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    install_connector_from_path, install_rustls_crypto_provider, list_connectors,
+    load_config as load_agent_config, manifest_preview_json, reset_invalid_config,
+    save_config as save_agent_config, show_connector, start_connector, uninstall_connector,
+    AgentConfig, AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult,
+    ConnectorStartResult, ConnectorSummary, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
+    ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -166,6 +169,13 @@ struct StartRegisteredServiceResult {
     stdout: String,
     stderr: String,
     timed_out: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorAppInstallDocument {
+    install: ConnectorInstallResult,
+    config: ConfigDocument,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -445,6 +455,78 @@ async fn start_registered_service(
         return Err(format!("服务 `{requested_service}` 没有注册启动命令"));
     };
     run_start_command(service_config.name, start_command).await
+}
+
+#[tauri::command]
+async fn list_connector_apps() -> Result<Vec<ConnectorSummary>, String> {
+    list_connectors().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String> {
+    show_connector(id.trim()).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn install_connector_app(
+    state: tauri::State<'_, DesktopState>,
+    source: String,
+    replace: bool,
+) -> Result<ConnectorAppInstallDocument, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    let source = source.trim();
+    if source.is_empty() {
+        return Err("安装来源不能为空".to_string());
+    }
+
+    let resolved_source = resolve_connector_source(source).await?;
+    let install = install_connector_from_path(resolved_source.path(), &state.config_path, replace)
+        .map_err(|err| err.to_string())?;
+    let runtime = state
+        .runtime
+        .apply_capabilities_from_path(&state.config_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+    Ok(ConnectorAppInstallDocument {
+        install,
+        config: ConfigDocument {
+            config_path: state.config_path.display().to_string(),
+            manifest_preview,
+            config,
+            runtime,
+        },
+    })
+}
+
+#[tauri::command]
+async fn start_connector_app(
+    state: tauri::State<'_, DesktopState>,
+    id: String,
+) -> Result<ConnectorStartResult, String> {
+    start_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn uninstall_connector_app(
+    state: tauri::State<'_, DesktopState>,
+    id: String,
+) -> Result<ConfigDocument, String> {
+    uninstall_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())?;
+    let runtime = state
+        .runtime
+        .apply_capabilities_from_path(&state.config_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+    Ok(ConfigDocument {
+        config_path: state.config_path.display().to_string(),
+        manifest_preview,
+        config,
+        runtime,
+    })
 }
 
 #[tauri::command]
@@ -1204,6 +1286,64 @@ async fn run_start_command(
     }
 }
 
+enum ResolvedConnectorSource {
+    Local(PathBuf),
+    Git {
+        path: PathBuf,
+        _temp_dir: tempfile::TempDir,
+    },
+}
+
+impl ResolvedConnectorSource {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Local(path) => path.as_path(),
+            Self::Git { path, .. } => path.as_path(),
+        }
+    }
+}
+
+async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSource, String> {
+    if is_git_connector_source(source) {
+        let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let checkout_path = temp_dir.path().join("connector");
+        let output = Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                source,
+                checkout_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .map_err(|err| format!("执行 git clone 失败: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "下载本地应用失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return Ok(ResolvedConnectorSource::Git {
+            path: checkout_path,
+            _temp_dir: temp_dir,
+        });
+    }
+
+    let path = PathBuf::from(source);
+    if !path.exists() {
+        return Err(format!("本地路径不存在: {}", path.display()));
+    }
+    Ok(ResolvedConnectorSource::Local(path))
+}
+
+fn is_git_connector_source(source: &str) -> bool {
+    let value = source.trim();
+    value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("git@")
+        || value.ends_with(".git")
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1370,6 +1510,11 @@ fn main() {
             desktop_permission_status,
             registered_service_statuses,
             start_registered_service,
+            list_connector_apps,
+            show_connector_app,
+            install_connector_app,
+            start_connector_app,
+            uninstall_connector_app,
             request_desktop_permission,
             open_desktop_permission_settings,
             start_browser_auth,

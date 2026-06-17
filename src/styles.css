@@ -15,10 +15,7 @@
   --danger: #f44336;
   --shadow: 0 24px 60px rgba(30, 42, 68, 0.08);
   font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
-  background:
-    radial-gradient(circle at top left, rgba(22, 163, 167, 0.16), transparent 30%),
-    radial-gradient(circle at top right, rgba(30, 42, 68, 0.08), transparent 28%),
-    linear-gradient(180deg, #f6f7f9 0%, #eef8f8 44%, #f6f7f9 100%);
+  background: linear-gradient(180deg, #f6f7f9 0%, #eef8f8 44%, #f6f7f9 100%);
   color: var(--text);
 }
 
@@ -524,6 +521,138 @@ select:focus {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.app-section-head {
+  margin: 18px 0 12px;
+}
+
+.app-ability-list,
+.local-app-runtime-list,
+.developer-config-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.app-ability-group {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.app-ability-group-head,
+.local-app-runtime-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.local-app-runtime-row {
+  padding: 14px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.local-app-runtime-row p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.compact-method-list {
+  gap: 10px;
+}
+
+.compact-method-card {
+  padding: 14px;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.compact-method-card .method-topline {
+  margin-bottom: 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(30, 42, 68, 0.28);
+}
+
+.install-panel {
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  box-shadow: 0 28px 80px rgba(30, 42, 68, 0.2);
+}
+
+.install-panel-head,
+.install-panel-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.install-panel-head h3 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.market-app-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.market-app-card {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  padding: 14px;
+  text-align: left;
+  border: 1px solid rgba(30, 42, 68, 0.1);
+  border-radius: 8px;
+  background: rgba(246, 247, 249, 0.9);
+}
+
+.market-app-card.active {
+  border-color: rgba(22, 163, 167, 0.45);
+  background: rgba(22, 163, 167, 0.08);
+}
+
+.market-app-card span,
+.market-app-card small,
+.install-risk-note span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.install-risk-note {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(155, 103, 0, 0.08);
+  border: 1px solid rgba(155, 103, 0, 0.14);
+}
+
+.install-replace-switch {
+  justify-self: start;
 }
 
 .method-topline {

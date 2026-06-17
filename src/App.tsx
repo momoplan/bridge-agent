@@ -306,6 +306,41 @@ interface StartRegisteredServiceResult {
   timedOut: boolean;
 }
 
+interface ConnectorSummary {
+  id: string;
+  name: string;
+  version: string;
+  packagePath: string;
+  serviceNames: string[];
+  installedAtEpochMs: number;
+}
+
+interface ConnectorInstallResult {
+  connectorId: string;
+  name: string;
+  version: string;
+  packagePath: string;
+  serviceNames: string[];
+}
+
+interface ConnectorAppInstallDocument {
+  install: ConnectorInstallResult;
+  config: ConfigDocument;
+}
+
+interface ConnectorServiceStartResult {
+  service: string;
+  configured: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+interface ConnectorStartResult {
+  connectorId: string;
+  services: ConnectorServiceStartResult[];
+}
+
 interface UiAgentConfig {
   platform: {
     base_url: string;
@@ -328,8 +363,28 @@ interface UiAgentConfig {
 
 type SettingsSection = "identity" | "connection" | "runtime";
 const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
-type AppPage = "overview" | "services" | "diagnostics";
+type AppPage = "overview" | "apps" | "diagnostics";
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
+type LocalAppKind = "connector" | "built_in" | "custom";
+type InstallSourceMode = "market" | "local";
+
+interface LocalAppItem {
+  id: string;
+  name: string;
+  description: string;
+  kind: LocalAppKind;
+  serviceIndexes: number[];
+  connector?: ConnectorSummary;
+}
+
+interface MarketConnector {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+  risk: string;
+  capability: string;
+}
 
 const SHELL_SCHEMA = {
   type: "object",
@@ -453,6 +508,25 @@ const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls, git";
 const FULL_ACCESS_COMMAND = "*";
 const FULL_ACCESS_ROOT_DIR = "/";
 
+const MARKET_CONNECTORS: MarketConnector[] = [
+  {
+    id: "codex",
+    name: "Codex",
+    description: "在本机启动 Codex adaptor，把 Codex 会话能力接入工作区。",
+    source: "https://gitee.com/zxflimit_admin/baijimu-connector-codex.git",
+    risk: "需要访问本机 Codex CLI 和工作目录。",
+    capability: "远程创建任务、查看任务和进入会话。"
+  },
+  {
+    id: "wechat",
+    name: "微信",
+    description: "安装微信本地采集 connector，把微信相关本地能力接入工作区。",
+    source: "https://github.com/momoplan/wechat-bridge-collector.git",
+    risk: "需要读取本机微信相关数据目录。",
+    capability: "本地微信数据采集和后续自动化能力。"
+  }
+];
+
 const COMPUTER_METHOD_PRESETS: Record<
   ComputerAction,
   { name: string; description: string; schema: unknown; label: string }
@@ -527,9 +601,11 @@ function App() {
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
+  const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
+  const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
   const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
   const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
@@ -543,6 +619,13 @@ function App() {
   const [activePage, setActivePage] = useState<AppPage>("overview");
   const [activeDetailPanel, setActiveDetailPanel] = useState<DetailPanel>("system");
   const [expandedServiceIndex, setExpandedServiceIndex] = useState<number | null>(0);
+  const [selectedLocalAppId, setSelectedLocalAppId] = useState<string | null>(null);
+  const [installPanelOpen, setInstallPanelOpen] = useState(false);
+  const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("market");
+  const [selectedMarketAppId, setSelectedMarketAppId] = useState(MARKET_CONNECTORS[0]?.id ?? "");
+  const [installSource, setInstallSource] = useState("");
+  const [installReplace, setInstallReplace] = useState(true);
+  const [installBusy, setInstallBusy] = useState(false);
 
   useEffect(() => {
     void refreshAll();
@@ -558,6 +641,10 @@ function App() {
 
   useEffect(() => {
     void refreshRegisteredServiceStatuses();
+  }, []);
+
+  useEffect(() => {
+    void refreshConnectorApps();
   }, []);
 
   useEffect(() => {
@@ -632,7 +719,6 @@ function App() {
   }, [runtime]);
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
-  const enabledServiceCount = config?.services.filter((service) => service.enabled).length ?? 0;
   const exposedCapabilityCount =
     config?.services.reduce(
       (count, service) =>
@@ -654,9 +740,81 @@ function App() {
           : 0),
       0
     ) ?? 0;
-  const selectedServiceIndex =
-    expandedServiceIndex != null && config?.services[expandedServiceIndex] ? expandedServiceIndex : null;
-  const selectedService = selectedServiceIndex == null ? null : config?.services[selectedServiceIndex] ?? null;
+  const localApps = useMemo<LocalAppItem[]>(() => {
+    if (!config) {
+      return [];
+    }
+    const connectorServiceNames = new Set<string>();
+    const apps: LocalAppItem[] = connectorApps.map((connector) => {
+      const serviceIndexes = connector.serviceNames
+        .map((serviceName) => config.services.findIndex((service) => service.name === serviceName))
+        .filter((index) => index >= 0);
+      connector.serviceNames.forEach((serviceName) => connectorServiceNames.add(serviceName));
+      return {
+        id: `connector:${connector.id}`,
+        name: connector.name,
+        description: `版本 ${connector.version} · ${connector.serviceNames.length} 项能力组`,
+        kind: "connector",
+        serviceIndexes,
+        connector
+      };
+    });
+
+    config.services.forEach((service, serviceIndex) => {
+      if (connectorServiceNames.has(service.name)) {
+        return;
+      }
+      if (isComputerService(service)) {
+        apps.push({
+          id: "built-in:desktop-control",
+          name: "桌面控制",
+          description: "截图、点击、输入、拖拽和按键能力。",
+          kind: "built_in",
+          serviceIndexes: [serviceIndex]
+        });
+        return;
+      }
+      if (isShellExecService(service)) {
+        apps.push({
+          id: "built-in:shell",
+          name: "Shell",
+          description: "受控执行本机命令。",
+          kind: "built_in",
+          serviceIndexes: [serviceIndex]
+        });
+        return;
+      }
+      apps.push({
+        id: `custom:${service.name}:${serviceIndex}`,
+        name: service.name || "未命名应用",
+        description: service.description || "开发者自定义本地应用。",
+        kind: "custom",
+        serviceIndexes: [serviceIndex]
+      });
+    });
+    return apps;
+  }, [config, connectorApps]);
+  const selectedLocalApp =
+    localApps.find((app) => app.id === selectedLocalAppId) ?? localApps[0] ?? null;
+  const enabledLocalAppCount = localApps.filter((app) =>
+    app.serviceIndexes.some((serviceIndex) => config?.services[serviceIndex]?.enabled)
+  ).length;
+
+  useEffect(() => {
+    if (localApps.length === 0) {
+      setSelectedLocalAppId(null);
+      return;
+    }
+    setSelectedLocalAppId((current) =>
+      current && localApps.some((app) => app.id === current) ? current : localApps[0].id
+    );
+  }, [localApps]);
+
+  useEffect(() => {
+    if (selectedLocalApp?.serviceIndexes.length) {
+      setExpandedServiceIndex(selectedLocalApp.serviceIndexes[0]);
+    }
+  }, [selectedLocalApp?.id]);
   const visibleAppUpdate =
     appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
   const hasDesktopPermissionGap =
@@ -763,6 +921,7 @@ function App() {
       applyConfigDocument(document);
       const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
       setLogs(latestLogs);
+      await refreshConnectorApps();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       setError(readError(err));
@@ -796,7 +955,16 @@ function App() {
       const statuses = await invoke<RegisteredServiceStatus[]>("registered_service_statuses");
       setRegisteredServiceStatuses(statuses);
     } catch (err) {
-      console.warn("读取注册服务状态失败", err);
+      console.warn("读取本地应用运行状态失败", err);
+    }
+  }
+
+  async function refreshConnectorApps() {
+    try {
+      const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
+      setConnectorApps(apps);
+    } catch (err) {
+      console.warn("读取本地应用列表失败", err);
     }
   }
 
@@ -811,10 +979,10 @@ function App() {
       if (result.success) {
         const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
         setRuntime(snapshot);
-        setMessage(formatApplyMessage(`服务 ${serviceName} 的启动命令已执行`, snapshot));
+        setMessage(formatApplyMessage(`应用 ${serviceName} 的启动命令已执行`, snapshot));
       } else {
         setError(
-          `服务 ${serviceName} 启动命令执行失败` +
+          `应用 ${serviceName} 启动命令执行失败` +
             (result.exitCode == null ? "" : `，退出码 ${result.exitCode}`) +
             (result.stderr.trim() ? `：${result.stderr.trim()}` : "")
         );
@@ -824,6 +992,100 @@ function App() {
       setError(readError(err));
     } finally {
       setServiceStartBusy(null);
+    }
+  }
+
+  async function installLocalApp() {
+    const selectedMarket = MARKET_CONNECTORS.find((app) => app.id === selectedMarketAppId);
+    const source =
+      installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
+    if (!source) {
+      setError(installSourceMode === "market" ? "请选择要安装的应用" : "请输入本地目录或 Git 仓库地址");
+      return;
+    }
+    try {
+      setInstallBusy(true);
+      setMessage("");
+      setError("");
+      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
+        source,
+        replace: installReplace
+      });
+      applyConfigDocument(document.config);
+      await refreshConnectorApps();
+      await refreshRegisteredServiceStatuses();
+      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
+      setActivePage("apps");
+      setInstallPanelOpen(false);
+      setMessage(`应用 ${document.install.name} ${document.install.version} 已安装`);
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  async function startLocalApp(app: LocalAppItem) {
+    try {
+      setConnectorBusy(app.id);
+      setMessage("");
+      setError("");
+      if (app.kind === "connector" && app.connector) {
+        const result = await invoke<ConnectorStartResult>("start_connector_app", {
+          id: app.connector.id
+        });
+        const failed = result.services.filter((service) => service.exitCode !== 0);
+        await refreshRegisteredServiceStatuses();
+        if (failed.length > 0) {
+          setError(
+            `应用 ${app.name} 启动失败：` +
+              failed
+                .map((service) =>
+                  `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`
+                )
+                .join("；")
+          );
+        } else {
+          setMessage(`应用 ${app.name} 已启动`);
+        }
+        return;
+      }
+
+      const startableService = app.serviceIndexes
+        .map((index) => config?.services[index])
+        .find((service): service is UiServiceConfig => Boolean(service?.start_command));
+      if (!startableService) {
+        setError(`应用 ${app.name} 没有配置启动命令`);
+        return;
+      }
+      await startRegisteredService(startableService.name);
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setConnectorBusy(null);
+    }
+  }
+
+  async function uninstallLocalApp(app: LocalAppItem) {
+    if (app.kind !== "connector" || !app.connector) {
+      return;
+    }
+    try {
+      setConnectorBusy(app.id);
+      setMessage("");
+      setError("");
+      const document = await invoke<ConfigDocument>("uninstall_connector_app", {
+        id: app.connector.id
+      });
+      applyConfigDocument(document);
+      await refreshConnectorApps();
+      await refreshRegisteredServiceStatuses();
+      setSelectedLocalAppId(null);
+      setMessage(`应用 ${app.name} 已卸载`);
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setConnectorBusy(null);
     }
   }
 
@@ -911,12 +1173,12 @@ function App() {
       });
       applySavedServiceDocument(document, serviceIndex);
       setExpandedServiceIndex(Math.min(serviceIndex, document.config.services.length - 1));
-      const serviceName = service.name.trim() || "未命名服务";
+      const serviceName = service.name.trim() || "未命名应用";
       setServiceNotices((current) => ({
         ...current,
         [serviceIndex]: applyToRuntime
-          ? formatApplyMessage(`服务 ${serviceName} 已保存`, document.runtime)
-          : `服务 ${serviceName} 已保存`
+          ? formatApplyMessage(`应用 ${serviceName} 已保存`, document.runtime)
+          : `应用 ${serviceName} 已保存`
       }));
       await refreshRegisteredServiceStatuses();
     } catch (err) {
@@ -930,7 +1192,7 @@ function App() {
     if (!config?.services[serviceIndex]) {
       return;
     }
-    const serviceName = config.services[serviceIndex].name.trim() || "未命名服务";
+    const serviceName = config.services[serviceIndex].name.trim() || "未命名应用";
     try {
       setBusy(true);
       setMessage("");
@@ -943,8 +1205,8 @@ function App() {
       setExpandedServiceIndex(document.config.services.length === 0 ? null : Math.max(0, serviceIndex - 1));
       setMessage(
         applyToRuntime
-          ? formatApplyMessage(`服务 ${serviceName} 已删除`, document.runtime)
-          : `服务 ${serviceName} 已删除`
+          ? formatApplyMessage(`应用 ${serviceName} 已删除`, document.runtime)
+          : `应用 ${serviceName} 已删除`
       );
       await refreshRegisteredServiceStatuses();
     } catch (err) {
@@ -1757,15 +2019,16 @@ function App() {
                 <button
                   className="attention-item"
                   onClick={() => {
-                    setActivePage("services");
+                    setActivePage("apps");
                     const computerIndex = config.services.findIndex(isComputerService);
                     if (computerIndex >= 0) {
                       setExpandedServiceIndex(computerIndex);
+                      setSelectedLocalAppId("built-in:desktop-control");
                     }
                   }}
                 >
-                  <strong>桌面控制服务需要权限</strong>
-                  <span>打开 computer 服务处理屏幕录制和辅助功能授权。</span>
+                  <strong>桌面控制需要权限</strong>
+                  <span>打开桌面控制应用处理屏幕录制和辅助功能授权。</span>
                 </button>
               ) : null}
               {hasRuntimeError ? (
@@ -1787,16 +2050,16 @@ function App() {
         </Card>
 
         <Card
-          title="对外能力"
+          title="本地应用"
           action={
-            <button className="secondary" onClick={() => setActivePage("services")}>
-              打开服务页
+            <button className="secondary" onClick={() => setActivePage("apps")}>
+              打开应用页
             </button>
           }
         >
           <div className="status-detail-grid">
-            <InfoRow label="服务总数" value={String(config.services.length)} />
-            <InfoRow label="已启用服务" value={String(enabledServiceCount)} />
+            <InfoRow label="应用总数" value={String(localApps.length)} />
+            <InfoRow label="已启用应用" value={String(enabledLocalAppCount)} />
             <InfoRow label="已开放能力" value={String(exposedCapabilityCount)} />
             <InfoRow label="最近日志" value={latestLog ? formatTime(latestLog.timestamp_ms) : "暂无"} />
           </div>
@@ -1842,7 +2105,7 @@ function App() {
       <div className="registered-service-runtime">
         <div className="registered-service-runtime-main">
           <div>
-            <strong>服务运行</strong>
+            <strong>运行</strong>
             <p>{runtimeView.detail}</p>
             {runtimeView.status ? (
               <span className="registered-service-runtime-meta">
@@ -1878,7 +2141,7 @@ function App() {
               onClick={() => void startRegisteredService(service.name)}
               disabled={serviceStartBusy != null}
             >
-              {serviceStartBusy === service.name ? "启动中" : "启动服务"}
+              {serviceStartBusy === service.name ? "启动中" : "启动应用"}
             </button>
           ) : !isSystem ? (
             <button
@@ -1907,7 +2170,7 @@ function App() {
       <div className="runtime-config-section">
         <div className="method-advanced-head">
           <strong>运行配置</strong>
-          <small>健康检查决定状态展示；启动命令决定“启动服务”按钮的执行内容。</small>
+          <small>健康检查决定状态展示；启动命令决定“启动应用”按钮的执行内容。</small>
         </div>
 
         <div className="runtime-config-block">
@@ -2023,7 +2286,7 @@ function App() {
           <div className="runtime-config-head">
             <div>
               <strong>启动命令</strong>
-              <small>{service.start_command ? "已启用服务启动按钮" : "未配置，服务详情不会执行启动动作"}</small>
+              <small>{service.start_command ? "已启用应用启动按钮" : "未配置，应用详情不会执行启动动作"}</small>
             </div>
             {service.start_command ? (
               <button
@@ -2120,7 +2383,7 @@ function App() {
         <div className="runtime-config-head">
           <div>
             <strong>桌面控制权限</strong>
-            <small>computer 服务启用后，截图需要屏幕录制；点击、输入和拖拽需要辅助功能。</small>
+            <small>桌面控制启用后，截图需要屏幕录制；点击、输入和拖拽需要辅助功能。</small>
           </div>
           <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
             刷新状态
@@ -2198,7 +2461,7 @@ function App() {
       <div className="service-json-section">
         <div className="method-advanced-head">
           <strong>能力定义 JSON</strong>
-          <small>统一编辑 methods 和 events；保存服务时会按同一套配置校验写入。</small>
+          <small>统一编辑 methods 和 events；保存应用时会按同一套配置校验写入。</small>
         </div>
         <textarea
           className="json-editor"
@@ -2229,11 +2492,11 @@ function App() {
 
     return (
       <Card
-        title={service.name || "未命名服务"}
+        title={service.name || "未命名应用"}
         description={
           isSystem
             ? "系统内置"
-            : service.description || "自定义本地服务"
+            : service.description || "自定义本地应用"
         }
         action={
           <div className="service-actions">
@@ -2254,7 +2517,7 @@ function App() {
               启用
             </label>
             <button className="secondary" onClick={() => void saveService(serviceIndex)} disabled={busy}>
-              保存服务
+              保存配置
             </button>
             <button className="primary" onClick={() => void saveService(serviceIndex, true)} disabled={busy}>
               保存并应用
@@ -2282,7 +2545,7 @@ function App() {
           {!isSystem ? (
             <>
               <div className="form-grid">
-                <Field label="服务名">
+                <Field label="内部服务名">
                   <input
                     value={service.name}
                     onChange={(event) =>
@@ -2293,7 +2556,7 @@ function App() {
                     }
                   />
                 </Field>
-                <Field label="服务描述">
+                <Field label="应用说明">
                   <input
                     value={service.description}
                     onChange={(event) =>
@@ -2421,7 +2684,7 @@ function App() {
                     {method.binding.type === "computer_use" ? (
                       <Field
                         label="桌面控制能力"
-                        hint="内置能力由系统服务维护，不在自定义服务里编辑。"
+                        hint="内置能力由系统应用维护，不在自定义应用里编辑。"
                       >
                         <input value={COMPUTER_METHOD_PRESETS[method.binding.action].label} readOnly />
                       </Field>
@@ -2647,7 +2910,7 @@ function App() {
                         {eventConfig.enabled ? "启用" : "停用"}
                       </span>
                     </div>
-                    <p>{eventConfig.description || "本地自定义服务可通过本机事件入口发送。"}</p>
+                    <p>{eventConfig.description || "本地自定义应用可通过本机事件入口发送。"}</p>
                   </div>
                 </div>
               </div>
@@ -2658,22 +2921,263 @@ function App() {
     );
   }
 
-  function renderServicesPage() {
+  function renderLocalAppAbilityList(app: LocalAppItem) {
     if (!config) {
       return <div />;
     }
+    const services = app.serviceIndexes
+      .map((serviceIndex) => config.services[serviceIndex])
+      .filter((service): service is UiServiceConfig => Boolean(service));
+
+    if (services.length === 0) {
+      return <div className="empty-state compact-empty">应用已安装，但当前没有写入能力。</div>;
+    }
+
+    return (
+      <div className="app-ability-list">
+        {services.map((service) => (
+          <div className="app-ability-group" key={service.name}>
+            <div className="app-ability-group-head">
+              <strong>{service.description || service.name}</strong>
+              <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
+                {service.enabled ? "启用" : "停用"}
+              </span>
+            </div>
+            <div className="method-list compact-method-list">
+              {[...service.methods, ...service.events].map((capability) => (
+                <div className="method-card compact-method-card" key={`${service.name}-${capability.name}`}>
+                  <div className="method-topline">
+                    <div className="method-copy">
+                      <div className="method-title-row">
+                        <h4>{capability.name || "未命名能力"}</h4>
+                        <span className={`service-badge ${capability.enabled ? "enabled" : "disabled"}`}>
+                          {capability.enabled ? "启用" : "停用"}
+                        </span>
+                      </div>
+                      <p>{capability.description || "本地能力"}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {service.methods.length === 0 && service.events.length === 0 ? (
+                <div className="empty-state compact-empty">当前没有开放能力。</div>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function renderLocalAppRuntime(app: LocalAppItem) {
+    if (!config) {
+      return null;
+    }
+    const services = app.serviceIndexes
+      .map((serviceIndex) => config.services[serviceIndex])
+      .filter((service): service is UiServiceConfig => Boolean(service));
+    if (services.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="local-app-runtime-list">
+        {services.map((service) => {
+          const runtimeView = serviceRuntimeView(service);
+          return (
+            <div className="local-app-runtime-row" key={service.name}>
+              <div>
+                <strong>{service.description || service.name}</strong>
+                <p>{runtimeView.detail}</p>
+              </div>
+              <div className={`status-pill status-${runtimeView.statusClass}`}>
+                {runtimeView.statusLabel}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderInstallLocalAppPanel() {
+    if (!installPanelOpen) {
+      return null;
+    }
+    const selectedMarket = MARKET_CONNECTORS.find((app) => app.id === selectedMarketAppId);
+
+    return (
+      <div className="modal-backdrop" role="presentation" onClick={() => setInstallPanelOpen(false)}>
+        <section className="install-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+          <div className="install-panel-head">
+            <div>
+              <p className="eyebrow">安装</p>
+              <h3>安装本地应用</h3>
+            </div>
+            <button className="ghost" onClick={() => setInstallPanelOpen(false)}>
+              关闭
+            </button>
+          </div>
+          <div className="section-tabs">
+            <button
+              className={`section-tab ${installSourceMode === "market" ? "active" : ""}`}
+              onClick={() => setInstallSourceMode("market")}
+            >
+              应用市场
+            </button>
+            <button
+              className={`section-tab ${installSourceMode === "local" ? "active" : ""}`}
+              onClick={() => setInstallSourceMode("local")}
+            >
+              本地安装
+            </button>
+          </div>
+
+          {installSourceMode === "market" ? (
+            <div className="market-app-grid">
+              {MARKET_CONNECTORS.map((app) => (
+                <button
+                  className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""}`}
+                  key={app.id}
+                  onClick={() => setSelectedMarketAppId(app.id)}
+                >
+                  <strong>{app.name}</strong>
+                  <span>{app.description}</span>
+                  <small>{app.capability}</small>
+                </button>
+              ))}
+              {selectedMarket ? (
+                <div className="install-risk-note">
+                  <strong>权限提示</strong>
+                  <span>{selectedMarket.risk}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="form-grid">
+              <Field label="本地目录或 Git 仓库" wide>
+                <input
+                  value={installSource}
+                  onChange={(event) => setInstallSource(event.target.value)}
+                  placeholder="/Users/me/connectors/my-app 或 https://gitee.com/org/repo.git"
+                />
+              </Field>
+            </div>
+          )}
+
+          <label className="switch install-replace-switch">
+            <input
+              type="checkbox"
+              checked={installReplace}
+              onChange={(event) => setInstallReplace(event.target.checked)}
+            />
+            覆盖同名能力
+          </label>
+          <div className="install-panel-actions">
+            <button className="secondary" onClick={() => setInstallPanelOpen(false)} disabled={installBusy}>
+              取消
+            </button>
+            <button className="primary" onClick={() => void installLocalApp()} disabled={installBusy}>
+              {installBusy ? "安装中" : "安装应用"}
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderAppsPage() {
+    if (!config) {
+      return <div />;
+    }
+    const app = selectedLocalApp;
+    const appComputerService = app
+      ? app.serviceIndexes
+          .map((serviceIndex) => config.services[serviceIndex])
+          .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)))
+      : null;
 
     return (
       <div className="service-editor-panel">
-        {selectedService && selectedServiceIndex != null ? (
-          renderServiceEditor(selectedService, selectedServiceIndex)
+        {app ? (
+          <>
+            <Card
+              title={app.name}
+              description={app.description}
+              action={
+                <div className="service-actions">
+                  <button className="primary" onClick={() => void startLocalApp(app)} disabled={connectorBusy != null}>
+                    {connectorBusy === app.id ? "启动中" : "启动应用"}
+                  </button>
+                  {app.kind === "connector" ? (
+                    <button
+                      className="ghost danger"
+                      onClick={() => void uninstallLocalApp(app)}
+                      disabled={connectorBusy != null}
+                    >
+                      卸载
+                    </button>
+                  ) : null}
+                </div>
+              }
+            >
+              <div className="status-detail-grid">
+                <InfoRow label="类型" value={formatLocalAppKind(app.kind)} />
+                <InfoRow label="来源" value={app.connector?.packagePath ?? "内置"} />
+                <InfoRow label="版本" value={app.connector?.version ?? "随客户端发布"} />
+                <InfoRow label="能力数" value={String(countLocalAppCapabilities(app, config))} />
+              </div>
+              {appComputerService ? renderComputerPermissionPanel(appComputerService) : null}
+              {renderLocalAppRuntime(app)}
+              <div className="method-advanced-head app-section-head">
+                <strong>能力</strong>
+                <small>这些能力会在授权后开放给工作区调用。</small>
+              </div>
+              {renderLocalAppAbilityList(app)}
+            </Card>
+            {showAdvancedSettings || app.kind === "custom" ? (
+              <div className="developer-config-stack">
+                <div className="method-advanced-head">
+                  <strong>开发者配置</strong>
+                  <small>内部运行项、启动命令、HTTP 绑定和 JSON 定义。</small>
+                </div>
+                {app.serviceIndexes.map((serviceIndex) =>
+                  config.services[serviceIndex] ? renderServiceEditor(config.services[serviceIndex], serviceIndex) : null
+                )}
+              </div>
+            ) : null}
+          </>
         ) : (
-          <Card title="服务详情" description="从左侧服务菜单选择一项开始。">
-            <div className="empty-state">还没有服务，先新增一个自定义服务。</div>
+          <Card
+            title="本地应用"
+            description="从应用市场安装 connector，或从本地目录安装开发中的应用。"
+            action={
+              <button className="primary" onClick={() => setInstallPanelOpen(true)}>
+                安装应用
+              </button>
+            }
+          >
+            <div className="empty-state">还没有安装应用。</div>
           </Card>
         )}
       </div>
     );
+  }
+
+  function countLocalAppCapabilities(app: LocalAppItem, agentConfig: UiAgentConfig) {
+    return app.serviceIndexes.reduce((count, serviceIndex) => {
+      const service = agentConfig.services[serviceIndex];
+      return service ? count + service.methods.length + service.events.length : count;
+    }, 0);
+  }
+
+  function formatLocalAppKind(kind: LocalAppKind) {
+    const labels: Record<LocalAppKind, string> = {
+      connector: "已安装应用",
+      built_in: "内置应用",
+      custom: "自定义应用"
+    };
+    return labels[kind];
   }
 
   function renderDetailPanel() {
@@ -2866,49 +3370,52 @@ function App() {
     );
   }
 
+  const loadedConfig = config;
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
-    services: "服务",
+    apps: "本地应用",
     diagnostics: "诊断"
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
     overview: "",
-    services: "系统服务与自定义服务",
+    apps: "安装、启动和授权本机应用",
     diagnostics: "系统、日志与清单"
   };
-  const showPageHeader = activePage !== "services";
-  const sidebarSystemServices = config.services
-    .map((service, serviceIndex) => ({ service, serviceIndex }))
-    .filter(({ service }) => isSystemService(service));
-  const sidebarCustomServices = config.services
-    .map((service, serviceIndex) => ({ service, serviceIndex }))
-    .filter(({ service }) => !isSystemService(service));
+  const showPageHeader = activePage !== "apps";
+  const sidebarInstalledApps = localApps.filter((app) => app.kind === "connector");
+  const sidebarBuiltInApps = localApps.filter((app) => app.kind === "built_in");
+  const sidebarCustomApps = localApps.filter((app) => app.kind === "custom");
 
-  function renderSidebarServiceItem(service: UiServiceConfig, serviceIndex: number) {
-    const runtimeView = serviceRuntimeView(service);
-    const hasRuntimeInfo = service.health_check != null || service.start_command != null;
+  function renderSidebarAppItem(app: LocalAppItem) {
+    const primaryService = app.serviceIndexes.length > 0 ? loadedConfig.services[app.serviceIndexes[0]] : null;
+    const runtimeView = primaryService ? serviceRuntimeView(primaryService) : null;
+    const hasRuntimeInfo =
+      primaryService?.health_check != null || primaryService?.start_command != null || app.kind === "connector";
     return (
       <button
         className={`sidebar-subnav-item ${
-          activePage === "services" && selectedServiceIndex === serviceIndex ? "active" : ""
+          activePage === "apps" && selectedLocalApp?.id === app.id ? "active" : ""
         }`}
-        key={`${service.name}-${serviceIndex}`}
+        key={app.id}
         onClick={() => {
-          setActivePage("services");
-          setExpandedServiceIndex(serviceIndex);
+          setActivePage("apps");
+          setSelectedLocalAppId(app.id);
+          if (app.serviceIndexes.length > 0) {
+            setExpandedServiceIndex(app.serviceIndexes[0]);
+          }
         }}
       >
         <span className="sidebar-service-title">
-          <span>{service.name || "未命名服务"}</span>
-          {hasRuntimeInfo ? (
+          <span>{app.name || "未命名应用"}</span>
+          {hasRuntimeInfo && runtimeView ? (
             <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
               {runtimeView.statusLabel}
             </span>
           ) : null}
         </span>
         <small>
-          {service.enabled ? "启用" : "停用"} · {service.methods.length} 个方法 · {service.events.length} 个事件
+          {formatLocalAppKind(app.kind)} · {countLocalAppCapabilities(app, loadedConfig)} 项能力
         </small>
       </button>
     );
@@ -2939,42 +3446,44 @@ function App() {
               <small>状态与主操作</small>
             </button>
             <button
-              className={`sidebar-nav-item ${activePage === "services" ? "active" : ""}`}
-              onClick={() => setActivePage("services")}
+              className={`sidebar-nav-item ${activePage === "apps" ? "active" : ""}`}
+              onClick={() => setActivePage("apps")}
             >
-              <span>服务</span>
-              <small>系统与自定义</small>
+              <span>应用</span>
+              <small>市场与本机</small>
             </button>
-            {activePage === "services" ? (
+            {activePage === "apps" ? (
               <div className="sidebar-subnav">
-                {config.services.length === 0 ? (
+                {localApps.length === 0 ? (
                   <>
-                    <div className="sidebar-subnav-empty">还没有服务</div>
-                    <button className="sidebar-subnav-add" onClick={addService}>
-                      新增自定义服务
+                    <div className="sidebar-subnav-empty">还没有应用</div>
+                    <button className="sidebar-subnav-add" onClick={() => setInstallPanelOpen(true)}>
+                      安装应用
                     </button>
                   </>
                 ) : (
                   <>
-                    {sidebarSystemServices.length > 0 ? (
-                      <>
-                        <div className="sidebar-subnav-section">系统服务</div>
-                        {sidebarSystemServices.map(({ service, serviceIndex }) =>
-                          renderSidebarServiceItem(service, serviceIndex)
-                        )}
-                      </>
-                    ) : null}
-                    {sidebarCustomServices.length > 0 ? (
-                      <>
-                        <div className="sidebar-subnav-section">自定义服务</div>
-                        {sidebarCustomServices.map(({ service, serviceIndex }) =>
-                          renderSidebarServiceItem(service, serviceIndex)
-                        )}
-                      </>
-                    ) : null}
-                    <button className="sidebar-subnav-add" onClick={addService}>
-                      新增自定义服务
+                    <button className="sidebar-subnav-add" onClick={() => setInstallPanelOpen(true)}>
+                      安装应用
                     </button>
+                    {sidebarInstalledApps.length > 0 ? (
+                      <>
+                        <div className="sidebar-subnav-section">已安装应用</div>
+                        {sidebarInstalledApps.map((app) => renderSidebarAppItem(app))}
+                      </>
+                    ) : null}
+                    {sidebarBuiltInApps.length > 0 ? (
+                      <>
+                        <div className="sidebar-subnav-section">内置应用</div>
+                        {sidebarBuiltInApps.map((app) => renderSidebarAppItem(app))}
+                      </>
+                    ) : null}
+                    {sidebarCustomApps.length > 0 ? (
+                      <>
+                        <div className="sidebar-subnav-section">自定义应用</div>
+                        {sidebarCustomApps.map((app) => renderSidebarAppItem(app))}
+                      </>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -3077,11 +3586,12 @@ function App() {
 
           <div className="page-body">
             {activePage === "overview" ? renderOverviewPage() : null}
-            {activePage === "services" ? renderServicesPage() : null}
+            {activePage === "apps" ? renderAppsPage() : null}
             {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
           </div>
         </section>
       </div>
+      {renderInstallLocalAppPanel()}
     </main>
   );
 }
@@ -3507,7 +4017,7 @@ function formatRegisteredServiceDetail(
   const hasStartCommand = status?.startCommandConfigured ?? service.start_command != null;
   const hasHealthCheck = status?.healthCheckConfigured ?? service.health_check != null;
   if (!hasHealthCheck && !hasStartCommand) {
-    return "未配置 healthCheck 或启动命令，当前只能作为能力清单服务展示";
+    return "未配置 healthCheck 或启动命令，当前只能作为能力清单展示";
   }
   if (!hasHealthCheck && hasStartCommand) {
     return "已配置启动命令；未配置 healthCheck，无法自动确认运行状态";

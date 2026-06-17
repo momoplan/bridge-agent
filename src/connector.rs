@@ -180,7 +180,7 @@ pub fn install_connector_from_path(
         .iter()
         .map(|registration| registration.name.trim().to_string())
         .collect::<Vec<_>>();
-    let services = registrations
+    let mut services = registrations
         .into_iter()
         .map(ServiceRegistration::into_service_config)
         .collect::<Result<Vec<_>>>()?;
@@ -191,6 +191,7 @@ pub fn install_connector_from_path(
             .with_context(|| format!("failed to replace connector {}", package_path.display()))?;
     }
     copy_connector_package(&source, &package_path)?;
+    resolve_installed_start_commands(&mut services, &package_path)?;
 
     let mut config = load_config(config_path)?;
     for service in &services {
@@ -418,6 +419,82 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_installed_start_commands(
+    services: &mut [ServiceConfig],
+    package_path: &Path,
+) -> Result<()> {
+    let package_bins = read_package_bins(package_path)?;
+    for service in services {
+        let Some(ServiceStartCommand::ShellCommand { command, cwd, .. }) =
+            service.start_command.as_mut()
+        else {
+            continue;
+        };
+        if command.is_empty() {
+            continue;
+        }
+        let executable = command[0].trim();
+        if executable.is_empty() || Path::new(executable).is_absolute() {
+            continue;
+        }
+
+        if let Some(relative_bin) = package_bins.get(executable) {
+            command[0] = "node".to_string();
+            command.insert(1, package_path.join(relative_bin).display().to_string());
+            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                *cwd = Some(package_path.display().to_string());
+            }
+            continue;
+        }
+
+        let direct_path = package_path.join(executable);
+        if direct_path.exists() {
+            command[0] = direct_path.display().to_string();
+            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                *cwd = Some(package_path.display().to_string());
+            }
+            continue;
+        }
+
+        let bin_path = package_path.join("bin").join(executable);
+        if bin_path.exists() {
+            command[0] = bin_path.display().to_string();
+            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                *cwd = Some(package_path.display().to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_package_bins(package_path: &Path) -> Result<BTreeMap<String, String>> {
+    let path = package_path.join("package.json");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read package metadata {}", path.display()))?;
+    let package: Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse package metadata {}", path.display()))?;
+    let mut bins = BTreeMap::new();
+    match package.get("bin") {
+        Some(Value::String(bin)) => {
+            if let Some(name) = package.get("name").and_then(Value::as_str) {
+                bins.insert(name.to_string(), bin.to_string());
+            }
+        }
+        Some(Value::Object(map)) => {
+            for (name, bin) in map {
+                if let Some(bin) = bin.as_str() {
+                    bins.insert(name.to_string(), bin.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(bins)
+}
+
 fn upsert_service(
     services: &mut Vec<ServiceConfig>,
     service: ServiceConfig,
@@ -604,5 +681,73 @@ mod tests {
             .services
             .iter()
             .any(|service| service.name == "inlineService"));
+    }
+
+    #[test]
+    fn install_connector_resolves_package_bin_start_command() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::write(
+            source.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "test-connector",
+                "bin": {
+                    "test-connector": "./bin/start.js"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.bin",
+                "name": "Bin Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "binService",
+                    "description": "Bin service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = install_connector_from_path(&source, &config_path, false).unwrap();
+        let package_path = PathBuf::from(result.package_path);
+        let config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter()
+            .find(|service| service.name == "binService")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand { command, cwd, .. } =
+            service.start_command.as_ref().unwrap();
+        assert_eq!(command[0], "node");
+        assert_eq!(
+            command[1],
+            package_path.join("./bin/start.js").display().to_string()
+        );
+        assert_eq!(command[2], "--port");
+        assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
     }
 }
