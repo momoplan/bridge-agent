@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    ActivationPolicy, Manager, WindowEvent,
+    Manager, WindowEvent,
 };
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
@@ -43,6 +43,8 @@ use core_foundation::string::CFString;
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSApplication;
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
 const TRAY_ID: &str = "bridge-agent";
