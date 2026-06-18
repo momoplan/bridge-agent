@@ -214,7 +214,7 @@ jobs:
           asset_dir="$RUNNER_TEMP/bridge-agent-release-assets"
           mkdir -p "$asset_dir"
 
-          curl -fsS --retry 3 --retry-delay 2 \
+          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
             -X POST \
             -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
             -H "Content-Type: application/json" \
@@ -299,7 +299,7 @@ jobs:
           esac
           version="${RELEASE_TAG#bridge-agent-v}"
 
-          curl -fsS --retry 3 --retry-delay 2 \
+          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
             -X POST \
             -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
             -H "Content-Type: application/json" \
