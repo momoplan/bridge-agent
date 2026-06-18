@@ -924,6 +924,17 @@ fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
         }
     }
 
+    if let Some(name) = lookup_windows_tasklist_image_name(pid) {
+        return RuntimeProcessInfo {
+            pid,
+            parent_pid: None,
+            name: Some(name),
+            executable_path: None,
+            command_line: None,
+            running: true,
+        };
+    }
+
     RuntimeProcessInfo {
         pid,
         parent_pid: None,
@@ -934,10 +945,65 @@ fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
     }
 }
 
+#[cfg(windows)]
+fn lookup_windows_tasklist_image_name(pid: u32) -> Option<String> {
+    let filter = format!("PID eq {pid}");
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_tasklist_image_name(&stdout)
+}
+
+#[cfg(any(windows, test))]
+fn parse_tasklist_image_name(tasklist_output: &str) -> Option<String> {
+    tasklist_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("INFO:"))
+        .find_map(first_csv_field)
+}
+
+#[cfg(any(windows, test))]
+fn first_csv_field(line: &str) -> Option<String> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix('"') {
+        let mut field = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    chars.next();
+                    continue;
+                }
+                return Some(field);
+            }
+            field.push(ch);
+        }
+        return None;
+    }
+    line.split(',').next().map(str::trim).map(ToOwned::to_owned)
+}
+
 #[cfg(unix)]
 fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
     if let Ok(output) = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "comm=", "-o", "args="])
+        .args([
+            "-p",
+            &pid.to_string(),
+            "-o",
+            "ppid=",
+            "-o",
+            "comm=",
+            "-o",
+            "args=",
+        ])
         .output()
     {
         if output.status.success() {
@@ -945,8 +1011,14 @@ fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
             if let Some(line) = stdout.lines().map(str::trim).find(|line| !line.is_empty()) {
                 let mut parts = line.splitn(3, char::is_whitespace);
                 let parent_pid = parts.next().and_then(|value| value.trim().parse().ok());
-                let name = parts.next().map(str::trim).filter(|value| !value.is_empty());
-                let command_line = parts.next().map(str::trim).filter(|value| !value.is_empty());
+                let name = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let command_line = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
                 return RuntimeProcessInfo {
                     pid,
                     parent_pid,
@@ -970,14 +1042,57 @@ fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
 }
 
 fn process_looks_like_bridge_agent(process: &RuntimeProcessInfo) -> bool {
-    [
-        process.name.as_deref(),
-        process.executable_path.as_deref(),
-        process.command_line.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| value.to_ascii_lowercase().contains("bridge-agent"))
+    process
+        .name
+        .as_deref()
+        .is_some_and(is_bridge_agent_process_name)
+        || process
+            .executable_path
+            .as_deref()
+            .is_some_and(|path| is_bridge_agent_process_name(path_file_name(path)))
+        || process
+            .command_line
+            .as_deref()
+            .is_some_and(command_line_starts_with_bridge_agent)
+}
+
+fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
+    let command_line = command_line.trim();
+    if command_line.is_empty() {
+        return false;
+    }
+
+    if let Some(rest) = command_line.strip_prefix('"') {
+        if let Some((executable, _)) = rest.split_once('"') {
+            return is_bridge_agent_process_name(path_file_name(executable));
+        }
+        return false;
+    }
+
+    command_line
+        .split_whitespace()
+        .next()
+        .is_some_and(|executable| is_bridge_agent_process_name(path_file_name(executable)))
+}
+
+fn path_file_name(path: &str) -> &str {
+    path.trim()
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+}
+
+fn is_bridge_agent_process_name(image_name: &str) -> bool {
+    let normalized = image_name
+        .trim()
+        .trim_matches('"')
+        .to_ascii_lowercase()
+        .replace([' ', '_', '-'], "");
+    matches!(
+        normalized.as_str(),
+        "bridgeagent" | "bridgeagent.exe" | "bridgeagentservice" | "bridgeagentservice.exe"
+    )
 }
 
 #[cfg(windows)]
@@ -1070,8 +1185,9 @@ fn process_is_running(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_url, read_runtime_lock, runtime_lock_path, RuntimeInstanceLock,
-        RuntimeLockDocument,
+        build_agent_url, command_line_starts_with_bridge_agent, is_bridge_agent_process_name,
+        parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
+        runtime_lock_path, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1115,5 +1231,64 @@ mod tests {
         let lock = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
         let active = read_runtime_lock(&lock.path).unwrap();
         assert_eq!(active.pid, std::process::id());
+    }
+
+    #[test]
+    fn tasklist_image_name_reads_bridge_agent_with_spaces() {
+        let output = r#""Bridge Agent.exe","18080","Console","1","64,000 K""#;
+
+        assert_eq!(
+            parse_tasklist_image_name(output),
+            Some("Bridge Agent.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn bridge_agent_process_name_allows_only_known_hosts() {
+        assert!(is_bridge_agent_process_name("Bridge Agent"));
+        assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent"));
+        assert!(is_bridge_agent_process_name("bridge-agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
+        assert!(!is_bridge_agent_process_name("node.exe"));
+        assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
+    }
+
+    #[test]
+    fn runtime_process_identity_accepts_desktop_executable_name() {
+        let process = RuntimeProcessInfo {
+            pid: 18080,
+            parent_pid: None,
+            name: Some("Bridge Agent.exe".to_string()),
+            executable_path: None,
+            command_line: None,
+            running: true,
+        };
+
+        assert!(process_looks_like_bridge_agent(&process));
+    }
+
+    #[test]
+    fn runtime_process_identity_accepts_quoted_install_path() {
+        assert!(command_line_starts_with_bridge_agent(
+            r#""C:\Program Files\Bridge Agent\Bridge Agent.exe" --config agent-config.json"#
+        ));
+    }
+
+    #[test]
+    fn runtime_process_identity_rejects_unknown_or_helper_processes() {
+        let process = RuntimeProcessInfo {
+            pid: 18080,
+            parent_pid: None,
+            name: Some("my-bridge-agent-helper.exe".to_string()),
+            executable_path: None,
+            command_line: None,
+            running: true,
+        };
+
+        assert!(!process_looks_like_bridge_agent(&process));
+        assert!(!command_line_starts_with_bridge_agent(
+            r#""C:\Program Files\nodejs\node.exe" bridge-agent.js"#
+        ));
     }
 }
