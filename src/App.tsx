@@ -216,6 +216,8 @@ interface AppUpdateStatus {
   assetName: string | null;
 }
 
+type AppUpdateCheckState = "checking" | "ready" | "error";
+
 interface AppUpdateInstallResult {
   status: "up_to_date" | "downloaded";
   version: string;
@@ -623,6 +625,8 @@ function App() {
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
+  const [appUpdateCheckState, setAppUpdateCheckState] = useState<AppUpdateCheckState>("checking");
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
@@ -853,6 +857,16 @@ function App() {
   }, [selectedLocalApp?.id]);
   const visibleAppUpdate =
     appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
+  const appVersionLabel =
+    appUpdate?.currentVersion ?? (appUpdateCheckState === "error" ? "检查失败" : "检查中");
+  const appUpdateStatusLabel = appUpdate
+    ? appUpdate.updateAvailable
+      ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
+      : "已是最新版本"
+    : appUpdateCheckState === "error"
+      ? appUpdateError || "检查失败"
+      : "检查中";
+  const appUpdateTone = appUpdate?.updateAvailable || appUpdateCheckState === "error" ? "danger" : "normal";
   const hasDesktopPermissionGap =
     enabledComputerMethodCount > 0 &&
     desktopPermissions != null &&
@@ -1308,9 +1322,12 @@ function App() {
   }
 
   async function checkAppUpdate(showLatestMessage = false) {
+    setAppUpdateCheckState("checking");
+    setAppUpdateError(null);
     try {
       const status = await invoke<AppUpdateStatus>("check_app_update");
       setAppUpdate(status);
+      setAppUpdateCheckState("ready");
       if (showLatestMessage) {
         setMessage(
           status.updateAvailable
@@ -1324,8 +1341,11 @@ function App() {
         setDismissedUpdateVersion(null);
       }
     } catch (err) {
+      const message = readError(err);
+      setAppUpdateCheckState("error");
+      setAppUpdateError(message);
       if (showLatestMessage) {
-        setError(readError(err));
+        setError(message);
       } else {
         console.warn("自动检查更新失败", err);
       }
@@ -2276,14 +2296,8 @@ function App() {
             />
             <InfoRow
               label="更新"
-              value={
-                appUpdate?.updateAvailable
-                  ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
-                  : appUpdate
-                    ? "已是最新版本"
-                    : "检查中"
-              }
-              tone={appUpdate?.updateAvailable ? "danger" : "normal"}
+              value={appUpdateStatusLabel}
+              tone={appUpdateTone}
             />
           </div>
         </Card>
@@ -3928,17 +3942,11 @@ function App() {
     return (
       <Card title="系统" description="版本与运行状态。">
         <div className="status-detail-grid">
-          <InfoRow label="应用版本" value={appUpdate?.currentVersion ?? "检查中"} />
+          <InfoRow label="应用版本" value={appVersionLabel} tone={appUpdateCheckState === "error" ? "danger" : "normal"} />
           <InfoRow
             label="更新状态"
-            value={
-              appUpdate?.updateAvailable
-                ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
-                : appUpdate
-                  ? "已是最新版本"
-                  : "尚未完成检查"
-            }
-            tone={appUpdate?.updateAvailable ? "danger" : "normal"}
+            value={appUpdateStatusLabel}
+            tone={appUpdateTone}
           />
           <InfoRow label="当前状态" value={statusLabel} />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
@@ -4120,7 +4128,7 @@ function App() {
           <div className="sidebar-footer">
             <div className="sidebar-stat">
               <span>应用版本</span>
-              <strong>{appUpdate?.currentVersion ?? "检查中"}</strong>
+              <strong>{appVersionLabel}</strong>
             </div>
           </div>
         </aside>
