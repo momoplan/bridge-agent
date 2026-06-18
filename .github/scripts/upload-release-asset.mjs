@@ -19,7 +19,7 @@ if (!token) {
   process.exit(2);
 }
 
-const apiBase = apiBaseArg.replace(/\/+$/, "");
+const apiBase = apiBaseArg.replace(/^http:\/\//, "https://").replace(/\/+$/, "");
 const assetName = basename(filePath);
 if (!isAllowedReleaseAsset(assetName, target)) {
   throw new Error(`Refusing to upload non-release bundle for ${target}: ${assetName}`);

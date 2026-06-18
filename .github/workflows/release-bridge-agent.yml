@@ -207,6 +207,9 @@ jobs:
           set -euo pipefail
 
           api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
+          case "$api" in
+            http://*) api="https://${api#http://}" ;;
+          esac
           version="${RELEASE_TAG#bridge-agent-v}"
           asset_dir="$RUNNER_TEMP/bridge-agent-release-assets"
           mkdir -p "$asset_dir"
@@ -291,6 +294,9 @@ jobs:
           done
 
           api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
+          case "$api" in
+            http://*) api="https://${api#http://}" ;;
+          esac
           version="${RELEASE_TAG#bridge-agent-v}"
 
           curl -fsS --retry 3 --retry-delay 2 \
