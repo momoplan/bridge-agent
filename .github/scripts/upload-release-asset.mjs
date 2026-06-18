@@ -83,7 +83,8 @@ async function postJson(url, payload) {
     `POST ${url}`,
   );
   if (response.status < 200 || response.status >= 300) {
-    throw new Error(`${url} failed: ${response.status} ${response.body}`);
+    const location = response.headers.location ? ` location=${response.headers.location}` : "";
+    throw new Error(`${url} failed: ${response.status}${location} ${response.body}`);
   }
   return JSON.parse(response.body);
 }
@@ -118,9 +119,13 @@ async function requestJson(url, method, headers, body) {
 }
 
 async function requestRaw(url, method, headers, body, timeoutMs) {
+  return requestRawWithRedirects(url, method, headers, body, timeoutMs, 0);
+}
+
+async function requestRawWithRedirects(url, method, headers, body, timeoutMs, redirectCount) {
   const parsed = new URL(url);
   const client = parsed.protocol === "http:" ? http : https;
-  return new Promise((resolve, reject) => {
+  const response = await new Promise((resolve, reject) => {
     const request = client.request(
       parsed,
       {
@@ -133,6 +138,7 @@ async function requestRaw(url, method, headers, body, timeoutMs) {
         response.on("end", () => {
           resolve({
             status: response.statusCode ?? 0,
+            headers: response.headers,
             body: Buffer.concat(chunks).toString("utf8"),
           });
         });
@@ -145,6 +151,33 @@ async function requestRaw(url, method, headers, body, timeoutMs) {
     request.on("error", reject);
     request.end(body);
   });
+
+  if (isRedirect(response.status) && response.headers.location && redirectCount < 5) {
+    const nextUrl = new URL(response.headers.location, parsed);
+    return requestRawWithRedirects(
+      nextUrl.toString(),
+      method,
+      headersForRedirect(headers, parsed, nextUrl),
+      body,
+      timeoutMs,
+      redirectCount + 1,
+    );
+  }
+
+  return response;
+}
+
+function isRedirect(status) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function headersForRedirect(headers, previousUrl, nextUrl) {
+  if (previousUrl.hostname === nextUrl.hostname) {
+    return headers;
+  }
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => name.toLowerCase() !== "authorization"),
+  );
 }
 
 function normalizeHeaders(headers) {
