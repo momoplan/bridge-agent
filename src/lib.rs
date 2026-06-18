@@ -17,11 +17,14 @@ pub use config::{
     ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use connector::{
-    connectors_dir, install_connector_from_path, list_connectors, show_connector, start_connector,
-    uninstall_connector, ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest,
-    ConnectorStartResult, ConnectorSummary,
+    connectors_dir, install_connector_from_path, list_connectors, load_connector_manifest,
+    show_connector, start_connector, stop_connector, uninstall_connector, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorManifest, ConnectorStartResult, ConnectorSummary,
 };
-pub use runtime::{AgentRuntimeManager, LogEntry, RuntimeSnapshot, RuntimeStatus};
+pub use runtime::{
+    terminate_runtime_lock_owner, AgentRuntimeManager, LogEntry, RuntimeLockConflict,
+    RuntimeProcessInfo, RuntimeSnapshot, RuntimeStatus,
+};
 
 pub fn install_rustls_crypto_provider() -> Result<()> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {

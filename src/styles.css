@@ -652,6 +652,44 @@ select:focus {
   line-height: 1.5;
 }
 
+.app-detail-dialog {
+  width: min(1040px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  box-shadow: 0 28px 80px rgba(30, 42, 68, 0.2);
+}
+
+.app-detail-dialog .install-panel-head p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.app-detail-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(30, 42, 68, 0.08);
+}
+
+.app-detail-toolbar .section-tabs {
+  margin-bottom: 0;
+}
+
+.app-detail-tab-panel {
+  display: grid;
+  gap: 16px;
+}
+
 .compact-method-list {
   gap: 10px;
 }
@@ -739,8 +777,32 @@ select:focus {
   border: 1px solid rgba(155, 103, 0, 0.14);
 }
 
-.install-replace-switch {
-  justify-self: start;
+.install-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.install-choice-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 128px;
+  padding: 18px;
+  text-align: left;
+  border: 1px solid rgba(30, 42, 68, 0.1);
+  border-radius: 8px;
+  background: rgba(246, 247, 249, 0.9);
+}
+
+.install-choice-card:hover {
+  border-color: rgba(22, 163, 167, 0.45);
+  background: rgba(22, 163, 167, 0.08);
+}
+
+.install-choice-card span {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .method-topline {
@@ -1001,10 +1063,20 @@ select:focus {
   box-shadow: 0 14px 24px rgba(11, 67, 48, 0.22);
 }
 
+.primary.danger {
+  background: linear-gradient(135deg, #d14343, #9f2d2d);
+  box-shadow: 0 14px 24px rgba(159, 45, 45, 0.2);
+}
+
 .secondary {
   background: rgba(255, 255, 255, 0.82);
   color: var(--text);
   border: 1px solid var(--line);
+}
+
+.secondary.danger {
+  color: var(--danger);
+  border-color: rgba(244, 67, 54, 0.32);
 }
 
 .ghost {
@@ -1037,6 +1109,134 @@ select:focus {
 .alert.error {
   background: rgba(152, 43, 43, 0.1);
   color: var(--danger);
+}
+
+.runtime-conflict-panel {
+  margin-top: 14px;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: flex-start;
+  border-radius: 16px;
+  border: 1px solid rgba(152, 43, 43, 0.18);
+  background: rgba(152, 43, 43, 0.08);
+}
+
+.runtime-conflict-copy {
+  min-width: 0;
+}
+
+.runtime-conflict-copy strong {
+  display: block;
+  color: var(--danger);
+  font-size: 16px;
+}
+
+.runtime-conflict-copy p {
+  margin: 8px 0 12px;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.runtime-conflict-copy dl {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-conflict-copy dl div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.runtime-conflict-copy dt {
+  color: var(--muted);
+}
+
+.runtime-conflict-copy dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.runtime-conflict-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.toast-stack {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 90;
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 14px 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(30, 42, 68, 0.12);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 42px rgba(30, 42, 68, 0.18);
+  pointer-events: auto;
+}
+
+.toast strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.toast p {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.toast-success {
+  border-left: 4px solid var(--success);
+}
+
+.toast-error {
+  border-left: 4px solid var(--danger);
+}
+
+.toast-success strong {
+  color: var(--success);
+}
+
+.toast-error strong {
+  color: var(--danger);
+}
+
+.toast-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(30, 42, 68, 0.12);
+  background: rgba(248, 246, 241, 0.92);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.toast-close:hover {
+  color: var(--text);
+  background: #FFFFFF;
 }
 
 .card {
@@ -1381,6 +1581,10 @@ select:focus {
 }
 
 @media (max-width: 860px) {
+  .runtime-conflict-panel {
+    grid-template-columns: 1fr;
+  }
+
   .page-header,
   .overview-status-row,
   .registered-service-runtime,

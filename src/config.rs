@@ -109,6 +109,8 @@ pub struct ServiceConfig {
     pub health_check: Option<ServiceHealthCheck>,
     #[serde(default, alias = "startCommand")]
     pub start_command: Option<ServiceStartCommand>,
+    #[serde(default, alias = "stopCommand")]
+    pub stop_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<MethodConfig>,
     #[serde(default)]
@@ -488,6 +490,8 @@ pub struct ServiceRegistration {
     pub health_check: Option<RegistrationHealthCheck>,
     #[serde(default, alias = "startCommand")]
     pub start_command: Option<ServiceStartCommand>,
+    #[serde(default, alias = "stopCommand")]
+    pub stop_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<RegistrationMethod>,
     #[serde(default)]
@@ -579,6 +583,7 @@ impl ServiceRegistration {
             enabled: self.enabled,
             health_check,
             start_command: self.start_command,
+            stop_command: self.stop_command,
             methods,
             events: self.events,
         })
@@ -936,6 +941,7 @@ fn is_legacy_default_local_java_service(service: &ServiceConfig) -> bool {
         || service.enabled
         || service.health_check.is_some()
         || service.start_command.is_some()
+        || service.stop_command.is_some()
         || service.methods.len() != 1
         || service.events.len() != 1
     {
@@ -1129,6 +1135,7 @@ fn default_computer_service() -> ServiceConfig {
         enabled: true,
         health_check: None,
         start_command: None,
+        stop_command: None,
         methods: vec![
             computer_method(
                 "screenshot",
@@ -1187,6 +1194,7 @@ fn default_shell_exec_service() -> ServiceConfig {
         enabled: true,
         health_check: None,
         start_command: None,
+        stop_command: None,
         methods: default_shell_exec_methods(),
         events: Vec::new(),
     }
@@ -1724,6 +1732,7 @@ mod tests {
             enabled,
             health_check: None,
             start_command: None,
+            stop_command: None,
             methods: vec![MethodConfig {
                 name: "invokeApi".to_string(),
                 description: "Forward invocation arguments to a local HTTP service.".to_string(),
@@ -1870,6 +1879,7 @@ mod tests {
             enabled: true,
             health_check: None,
             start_command: None,
+            stop_command: None,
             methods: Vec::new(),
             events: vec![EventConfig {
                 name: "finished".to_string(),

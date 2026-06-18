@@ -7,6 +7,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -295,6 +296,34 @@ pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<Connect
     })
 }
 
+pub fn stop_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
+    ensure_config_exists(config_path)?;
+    let record = load_install_record(connector_id)?;
+    let config = load_config(config_path)?;
+    let mut results = Vec::new();
+    for service_name in &record.service_names {
+        let service = config
+            .services
+            .iter()
+            .find(|service| &service.name == service_name);
+        let result = match service.and_then(|service| service.stop_command.as_ref()) {
+            Some(command) => run_start_command(service_name, command)?,
+            None => ConnectorServiceStartResult {
+                service: service_name.clone(),
+                configured: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: "stop command is not configured".to_string(),
+            },
+        };
+        results.push(result);
+    }
+    Ok(ConnectorStartResult {
+        connector_id: record.manifest.id,
+        services: results,
+    })
+}
+
 fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     if manifest.schema_version.trim().is_empty() {
         bail!("connector schemaVersion cannot be empty");
@@ -424,47 +453,191 @@ fn resolve_installed_start_commands(
     package_path: &Path,
 ) -> Result<()> {
     let package_bins = read_package_bins(package_path)?;
+    let node_path = resolve_command_path("node");
+    let codex_path = resolve_command_path("codex");
     for service in services {
-        let Some(ServiceStartCommand::ShellCommand { command, cwd, .. }) =
-            service.start_command.as_mut()
-        else {
-            continue;
-        };
-        if command.is_empty() {
-            continue;
+        if service.stop_command.is_none() {
+            service.stop_command = derive_stop_command_from_start(service.start_command.as_ref());
         }
-        let executable = command[0].trim();
-        if executable.is_empty() || Path::new(executable).is_absolute() {
-            continue;
-        }
-
-        if let Some(relative_bin) = package_bins.get(executable) {
-            command[0] = "node".to_string();
-            command.insert(1, package_path.join(relative_bin).display().to_string());
-            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                *cwd = Some(package_path.display().to_string());
-            }
-            continue;
-        }
-
-        let direct_path = package_path.join(executable);
-        if direct_path.exists() {
-            command[0] = direct_path.display().to_string();
-            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                *cwd = Some(package_path.display().to_string());
-            }
-            continue;
-        }
-
-        let bin_path = package_path.join("bin").join(executable);
-        if bin_path.exists() {
-            command[0] = bin_path.display().to_string();
-            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                *cwd = Some(package_path.display().to_string());
-            }
+        for command_config in [&mut service.start_command, &mut service.stop_command] {
+            let Some(ServiceStartCommand::ShellCommand {
+                command, cwd, env, ..
+            }) = command_config.as_mut()
+            else {
+                continue;
+            };
+            resolve_installed_shell_command(
+                command,
+                cwd,
+                env,
+                package_path,
+                &package_bins,
+                &node_path,
+                &codex_path,
+            );
         }
     }
     Ok(())
+}
+
+fn derive_stop_command_from_start(
+    start_command: Option<&ServiceStartCommand>,
+) -> Option<ServiceStartCommand> {
+    let ServiceStartCommand::ShellCommand {
+        command,
+        cwd,
+        env,
+        timeout_secs,
+    } = start_command?;
+    let start_index = command.iter().position(|part| part == "start")?;
+    if !command.iter().any(|part| part == "--daemon") {
+        return None;
+    }
+    let mut stop_command = command.clone();
+    stop_command[start_index] = "stop".to_string();
+    stop_command.retain(|part| part != "--daemon");
+    Some(ServiceStartCommand::ShellCommand {
+        command: stop_command,
+        cwd: cwd.clone(),
+        env: env.clone(),
+        timeout_secs: *timeout_secs,
+    })
+}
+
+fn resolve_installed_shell_command(
+    command: &mut Vec<String>,
+    cwd: &mut Option<String>,
+    env: &mut BTreeMap<String, String>,
+    package_path: &Path,
+    package_bins: &BTreeMap<String, String>,
+    node_path: &Option<PathBuf>,
+    codex_path: &Option<PathBuf>,
+) {
+    if command.is_empty() {
+        return;
+    }
+    let executable = command[0].trim();
+    if executable.is_empty() || Path::new(executable).is_absolute() {
+        return;
+    }
+
+    if let Some(relative_bin) = package_bins.get(executable) {
+        command[0] = node_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "node".to_string());
+        command.insert(1, package_path.join(relative_bin).display().to_string());
+        enrich_start_command_env(env, [node_path, codex_path]);
+        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            *cwd = Some(package_path.display().to_string());
+        }
+        return;
+    }
+
+    let direct_path = package_path.join(executable);
+    if direct_path.exists() {
+        command[0] = direct_path.display().to_string();
+        enrich_start_command_env(env, [node_path, codex_path]);
+        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            *cwd = Some(package_path.display().to_string());
+        }
+        return;
+    }
+
+    let bin_path = package_path.join("bin").join(executable);
+    if bin_path.exists() {
+        command[0] = bin_path.display().to_string();
+        enrich_start_command_env(env, [node_path, codex_path]);
+        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            *cwd = Some(package_path.display().to_string());
+        }
+    }
+}
+
+fn enrich_start_command_env<'a>(
+    env_vars: &mut BTreeMap<String, String>,
+    executable_paths: impl IntoIterator<Item = &'a Option<PathBuf>>,
+) {
+    let mut path_entries = Vec::new();
+    let mut codex_binary = None;
+    for executable_path in executable_paths.into_iter().filter_map(|path| path.as_ref()) {
+        if executable_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "codex")
+        {
+            codex_binary = Some(executable_path.display().to_string());
+        }
+        if let Some(parent) = executable_path.parent() {
+            push_unique_path_entry(&mut path_entries, parent.to_path_buf());
+        }
+    }
+    append_split_path(&mut path_entries, env_vars.get("PATH"));
+    append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
+    if let Some(shell_path) = login_shell_path() {
+        append_split_path(&mut path_entries, Some(&shell_path));
+    }
+    if let Ok(joined_path) = env::join_paths(path_entries) {
+        env_vars.insert("PATH".to_string(), joined_path.to_string_lossy().to_string());
+    }
+    if let Some(codex_binary) = codex_binary {
+        env_vars
+            .entry("CODEX_CONNECTOR_CODEX_BINARY".to_string())
+            .or_insert(codex_binary);
+    }
+}
+
+fn append_split_path(entries: &mut Vec<PathBuf>, value: Option<&String>) {
+    let Some(value) = value else {
+        return;
+    };
+    for entry in env::split_paths(value) {
+        push_unique_path_entry(entries, entry);
+    }
+}
+
+fn push_unique_path_entry(entries: &mut Vec<PathBuf>, entry: PathBuf) {
+    if entry.as_os_str().is_empty() {
+        return;
+    }
+    if !entries.iter().any(|candidate| candidate == &entry) {
+        entries.push(entry);
+    }
+}
+
+fn resolve_command_path(executable: &str) -> Option<PathBuf> {
+    find_command_in_path(executable, env::var("PATH").ok().as_ref())
+        .or_else(|| login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path))))
+}
+
+fn find_command_in_path(executable: &str, path: Option<&String>) -> Option<PathBuf> {
+    let path = path?;
+    env::split_paths(path)
+        .map(|dir| dir.join(executable))
+        .find(|candidate| candidate.is_file())
+}
+
+fn login_shell_path() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/bin/zsh")
+            .args(["-lc", "printf %s \"$PATH\""])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 fn read_package_bins(package_path: &Path) -> Result<BTreeMap<String, String>> {
@@ -740,14 +913,96 @@ mod tests {
             .iter()
             .find(|service| service.name == "binService")
             .unwrap();
-        let ServiceStartCommand::ShellCommand { command, cwd, .. } =
+        let ServiceStartCommand::ShellCommand {
+            command, cwd, env, ..
+        } =
             service.start_command.as_ref().unwrap();
-        assert_eq!(command[0], "node");
+        let expected_node = resolve_command_path("node")
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "node".to_string());
+        assert_eq!(command[0], expected_node);
         assert_eq!(
             command[1],
             package_path.join("./bin/start.js").display().to_string()
         );
         assert_eq!(command[2], "--port");
+        assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
+        if let Some(node_dir) = Path::new(&expected_node).parent() {
+            assert!(env
+                .get("PATH")
+                .is_some_and(|path| env::split_paths(path).any(|entry| entry == node_dir)));
+        }
+    }
+
+    #[test]
+    fn install_connector_derives_package_bin_stop_command() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::write(
+            source.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "test-connector",
+                "bin": {
+                    "test-connector": "./bin/start.js"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.daemon",
+                "name": "Daemon Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "daemonService",
+                    "description": "Daemon service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "start", "--daemon", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = install_connector_from_path(&source, &config_path, false).unwrap();
+        let package_path = PathBuf::from(result.package_path);
+        let config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter()
+            .find(|service| service.name == "daemonService")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand { command, cwd, .. } =
+            service.stop_command.as_ref().unwrap();
+        let expected_node = resolve_command_path("node")
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "node".to_string());
+        assert_eq!(command[0], expected_node);
+        assert_eq!(
+            command[1],
+            package_path.join("./bin/start.js").display().to_string()
+        );
+        assert_eq!(command[2], "stop");
+        assert_eq!(command[3], "--port");
         assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
     }
 }

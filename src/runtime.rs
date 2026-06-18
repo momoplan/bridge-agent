@@ -3,7 +3,7 @@ use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink};
 use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
 use crate::services::ServiceRegistry;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,37 @@ pub struct LogEntry {
     pub level: String,
     pub message: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeProcessInfo {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub name: Option<String>,
+    pub executable_path: Option<String>,
+    pub command_line: Option<String>,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeLockConflict {
+    pub pid: u32,
+    pub agent_id: String,
+    pub config_path: String,
+    pub lock_path: String,
+    pub process: RuntimeProcessInfo,
+}
+
+impl std::fmt::Display for RuntimeLockConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "bridge-agent runtime is already running for agent `{}` with config `{}` (pid {}, lock {})",
+            self.agent_id, self.config_path, self.pid, self.lock_path
+        )
+    }
+}
+
+impl std::error::Error for RuntimeLockConflict {}
 
 #[derive(Clone, Default)]
 pub struct AgentRuntimeManager {
@@ -689,13 +720,14 @@ impl RuntimeInstanceLock {
                         continue;
                     }
                     if let Ok(existing) = read_runtime_lock(&lock_path) {
-                        anyhow::bail!(
-                            "bridge-agent runtime is already running for agent `{}` with config `{}` (pid {}, lock {})",
-                            existing.agent_id,
-                            existing.config_path,
-                            existing.pid,
-                            lock_path.display()
-                        );
+                        return Err(RuntimeLockConflict {
+                            pid: existing.pid,
+                            agent_id: existing.agent_id,
+                            config_path: existing.config_path,
+                            lock_path: lock_path.display().to_string(),
+                            process: describe_process(existing.pid),
+                        }
+                        .into());
                     }
                     anyhow::bail!(
                         "bridge-agent runtime lock already exists at {}",
@@ -794,6 +826,204 @@ fn read_runtime_lock(path: &Path) -> Result<RuntimeLockDocument> {
         .with_context(|| format!("failed to read runtime lock {}", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("failed to parse runtime lock {}", path.display()))
+}
+
+pub fn terminate_runtime_lock_owner(
+    lock_path: &Path,
+    expected_pid: u32,
+    expected_agent_id: &str,
+    expected_config_path: &str,
+) -> Result<()> {
+    let document = read_runtime_lock(lock_path)?;
+    if document.pid != expected_pid
+        || document.agent_id != expected_agent_id
+        || document.config_path != expected_config_path
+    {
+        bail!("runtime lock changed; please retry with the latest conflict information");
+    }
+
+    let process = describe_process(document.pid);
+    if process.running {
+        if !process_looks_like_bridge_agent(&process) {
+            bail!(
+                "pid {} is running but does not look like a Bridge Agent process",
+                document.pid
+            );
+        }
+        terminate_process_tree(document.pid)?;
+        wait_for_process_exit(document.pid, Duration::from_secs(5))?;
+    }
+
+    match fs::remove_file(lock_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to remove runtime lock after terminating owner {}",
+                lock_path.display()
+            )
+        }),
+    }
+}
+
+fn describe_process(pid: u32) -> RuntimeProcessInfo {
+    #[cfg(windows)]
+    {
+        return describe_process_windows(pid);
+    }
+
+    #[cfg(unix)]
+    {
+        return describe_process_unix(pid);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        RuntimeProcessInfo {
+            pid,
+            parent_pid: None,
+            name: None,
+            executable_path: None,
+            command_line: None,
+            running: process_is_running(pid),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct WindowsProcessInfo {
+        process_id: u32,
+        parent_process_id: Option<u32>,
+        name: Option<String>,
+        executable_path: Option<String>,
+        command_line: Option<String>,
+    }
+
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+    );
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Ok(info) = serde_json::from_str::<WindowsProcessInfo>(stdout.trim()) {
+                return RuntimeProcessInfo {
+                    pid: info.process_id,
+                    parent_pid: info.parent_process_id,
+                    name: info.name,
+                    executable_path: info.executable_path,
+                    command_line: info.command_line,
+                    running: true,
+                };
+            }
+        }
+    }
+
+    RuntimeProcessInfo {
+        pid,
+        parent_pid: None,
+        name: None,
+        executable_path: None,
+        command_line: None,
+        running: process_is_running(pid),
+    }
+}
+
+#[cfg(unix)]
+fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "comm=", "-o", "args="])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = stdout.lines().map(str::trim).find(|line| !line.is_empty()) {
+                let mut parts = line.splitn(3, char::is_whitespace);
+                let parent_pid = parts.next().and_then(|value| value.trim().parse().ok());
+                let name = parts.next().map(str::trim).filter(|value| !value.is_empty());
+                let command_line = parts.next().map(str::trim).filter(|value| !value.is_empty());
+                return RuntimeProcessInfo {
+                    pid,
+                    parent_pid,
+                    name: name.map(ToOwned::to_owned),
+                    executable_path: None,
+                    command_line: command_line.map(ToOwned::to_owned),
+                    running: true,
+                };
+            }
+        }
+    }
+
+    RuntimeProcessInfo {
+        pid,
+        parent_pid: None,
+        name: None,
+        executable_path: None,
+        command_line: None,
+        running: process_is_running(pid),
+    }
+}
+
+fn process_looks_like_bridge_agent(process: &RuntimeProcessInfo) -> bool {
+    [
+        process.name.as_deref(),
+        process.executable_path.as_deref(),
+        process.command_line.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains("bridge-agent"))
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(pid: u32) -> Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .with_context(|| format!("failed to run taskkill for pid {pid}"))?;
+    if status.success() || !process_is_running(pid) {
+        return Ok(());
+    }
+    bail!("failed to terminate runtime owner pid {pid}");
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(pid: u32) -> Result<()> {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    if wait_for_process_exit(pid, Duration::from_secs(2)).is_ok() {
+        return Ok(());
+    }
+    let status = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .with_context(|| format!("failed to run kill for pid {pid}"))?;
+    if status.success() || !process_is_running(pid) {
+        return Ok(());
+    }
+    bail!("failed to terminate runtime owner pid {pid}");
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(pid: u32) -> Result<()> {
+    bail!("terminating pid {pid} is not supported on this platform");
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<()> {
+    let started = SystemTime::now();
+    while process_is_running(pid) {
+        if started.elapsed().unwrap_or_default() >= timeout {
+            bail!("runtime owner pid {pid} is still running");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

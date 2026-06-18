@@ -856,6 +856,7 @@ mod tests {
             enabled: true,
             health_check: None,
             start_command: None,
+            stop_command: None,
             methods: Vec::new(),
             events: vec![EventConfig {
                 name: "finished".to_string(),

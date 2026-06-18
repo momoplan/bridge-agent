@@ -3316,6 +3316,7 @@ mod tests {
             enabled: true,
             health_check: None,
             start_command: None,
+            stop_command: None,
             methods: Vec::new(),
             events: vec![EventConfig {
                 name: "finished".to_string(),
@@ -3350,6 +3351,7 @@ mod tests {
                 body_contains: None,
             }),
             start_command: None,
+            stop_command: None,
             methods: vec![MethodConfig {
                 name: "getRecentSessions".to_string(),
                 description: "Recent sessions.".to_string(),
@@ -3408,6 +3410,7 @@ mod tests {
                 body_contains: Some("ok".to_string()),
             }),
             start_command: None,
+            stop_command: None,
             methods: Vec::new(),
             events: vec![EventConfig {
                 name: "finished".to_string(),

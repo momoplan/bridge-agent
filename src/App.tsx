@@ -20,6 +20,27 @@ interface RuntimeSnapshot {
   last_event_at: number;
 }
 
+interface RuntimeProcessInfo {
+  pid: number;
+  parent_pid: number | null;
+  name: string | null;
+  executable_path: string | null;
+  command_line: string | null;
+  running: boolean;
+}
+
+interface RuntimeLockConflict {
+  pid: number;
+  agent_id: string;
+  config_path: string;
+  lock_path: string;
+  process: RuntimeProcessInfo;
+}
+
+type CommandError =
+  | { code: "runtime_already_running"; conflict: RuntimeLockConflict }
+  | { code: "message"; message: string };
+
 interface LogEntry {
   timestamp_ms: number;
   level: string;
@@ -143,6 +164,7 @@ interface ServiceConfig {
   enabled: boolean;
   health_check?: ServiceHealthCheck | null;
   start_command?: ServiceStartCommand | null;
+  stop_command?: ServiceStartCommand | null;
   methods: MethodConfig[];
   events: EventConfig[];
 }
@@ -277,6 +299,7 @@ interface UiServiceConfig {
   enabled: boolean;
   health_check: UiServiceHealthCheck | null;
   start_command: UiServiceStartCommand | null;
+  stop_command: UiServiceStartCommand | null;
   methods: UiMethodConfig[];
   events: UiEventConfig[];
 }
@@ -295,6 +318,7 @@ interface RegisteredServiceStatus {
   checkedAtMs: number;
   healthCheckConfigured: boolean;
   startCommandConfigured: boolean;
+  stopCommandConfigured: boolean;
 }
 
 interface StartRegisteredServiceResult {
@@ -341,6 +365,15 @@ interface ConnectorStartResult {
   services: ConnectorServiceStartResult[];
 }
 
+interface ConnectorAppUpdateStatus {
+  connectorId: string;
+  name: string;
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  source: string;
+}
+
 interface UiAgentConfig {
   platform: {
     base_url: string;
@@ -366,7 +399,8 @@ const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
 type AppPage = "overview" | "apps" | "diagnostics";
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
 type LocalAppKind = "connector" | "built_in" | "custom";
-type InstallSourceMode = "market" | "local";
+type InstallSourceMode = "choose" | "market" | "custom";
+type LocalAppDetailTab = "overview" | "capabilities" | "config";
 
 interface LocalAppItem {
   id: string;
@@ -379,6 +413,7 @@ interface LocalAppItem {
 
 interface MarketConnector {
   id: string;
+  connectorId?: string;
   name: string;
   description: string;
   source: string;
@@ -511,6 +546,7 @@ const FULL_ACCESS_ROOT_DIR = "/";
 const MARKET_CONNECTORS: MarketConnector[] = [
   {
     id: "codex",
+    connectorId: "com.baijimu.connector.codex",
     name: "Codex",
     description: "在本机启动 Codex adaptor，把 Codex 会话能力接入工作区。",
     source: "https://gitee.com/zxflimit_admin/baijimu-connector-codex.git",
@@ -597,15 +633,18 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [runtimeConflict, setRuntimeConflict] = useState<RuntimeLockConflict | null>(null);
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
+  const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
+  const [connectorUpdateBusy, setConnectorUpdateBusy] = useState<string | null>(null);
   const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
   const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
@@ -620,11 +659,11 @@ function App() {
   const [activeDetailPanel, setActiveDetailPanel] = useState<DetailPanel>("system");
   const [expandedServiceIndex, setExpandedServiceIndex] = useState<number | null>(0);
   const [selectedLocalAppId, setSelectedLocalAppId] = useState<string | null>(null);
+  const [activeLocalAppDetailTab, setActiveLocalAppDetailTab] = useState<LocalAppDetailTab>("overview");
   const [installPanelOpen, setInstallPanelOpen] = useState(false);
-  const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("market");
+  const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("choose");
   const [selectedMarketAppId, setSelectedMarketAppId] = useState(MARKET_CONNECTORS[0]?.id ?? "");
   const [installSource, setInstallSource] = useState("");
-  const [installReplace, setInstallReplace] = useState(true);
   const [installBusy, setInstallBusy] = useState(false);
 
   useEffect(() => {
@@ -646,6 +685,14 @@ function App() {
   useEffect(() => {
     void refreshConnectorApps();
   }, []);
+
+  useEffect(() => {
+    if (!message) {
+      return;
+    }
+    const timer = window.setTimeout(() => setMessage(""), 4500);
+    return () => window.clearTimeout(timer);
+  }, [message]);
 
   useEffect(() => {
     const handleWindowFocus = () => {
@@ -810,6 +857,7 @@ function App() {
     if (selectedLocalApp?.serviceIndexes.length) {
       setExpandedServiceIndex(selectedLocalApp.serviceIndexes[0]);
     }
+    setActiveLocalAppDetailTab("overview");
   }, [selectedLocalApp?.id]);
   const visibleAppUpdate =
     appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
@@ -839,6 +887,7 @@ function App() {
     setConfig(uiConfig);
     setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
     setRuntime(document.runtime);
+    setRuntimeConflict(null);
     setServiceNotices({});
     setServiceJsonDrafts({});
     setServiceJsonErrors({});
@@ -910,9 +959,21 @@ function App() {
       : `${base}，已应用到正在运行的 Agent`;
   }
 
+  function handleCommandError(err: unknown) {
+    const conflict = readRuntimeConflict(err);
+    if (conflict) {
+      setRuntimeConflict(conflict);
+      setError("");
+      setActivePage("overview");
+      return;
+    }
+    setError(readError(err));
+  }
+
   async function refreshAll() {
     try {
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("load_config");
       applyConfigDocument(document);
       const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
@@ -920,7 +981,7 @@ function App() {
       await refreshConnectorApps();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     }
   }
 
@@ -969,6 +1030,7 @@ function App() {
       setServiceStartBusy(serviceName);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const result = await invoke<StartRegisteredServiceResult>("start_registered_service", {
         service: serviceName
       });
@@ -985,7 +1047,33 @@ function App() {
       }
       await refreshRegisteredServiceStatuses();
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
+    } finally {
+      setServiceStartBusy(null);
+    }
+  }
+
+  async function stopRegisteredService(serviceName: string) {
+    try {
+      setServiceStartBusy(serviceName);
+      setMessage("");
+      setError("");
+      setRuntimeConflict(null);
+      const result = await invoke<StartRegisteredServiceResult>("stop_registered_service", {
+        service: serviceName
+      });
+      if (result.success) {
+        setMessage(`应用 ${serviceName} 已停止`);
+      } else {
+        setError(
+          `应用 ${serviceName} 停止命令执行失败` +
+            (result.exitCode == null ? "" : `，退出码 ${result.exitCode}`) +
+            (result.stderr.trim() ? `：${result.stderr.trim()}` : "")
+        );
+      }
+      await refreshRegisteredServiceStatuses();
+    } catch (err) {
+      handleCommandError(err);
     } finally {
       setServiceStartBusy(null);
     }
@@ -1003,9 +1091,10 @@ function App() {
       setInstallBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source,
-        replace: installReplace
+        replace: true
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -1015,9 +1104,89 @@ function App() {
       setInstallPanelOpen(false);
       setMessage(`应用 ${document.install.name} ${document.install.version} 已安装`);
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setInstallBusy(false);
+    }
+  }
+
+  function marketConnectorForLocalApp(app: LocalAppItem): MarketConnector | undefined {
+    if (app.kind !== "connector" || !app.connector) {
+      return undefined;
+    }
+    return MARKET_CONNECTORS.find((marketApp) => marketApp.connectorId === app.connector?.id);
+  }
+
+  async function checkLocalAppUpdate(app: LocalAppItem, showLatestMessage = true) {
+    const marketApp = marketConnectorForLocalApp(app);
+    if (!app.connector || !marketApp) {
+      setError(`应用 ${app.name} 没有关联的市场更新源`);
+      return null;
+    }
+    try {
+      setConnectorUpdateBusy(app.id);
+      setMessage("");
+      setError("");
+      setRuntimeConflict(null);
+      const status = await invoke<ConnectorAppUpdateStatus>("check_connector_app_update", {
+        id: app.connector.id,
+        source: marketApp.source
+      });
+      setConnectorUpdateStatuses((current) => ({
+        ...current,
+        [app.connector!.id]: status
+      }));
+      if (showLatestMessage) {
+        setMessage(
+          status.updateAvailable
+            ? `发现 ${status.name} ${status.latestVersion}，当前版本 ${status.currentVersion}`
+            : `${status.name} 当前已经是最新版本 ${status.currentVersion}`
+        );
+      }
+      return status;
+    } catch (err) {
+      handleCommandError(err);
+      return null;
+    } finally {
+      setConnectorUpdateBusy(null);
+    }
+  }
+
+  async function upgradeLocalApp(app: LocalAppItem) {
+    const marketApp = marketConnectorForLocalApp(app);
+    if (!app.connector || !marketApp) {
+      setError(`应用 ${app.name} 没有关联的市场更新源`);
+      return;
+    }
+    try {
+      setConnectorUpdateBusy(app.id);
+      setMessage("");
+      setError("");
+      setRuntimeConflict(null);
+      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
+        source: marketApp.source,
+        replace: true
+      });
+      applyConfigDocument(document.config);
+      await refreshConnectorApps();
+      await refreshRegisteredServiceStatuses();
+      setConnectorUpdateStatuses((current) => ({
+        ...current,
+        [document.install.connectorId]: {
+          connectorId: document.install.connectorId,
+          name: document.install.name,
+          currentVersion: document.install.version,
+          latestVersion: document.install.version,
+          updateAvailable: false,
+          source: marketApp.source
+        }
+      }));
+      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
+      setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
+    } catch (err) {
+      handleCommandError(err);
+    } finally {
+      setConnectorUpdateBusy(null);
     }
   }
 
@@ -1029,6 +1198,7 @@ function App() {
       setConnectorBusy(app.id);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       if (app.kind === "connector" && app.connector) {
         const result = await invoke<ConnectorStartResult>("start_connector_app", {
           id: app.connector.id
@@ -1059,7 +1229,52 @@ function App() {
       }
       await startRegisteredService(startableService.name);
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
+    } finally {
+      setConnectorBusy(null);
+    }
+  }
+
+  async function stopLocalApp(app: LocalAppItem) {
+    if (!hasLocalAppStopCommand(app)) {
+      return;
+    }
+    try {
+      setConnectorBusy(app.id);
+      setMessage("");
+      setError("");
+      setRuntimeConflict(null);
+      if (app.kind === "connector" && app.connector) {
+        const result = await invoke<ConnectorStartResult>("stop_connector_app", {
+          id: app.connector.id
+        });
+        const failed = result.services.filter((service) => service.exitCode !== 0);
+        await refreshRegisteredServiceStatuses();
+        if (failed.length > 0) {
+          setError(
+            `应用 ${app.name} 停止失败：` +
+              failed
+                .map((service) =>
+                  `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`
+                )
+                .join("；")
+          );
+        } else {
+          setMessage(`应用 ${app.name} 已停止`);
+        }
+        return;
+      }
+
+      const stoppableService = app.serviceIndexes
+        .map((index) => config?.services[index])
+        .find((service): service is UiServiceConfig => Boolean(service?.stop_command));
+      if (!stoppableService) {
+        setError(`应用 ${app.name} 没有配置停止命令`);
+        return;
+      }
+      await stopRegisteredService(stoppableService.name);
+    } catch (err) {
+      handleCommandError(err);
     } finally {
       setConnectorBusy(null);
     }
@@ -1073,6 +1288,7 @@ function App() {
       setConnectorBusy(app.id);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("uninstall_connector_app", {
         id: app.connector.id
       });
@@ -1082,7 +1298,7 @@ function App() {
       setSelectedLocalAppId(null);
       setMessage(`应用 ${app.name} 已卸载`);
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setConnectorBusy(null);
     }
@@ -1118,6 +1334,7 @@ function App() {
       setUpdateBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const result = await invoke<AppUpdateInstallResult>("install_app_update");
       if (result.status === "up_to_date") {
         setMessage(`当前已经是最新版本 ${result.version}`);
@@ -1130,7 +1347,7 @@ function App() {
           : `更新包 ${result.assetName ?? ""} 已下载，应用即将退出并自动完成替换。`
       );
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setUpdateBusy(false);
     }
@@ -1144,13 +1361,14 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("save_config", {
         config: fromUiConfig(config)
       });
       applyConfigDocument(document);
       setMessage("配置已保存");
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1165,6 +1383,7 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("save_service", {
         serviceIndex,
         service: fromUiService(service),
@@ -1181,7 +1400,7 @@ function App() {
       }));
       await refreshRegisteredServiceStatuses();
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1196,6 +1415,7 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("delete_service", {
         serviceIndex,
         applyToRuntime
@@ -1209,7 +1429,7 @@ function App() {
       );
       await refreshRegisteredServiceStatuses();
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1223,6 +1443,7 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const snapshot = await invoke<RuntimeSnapshot>("start_agent", {
         config: fromUiConfig(config)
       });
@@ -1231,7 +1452,47 @@ function App() {
       setMessage("Agent 已启动");
       await refreshRuntime();
     } catch (err) {
-      setError(readError(err));
+      const conflict = readRuntimeConflict(err);
+      if (conflict) {
+        setRuntimeConflict(conflict);
+        setActivePage("overview");
+      } else {
+        setError(readError(err));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopConflictingRuntimeAndStart() {
+    if (!runtimeConflict || !config) {
+      return;
+    }
+    try {
+      setBusy(true);
+      setMessage("");
+      setError("");
+      await invoke("stop_conflicting_runtime", {
+        lockPath: runtimeConflict.lock_path,
+        pid: runtimeConflict.pid,
+        agentId: runtimeConflict.agent_id,
+        configPath: runtimeConflict.config_path
+      });
+      setRuntimeConflict(null);
+      const snapshot = await invoke<RuntimeSnapshot>("start_agent", {
+        config: fromUiConfig(config)
+      });
+      setSavedServiceSignatures(config.services.map(serviceSignature));
+      setRuntime(snapshot);
+      setMessage("已停止旧实例并重新启动 Agent");
+      await refreshRuntime();
+    } catch (err) {
+      const conflict = readRuntimeConflict(err);
+      if (conflict) {
+        setRuntimeConflict(conflict);
+      } else {
+        setError(readError(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -1242,12 +1503,13 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const snapshot = await invoke<RuntimeSnapshot>("stop_agent");
       setRuntime(snapshot);
       setMessage("Agent 已停止");
       await refreshRuntime();
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1258,11 +1520,12 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("reset_example_config");
       applyConfigDocument(document);
       setMessage("已恢复示例配置");
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1273,6 +1536,7 @@ function App() {
       setBusy(true);
       setMessage("");
       setError("");
+      setRuntimeConflict(null);
       const document = await invoke<ConfigRecoveryDocument>("recover_invalid_config");
       applyConfigDocument(document);
       setMessage(
@@ -1281,7 +1545,7 @@ function App() {
           : "已创建默认配置"
       );
     } catch (err) {
-      setError(readError(err));
+      handleCommandError(err);
     } finally {
       setBusy(false);
     }
@@ -1509,6 +1773,19 @@ function App() {
     });
   }
 
+  function updateServiceStopCommand(
+    serviceIndex: number,
+    updater: (stopCommand: UiServiceStartCommand) => UiServiceStartCommand
+  ) {
+    updateService(serviceIndex, (service) => {
+      const current = service.stop_command ?? createServiceStopCommand();
+      return {
+        ...service,
+        stop_command: updater(current)
+      };
+    });
+  }
+
   function updateServiceJsonDraft(serviceIndex: number, value: string) {
     setServiceJsonDrafts((current) => ({
       ...current,
@@ -1579,6 +1856,7 @@ function App() {
                 enabled: true,
                 health_check: null,
                 start_command: null,
+                stop_command: null,
                 methods: [createShellMethod()],
                 events: []
               }
@@ -1945,9 +2223,11 @@ function App() {
       return <div />;
     }
     const needsAuthorization = !config.platform.workspace_id || !config.relay.token;
+    const hasRuntimeConflict = Boolean(runtimeConflict);
     const hasRuntimeError = Boolean(runtime?.last_error);
     const hasUpdate = Boolean(appUpdate?.updateAvailable);
-    const hasAttention = needsAuthorization || hasRuntimeError || hasDesktopPermissionGap || hasUpdate;
+    const hasAttention =
+      needsAuthorization || hasRuntimeConflict || hasRuntimeError || hasDesktopPermissionGap || hasUpdate;
 
     return (
       <div className="overview-grid">
@@ -2030,6 +2310,12 @@ function App() {
                   <span>打开桌面控制应用处理屏幕录制和辅助功能授权。</span>
                 </button>
               ) : null}
+              {runtimeConflict ? (
+                <button className="attention-item" onClick={() => setActivePage("overview")}>
+                  <strong>已有 Agent 实例占用运行锁</strong>
+                  <span>PID {runtimeConflict.pid} 正在使用当前配置，可以停止旧实例后重新启动。</span>
+                </button>
+              ) : null}
               {hasRuntimeError ? (
                 <button className="attention-item" onClick={() => setActivePage("diagnostics")}>
                   <strong>运行错误</strong>
@@ -2067,18 +2353,66 @@ function App() {
     );
   }
 
+  function renderRuntimeConflictPanel() {
+    if (!runtimeConflict) {
+      return null;
+    }
+
+    const processName = runtimeConflict.process.name || "未知进程";
+    const processPath =
+      runtimeConflict.process.executable_path || runtimeConflict.process.command_line || "无法读取进程路径";
+
+    return (
+      <div className="runtime-conflict-panel" role="alert">
+        <div className="runtime-conflict-copy">
+          <strong>Bridge Agent 已经在运行</strong>
+          <p>
+            当前配置被 PID {runtimeConflict.pid} 占用。确认这是旧实例后，可以停止旧实例并重新启动。
+          </p>
+          <dl>
+            <div>
+              <dt>进程</dt>
+              <dd>{processName}</dd>
+            </div>
+            <div>
+              <dt>路径</dt>
+              <dd>{processPath}</dd>
+            </div>
+            <div>
+              <dt>锁文件</dt>
+              <dd>{runtimeConflict.lock_path}</dd>
+            </div>
+          </dl>
+        </div>
+        <div className="runtime-conflict-actions">
+          <button className="primary danger" onClick={() => void stopConflictingRuntimeAndStart()} disabled={busy}>
+            停止旧实例并启动
+          </button>
+          <button className="secondary" onClick={() => setRuntimeConflict(null)} disabled={busy}>
+            暂不处理
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   function serviceRuntimeView(service: UiServiceConfig): {
     status: RegisteredServiceStatus | undefined;
-    statusClass: string;
-    statusLabel: string;
+    statusClass: string | null;
+    statusLabel: string | null;
     detail: string;
   } {
     const runtimeStatus = registeredServiceStatuses.find((status) => status.service === service.name);
-    if (!service.health_check && !service.start_command && !runtimeStatus) {
+    if (
+      !service.health_check &&
+      !service.start_command &&
+      !service.stop_command &&
+      (!runtimeStatus || runtimeStatus.status === "not_configured")
+    ) {
       return {
         status: undefined,
-        statusClass: "not_configured",
-        statusLabel: formatRegisteredServiceStatus("not_configured"),
+        statusClass: null,
+        statusLabel: null,
         detail: formatRegisteredServiceDetail(service, undefined)
       };
     }
@@ -2099,6 +2433,8 @@ function App() {
 
   function renderServiceRuntimePanel(service: UiServiceConfig, serviceIndex: number, isSystem: boolean) {
     const runtimeView = serviceRuntimeView(service);
+    const serviceIsHealthy = runtimeView.status?.status === "healthy";
+    const canStopService = service.stop_command != null;
 
     return (
       <div className="registered-service-runtime">
@@ -2112,9 +2448,11 @@ function App() {
               </span>
             ) : null}
           </div>
-          <div className={`status-pill status-${runtimeView.statusClass}`}>
-            {runtimeView.statusLabel}
-          </div>
+          {runtimeView.statusLabel && runtimeView.statusClass ? (
+            <div className={`status-pill status-${runtimeView.statusClass}`}>
+              {runtimeView.statusLabel}
+            </div>
+          ) : null}
         </div>
         <div className="registered-service-runtime-actions">
           {service.health_check ? (
@@ -2134,7 +2472,15 @@ function App() {
               配置检查
             </button>
           ) : null}
-          {service.start_command ? (
+          {serviceIsHealthy && canStopService ? (
+            <button
+              className="secondary danger"
+              onClick={() => void stopRegisteredService(service.name)}
+              disabled={serviceStartBusy != null}
+            >
+              {serviceStartBusy === service.name ? "停止中" : "停止应用"}
+            </button>
+          ) : service.start_command ? (
             <button
               className="secondary"
               onClick={() => void startRegisteredService(service.name)}
@@ -2169,7 +2515,7 @@ function App() {
       <div className="runtime-config-section">
         <div className="method-advanced-head">
           <strong>运行配置</strong>
-          <small>健康检查决定状态展示；启动命令决定“启动应用”按钮的执行内容。</small>
+          <small>健康检查决定状态展示；启动/停止命令决定应用详情里的运行按钮。</small>
         </div>
 
         <div className="runtime-config-block">
@@ -2368,6 +2714,94 @@ function App() {
             </div>
           ) : null}
         </div>
+
+        <div className="runtime-config-block">
+          <div className="runtime-config-head">
+            <div>
+              <strong>停止命令</strong>
+              <small>{service.stop_command ? "运行中会显示停止应用按钮" : "未配置，运行中无法从应用详情停止"}</small>
+            </div>
+            {service.stop_command ? (
+              <button
+                className="ghost danger"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    stop_command: null
+                  }))
+                }
+              >
+                移除停止
+              </button>
+            ) : (
+              <button
+                className="secondary"
+                onClick={() =>
+                  updateService(serviceIndex, (current) => ({
+                    ...current,
+                    stop_command: createServiceStopCommand()
+                  }))
+                }
+              >
+                添加停止
+              </button>
+            )}
+          </div>
+          {service.stop_command ? (
+            <div className="form-grid">
+              <Field label="命令参数" hint="每行一个参数；第一行是可执行文件。" wide>
+                <textarea
+                  rows={5}
+                  value={service.stop_command.command_text}
+                  onChange={(event) =>
+                    updateServiceStopCommand(serviceIndex, (current) => ({
+                      ...current,
+                      command_text: event.target.value
+                    }))
+                  }
+                  placeholder={"npm\nrun\nstop"}
+                />
+              </Field>
+              <Field label="工作目录">
+                <input
+                  value={service.stop_command.cwd}
+                  onChange={(event) =>
+                    updateServiceStopCommand(serviceIndex, (current) => ({
+                      ...current,
+                      cwd: event.target.value
+                    }))
+                  }
+                  placeholder="留空继承 Agent 进程目录"
+                />
+              </Field>
+              <Field label="超时秒数">
+                <input
+                  value={service.stop_command.timeout_secs}
+                  onChange={(event) =>
+                    updateServiceStopCommand(serviceIndex, (current) => ({
+                      ...current,
+                      timeout_secs: event.target.value
+                    }))
+                  }
+                  placeholder="默认 20"
+                />
+              </Field>
+              <Field label="环境变量" wide>
+                <textarea
+                  rows={4}
+                  value={service.stop_command.env_text}
+                  onChange={(event) =>
+                    updateServiceStopCommand(serviceIndex, (current) => ({
+                      ...current,
+                      env_text: event.target.value
+                    }))
+                  }
+                  placeholder={"NODE_ENV: development\nPORT: 8081"}
+                />
+              </Field>
+            </div>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -2486,7 +2920,8 @@ function App() {
     const isSystem = isSystemService(service);
     const serviceDirty = savedServiceSignatures[serviceIndex] !== serviceSignature(service);
     const servicePersisted = savedServiceSignatures[serviceIndex] != null;
-    const hasRuntimeControls = service.health_check != null || service.start_command != null;
+    const hasRuntimeControls =
+      service.health_check != null || service.start_command != null || service.stop_command != null;
     const serviceNotice = serviceNotices[serviceIndex];
 
     return (
@@ -2989,9 +3424,11 @@ function App() {
                 <strong>{service.description || service.name}</strong>
                 <p>{runtimeView.detail}</p>
               </div>
-              <div className={`status-pill status-${runtimeView.statusClass}`}>
-                {runtimeView.statusLabel}
-              </div>
+              {runtimeView.statusLabel && runtimeView.statusClass ? (
+                <div className={`status-pill status-${runtimeView.statusClass}`}>
+                  {runtimeView.statusLabel}
+                </div>
+              ) : null}
             </div>
           );
         })}
@@ -3004,35 +3441,45 @@ function App() {
       return null;
     }
     const selectedMarket = MARKET_CONNECTORS.find((app) => app.id === selectedMarketAppId);
+    const closeInstallPanel = () => {
+      if (installBusy) {
+        return;
+      }
+      setInstallPanelOpen(false);
+      setInstallSourceMode("choose");
+    };
 
     return (
-      <div className="modal-backdrop" role="presentation" onClick={() => setInstallPanelOpen(false)}>
+      <div className="modal-backdrop" role="presentation" onClick={closeInstallPanel}>
         <section className="install-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
           <div className="install-panel-head">
             <div>
               <p className="eyebrow">安装</p>
-              <h3>安装本地应用</h3>
+              <h3>
+                {installSourceMode === "market"
+                  ? "从市场安装"
+                  : installSourceMode === "custom"
+                    ? "自定义安装"
+                    : "安装本地应用"}
+              </h3>
             </div>
-            <button className="ghost" onClick={() => setInstallPanelOpen(false)}>
+            <button className="ghost" onClick={closeInstallPanel} disabled={installBusy}>
               关闭
             </button>
           </div>
-          <div className="section-tabs">
-            <button
-              className={`section-tab ${installSourceMode === "market" ? "active" : ""}`}
-              onClick={() => setInstallSourceMode("market")}
-            >
-              应用市场
-            </button>
-            <button
-              className={`section-tab ${installSourceMode === "local" ? "active" : ""}`}
-              onClick={() => setInstallSourceMode("local")}
-            >
-              本地安装
-            </button>
-          </div>
 
-          {installSourceMode === "market" ? (
+          {installSourceMode === "choose" ? (
+            <div className="install-choice-grid">
+              <button className="install-choice-card" onClick={() => setInstallSourceMode("market")}>
+                <strong>从市场安装</strong>
+                <span>选择官方维护的本地应用，安装后直接生效。</span>
+              </button>
+              <button className="install-choice-card" onClick={() => setInstallSourceMode("custom")}>
+                <strong>自定义安装</strong>
+                <span>从本地目录或 Git 仓库安装开发中的 connector。</span>
+              </button>
+            </div>
+          ) : installSourceMode === "market" ? (
             <div className="market-app-grid">
               {MARKET_CONNECTORS.map((app) => (
                 <button
@@ -3064,21 +3511,21 @@ function App() {
             </div>
           )}
 
-          <label className="switch install-replace-switch">
-            <input
-              type="checkbox"
-              checked={installReplace}
-              onChange={(event) => setInstallReplace(event.target.checked)}
-            />
-            覆盖同名能力
-          </label>
           <div className="install-panel-actions">
-            <button className="secondary" onClick={() => setInstallPanelOpen(false)} disabled={installBusy}>
-              取消
-            </button>
-            <button className="primary" onClick={() => void installLocalApp()} disabled={installBusy}>
-              {installBusy ? "安装中" : "安装应用"}
-            </button>
+            {installSourceMode === "choose" ? (
+              <button className="secondary" onClick={closeInstallPanel} disabled={installBusy}>
+                取消
+              </button>
+            ) : (
+              <>
+                <button className="secondary" onClick={() => setInstallSourceMode("choose")} disabled={installBusy}>
+                  返回
+                </button>
+                <button className="primary" onClick={() => void installLocalApp()} disabled={installBusy}>
+                  {installBusy ? "安装中" : "安装应用"}
+                </button>
+              </>
+            )}
           </div>
         </section>
       </div>
@@ -3103,7 +3550,13 @@ function App() {
             <h2>应用</h2>
             <p>安装 connector，查看本机能力和授权状态。</p>
           </div>
-          <button className="primary" onClick={() => setInstallPanelOpen(true)}>
+          <button
+            className="primary"
+            onClick={() => {
+              setInstallSourceMode("choose");
+              setInstallPanelOpen(true);
+            }}
+          >
             安装应用
           </button>
         </div>
@@ -3143,6 +3596,7 @@ function App() {
         key={app.id}
         onClick={() => {
           setSelectedLocalAppId(app.id);
+          setActiveLocalAppDetailTab("overview");
           if (app.serviceIndexes.length > 0) {
             setExpandedServiceIndex(app.serviceIndexes[0]);
           }
@@ -3150,7 +3604,7 @@ function App() {
       >
         <div className="local-app-card-top">
           <strong>{app.name}</strong>
-          {runtimeView ? (
+          {runtimeView?.statusLabel && runtimeView.statusClass ? (
             <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
               {runtimeView.statusLabel}
             </span>
@@ -3166,75 +3620,166 @@ function App() {
     );
   }
 
-  function renderAppsPage() {
+  function renderLocalAppDetailDialog(app: LocalAppItem) {
     if (!config) {
-      return <div />;
+      return null;
     }
-    const app = selectedLocalApp;
     const appComputerService = app
-      ? app.serviceIndexes
-          .map((serviceIndex) => config.services[serviceIndex])
-          .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)))
-      : null;
+      .serviceIndexes.map((serviceIndex) => config.services[serviceIndex])
+      .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)));
+    const canShowConfig = showAdvancedSettings || app.kind === "custom";
+    const marketApp = marketConnectorForLocalApp(app);
+    const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
+    const updateBusy = connectorUpdateBusy === app.id;
+    const appIsRunning = isLocalAppRunning(app);
+    const appCanStop = hasLocalAppStopCommand(app);
+    const closeDetail = () => setSelectedLocalAppId(null);
 
     return (
-      <div className="service-editor-panel">
-        {app ? (
-          <>
-            <Card
-              title={app.name}
-              description={app.description}
-              action={
-                <div className="service-actions">
-                  <button className="secondary" onClick={() => setSelectedLocalAppId(null)}>
-                    返回应用
+      <div className="modal-backdrop" role="presentation" onClick={closeDetail}>
+        <section
+          className="app-detail-dialog"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="install-panel-head">
+            <div>
+              <p className="eyebrow">{formatLocalAppKind(app.kind)}</p>
+              <h3>{app.name}</h3>
+              <p>{app.description}</p>
+            </div>
+            <button className="ghost" onClick={closeDetail}>
+              关闭
+            </button>
+          </div>
+
+          <div className="app-detail-toolbar">
+            <div className="section-tabs">
+              <button
+                className={`section-tab ${activeLocalAppDetailTab === "overview" ? "active" : ""}`}
+                onClick={() => setActiveLocalAppDetailTab("overview")}
+              >
+                概览
+              </button>
+              <button
+                className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
+                onClick={() => setActiveLocalAppDetailTab("capabilities")}
+              >
+                能力
+              </button>
+              {canShowConfig ? (
+                <button
+                  className={`section-tab ${activeLocalAppDetailTab === "config" ? "active" : ""}`}
+                  onClick={() => setActiveLocalAppDetailTab("config")}
+                >
+                  配置
+                </button>
+              ) : null}
+            </div>
+            <div className="service-actions">
+              {marketApp && app.connector ? (
+                updateStatus?.updateAvailable ? (
+                  <button
+                    className="primary accent"
+                    onClick={() => void upgradeLocalApp(app)}
+                    disabled={connectorBusy != null || connectorUpdateBusy != null}
+                  >
+                    {updateBusy ? "升级中" : `升级到 ${updateStatus.latestVersion}`}
                   </button>
-                  {hasLocalAppStartCommand(app) ? (
-                    <button className="primary" onClick={() => void startLocalApp(app)} disabled={connectorBusy != null}>
-                      {connectorBusy === app.id ? "启动中" : "启动应用"}
-                    </button>
-                  ) : null}
-                  {app.kind === "connector" ? (
-                    <button
-                      className="ghost danger"
-                      onClick={() => void uninstallLocalApp(app)}
-                      disabled={connectorBusy != null}
-                    >
-                      卸载
-                    </button>
-                  ) : null}
-                </div>
-              }
-            >
+                ) : (
+                  <button
+                    className="secondary"
+                    onClick={() => void checkLocalAppUpdate(app)}
+                    disabled={connectorBusy != null || connectorUpdateBusy != null}
+                  >
+                    {updateBusy ? "检查中" : "检查更新"}
+                  </button>
+                )
+              ) : null}
+              {appIsRunning && appCanStop ? (
+                <button
+                  className="primary danger"
+                  onClick={() => void stopLocalApp(app)}
+                  disabled={connectorBusy != null || connectorUpdateBusy != null}
+                >
+                  {connectorBusy === app.id ? "停止中" : "停止应用"}
+                </button>
+              ) : hasLocalAppStartCommand(app) ? (
+                <button
+                  className="primary"
+                  onClick={() => void startLocalApp(app)}
+                  disabled={connectorBusy != null || connectorUpdateBusy != null}
+                >
+                  {connectorBusy === app.id ? "启动中" : "启动应用"}
+                </button>
+              ) : null}
+              {app.kind === "connector" ? (
+                <button
+                  className="ghost danger"
+                  onClick={() => void uninstallLocalApp(app)}
+                  disabled={connectorBusy != null || connectorUpdateBusy != null}
+                >
+                  卸载
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          {activeLocalAppDetailTab === "overview" ? (
+            <div className="app-detail-tab-panel">
               <div className="status-detail-grid">
                 <InfoRow label="类型" value={formatLocalAppKind(app.kind)} />
                 <InfoRow label="来源" value={app.connector?.packagePath ?? "内置"} />
                 <InfoRow label="版本" value={app.connector?.version ?? "随客户端发布"} />
+                {updateStatus ? (
+                  <InfoRow
+                    label="更新"
+                    value={
+                      updateStatus.updateAvailable
+                        ? `可升级到 ${updateStatus.latestVersion}`
+                        : `已是最新版本 ${updateStatus.currentVersion}`
+                    }
+                  />
+                ) : null}
                 <InfoRow label="能力数" value={String(countLocalAppCapabilities(app, config))} />
               </div>
               {appComputerService ? renderComputerPermissionPanel(appComputerService) : null}
               {renderLocalAppRuntime(app)}
-              <div className="method-advanced-head app-section-head">
+            </div>
+          ) : null}
+
+          {activeLocalAppDetailTab === "capabilities" ? (
+            <div className="app-detail-tab-panel">
+              <div className="method-advanced-head">
                 <strong>能力</strong>
                 <small>这些能力会在授权后开放给工作区调用。</small>
               </div>
               {renderLocalAppAbilityList(app)}
-            </Card>
-            {showAdvancedSettings || app.kind === "custom" ? (
-              <div className="developer-config-stack">
-                <div className="method-advanced-head">
-                  <strong>开发者配置</strong>
-                  <small>内部运行项、启动命令、HTTP 绑定和 JSON 定义。</small>
-                </div>
-                {app.serviceIndexes.map((serviceIndex) =>
-                  config.services[serviceIndex] ? renderServiceEditor(config.services[serviceIndex], serviceIndex) : null
-                )}
+            </div>
+          ) : null}
+
+          {activeLocalAppDetailTab === "config" && canShowConfig ? (
+            <div className="app-detail-tab-panel developer-config-stack">
+              <div className="method-advanced-head">
+                <strong>开发者配置</strong>
+                <small>内部运行项、启动命令、HTTP 绑定和 JSON 定义。</small>
               </div>
-            ) : null}
-          </>
-        ) : (
-          renderLocalAppPanel()
-        )}
+              {app.serviceIndexes.map((serviceIndex) =>
+                config.services[serviceIndex] ? renderServiceEditor(config.services[serviceIndex], serviceIndex) : null
+              )}
+            </div>
+          ) : null}
+        </section>
+      </div>
+    );
+  }
+
+  function renderAppsPage() {
+    return (
+      <div className="service-editor-panel">
+        {renderLocalAppPanel()}
+        {selectedLocalApp ? renderLocalAppDetailDialog(selectedLocalApp) : null}
       </div>
     );
   }
@@ -3244,6 +3789,25 @@ function App() {
       return false;
     }
     return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.start_command));
+  }
+
+  function hasLocalAppStopCommand(app: LocalAppItem) {
+    if (!config) {
+      return false;
+    }
+    return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.stop_command));
+  }
+
+  function isLocalAppRunning(app: LocalAppItem) {
+    if (!config) {
+      return false;
+    }
+    return app.serviceIndexes.some((serviceIndex) => {
+      const service = config.services[serviceIndex];
+      return service
+        ? registeredServiceStatuses.find((status) => status.service === service.name)?.status === "healthy"
+        : false;
+    });
   }
 
   function countLocalAppCapabilities(app: LocalAppItem, agentConfig: UiAgentConfig) {
@@ -3410,6 +3974,39 @@ function App() {
           </button>
         </div>
         {renderDetailPanel()}
+      </div>
+    );
+  }
+
+  function renderToastStack() {
+    if (!message && !error) {
+      return null;
+    }
+
+    return (
+      <div className="toast-stack" aria-live="polite" aria-atomic="true">
+        {message ? (
+          <div className="toast toast-success" role="status">
+            <div>
+              <strong>已完成</strong>
+              <p>{message}</p>
+            </div>
+            <button className="toast-close" onClick={() => setMessage("")} aria-label="关闭成功提示">
+              ×
+            </button>
+          </div>
+        ) : null}
+        {error ? (
+          <div className="toast toast-error" role="alert">
+            <div>
+              <strong>操作失败</strong>
+              <p>{error}</p>
+            </div>
+            <button className="toast-close" onClick={() => setError("")} aria-label="关闭错误提示">
+              ×
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -3586,8 +4183,7 @@ function App() {
             </div>
           ) : null}
 
-          {message ? <div className="alert success">{message}</div> : null}
-          {error ? <div className="alert error">{error}</div> : null}
+          {renderRuntimeConflictPanel()}
           {runtime?.last_error && activePage !== "diagnostics" ? (
             <div className="alert warning">{runtime.last_error}</div>
           ) : null}
@@ -3602,6 +4198,7 @@ function App() {
           </div>
         </section>
       </div>
+      {renderToastStack()}
       {renderInstallLocalAppPanel()}
     </main>
   );
@@ -3707,6 +4304,7 @@ function toUiService(service: ServiceConfig): UiServiceConfig {
     enabled: service.enabled,
     health_check: service.health_check ? toUiServiceHealthCheck(service.health_check) : null,
     start_command: service.start_command ? toUiServiceStartCommand(service.start_command) : null,
+    stop_command: service.stop_command ? toUiServiceStartCommand(service.stop_command) : null,
     events: (service.events ?? []).map(toUiEvent),
     methods: service.methods.map(toUiMethod)
   };
@@ -3719,6 +4317,7 @@ function fromUiService(service: UiServiceConfig): ServiceConfig {
     enabled: service.enabled,
     health_check: service.health_check ? fromUiServiceHealthCheck(service.health_check) : null,
     start_command: service.start_command ? fromUiServiceStartCommand(service.start_command) : null,
+    stop_command: service.stop_command ? fromUiServiceStartCommand(service.stop_command) : null,
     events: service.events.map(fromUiEvent),
     methods: service.methods.map(fromUiMethod)
   };
@@ -3885,6 +4484,16 @@ function createServiceStartCommand(): UiServiceStartCommand {
   };
 }
 
+function createServiceStopCommand(): UiServiceStartCommand {
+  return {
+    type: "shell_command",
+    command_text: "",
+    cwd: "",
+    env_text: "",
+    timeout_secs: "20"
+  };
+}
+
 function toUiServiceHealthCheck(healthCheck: ServiceHealthCheck): UiServiceHealthCheck {
   return {
     type: "http",
@@ -4026,9 +4635,10 @@ function formatRegisteredServiceDetail(
   status: RegisteredServiceStatus | undefined
 ): string {
   const hasStartCommand = status?.startCommandConfigured ?? service.start_command != null;
+  const hasStopCommand = status?.stopCommandConfigured ?? service.stop_command != null;
   const hasHealthCheck = status?.healthCheckConfigured ?? service.health_check != null;
-  if (!hasHealthCheck && !hasStartCommand) {
-    return "未配置 healthCheck 或启动命令，当前只能作为能力清单展示";
+  if (!hasHealthCheck && !hasStartCommand && !hasStopCommand) {
+    return "仅作为能力清单展示";
   }
   if (!hasHealthCheck && hasStartCommand) {
     return "已配置启动命令；未配置 healthCheck，无法自动确认运行状态";
@@ -4125,7 +4735,43 @@ function readError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+  if (isCommandError(error)) {
+    if (error.code === "runtime_already_running") {
+      return `Bridge Agent 已经在运行，PID ${error.conflict.pid} 正在占用当前配置。`;
+    }
+    return error.message;
+  }
   return String(error);
+}
+
+function readRuntimeConflict(error: unknown): RuntimeLockConflict | null {
+  if (isCommandError(error) && error.code === "runtime_already_running") {
+    return error.conflict;
+  }
+  return null;
+}
+
+function isCommandError(error: unknown): error is CommandError {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+  const candidate = error as { code?: unknown; conflict?: unknown; message?: unknown };
+  if (candidate.code === "message") {
+    return typeof candidate.message === "string";
+  }
+  if (candidate.code !== "runtime_already_running") {
+    return false;
+  }
+  const conflict = candidate.conflict as Partial<RuntimeLockConflict> | undefined;
+  return Boolean(
+    conflict &&
+      typeof conflict.pid === "number" &&
+      typeof conflict.agent_id === "string" &&
+      typeof conflict.config_path === "string" &&
+      typeof conflict.lock_path === "string" &&
+      conflict.process &&
+      typeof conflict.process === "object"
+  );
 }
 
 export default App;

@@ -3,10 +3,11 @@
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     install_connector_from_path, install_rustls_crypto_provider, list_connectors,
-    load_config as load_agent_config, manifest_preview_json, reset_invalid_config,
-    save_config as save_agent_config, show_connector, start_connector, uninstall_connector,
-    AgentConfig, AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult,
-    ConnectorStartResult, ConnectorSummary, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
+    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
+    reset_invalid_config, save_config as save_agent_config, show_connector, start_connector,
+    stop_connector, terminate_runtime_lock_owner, uninstall_connector, AgentConfig,
+    AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult,
+    ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
     ServiceStartCommand,
 };
 use reqwest::Client;
@@ -55,6 +56,26 @@ struct DesktopState {
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+enum CommandError {
+    RuntimeAlreadyRunning { conflict: RuntimeLockConflict },
+    Message { message: String },
+}
+
+impl From<anyhow::Error> for CommandError {
+    fn from(err: anyhow::Error) -> Self {
+        if let Some(conflict) = err.downcast_ref::<RuntimeLockConflict>() {
+            return Self::RuntimeAlreadyRunning {
+                conflict: conflict.clone(),
+            };
+        }
+        Self::Message {
+            message: err.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -164,6 +185,7 @@ struct RegisteredServiceStatus {
     checked_at_ms: u64,
     health_check_configured: bool,
     start_command_configured: bool,
+    stop_command_configured: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +197,17 @@ struct StartRegisteredServiceResult {
     stdout: String,
     stderr: String,
     timed_out: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorAppUpdateStatus {
+    connector_id: String,
+    name: String,
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    source: String,
 }
 
 #[derive(Serialize)]
@@ -328,18 +361,31 @@ async fn delete_service(
 async fn start_agent(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
-) -> Result<RuntimeSnapshot, String> {
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+) -> Result<RuntimeSnapshot, CommandError> {
+    save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
+        message: err.to_string(),
+    })?;
     state
         .runtime
         .start_from_path(&state.config_path)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 async fn stop_agent(state: tauri::State<'_, DesktopState>) -> Result<RuntimeSnapshot, String> {
     state.runtime.stop().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn stop_conflicting_runtime(
+    lock_path: String,
+    pid: u32,
+    agent_id: String,
+    config_path: String,
+) -> Result<(), CommandError> {
+    terminate_runtime_lock_owner(Path::new(&lock_path), pid, &agent_id, &config_path)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -396,7 +442,8 @@ async fn recover_invalid_config(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<ConfigRecoveryDocument, String> {
     let recovery = reset_invalid_config(&state.config_path).map_err(|err| err.to_string())?;
-    let manifest_preview = manifest_preview_json(&recovery.config).map_err(|err| err.to_string())?;
+    let manifest_preview =
+        manifest_preview_json(&recovery.config).map_err(|err| err.to_string())?;
     let runtime = state.runtime.snapshot().await;
     Ok(ConfigRecoveryDocument {
         config_path: state.config_path.display().to_string(),
@@ -464,6 +511,28 @@ async fn start_registered_service(
 }
 
 #[tauri::command]
+async fn stop_registered_service(
+    state: tauri::State<'_, DesktopState>,
+    service: String,
+) -> Result<StartRegisteredServiceResult, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let requested_service = service.trim();
+    if requested_service.is_empty() {
+        return Err("服务名不能为空".to_string());
+    }
+    let service_config = config
+        .services
+        .into_iter()
+        .find(|candidate| candidate.name == requested_service)
+        .ok_or_else(|| format!("服务 `{requested_service}` 未注册"))?;
+    let Some(stop_command) = service_config.stop_command else {
+        return Err(format!("服务 `{requested_service}` 没有注册停止命令"));
+    };
+    run_start_command(service_config.name, stop_command).await
+}
+
+#[tauri::command]
 async fn list_connector_apps() -> Result<Vec<ConnectorSummary>, String> {
     list_connectors().map_err(|err| err.to_string())
 }
@@ -471,6 +540,44 @@ async fn list_connector_apps() -> Result<Vec<ConnectorSummary>, String> {
 #[tauri::command]
 async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String> {
     show_connector(id.trim()).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn check_connector_app_update(
+    id: String,
+    source: String,
+) -> Result<ConnectorAppUpdateStatus, String> {
+    let connector_id = id.trim();
+    if connector_id.is_empty() {
+        return Err("应用 ID 不能为空".to_string());
+    }
+    let source = source.trim();
+    if source.is_empty() {
+        return Err("更新来源不能为空".to_string());
+    }
+
+    let installed = show_connector(connector_id).map_err(|err| err.to_string())?;
+    let resolved_source = resolve_connector_source(source).await?;
+    let latest_manifest =
+        load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
+    if latest_manifest.id != installed.manifest.id {
+        return Err(format!(
+            "更新来源应用 ID 不匹配：当前 `{}`，来源 `{}`",
+            installed.manifest.id, latest_manifest.id
+        ));
+    }
+
+    Ok(ConnectorAppUpdateStatus {
+        connector_id: installed.manifest.id,
+        name: latest_manifest.name,
+        current_version: installed.manifest.version.clone(),
+        latest_version: latest_manifest.version.clone(),
+        update_available: connector_version_is_newer(
+            &latest_manifest.version,
+            &installed.manifest.version,
+        ),
+        source: source.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -512,6 +619,14 @@ async fn start_connector_app(
     id: String,
 ) -> Result<ConnectorStartResult, String> {
     start_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn stop_connector_app(
+    state: tauri::State<'_, DesktopState>,
+    id: String,
+) -> Result<ConnectorStartResult, String> {
+    stop_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1149,9 +1264,13 @@ fn read_desktop_permission_status() -> DesktopPermissionStatus {
     }
 }
 
-async fn check_registered_service(client: &Client, service: ServiceConfig) -> RegisteredServiceStatus {
+async fn check_registered_service(
+    client: &Client,
+    service: ServiceConfig,
+) -> RegisteredServiceStatus {
     let health_check_configured = service.health_check.is_some();
     let start_command_configured = service.start_command.is_some();
+    let stop_command_configured = service.stop_command.is_some();
     let Some(health_check) = service.health_check else {
         return RegisteredServiceStatus {
             service: service.name,
@@ -1160,6 +1279,7 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
             checked_at_ms: now_ms(),
             health_check_configured,
             start_command_configured,
+            stop_command_configured,
         };
     };
 
@@ -1197,9 +1317,14 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
                             checked_at_ms: now_ms(),
                             health_check_configured,
                             start_command_configured,
+                            stop_command_configured,
                         };
                     }
-                    if let Some(expected_text) = body_contains.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                    if let Some(expected_text) = body_contains
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
                         match response.text().await {
                             Ok(body) if body.contains(expected_text) => {}
                             Ok(_) => {
@@ -1210,6 +1335,7 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
                                     checked_at_ms: now_ms(),
                                     health_check_configured,
                                     start_command_configured,
+                                    stop_command_configured,
                                 };
                             }
                             Err(err) => {
@@ -1220,6 +1346,7 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
                                     checked_at_ms: now_ms(),
                                     health_check_configured,
                                     start_command_configured,
+                                    stop_command_configured,
                                 };
                             }
                         }
@@ -1231,6 +1358,7 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
                         checked_at_ms: now_ms(),
                         health_check_configured,
                         start_command_configured,
+                        stop_command_configured,
                     }
                 }
                 Err(err) => RegisteredServiceStatus {
@@ -1240,6 +1368,7 @@ async fn check_registered_service(client: &Client, service: ServiceConfig) -> Re
                     checked_at_ms: now_ms(),
                     health_check_configured,
                     start_command_configured,
+                    stop_command_configured,
                 },
             }
         }
@@ -1262,7 +1391,11 @@ async fn run_start_command(
             }
             let mut process = AsyncCommand::new(&command[0]);
             process.args(command.iter().skip(1));
-            if let Some(cwd) = cwd.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(cwd) = cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 process.current_dir(cwd);
             }
             process.envs(env);
@@ -1350,6 +1483,15 @@ fn is_git_connector_source(source: &str) -> bool {
         || value.ends_with(".git")
 }
 
+fn connector_version_is_newer(latest: &str, current: &str) -> bool {
+    let latest = latest.trim().trim_start_matches('v');
+    let current = current.trim().trim_start_matches('v');
+    match (Version::parse(latest), Version::parse(current)) {
+        (Ok(latest), Ok(current)) => latest > current,
+        _ => latest != current,
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1407,14 +1549,16 @@ fn show_main_window(app: &tauri::AppHandle) {
         restore_main_window(&window);
     }
 
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        activate_app(&app);
-        if let Some(window) = app.get_webview_window("main") {
-            restore_main_window(&window);
-        }
-    });
+    for delay_ms in [120, 400, 900] {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            activate_app(&app);
+            if let Some(window) = app.get_webview_window("main") {
+                restore_main_window(&window);
+            }
+        });
+    }
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow) {
@@ -1535,6 +1679,7 @@ fn main() {
             delete_service,
             start_agent,
             stop_agent,
+            stop_conflicting_runtime,
             runtime_snapshot,
             apply_saved_config_to_runtime,
             list_logs,
@@ -1545,10 +1690,13 @@ fn main() {
             desktop_permission_status,
             registered_service_statuses,
             start_registered_service,
+            stop_registered_service,
             list_connector_apps,
             show_connector_app,
+            check_connector_app_update,
             install_connector_app,
             start_connector_app,
+            stop_connector_app,
             uninstall_connector_app,
             request_desktop_permission,
             open_desktop_permission_settings,
@@ -1559,13 +1707,20 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::Ready => {
+                show_main_window(app);
+            }
+            tauri::RunEvent::Reopen { .. } => {
+                show_main_window(app);
+            }
+            tauri::RunEvent::ExitRequested { api, .. } => {
                 let state = app.state::<DesktopState>();
                 if !state.quitting.load(Ordering::SeqCst) {
                     api.prevent_exit();
                     quit_app(app);
                 }
             }
+            _ => {}
         });
 }
