@@ -138,7 +138,7 @@ pub fn connectors_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("BRIDGE_AGENT_CONNECTORS_DIR") {
         return Ok(PathBuf::from(path));
     }
-    if let Some(dirs) = ProjectDirs::from("com", "Baijimu", "BridgeAgent") {
+    if let Some(dirs) = ProjectDirs::from("com", "baijimu", "bridge-agent") {
         return Ok(dirs.config_dir().join("connectors"));
     }
     bail!("failed to resolve BridgeAgent config directory")

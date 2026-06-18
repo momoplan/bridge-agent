@@ -555,6 +555,7 @@ const MARKET_CONNECTORS: MarketConnector[] = [
   },
   {
     id: "wechat",
+    connectorId: "com.baijimu.connector.wechat",
     name: "微信",
     description: "安装微信本地采集 connector，把微信相关本地能力接入工作区。",
     source: "https://github.com/momoplan/wechat-bridge-collector.git",
