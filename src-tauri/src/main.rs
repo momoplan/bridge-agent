@@ -12,7 +12,7 @@ use bridge_agent::{
 };
 use reqwest::Client;
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -208,6 +208,49 @@ struct ConnectorAppUpdateStatus {
     latest_version: String,
     update_available: bool,
     source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketConnectorApp {
+    id: String,
+    connector_id: String,
+    name: String,
+    description: String,
+    source: String,
+    risk: String,
+    risk_level: String,
+    capability: String,
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawLocalAppMarketResponse<T> {
+    error_code: Option<String>,
+    value: Option<String>,
+    data: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMarketConnectorApp {
+    id: String,
+    connector_id: String,
+    name: String,
+    description: String,
+    risk: String,
+    risk_level: Option<String>,
+    capability: String,
+    latest_version: RawMarketConnectorVersion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMarketConnectorVersion {
+    version: String,
+    source: String,
+    revision: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -535,6 +578,46 @@ async fn stop_registered_service(
 #[tauri::command]
 async fn list_connector_apps() -> Result<Vec<ConnectorSummary>, String> {
     list_connectors().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_market_connector_apps(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<MarketConnectorApp>, String> {
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    let base_url = config.platform.base_url.trim_end_matches('/');
+    let platform = normalized_platform();
+    let url = format!("{base_url}/api/local-app-market/apps?platform={platform}");
+    let response = Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| format!("请求 localApp 市场失败: {err}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("请求 localApp 市场失败: HTTP {status} {body}"));
+    }
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|err| format!("解析 localApp 市场响应失败: {err}"))?;
+    let raw_apps: Vec<RawMarketConnectorApp> = if payload.get("data").is_some() {
+        let wrapped: RawLocalAppMarketResponse<Vec<RawMarketConnectorApp>> =
+            serde_json::from_value(payload)
+                .map_err(|err| format!("解析 lowcode localApp 市场响应失败: {err}"))?;
+        if wrapped.error_code.as_deref().is_some_and(|code| code != "0") {
+            return Err(format!(
+                "lowcode localApp 市场返回失败: {}",
+                wrapped.value.unwrap_or_else(|| "未知错误".to_string())
+            ));
+        }
+        wrapped.data.unwrap_or_default()
+    } else {
+        serde_json::from_value(payload)
+            .map_err(|err| format!("解析 local-app-market 响应失败: {err}"))?
+    };
+    Ok(raw_apps.into_iter().map(MarketConnectorApp::from).collect())
 }
 
 #[tauri::command]
@@ -1443,17 +1526,18 @@ impl ResolvedConnectorSource {
 }
 
 async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSource, String> {
-    if is_git_connector_source(source) {
+    let (source, git_revision) = split_source_revision(source);
+    if is_git_connector_source(&source) {
         let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let checkout_path = temp_dir.path().join("connector");
-        let output = Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                source,
-                checkout_path.to_string_lossy().as_ref(),
-            ])
+        let mut command = Command::new("git");
+        command.args(["clone", "--depth", "1"]);
+        if let Some(revision) = git_revision.as_deref().filter(|value| !value.is_empty()) {
+            command.args(["--branch", revision]);
+        }
+        let output = command
+            .arg(&source)
+            .arg(&checkout_path)
             .output()
             .map_err(|err| format!("执行 git clone 失败: {err}"))?;
         if !output.status.success() {
@@ -1473,6 +1557,50 @@ async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSourc
         return Err(format!("本地路径不存在: {}", path.display()));
     }
     Ok(ResolvedConnectorSource::Local(path))
+}
+
+impl From<RawMarketConnectorApp> for MarketConnectorApp {
+    fn from(value: RawMarketConnectorApp) -> Self {
+        let source = with_revision(&value.latest_version.source, value.latest_version.revision.as_deref());
+        Self {
+            id: value.id,
+            connector_id: value.connector_id,
+            name: value.name,
+            description: value.description,
+            source,
+            risk: value.risk,
+            risk_level: value.risk_level.unwrap_or_else(|| "medium".to_string()),
+            capability: value.capability,
+            version: value.latest_version.version,
+        }
+    }
+}
+
+fn with_revision(source: &str, revision: Option<&str>) -> String {
+    let source = source.trim();
+    match revision.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(revision) if !source.contains('#') => format!("{source}#{revision}"),
+        _ => source.to_string(),
+    }
+}
+
+fn split_source_revision(source: &str) -> (String, Option<String>) {
+    let source = source.trim();
+    match source.rsplit_once('#') {
+        Some((base, revision)) if !base.is_empty() && !revision.is_empty() => {
+            (base.to_string(), Some(revision.to_string()))
+        }
+        _ => (source.to_string(), None),
+    }
+}
+
+fn normalized_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => std::env::consts::OS,
+    }
 }
 
 fn is_git_connector_source(source: &str) -> bool {
@@ -1692,6 +1820,7 @@ fn main() {
             start_registered_service,
             stop_registered_service,
             list_connector_apps,
+            list_market_connector_apps,
             show_connector_app,
             check_connector_app_update,
             install_connector_app,

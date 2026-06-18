@@ -413,12 +413,14 @@ interface LocalAppItem {
 
 interface MarketConnector {
   id: string;
-  connectorId?: string;
+  connectorId: string;
   name: string;
   description: string;
   source: string;
   risk: string;
+  riskLevel: string;
   capability: string;
+  version: string;
 }
 
 const SHELL_SCHEMA = {
@@ -543,27 +545,6 @@ const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls, git";
 const FULL_ACCESS_COMMAND = "*";
 const FULL_ACCESS_ROOT_DIR = "/";
 
-const MARKET_CONNECTORS: MarketConnector[] = [
-  {
-    id: "codex",
-    connectorId: "com.baijimu.connector.codex",
-    name: "Codex",
-    description: "在本机启动 Codex adaptor，把 Codex 会话能力接入工作区。",
-    source: "https://gitee.com/zxflimit_admin/baijimu-connector-codex.git",
-    risk: "需要访问本机 Codex CLI 和工作目录。",
-    capability: "远程创建任务、查看任务和进入会话。"
-  },
-  {
-    id: "wechat",
-    connectorId: "com.baijimu.connector.wechat",
-    name: "微信",
-    description: "安装微信本地采集 connector，把微信相关本地能力接入工作区。",
-    source: "https://github.com/momoplan/wechat-bridge-collector.git",
-    risk: "需要读取本机微信相关数据目录。",
-    capability: "本地微信数据采集和后续自动化能力。"
-  }
-];
-
 const COMPUTER_METHOD_PRESETS: Record<
   ComputerAction,
   { name: string; description: string; schema: unknown; label: string }
@@ -640,6 +621,7 @@ function App() {
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
+  const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -663,7 +645,7 @@ function App() {
   const [activeLocalAppDetailTab, setActiveLocalAppDetailTab] = useState<LocalAppDetailTab>("overview");
   const [installPanelOpen, setInstallPanelOpen] = useState(false);
   const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("choose");
-  const [selectedMarketAppId, setSelectedMarketAppId] = useState(MARKET_CONNECTORS[0]?.id ?? "");
+  const [selectedMarketAppId, setSelectedMarketAppId] = useState("");
   const [installSource, setInstallSource] = useState("");
   const [installBusy, setInstallBusy] = useState(false);
 
@@ -735,6 +717,15 @@ function App() {
       setShowAdvancedSettings(true);
     }
   }, [config]);
+
+  useEffect(() => {
+    setSelectedMarketAppId((current) => {
+      if (current && marketConnectors.some((app) => app.id === current)) {
+        return current;
+      }
+      return marketConnectors[0]?.id ?? "";
+    });
+  }, [marketConnectors]);
 
   useEffect(() => {
     if (!config) {
@@ -979,6 +970,7 @@ function App() {
       applyConfigDocument(document);
       const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
       setLogs(latestLogs);
+      await refreshMarketConnectorApps();
       await refreshConnectorApps();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
@@ -1023,6 +1015,16 @@ function App() {
       setConnectorApps(apps);
     } catch (err) {
       console.warn("读取本地应用列表失败", err);
+    }
+  }
+
+  async function refreshMarketConnectorApps() {
+    try {
+      const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
+      setMarketConnectors(apps);
+    } catch (err) {
+      console.warn("读取本地应用市场失败", err);
+      setMarketConnectors([]);
     }
   }
 
@@ -1081,7 +1083,7 @@ function App() {
   }
 
   async function installLocalApp() {
-    const selectedMarket = MARKET_CONNECTORS.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = marketConnectors.find((app) => app.id === selectedMarketAppId);
     const source =
       installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
     if (!source) {
@@ -1115,7 +1117,7 @@ function App() {
     if (app.kind !== "connector" || !app.connector) {
       return undefined;
     }
-    return MARKET_CONNECTORS.find((marketApp) => marketApp.connectorId === app.connector?.id);
+    return marketConnectors.find((marketApp) => marketApp.connectorId === app.connector?.id);
   }
 
   async function checkLocalAppUpdate(app: LocalAppItem, showLatestMessage = true) {
@@ -3441,7 +3443,7 @@ function App() {
     if (!installPanelOpen) {
       return null;
     }
-    const selectedMarket = MARKET_CONNECTORS.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = marketConnectors.find((app) => app.id === selectedMarketAppId);
     const closeInstallPanel = () => {
       if (installBusy) {
         return;
@@ -3471,7 +3473,13 @@ function App() {
 
           {installSourceMode === "choose" ? (
             <div className="install-choice-grid">
-              <button className="install-choice-card" onClick={() => setInstallSourceMode("market")}>
+              <button
+                className="install-choice-card"
+                onClick={() => {
+                  setInstallSourceMode("market");
+                  void refreshMarketConnectorApps();
+                }}
+              >
                 <strong>从市场安装</strong>
                 <span>选择官方维护的本地应用，安装后直接生效。</span>
               </button>
@@ -3482,7 +3490,7 @@ function App() {
             </div>
           ) : installSourceMode === "market" ? (
             <div className="market-app-grid">
-              {MARKET_CONNECTORS.map((app) => (
+              {marketConnectors.map((app) => (
                 <button
                   className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""}`}
                   key={app.id}
@@ -3490,9 +3498,12 @@ function App() {
                 >
                   <strong>{app.name}</strong>
                   <span>{app.description}</span>
-                  <small>{app.capability}</small>
+                  <small>{app.capability} · {app.version}</small>
                 </button>
               ))}
+              {marketConnectors.length === 0 ? (
+                <div className="empty-state">暂时没有可安装的市场应用。</div>
+              ) : null}
               {selectedMarket ? (
                 <div className="install-risk-note">
                   <strong>权限提示</strong>
