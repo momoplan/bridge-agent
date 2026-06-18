@@ -135,6 +135,13 @@ struct AuthorizedPayload {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AppVersionInfo {
+    current_version: String,
+    current_target: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppUpdateStatus {
     current_version: String,
     latest_version: Option<String>,
@@ -888,6 +895,14 @@ async fn poll_browser_auth(
         message: payload.message,
         config: Some(updated),
     })
+}
+
+#[tauri::command]
+fn app_version() -> AppVersionInfo {
+    AppVersionInfo {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        current_target: current_update_target(),
+    }
 }
 
 #[tauri::command]
@@ -1831,6 +1846,7 @@ fn main() {
             open_desktop_permission_settings,
             start_browser_auth,
             poll_browser_auth,
+            app_version,
             check_app_update,
             install_app_update
         ])

@@ -216,6 +216,11 @@ interface AppUpdateStatus {
   assetName: string | null;
 }
 
+interface AppVersionInfo {
+  currentVersion: string;
+  currentTarget: string;
+}
+
 type AppUpdateCheckState = "checking" | "ready" | "error";
 
 interface AppUpdateInstallResult {
@@ -619,6 +624,7 @@ function App() {
   const [error, setError] = useState("");
   const [runtimeConflict, setRuntimeConflict] = useState<RuntimeLockConflict | null>(null);
   const [browserAuth, setBrowserAuth] = useState<BrowserAuthStartResponse | null>(null);
+  const [appVersion, setAppVersion] = useState<AppVersionInfo | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
@@ -658,6 +664,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    void loadAppVersion();
     void checkAppUpdate();
   }, []);
 
@@ -858,7 +865,7 @@ function App() {
   const visibleAppUpdate =
     appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
   const appVersionLabel =
-    appUpdate?.currentVersion ?? (appUpdateCheckState === "error" ? "检查失败" : "检查中");
+    appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "检查中";
   const appUpdateStatusLabel = appUpdate
     ? appUpdate.updateAvailable
       ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
@@ -1349,6 +1356,14 @@ function App() {
       } else {
         console.warn("自动检查更新失败", err);
       }
+    }
+  }
+
+  async function loadAppVersion() {
+    try {
+      setAppVersion(await invoke<AppVersionInfo>("app_version"));
+    } catch (err) {
+      console.warn("读取本地应用版本失败", err);
     }
   }
 
