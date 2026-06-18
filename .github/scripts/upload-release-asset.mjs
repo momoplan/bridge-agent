@@ -73,23 +73,19 @@ await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/comple
 console.log(`Uploaded ${assetName} (${size} bytes, sha256:${sha256})`);
 
 async function postJson(url, payload) {
+  const body = Buffer.from(JSON.stringify(payload));
   const response = await retry(
-    () =>
-      fetch(url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(60_000),
-      }),
+    () => requestJson(url, "POST", {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "content-length": body.length,
+    }, body),
     `POST ${url}`,
   );
-  if (!response.ok) {
-    throw new Error(`${url} failed: ${response.status} ${await response.text()}`);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`${url} failed: ${response.status} ${response.body}`);
   }
-  return response.json();
+  return JSON.parse(response.body);
 }
 
 async function retry(operation, label, attempts = 3) {
@@ -111,6 +107,17 @@ async function retry(operation, label, attempts = 3) {
 }
 
 async function uploadBinary(url, method, headers, body) {
+  return requestRaw(url, method, {
+    ...headers,
+    "content-length": body.length,
+  }, body, 20 * 60 * 1000);
+}
+
+async function requestJson(url, method, headers, body) {
+  return requestRaw(url, method, headers, body, 60 * 1000);
+}
+
+async function requestRaw(url, method, headers, body, timeoutMs) {
   const parsed = new URL(url);
   const client = parsed.protocol === "http:" ? http : https;
   return new Promise((resolve, reject) => {
@@ -118,10 +125,7 @@ async function uploadBinary(url, method, headers, body) {
       parsed,
       {
         method,
-        headers: {
-          ...headers,
-          "content-length": body.length,
-        },
+        headers,
       },
       (response) => {
         const chunks = [];
@@ -135,8 +139,8 @@ async function uploadBinary(url, method, headers, body) {
       },
     );
 
-    request.setTimeout(20 * 60 * 1000, () => {
-      request.destroy(new Error(`upload timed out after 1200s`));
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(new Error(`${method} ${url} timed out after ${Math.round(timeoutMs / 1000)}s`));
     });
     request.on("error", reject);
     request.end(body);
