@@ -1,369 +1,391 @@
-# 百积木 Local Connector 规范草案
+# Bridge Agent Local App and Connector Specification
 
-本文定义百积木 Local 的 Connector 安装、运行、注册和远程暴露规范。
+本文定义 `bridge-agent` 桌面端里的“本地应用”规范，用来约束 Codex、WeChat、Desktop Control 以及后续第三方本地能力如何接入、安装、启动、更新、卸载和对外暴露能力。
 
-目标是把 `wechat-bridge-collector`、Codex Adapter、Claude Code Adapter、桌面控制、浏览器控制等本机能力统一成可安装、可升级、可审计的本地 Connector，而不是依赖 skill 带用户逐条执行安装命令。
+## 术语
 
-## 命名
+- 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。它可以是内置应用、市场 Connector，也可以是用户手动注册的自定义应用。
+- Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、服务注册信息和能力。
+- 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
+- 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
+- 服务：Bridge Agent 协议内部的能力组，例如 `wechatLocal`、`computer`、`shellExec`。
+- 方法：服务下的可调用动作，例如 `wechatLocal.searchMessages`。
+- 事件：服务上报给外部订阅方的消息，例如 `wechatLocal.messageReceived`。
 
-- 百积木 Local：安装在用户电脑上的本地宿主，工程内部可继续沿用 `bridge-agent`。
-- Connector：安装到百积木 Local 的本地连接器，负责连接一个本机应用、服务或能力。
-- Connector Package：Connector 的分发包，建议后缀为 `.bjmconnector`。
-- Connector Registry：官方或企业维护的 Connector 索引。
+## 分类
 
-示例：
+本地应用分为三类：
 
-- Codex Connector：连接本机 `codex app-server`。
-- WeChat Connector：连接本机微信采集器。
-- Claude Code Connector：连接本机 Claude Code。
-- Desktop Connector：暴露本机截图、鼠标、键盘等桌面能力。
+| 类型 | 来源 | 是否可市场更新 | 典型例子 |
+| --- | --- | --- | --- |
+| 内置应用 | 随 `bridge-agent` 客户端发布 | 否，跟随客户端版本 | Desktop Control |
+| 市场 Connector | `local-app-market` 返回的 Git / 包版本 | 是 | Codex Connector、WeChat Connector |
+| 自定义应用 | 本机配置、注册 API、CLI | 否 | 本地报表工具、开发中的 HTTP 服务 |
 
-## 设计原则
+UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 
-1. 百积木 Local 是宿主，不内置具体业务能力。
-2. Connector 单独发布、安装、升级和卸载。
-3. Connector 可以来自官方市场、GitHub 仓库或本地开发包。
-4. 安装不等于远程开放；用户必须显式授权 workspace、service 和高风险 method。
-5. Connector 不直接连接 relay；所有远程访问都经过百积木 Local。
-6. 百积木 Local 负责鉴权、relay 长连、服务上报、调用审计、生命周期和健康检查。
-7. Connector 本身可以开源或闭源，但 manifest、能力声明、签名和校验信息必须可审计。
+- 市场 Connector 必须有稳定 `connectorId`，并能从市场记录找到更新源。
+- 自定义应用不能伪装成市场应用；除非被市场收录并按本规范提供 Connector 包。
+- 内置应用由 `bridge-agent` 客户端维护，不允许普通卸载，也不通过 Connector 安装目录管理。
 
-## 包结构
+## Connector 包结构
 
-目录式包：
+一个 Connector 包必须至少包含：
 
 ```text
-codex-connector.bjmconnector/
+connector-root/
   connector.json
-  README.md
-  LICENSE
-  bin/
-    codex-connector
-  schemas/
-    config.schema.json
-    events.schema.json
-  hooks/
-    install.sh
-    uninstall.sh
+  service-registration.json
 ```
 
-归档式包可以使用同样结构压缩分发，百积木 Local 安装时解包到本机 Connector 目录。
+可以包含：
+
+```text
+connector-root/
+  package.json
+  bin/
+  dist/
+  README.md
+  LICENSE
+```
+
+要求：
+
+- `connector.json` 必须位于包根目录。
+- 包内路径必须使用相对路径，不依赖安装前的源码绝对路径。
+- 安装后，Bridge Agent 会把包复制到本机 connectors 目录；运行命令应以安装后的包路径为准。
+- 不要把用户 token、cookie、数据库副本或机器私有配置提交进 Connector 包。
 
 ## connector.json
 
-`connector.json` 是唯一必需文件。
+`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.0`。
+
+必填字段：
+
+- `schemaVersion`
+- `id`
+- `name`
+- `version`
+- `services` 或 `serviceRegistrationFiles` 至少一个
+
+推荐字段：
+
+- `description`
+- `publisher`
+- `source`
+- `runtime`
+- `configSchema`
+- `remoteCapabilities`
+- `hooks`
+
+示例：
 
 ```json
 {
   "schemaVersion": "1.0",
-  "id": "com.baijimu.connector.codex",
-  "name": "Codex Connector",
-  "version": "0.1.0",
-  "description": "Connect local Codex app-server to Baijimu Local.",
+  "id": "com.baijimu.connector.wechat",
+  "name": "WeChat Connector",
+  "version": "0.2.3",
+  "description": "Expose local WeChat search and message events to Bridge Agent.",
   "publisher": {
     "name": "Baijimu",
     "homepage": "https://baijimu.com"
   },
   "source": {
-    "type": "github",
-    "repo": "baijimu/baijimu-connector-codex",
-    "revision": "v0.1.0"
+    "type": "git",
+    "repo": "momoplan/wechat-bridge-collector",
+    "revision": "v0.2.3"
   },
   "runtime": {
     "type": "process",
-    "command": "bin/codex-connector",
-    "args": [],
-    "env": {},
-    "healthCheck": {
-      "type": "http",
-      "url": "http://127.0.0.1:${PORT}/healthz",
-      "timeoutSecs": 2,
-      "expectStatus": 200
-    }
+    "command": "wechat-bridge-collector",
+    "args": ["start"]
   },
-  "configSchema": {
-    "type": "object",
-    "properties": {
-      "codexBinary": {
-        "type": "string",
-        "default": "codex"
-      },
-      "defaultCwd": {
-        "type": "string"
-      }
-    },
-    "additionalProperties": false
-  },
+  "serviceRegistrationFiles": [
+    "service-registration.json"
+  ],
   "remoteCapabilities": [
     {
-      "name": "codex.thread.read",
-      "risk": "medium",
-      "description": "Read local Codex thread metadata and output."
-    },
-    {
-      "name": "codex.turn.write",
-      "risk": "medium",
-      "description": "Send prompts and follow-up instructions to local Codex."
-    },
-    {
-      "name": "codex.action.approve",
+      "name": "wechat.events.messageReceived",
       "risk": "high",
-      "description": "Approve Codex actions from a remote client."
+      "description": "Emit message events from the user's local WeChat data."
     }
-  ],
-  "services": [
+  ]
+}
+```
+
+命名要求：
+
+- `id` 必须全局稳定，建议使用反域名格式，例如 `com.baijimu.connector.wechat`。
+- `id` 一旦发布，不得因为仓库迁移、展示名称变化或实现重写而改变。
+- `name` 是展示名，可以变化。
+- `version` 应使用 SemVer。市场版本和 Connector 包版本必须一致。
+
+## 服务注册
+
+Connector 通过 `services` 内联声明服务，或通过 `serviceRegistrationFiles` 指向一个或多个服务注册文件。
+
+推荐使用独立 `service-registration.json`：
+
+```json
+{
+  "name": "wechatLocal",
+  "description": "Local WeChat capability service.",
+  "transport": {
+    "type": "http",
+    "baseUrl": "http://127.0.0.1:18082"
+  },
+  "healthCheck": {
+    "type": "http",
+    "path": "/health",
+    "timeoutSecs": 2,
+    "expectStatus": 200
+  },
+  "startCommand": {
+    "type": "shell_command",
+    "command": ["wechat-bridge-collector", "start", "--daemon"],
+    "timeoutSecs": 15
+  },
+  "stopCommand": {
+    "type": "shell_command",
+    "command": ["wechat-bridge-collector", "stop"],
+    "timeoutSecs": 10
+  },
+  "methods": [
     {
-      "name": "codexSession",
-      "description": "Local Codex session control.",
-      "transport": {
-        "type": "http",
-        "baseUrl": "http://127.0.0.1:${PORT}"
-      },
-      "methods": [
-        {
-          "name": "startThread",
-          "description": "Start a Codex thread.",
-          "path": "/invoke/startThread",
-          "httpMethod": "POST",
-          "timeoutSecs": 30,
-          "input_schema": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      ],
-      "events": [
-        {
-          "name": "messageDelta",
-          "description": "Streaming Codex assistant output.",
-          "payload_schema": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      ]
+      "name": "searchMessages",
+      "description": "Search local WeChat messages.",
+      "path": "/invoke/searchMessages",
+      "httpMethod": "POST",
+      "timeoutSecs": 30,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     }
   ],
-  "hooks": {
-    "install": "hooks/install.sh",
-    "uninstall": "hooks/uninstall.sh"
+  "events": [
+    {
+      "name": "messageReceived",
+      "description": "A local WeChat message was received.",
+      "enabled": true,
+      "payload_schema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  ]
+}
+```
+
+要求：
+
+- `name` 是对外协议里的服务名，必须稳定。
+- `methods[].name` 和 `events[].name` 必须稳定；删除或改名属于破坏性变更。
+- `transport.baseUrl` 默认应绑定 `127.0.0.1`，不要要求用户暴露公网端口。
+- `healthCheck` 应能快速判断本地服务是否可用。
+- `startCommand` 应是触发启动后退出的命令，不应是永久阻塞的前台进程。
+- `stopCommand` 应尽量幂等；服务未运行时也应安全退出。
+- `input_schema` 应尽量收紧，不要长期使用完全开放的 `additionalProperties: true` 作为正式能力接口。
+
+## 市场元数据
+
+市场服务 `local-app-market` 返回的是可安装版本列表。Bridge Agent 当前请求：
+
+```text
+GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
+```
+
+可以返回 lowcode 包装结构：
+
+```json
+{
+  "errorCode": "0",
+  "value": "成功",
+  "data": []
+}
+```
+
+也可以直接返回数组。数组项格式：
+
+```json
+{
+  "id": "wechat",
+  "connectorId": "com.baijimu.connector.wechat",
+  "name": "微信",
+  "description": "安装微信本地采集 connector，把微信相关本地能力接入工作区。",
+  "publisher": "Baijimu",
+  "risk": "需要读取本机微信数据库、联系人和消息记录目录，只在用户本机运行。",
+  "riskLevel": "high",
+  "capability": "本地微信消息查询、搜索和消息事件采集。",
+  "platforms": ["macos"],
+  "latestVersion": {
+    "version": "0.2.3",
+    "sourceType": "git",
+    "source": "https://github.com/momoplan/wechat-bridge-collector.git",
+    "repo": "momoplan/wechat-bridge-collector",
+    "revision": "v0.2.3",
+    "checksum": null,
+    "capabilities": [
+      "wechat.messages.read",
+      "wechat.messages.search",
+      "wechat.events.messageReceived"
+    ],
+    "manifest": {
+      "runtime": "process",
+      "command": "wechat-bridge-collector",
+      "args": ["start"]
+    },
+    "publishedAt": "2026-06-18T10:00:00Z"
   }
 }
 ```
 
-## 字段要求
+要求：
 
-- `schemaVersion`：规范版本，当前为 `1.0`。
-- `id`：全局唯一 ID，推荐反向域名格式。
-- `name`：展示名。
-- `version`：语义化版本。
-- `publisher`：发布方信息。
-- `source`：来源信息，用于审计和升级。
-- `runtime`：启动方式和健康检查。
-- `configSchema`：用户配置 schema。
-- `remoteCapabilities`：远程能力声明，用于安装确认和 workspace 授权。
-- `services`：Connector 安装后向百积木 Local 注册的服务、方法和事件。
-- `hooks`：可选安装/卸载脚本。高风险 hook 需要本地用户确认。
+- `id` 是市场条目 ID，面向市场展示和路由。
+- `connectorId` 必须等于 Connector 包内 `connector.json.id`。
+- `latestVersion.version` 必须等于 Connector 包内 `connector.json.version`。
+- `latestVersion.revision` 推荐指向不可变 tag，例如 `v0.2.3`。
+- `latestVersion.source` 是安装源。若带 `revision`，Bridge Agent 会按 `source#revision` 克隆。
+- `platforms` 必须准确表达支持平台；不要把只支持 macOS 的 Connector 标成 Windows/Linux 可用。
+- `riskLevel` 建议使用 `low`、`medium`、`high`。
 
-## 安装来源
+## 安装和更新
 
-### 官方市场
+安装流程：
 
-默认入口。市场返回已审核版本、签名、checksum、兼容范围和下载地址。
+1. Bridge Agent 从市场读取条目。
+2. 用户选择市场应用。
+3. Bridge Agent 下载 `latestVersion.source`，如果有 `revision` 则 checkout 对应分支或 tag。
+4. Bridge Agent 读取 `connector.json` 并校验。
+5. Bridge Agent 安装 Connector 包到本机 connectors 目录。
+6. Bridge Agent 把服务注册写入本机 `agent-config.json`。
+7. Bridge Agent 刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
 
-### GitHub 仓库
+更新规则：
 
-高级入口。支持：
+- 用市场 `connectorId` 找到本机已安装 Connector。
+- 比较本机 `connector.json.version` 与市场 `latestVersion.version`。
+- 更新时重新安装同一个 `connectorId`，并替换该 Connector 管理的服务。
+- 更新不得悄悄迁移到另一个 `connectorId`。
+- 如果服务名、方法名、事件名发生破坏性变更，必须升级主版本，并在市场风险说明中写清楚。
 
-```bash
-bjm-local connector install github:baijimu/baijimu-connector-codex
-bjm-local connector install https://github.com/baijimu/baijimu-connector-codex
-```
+卸载规则：
 
-仓库必须提供：
+- 卸载 Connector 时，删除安装记录和该 Connector 注册的服务。
+- 不得删除用户手动创建的自定义服务。
+- 不得删除其他 Connector 的服务。
 
-- 根目录 `connector.json`，或 GitHub Release asset 中的 `.bjmconnector`。
-- 可校验的版本、checksum 和 source revision。
-- README，说明本机依赖和安全边界。
+## 权限和安全
 
-如果没有百积木认可签名，安装 UI 必须标记为未验证来源。
+Connector 默认运行在用户自己的机器上，因此规范重点是“清楚告知、最小暴露、可撤销”。
 
-### 本地开发包
+必须遵守：
 
-用于开发和调试：
+- 本地服务默认只监听 `127.0.0.1`。
+- 需要读取本机敏感数据时，必须在市场 `risk` 和 Connector README 中说明。
+- 不得默认上传用户本机数据，除非用户明确授权且能力描述中写清楚。
+- 不得要求用户关闭系统安全设置作为常规安装步骤。
+- 不得把长期有效 token 写入仓库。
+- 日志不得记录敏感消息正文、密钥、cookie、完整数据库路径等信息，除非用户显式开启诊断级别。
 
-```bash
-bjm-local connector install ./dist/codex-connector.bjmconnector
-```
+高风险能力示例：
 
-本地开发包默认只对当前设备启用，不自动开放到 workspace。
+- 读取聊天记录、联系人、浏览器数据、剪贴板、文件系统。
+- 控制桌面、键盘、鼠标。
+- 执行 shell 命令。
+- 监听消息事件并转发给外部 agent。
 
-## 生命周期
+高风险能力必须在市场条目中设置 `riskLevel: "high"`。
 
-百积木 Local 负责：
+## 事件
 
-1. 下载并校验包。
-2. 展示远程能力和高风险行为。
-3. 写入 Connector 安装目录。
-4. 渲染配置。
-5. 执行 install hook。
-6. 启动 Connector runtime。
-7. 运行 health check。
-8. 注册 services、methods、events。
-9. 重新上报 capabilities 到 relay。
-10. 记录安装、启动、调用、事件和卸载日志。
+Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 
-Connector 状态至少包含：
+正确流程：
 
-- `installed`
-- `configured`
-- `starting`
-- `running`
-- `unhealthy`
-- `stopped`
-- `update_available`
-- `failed`
+1. Connector 本地服务声明 `events[]`。
+2. Connector 运行时向 Bridge Agent 本机事件入口发送事件。
+3. Bridge Agent 校验 `service.event` 已声明且启用。
+4. Bridge Agent 通过已有 agent WebSocket 上报 relay。
+5. relay 再按订阅关系投递给外部 app / agent。
 
-## 服务注册
+事件 payload 应保持结构化，并避免发送无边界的大对象。需要传大文件时，应走文件引用或上传协议。
 
-Connector 可以通过两种方式注册服务：
+## 兼容性
 
-1. 静态注册：百积木 Local 从 `connector.json.services` 生成本地 service 配置。
-2. 动态注册：Connector 启动后调用本机 `/v1/services` 注册或替换 service。
+稳定接口：
 
-动态注册适合运行期端口、path、事件 schema 会变化的 Connector。静态注册适合固定 HTTP/stdio/socket 适配器。
+- `connector.json.id`
+- `connector.json.version`
+- 服务名
+- 方法名
+- 事件名
+- 方法输入 schema
+- 事件 payload schema
 
-无论哪种方式，对 relay 上报的仍然只有：
+允许非破坏性变更：
 
-```text
-services[].methods[]
-services[].events[]
-```
+- 增加新方法。
+- 增加新事件。
+- 扩展输入 schema 的可选字段。
+- 增加更明确的健康检查。
+- 改进启动/停止命令，只要行为兼容。
 
-Connector 的内部 transport、进程、hook、安装来源不暴露给远端调用方。
+破坏性变更：
 
-## 权限和授权
+- 改名或删除服务、方法、事件。
+- 收紧输入 schema 导致旧调用失败。
+- 改变事件 payload 必填字段。
+- 改变权限边界，例如从只读查询变成消息监听。
 
-Connector 权限分两类：
+破坏性变更必须提升主版本。
 
-- 本机依赖：例如启动 `codex app-server`、读取微信本地数据库、连接本机 HTTP 端口。
-- 远程能力：例如远程发 prompt、读取消息、审批 action、控制桌面。
+## 本地开发和自定义应用
 
-百积木 Local 不替代 Codex、微信或 Claude Code 自己的权限系统。它只控制这些能力通过 relay 暴露给哪个 workspace、哪个远端 app、哪些 service/method。
-
-安装后默认策略：
-
-1. Connector 已安装但不自动开放给任何 workspace。
-2. 用户必须选择开放的 workspace。
-3. 用户必须选择开放的 service/method。
-4. 高风险 method 默认需要确认或显式策略。
-5. 所有远程调用本地留审计日志。
-
-## WeChat Connector 映射
-
-现有 `wechat-bridge-collector` 已经具备 Connector 雏形：
-
-- 本机 HTTP method server：`http://127.0.0.1:18082/invoke/*`
-- 本机事件入口：`POST http://127.0.0.1:18081/v1/events`
-- 服务注册文件：`service-registration.json`
-- health check：`GET /health`
-- start command：`wechat-bridge-collector start`
-- 自启：`wechat-bridge-collector install-autostart`
-
-迁移后：
-
-- `wechat-bridge-collector` 仓库增加 `connector.json`。
-- 安装入口从 skill 改为百积木 Local Connector 安装器。
-- skill 只保留为诊断、权限异常处理和 legacy 安装 fallback。
-- `service-registration.json` 可以继续作为服务定义来源，或被 `connector.json.services` 引用。
-
-## Codex Connector 映射
-
-Codex Connector 不应通过 PTY 作为主协议。优先使用 `codex app-server`：
+开发中的 Connector 可以从本地目录或 Git 仓库安装：
 
 ```text
-百积木 Local
-  -> Codex Connector
-  -> codex app-server --listen stdio:// 或 unix://
-  -> JSON-RPC thread/turn/item/event
+/Users/me/connectors/my-app
+https://gitee.com/org/my-connector.git#v0.1.0
 ```
 
-远端调用映射：
+自定义应用适合：
 
-- `codexSession.startThread` -> `thread/start`
-- `codexSession.resumeThread` -> `thread/resume`
-- `codexSession.startTurn` -> `turn/start`
-- `codexSession.steerTurn` -> `turn/steer`
-- `codexSession.interruptTurn` -> `turn/interrupt`
+- 临时开发。
+- 用户自己机器上的私有工具。
+- AI 生成的本地脚本服务。
+- 尚未进入市场审核的 Connector。
 
-事件映射：
+自定义应用不应被 Bridge Agent 标成“市场应用”。只有当它拥有稳定 `connectorId`、版本、风险说明、可安装源和市场条目后，才是市场 Connector。
 
-- `thread/started` -> `codexSession.threadStarted`
-- `turn/started` -> `codexSession.turnStarted`
-- `item/agentMessage/delta` -> `codexSession.messageDelta`
-- `item/started` -> `codexSession.itemStarted`
-- `item/completed` -> `codexSession.itemCompleted`
-- `turn/completed` -> `codexSession.turnCompleted`
+## 发布前验收清单
 
-Codex app-server transport 不应直接暴露到公网。Connector 应使用本机 stdio、Unix socket 或 loopback，并通过百积木 Local relay 暴露结构化能力。
+Connector 发布到市场前至少确认：
 
-## CLI 草案
+- `connector.json` 可以被 Bridge Agent 解析。
+- `connector.json.id` 与市场 `connectorId` 一致。
+- `connector.json.version` 与市场 `latestVersion.version` 一致。
+- Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
+- 安装后服务能写入 `agent-config.json`。
+- `startCommand` 可执行，且不会永久阻塞。
+- `healthCheck` 通过。
+- 方法能通过 Bridge Agent 调用。
+- 事件能通过 Bridge Agent 本机事件入口上报。
+- 卸载只删除该 Connector 管理的服务。
+- `risk`、`riskLevel`、`platforms` 与真实行为一致。
 
-```bash
-bjm-local connector search codex
-bjm-local connector install baijimu/codex
-bjm-local connector install github:baijimu/baijimu-connector-codex
-bjm-local connector install ./dist/wechat-connector.bjmconnector
-bjm-local connector list
-bjm-local connector status com.baijimu.connector.wechat
-bjm-local connector start com.baijimu.connector.wechat
-bjm-local connector stop com.baijimu.connector.wechat
-bjm-local connector update com.baijimu.connector.wechat
-bjm-local connector uninstall com.baijimu.connector.wechat
-bjm-local connector logs com.baijimu.connector.wechat
-```
+## 当前实现约束
 
-## 实施路线
+当前 Bridge Agent 实现中：
 
-### 阶段 1：规范和兼容层
+- Connector 清单文件名固定为 `connector.json`。
+- 安装源支持本地目录和 Git URL。
+- Git URL 可以通过 `source#revision` 指定分支或 tag。
+- 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
+- 安装后记录写入本机 connectors 目录下的 `install.json`。
+- Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
+- 服务注册 transport 目前支持 `http`。
 
-- 定义 `connector.json` schema。
-- 在百积木 Local 中加入 Connector 安装目录和状态表。
-- 支持从本地目录安装 Connector。
-- 支持从 `connector.json.services` 生成现有 `ServiceConfig`。
-- 保持现有 `/v1/services` 动态注册能力。
-
-### 阶段 2：WeChat Connector 迁移
-
-- 给 `wechat-bridge-collector` 增加 `connector.json`。
-- 把 `setup`、`probe`、`install-autostart`、`start`、`register` 编排到安装器。
-- 安装完成后自动 health check 和 service 上报。
-- 将 `agent-skill` 改为诊断和 legacy fallback。
-
-### 阶段 3：Codex Connector
-
-- 新建 `baijimu-connector-codex`。
-- 对接 `codex app-server` JSON-RPC。
-- 支持 thread、turn、streamed events、approval 和 interrupt。
-- 通过百积木 Local relay 实现远程控制。
-
-### 阶段 4：市场和 GitHub 安装
-
-- 增加官方 Connector Registry。
-- 支持 GitHub repo/release 安装。
-- 增加签名、checksum、兼容性校验。
-- 增加更新和回滚。
-
-## 与 skill 的关系
-
-Connector 安装器接管标准安装路径。
-
-Skill 不再负责常规安装，而负责：
-
-- 诊断安装失败原因。
-- 引导系统权限异常处理。
-- 解释安全边界。
-- 处理旧版本迁移。
-- 支持没有百积木 Local 安装器的 legacy 场景。
-
-这可以避免每个本机能力都写一套 skill 安装流程，也避免安装行为散落在不可审计的自然语言执行步骤里。
+后续如果新增包签名、checksum、压缩包分发或沙箱运行，应在本文中扩展对应章节。

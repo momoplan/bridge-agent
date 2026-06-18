@@ -101,7 +101,7 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 - WeChat Connector：连接本机微信采集器，注册 `wechatLocal` 查询方法和消息事件。
 - Desktop Control：提供截图、点击、键盘、滚动等桌面能力，当前作为内置应用随客户端分发。
 
-规范草案见仓库根目录的 `BRIDGE_LOCAL_CONNECTOR_SPEC.md`。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
+本地应用和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
 ## 对外暴露的模型
 
