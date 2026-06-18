@@ -76,7 +76,7 @@ async function postJson(url, payload) {
   const body = Buffer.from(JSON.stringify(payload));
   const response = await retry(
     () => requestJson(url, "POST", {
-      authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "content-length": body.length,
     }, body),
