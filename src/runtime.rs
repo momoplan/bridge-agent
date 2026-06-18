@@ -892,6 +892,10 @@ fn describe_process(pid: u32) -> RuntimeProcessInfo {
 
 #[cfg(windows)]
 fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
+    if let Some(process) = describe_process_windows_api(pid) {
+        return process;
+    }
+
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct WindowsProcessInfo {
@@ -943,6 +947,103 @@ fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
         command_line: None,
         running: process_is_running(pid),
     }
+}
+
+#[cfg(windows)]
+fn describe_process_windows_api(pid: u32) -> Option<RuntimeProcessInfo> {
+    if let Some(entry) = find_windows_snapshot_process(pid).flatten() {
+        return Some(RuntimeProcessInfo {
+            pid,
+            parent_pid: entry.parent_pid,
+            name: entry.name,
+            executable_path: query_windows_process_image_path(pid),
+            command_line: None,
+            running: true,
+        });
+    }
+
+    query_windows_process_image_path(pid).map(|executable_path| RuntimeProcessInfo {
+        pid,
+        parent_pid: None,
+        name: Some(path_file_name(&executable_path).to_string()),
+        executable_path: Some(executable_path),
+        command_line: None,
+        running: true,
+    })
+}
+
+#[cfg(windows)]
+struct WindowsSnapshotProcessEntry {
+    parent_pid: Option<u32>,
+    name: Option<String>,
+}
+
+#[cfg(windows)]
+fn find_windows_snapshot_process(pid: u32) -> Option<Option<WindowsSnapshotProcessEntry>> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut found = None;
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        if entry.th32ProcessID == pid {
+            found = Some(WindowsSnapshotProcessEntry {
+                parent_pid: Some(entry.th32ParentProcessID),
+                name: wide_null_terminated_to_string(&entry.szExeFile),
+            });
+            break;
+        }
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    Some(found)
+}
+
+#[cfg(windows)]
+fn query_windows_process_image_path(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; 32768];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) } != 0;
+    unsafe {
+        CloseHandle(handle);
+    }
+    if !ok || size == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..size as usize]))
+}
+
+#[cfg(any(windows, test))]
+fn wide_null_terminated_to_string(value: &[u16]) -> Option<String> {
+    let end = value.iter().position(|ch| *ch == 0).unwrap_or(value.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&value[..end]))
 }
 
 #[cfg(windows)]
@@ -1160,6 +1261,11 @@ fn process_is_running(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    match find_windows_snapshot_process(pid) {
+        Some(found) => return found.is_some(),
+        None => {}
+    }
+
     let filter = format!("PID eq {pid}");
     let Ok(output) = std::process::Command::new("tasklist")
         .args(["/FI", &filter, "/FO", "CSV", "/NH"])
@@ -1187,7 +1293,8 @@ mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, is_bridge_agent_process_name,
         parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
-        runtime_lock_path, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo,
+        runtime_lock_path, wide_null_terminated_to_string, RuntimeInstanceLock,
+        RuntimeLockDocument, RuntimeProcessInfo,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1239,6 +1346,18 @@ mod tests {
 
         assert_eq!(
             parse_tasklist_image_name(output),
+            Some("Bridge Agent.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn wide_process_name_reads_utf16_until_null() {
+        let mut value = "Bridge Agent.exe".encode_utf16().collect::<Vec<_>>();
+        value.push(0);
+        value.extend("ignored".encode_utf16());
+
+        assert_eq!(
+            wide_null_terminated_to_string(&value),
             Some("Bridge Agent.exe".to_string())
         );
     }
