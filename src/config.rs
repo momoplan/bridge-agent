@@ -521,7 +521,7 @@ pub enum RegistrationHealthCheck {
         path: Option<String>,
         #[serde(default)]
         url: Option<String>,
-        #[serde(default = "default_http_method", alias = "httpMethod")]
+        #[serde(default = "default_health_check_http_method", alias = "httpMethod")]
         http_method: String,
         #[serde(default)]
         headers: BTreeMap<String, String>,
@@ -1500,6 +1500,10 @@ fn default_service_registration_enabled() -> bool {
 
 fn default_http_method() -> String {
     "POST".to_string()
+}
+
+fn default_health_check_http_method() -> String {
+    "GET".to_string()
 }
 
 fn default_platform_config() -> PlatformConfig {
