@@ -1,6 +1,7 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink};
+use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
 use crate::services::ServiceRegistry;
 use anyhow::{bail, Context, Result};
@@ -1150,7 +1151,7 @@ fn process_looks_like_bridge_agent(process: &RuntimeProcessInfo) -> bool {
         || process
             .executable_path
             .as_deref()
-            .is_some_and(|path| is_bridge_agent_process_name(path_file_name(path)))
+            .is_some_and(is_bridge_agent_process_name)
         || process
             .command_line
             .as_deref()
@@ -1165,7 +1166,7 @@ fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
 
     if let Some(rest) = command_line.strip_prefix('"') {
         if let Some((executable, _)) = rest.split_once('"') {
-            return is_bridge_agent_process_name(path_file_name(executable));
+            return is_bridge_agent_process_name(executable);
         }
         return false;
     }
@@ -1173,32 +1174,7 @@ fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
     command_line
         .split_whitespace()
         .next()
-        .is_some_and(|executable| is_bridge_agent_process_name(path_file_name(executable)))
-}
-
-fn path_file_name(path: &str) -> &str {
-    path.trim()
-        .trim_matches('"')
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path)
-}
-
-fn is_bridge_agent_process_name(image_name: &str) -> bool {
-    let normalized = image_name
-        .trim()
-        .trim_matches('"')
-        .to_ascii_lowercase()
-        .replace([' ', '_', '-'], "");
-    matches!(
-        normalized.as_str(),
-        "bridgeagent"
-            | "bridgeagent.exe"
-            | "bridgeagentdesktop"
-            | "bridgeagentdesktop.exe"
-            | "bridgeagentservice"
-            | "bridgeagentservice.exe"
-    )
+        .is_some_and(is_bridge_agent_process_name)
 }
 
 #[cfg(windows)]
@@ -1296,10 +1272,10 @@ fn process_is_running(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_url, command_line_starts_with_bridge_agent, is_bridge_agent_process_name,
-        parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
-        runtime_lock_path, wide_null_terminated_to_string, RuntimeInstanceLock,
-        RuntimeLockDocument, RuntimeProcessInfo,
+        build_agent_url, command_line_starts_with_bridge_agent, parse_tasklist_image_name,
+        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_path,
+        wide_null_terminated_to_string, RuntimeInstanceLock, RuntimeLockDocument,
+        RuntimeProcessInfo,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1365,18 +1341,6 @@ mod tests {
             wide_null_terminated_to_string(&value),
             Some("Bridge Agent.exe".to_string())
         );
-    }
-
-    #[test]
-    fn bridge_agent_process_name_allows_only_known_hosts() {
-        assert!(is_bridge_agent_process_name("Bridge Agent"));
-        assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent"));
-        assert!(is_bridge_agent_process_name("bridge-agent.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent-desktop.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
-        assert!(!is_bridge_agent_process_name("node.exe"));
-        assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
     }
 
     #[test]

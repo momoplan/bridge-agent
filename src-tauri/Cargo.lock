@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "anyhow",
  "axum",
@@ -406,6 +406,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -416,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "anyhow",
  "bridge-agent",

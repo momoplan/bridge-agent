@@ -2,6 +2,7 @@ use crate::config::{
     load_config, resolve_config_base_dir, save_config, RuntimeConfig, ServiceConfig,
     ServiceRegistration,
 };
+use crate::process_identity::is_bridge_agent_process_name;
 use crate::runtime::RuntimeRegistryUpdate;
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
@@ -521,23 +522,6 @@ fn split_endpoint(endpoint: &str) -> Option<(&str, u16)> {
     Some((host, port.parse().ok()?))
 }
 
-fn is_bridge_agent_process_name(image_name: &str) -> bool {
-    let normalized = image_name
-        .trim()
-        .trim_matches('"')
-        .to_ascii_lowercase()
-        .replace([' ', '_', '-'], "");
-    matches!(
-        normalized.as_str(),
-        "bridgeagent"
-            | "bridgeagent.exe"
-            | "bridgeagentdesktop"
-            | "bridgeagentdesktop.exe"
-            | "bridgeagentservice"
-            | "bridgeagentservice.exe"
-    )
-}
-
 async fn emit_event(
     State(state): State<EventServerState>,
     headers: HeaderMap,
@@ -840,8 +824,8 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_bridge_agent_process_name, local_endpoint_covers_bind, parse_listening_pid,
-        parse_lsof_listening_owner, parse_tasklist_image_name, LocalEventServer,
+        local_endpoint_covers_bind, parse_listening_pid, parse_lsof_listening_owner,
+        parse_tasklist_image_name, LocalEventServer,
     };
     use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
     use crate::services::ServiceRegistry;
@@ -991,18 +975,6 @@ n*:18081
                 image_name: "bridge-agent".to_string()
             })
         );
-    }
-
-    #[test]
-    fn bridge_agent_process_name_allows_only_known_hosts() {
-        assert!(is_bridge_agent_process_name("Bridge Agent"));
-        assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent"));
-        assert!(is_bridge_agent_process_name("bridge-agent.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent-desktop.exe"));
-        assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
-        assert!(!is_bridge_agent_process_name("node.exe"));
-        assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
     }
 
     #[tokio::test]
