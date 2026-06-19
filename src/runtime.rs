@@ -2,6 +2,8 @@ use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink};
 use crate::process_identity::is_bridge_agent_process_name;
+#[cfg(windows)]
+use crate::process_identity::process_file_name;
 use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
 use crate::services::ServiceRegistry;
 use anyhow::{bail, Context, Result};
@@ -966,7 +968,7 @@ fn describe_process_windows_api(pid: u32) -> Option<RuntimeProcessInfo> {
     query_windows_process_image_path(pid).map(|executable_path| RuntimeProcessInfo {
         pid,
         parent_pid: None,
-        name: Some(path_file_name(&executable_path).to_string()),
+        name: Some(process_file_name(&executable_path).to_string()),
         executable_path: Some(executable_path),
         command_line: None,
         running: true,
