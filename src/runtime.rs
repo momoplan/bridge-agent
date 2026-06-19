@@ -1192,7 +1192,12 @@ fn is_bridge_agent_process_name(image_name: &str) -> bool {
         .replace([' ', '_', '-'], "");
     matches!(
         normalized.as_str(),
-        "bridgeagent" | "bridgeagent.exe" | "bridgeagentservice" | "bridgeagentservice.exe"
+        "bridgeagent"
+            | "bridgeagent.exe"
+            | "bridgeagentdesktop"
+            | "bridgeagentdesktop.exe"
+            | "bridgeagentservice"
+            | "bridgeagentservice.exe"
     )
 }
 
@@ -1368,6 +1373,7 @@ mod tests {
         assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent"));
         assert!(is_bridge_agent_process_name("bridge-agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent-desktop.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
         assert!(!is_bridge_agent_process_name("node.exe"));
         assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
@@ -1376,10 +1382,12 @@ mod tests {
     #[test]
     fn runtime_process_identity_accepts_desktop_executable_name() {
         let process = RuntimeProcessInfo {
-            pid: 18080,
+            pid: 13304,
             parent_pid: None,
-            name: Some("Bridge Agent.exe".to_string()),
-            executable_path: None,
+            name: Some("bridge-agent-desktop.exe".to_string()),
+            executable_path: Some(
+                r#"C:\Program Files\Bridge Agent\bridge-agent-desktop.exe"#.to_string(),
+            ),
             command_line: None,
             running: true,
         };
@@ -1391,6 +1399,9 @@ mod tests {
     fn runtime_process_identity_accepts_quoted_install_path() {
         assert!(command_line_starts_with_bridge_agent(
             r#""C:\Program Files\Bridge Agent\Bridge Agent.exe" --config agent-config.json"#
+        ));
+        assert!(command_line_starts_with_bridge_agent(
+            r#""C:\Program Files\Bridge Agent\bridge-agent-desktop.exe" --config agent-config.json"#
         ));
     }
 

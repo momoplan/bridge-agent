@@ -529,7 +529,12 @@ fn is_bridge_agent_process_name(image_name: &str) -> bool {
         .replace([' ', '_', '-'], "");
     matches!(
         normalized.as_str(),
-        "bridgeagent" | "bridgeagent.exe" | "bridgeagentservice" | "bridgeagentservice.exe"
+        "bridgeagent"
+            | "bridgeagent.exe"
+            | "bridgeagentdesktop"
+            | "bridgeagentdesktop.exe"
+            | "bridgeagentservice"
+            | "bridgeagentservice.exe"
     )
 }
 
@@ -994,6 +999,7 @@ n*:18081
         assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent"));
         assert!(is_bridge_agent_process_name("bridge-agent.exe"));
+        assert!(is_bridge_agent_process_name("bridge-agent-desktop.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
         assert!(!is_bridge_agent_process_name("node.exe"));
         assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));
