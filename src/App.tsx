@@ -767,6 +767,18 @@ function App() {
     };
     return textMap[runtime.status];
   }, [runtime]);
+  const startActionLocked =
+    runtime?.status === "starting" ||
+    runtime?.status === "connecting" ||
+    runtime?.status === "backoff" ||
+    runtime?.status === "stopping";
+  const startActionLabel = runtime
+    ? startActionLocked
+      ? statusLabel
+      : runtime.status !== "stopped"
+        ? "重启"
+        : "启动"
+    : "启动";
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const exposedCapabilityCount =
@@ -1487,7 +1499,7 @@ function App() {
       });
       setSavedServiceSignatures(config.services.map(serviceSignature));
       setRuntime(snapshot);
-      setMessage("Agent 已启动");
+      setMessage(formatStartAgentMessage(snapshot));
       await refreshRuntime();
     } catch (err) {
       const conflict = readRuntimeConflict(err);
@@ -2279,8 +2291,12 @@ function App() {
               </div>
             </div>
             <div className="hero-actions compact-actions">
-              <button className="primary accent" onClick={() => void startAgent()} disabled={busy}>
-                {runtime && runtime.status !== "stopped" ? "重启" : "启动"}
+              <button
+                className="primary accent"
+                onClick={() => void startAgent()}
+                disabled={busy || startActionLocked}
+              >
+                {startActionLabel}
               </button>
               <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
                 停止
@@ -4752,6 +4768,16 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
   });
+}
+
+function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {
+  const messages: Partial<Record<RuntimeStatus, string>> = {
+    starting: "Agent 正在启动",
+    connecting: "Agent 正在连接",
+    backoff: "Agent 正在重连等待",
+    online: "Agent 已启动"
+  };
+  return messages[snapshot.status] ?? "Agent 已启动";
 }
 
 function formatReleaseTime(value: string): string {

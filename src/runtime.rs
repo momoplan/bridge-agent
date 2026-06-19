@@ -95,6 +95,7 @@ pub struct AgentRuntimeManager {
 
 #[derive(Default)]
 struct RuntimeInner {
+    lifecycle: Mutex<()>,
     state: Mutex<ManagedState>,
     logs: Mutex<VecDeque<LogEntry>>,
     file_log: Mutex<Option<FileLogSink>>,
@@ -142,6 +143,10 @@ impl AgentRuntimeManager {
     }
 
     pub async fn start(&self, config: AgentConfig, config_path: &Path) -> Result<RuntimeSnapshot> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        if let Some(snapshot) = self.active_start_snapshot(&config, config_path).await {
+            return Ok(snapshot);
+        }
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
@@ -295,6 +300,7 @@ impl AgentRuntimeManager {
     }
 
     pub async fn stop(&self) -> Result<RuntimeSnapshot> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
         self.stop_if_running().await?;
         Ok(self.snapshot().await)
     }
@@ -346,9 +352,35 @@ impl AgentRuntimeManager {
         Ok(())
     }
 
+    async fn active_start_snapshot(
+        &self,
+        config: &AgentConfig,
+        config_path: &Path,
+    ) -> Option<RuntimeSnapshot> {
+        let state = self.inner.state.lock().await;
+        let snapshot = &state.snapshot;
+        if !runtime_start_is_active(snapshot.status) {
+            return None;
+        }
+        if snapshot.agent_id.as_deref() != Some(config.relay.agent_id.as_str()) {
+            return None;
+        }
+        if snapshot.config_path.as_deref() != Some(&config_path.display().to_string()) {
+            return None;
+        }
+        Some(snapshot.clone())
+    }
+
     async fn push_log(&self, level: &str, message: &str, limit: usize) {
         push_log_entry(&self.inner, limit, level, message).await;
     }
+}
+
+fn runtime_start_is_active(status: RuntimeStatus) -> bool {
+    matches!(
+        status,
+        RuntimeStatus::Starting | RuntimeStatus::Connecting | RuntimeStatus::Backoff
+    )
 }
 
 struct RuntimeRunner {
@@ -844,6 +876,9 @@ pub fn terminate_runtime_lock_owner(
     {
         bail!("runtime lock changed; please retry with the latest conflict information");
     }
+    if document.pid == std::process::id() {
+        bail!("runtime lock is owned by this Bridge Agent process; use the normal stop or restart action instead");
+    }
 
     let process = describe_process(document.pid);
     if process.running {
@@ -853,7 +888,7 @@ pub fn terminate_runtime_lock_owner(
                 document.pid
             );
         }
-        terminate_process_tree(document.pid)?;
+        terminate_process(document.pid)?;
         wait_for_process_exit(document.pid, Duration::from_secs(5))?;
     }
 
@@ -1180,9 +1215,9 @@ fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn terminate_process_tree(pid: u32) -> Result<()> {
+fn terminate_process(pid: u32) -> Result<()> {
     let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .args(["/PID", &pid.to_string(), "/F"])
         .status()
         .with_context(|| format!("failed to run taskkill for pid {pid}"))?;
     if status.success() || !process_is_running(pid) {
@@ -1192,7 +1227,7 @@ fn terminate_process_tree(pid: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn terminate_process_tree(pid: u32) -> Result<()> {
+fn terminate_process(pid: u32) -> Result<()> {
     let _ = std::process::Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
@@ -1210,7 +1245,7 @@ fn terminate_process_tree(pid: u32) -> Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(pid: u32) -> Result<()> {
+fn terminate_process(pid: u32) -> Result<()> {
     bail!("terminating pid {pid} is not supported on this platform");
 }
 
@@ -1276,9 +1311,11 @@ mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, parse_tasklist_image_name,
         process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_path,
-        wide_null_terminated_to_string, RuntimeInstanceLock, RuntimeLockDocument,
-        RuntimeProcessInfo,
+        runtime_start_is_active, terminate_runtime_lock_owner, wide_null_terminated_to_string,
+        AgentRuntimeManager, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo,
+        RuntimeStatus,
     };
+    use crate::config::AgentConfig;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1321,6 +1358,95 @@ mod tests {
         let lock = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
         let active = read_runtime_lock(&lock.path).unwrap();
         assert_eq!(active.pid, std::process::id());
+    }
+
+    #[test]
+    fn runtime_start_active_statuses_are_idempotent_start_targets() {
+        assert!(runtime_start_is_active(RuntimeStatus::Starting));
+        assert!(runtime_start_is_active(RuntimeStatus::Connecting));
+        assert!(runtime_start_is_active(RuntimeStatus::Backoff));
+        assert!(!runtime_start_is_active(RuntimeStatus::Online));
+        assert!(!runtime_start_is_active(RuntimeStatus::Stopped));
+        assert!(!runtime_start_is_active(RuntimeStatus::Stopping));
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_serializes_concurrent_starts() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
+        config.relay.agent_id = "dev_concurrent_start".to_string();
+        config.runtime.event_server_enabled = false;
+        config.runtime.service_registration_enabled = false;
+        config.services.clear();
+
+        let manager = AgentRuntimeManager::new();
+        let first_manager = manager.clone();
+        let second_manager = manager.clone();
+        let first_config = config.clone();
+        let second_config = config;
+        let first_path = config_path.clone();
+        let second_path = config_path.clone();
+
+        let (first, second) = tokio::join!(
+            async move { first_manager.start(first_config, &first_path).await },
+            async move { second_manager.start(second_config, &second_path).await }
+        );
+
+        assert!(first.is_ok(), "first start failed: {first:?}");
+        assert!(second.is_ok(), "second start failed: {second:?}");
+        manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_reuses_active_start_for_duplicate_start() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
+        config.relay.agent_id = "dev_duplicate_start".to_string();
+        config.runtime.event_server_enabled = false;
+        config.runtime.service_registration_enabled = false;
+        config.services.clear();
+
+        let manager = AgentRuntimeManager::new();
+        manager.start(config.clone(), &config_path).await.unwrap();
+        let lock_path = runtime_lock_path(&config_path, &config.relay.agent_id);
+        let before = read_runtime_lock(&lock_path).unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        manager.start(config, &config_path).await.unwrap();
+        let after = read_runtime_lock(&lock_path).unwrap();
+
+        assert_eq!(before.pid, after.pid);
+        assert_eq!(before.started_at_ms, after.started_at_ms);
+        manager.stop().await.unwrap();
+    }
+
+    #[test]
+    fn terminating_conflicting_runtime_refuses_current_process_owner() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let lock_path = runtime_lock_path(&config_path, "dev_1");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let lock = RuntimeLockDocument {
+            pid: std::process::id(),
+            agent_id: "dev_1".to_string(),
+            config_path: config_path.display().to_string(),
+            started_at_ms: 1,
+        };
+        fs::write(&lock_path, serde_json::to_string_pretty(&lock).unwrap()).unwrap();
+
+        let err =
+            terminate_runtime_lock_owner(&lock_path, lock.pid, &lock.agent_id, &lock.config_path)
+                .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("owned by this Bridge Agent process"));
+        assert!(lock_path.exists());
     }
 
     #[test]
