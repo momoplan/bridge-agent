@@ -704,6 +704,14 @@ select:focus {
   margin-bottom: 0;
 }
 
+.compact-method-topline {
+  align-items: center;
+}
+
+.compact-config-button {
+  flex: 0 0 auto;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

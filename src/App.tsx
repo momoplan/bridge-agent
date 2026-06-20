@@ -905,6 +905,14 @@ function App() {
     setExpandedMethodAdvancedKey((current) => (current === key ? null : key));
   }
 
+  function openLocalAppCapabilityConfig(serviceIndex: number, methodIndex?: number) {
+    setExpandedServiceIndex(serviceIndex);
+    if (methodIndex != null) {
+      setExpandedMethodAdvancedKey(buildMethodEditorKey(serviceIndex, methodIndex));
+    }
+    setActiveLocalAppDetailTab("config");
+  }
+
   function applyConfigDocument(document: ConfigDocument) {
     const uiConfig = toUiConfig(document.config);
     setConfigPath(document.config_path);
@@ -3403,13 +3411,15 @@ function App() {
     );
   }
 
-  function renderLocalAppAbilityList(app: LocalAppItem) {
+  function renderLocalAppAbilityList(app: LocalAppItem, canShowConfig: boolean) {
     if (!config) {
       return <div />;
     }
     const services = app.serviceIndexes
-      .map((serviceIndex) => config.services[serviceIndex])
-      .filter((service): service is UiServiceConfig => Boolean(service));
+      .map((serviceIndex) => ({ serviceIndex, service: config.services[serviceIndex] }))
+      .filter((entry): entry is { serviceIndex: number; service: UiServiceConfig } =>
+        Boolean(entry.service)
+      );
 
     if (services.length === 0) {
       return <div className="empty-state compact-empty">应用已安装，但当前没有写入能力。</div>;
@@ -3417,7 +3427,7 @@ function App() {
 
     return (
       <div className="app-ability-list">
-        {services.map((service) => (
+        {services.map(({ serviceIndex, service }) => (
           <div className="app-ability-group" key={service.name}>
             <div className="app-ability-group-head">
               <strong>{service.description || service.name}</strong>
@@ -3426,17 +3436,45 @@ function App() {
               </span>
             </div>
             <div className="method-list compact-method-list">
-              {[...service.methods, ...service.events].map((capability) => (
-                <div className="method-card compact-method-card" key={`${service.name}-${capability.name}`}>
-                  <div className="method-topline">
+              {service.methods.map((method, methodIndex) => (
+                <div className="method-card compact-method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
+                  <div className="method-topline compact-method-topline">
                     <div className="method-copy">
                       <div className="method-title-row">
-                        <h4>{capability.name || "未命名能力"}</h4>
-                        <span className={`service-badge ${capability.enabled ? "enabled" : "disabled"}`}>
-                          {capability.enabled ? "启用" : "停用"}
+                        <h4>{method.name || "未命名方法"}</h4>
+                        <span className="method-badge">{formatMethodTypeLabel(method.binding.type)}</span>
+                        <span className={`service-badge ${method.enabled ? "enabled" : "disabled"}`}>
+                          {method.enabled ? "启用" : "停用"}
                         </span>
                       </div>
-                      <p>{capability.description || "本地能力"}</p>
+                      <p>{method.description || "本地方法"}</p>
+                    </div>
+                    {canShowConfig ? (
+                      <button
+                        className="secondary compact-config-button"
+                        onClick={() => openLocalAppCapabilityConfig(serviceIndex, methodIndex)}
+                      >
+                        配置
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+              {service.events.map((eventConfig, eventIndex) => (
+                <div
+                  className="method-card compact-method-card"
+                  key={`${service.name}-${eventConfig.name}-event-${eventIndex}`}
+                >
+                  <div className="method-topline compact-method-topline">
+                    <div className="method-copy">
+                      <div className="method-title-row">
+                        <h4>{eventConfig.name || "未命名事件"}</h4>
+                        <span className="method-badge">Event</span>
+                        <span className={`service-badge ${eventConfig.enabled ? "enabled" : "disabled"}`}>
+                          {eventConfig.enabled ? "启用" : "停用"}
+                        </span>
+                      </div>
+                      <p>{eventConfig.description || "本地事件"}</p>
                     </div>
                   </div>
                 </div>
@@ -3684,7 +3722,13 @@ function App() {
     const appComputerService = app
       .serviceIndexes.map((serviceIndex) => config.services[serviceIndex])
       .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)));
-    const canShowConfig = showAdvancedSettings || app.kind === "custom";
+    const canShowConfig =
+      showAdvancedSettings ||
+      app.kind === "custom" ||
+      app.serviceIndexes.some((serviceIndex) => {
+        const service = config.services[serviceIndex];
+        return service ? isShellExecService(service) : false;
+      });
     const marketApp = marketConnectorForLocalApp(app);
     const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
     const updateBusy = connectorUpdateBusy === app.id;
@@ -3812,7 +3856,7 @@ function App() {
                 <strong>能力</strong>
                 <small>这些能力会在授权后开放给工作区调用。</small>
               </div>
-              {renderLocalAppAbilityList(app)}
+              {renderLocalAppAbilityList(app, canShowConfig)}
             </div>
           ) : null}
 
