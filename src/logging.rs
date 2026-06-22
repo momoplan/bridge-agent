@@ -20,11 +20,90 @@ pub struct FileLogSink {
     max_files: usize,
 }
 
-#[derive(Serialize)]
-struct FileLogRecord<'a> {
-    timestamp_ms: u64,
-    level: &'a str,
-    message: &'a str,
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LogMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+}
+
+impl LogMetadata {
+    pub fn category(category: impl Into<String>) -> Self {
+        Self {
+            category: Some(category.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn service(mut self, service: impl Into<String>) -> Self {
+        self.service = Some(service.into());
+        self
+    }
+
+    pub fn method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    pub fn event(mut self, event: impl Into<String>) -> Self {
+        self.event = Some(event.into());
+        self
+    }
+
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    pub fn event_id(mut self, event_id: impl Into<String>) -> Self {
+        self.event_id = Some(event_id.into());
+        self
+    }
+
+    pub fn outcome(mut self, outcome: impl Into<String>) -> Self {
+        self.outcome = Some(outcome.into());
+        self
+    }
+
+    pub fn duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    pub fn http(mut self, method: impl Into<String>, path: impl Into<String>, status: u16) -> Self {
+        self.http_method = Some(method.into());
+        self.path = Some(path.into());
+        self.status_code = Some(status);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    pub timestamp_ms: u64,
+    pub level: String,
+    pub message: String,
+    #[serde(flatten)]
+    pub metadata: LogMetadata,
 }
 
 impl FileLogSink {
@@ -53,14 +132,9 @@ impl FileLogSink {
         &self.path
     }
 
-    pub fn append(&self, timestamp_ms: u64, level: &str, message: &str) -> Result<()> {
+    pub fn append(&self, entry: &LogEntry) -> Result<()> {
         self.rotate_if_needed()?;
-        let record = FileLogRecord {
-            timestamp_ms,
-            level,
-            message,
-        };
-        let line = serde_json::to_string(&record)?;
+        let line = serde_json::to_string(entry)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -149,7 +223,13 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        sink.append(123, "info", "hello").unwrap();
+        sink.append(&super::LogEntry {
+            timestamp_ms: 123,
+            level: "info".to_string(),
+            message: "hello".to_string(),
+            metadata: super::LogMetadata::default(),
+        })
+        .unwrap();
         let content = std::fs::read_to_string(sink.path()).unwrap();
         assert!(content.contains("\"timestamp_ms\":123"));
         assert!(content.contains("\"level\":\"info\""));

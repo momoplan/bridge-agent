@@ -1,6 +1,6 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
-use crate::logging::{FileLogConfig, FileLogSink};
+use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::process_identity::is_bridge_agent_process_name;
 #[cfg(windows)]
 use crate::process_identity::process_file_name;
@@ -48,13 +48,6 @@ pub struct RuntimeSnapshot {
     pub log_file_path: Option<String>,
     pub last_error: Option<String>,
     pub last_event_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LogEntry {
-    pub timestamp_ms: u64,
-    pub level: String,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +104,12 @@ struct ManagedState {
 pub(crate) struct RuntimeRegistryUpdate {
     pub(crate) registry: ServiceRegistry,
     pub(crate) services: Vec<crate::protocol::ServiceDefinition>,
+}
+
+pub(crate) struct RuntimeAuditLog {
+    pub(crate) level: String,
+    pub(crate) message: String,
+    pub(crate) metadata: LogMetadata,
 }
 
 impl Default for ManagedState {
@@ -174,12 +173,14 @@ impl AgentRuntimeManager {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
+        let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
         let event_server = LocalEventServer::bind(
             &config.runtime,
             config_path.to_path_buf(),
             Arc::clone(&registry),
             event_tx,
             apply_tx.clone(),
+            audit_tx,
         )
         .await?;
         let snapshot = RuntimeSnapshot {
@@ -216,6 +217,7 @@ impl AgentRuntimeManager {
                         log_limit,
                         "info",
                         &format!("local event server listening on {bind_addr}"),
+                        LogMetadata::category("event_server").outcome("listening"),
                     )
                     .await;
                     if let Err(err) = server.serve(server_shutdown_rx).await {
@@ -224,6 +226,7 @@ impl AgentRuntimeManager {
                             log_limit,
                             "error",
                             &format!("local event server stopped: {err:#}"),
+                            LogMetadata::category("event_server").outcome("stopped"),
                         )
                         .await;
                     }
@@ -237,7 +240,10 @@ impl AgentRuntimeManager {
                 ws_url,
                 registry,
             };
-            if let Err(err) = runner.run(shutdown_rx, &mut apply_rx, &mut event_rx).await {
+            if let Err(err) = runner
+                .run(shutdown_rx, &mut apply_rx, &mut event_rx, &mut audit_rx)
+                .await
+            {
                 runner
                     .update_snapshot(
                         RuntimeStatus::Stopped,
@@ -372,7 +378,7 @@ impl AgentRuntimeManager {
     }
 
     async fn push_log(&self, level: &str, message: &str, limit: usize) {
-        push_log_entry(&self.inner, limit, level, message).await;
+        push_log_entry(&self.inner, limit, level, message, LogMetadata::default()).await;
     }
 }
 
@@ -398,6 +404,7 @@ impl RuntimeRunner {
         mut shutdown_rx: watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
         event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
+        audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         loop {
             if *shutdown_rx.borrow() {
@@ -428,7 +435,7 @@ impl RuntimeRunner {
                     self.push_log("info", "connected to relay").await;
 
                     if let Err(err) = self
-                        .handle_connection(stream, &mut shutdown_rx, apply_rx, event_rx)
+                        .handle_connection(stream, &mut shutdown_rx, apply_rx, event_rx, audit_rx)
                         .await
                     {
                         self.update_snapshot(
@@ -464,6 +471,9 @@ impl RuntimeRunner {
                 Some(update) = apply_rx.recv() => {
                     self.apply_registry_update(update).await;
                 }
+                Some(audit) = audit_rx.recv() => {
+                    self.push_audit_log(audit).await;
+                }
                 _ = sleep(Duration::from_secs(self.config.relay.reconnect_secs)) => {}
             }
         }
@@ -488,6 +498,7 @@ impl RuntimeRunner {
         shutdown_rx: &mut watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
         event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
+        audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         let (mut write, mut read) = stream.split();
         let capabilities = self.current_capabilities().await;
@@ -512,6 +523,7 @@ impl RuntimeRunner {
                 Some(event) = event_rx.recv() => {
                     let service = event.service.clone();
                     let event_name = event.event.clone();
+                    let event_id = event.event_id.clone();
                     let message = AgentMessage::EventEmitted(EventEmitted {
                         event_id: Some(event.event_id),
                         service: event.service,
@@ -520,7 +532,19 @@ impl RuntimeRunner {
                         occurred_at: event.occurred_at,
                     });
                     write_json(&mut write, &message).await?;
-                    self.push_log("info", &format!("event {service}.{event_name} sent to relay")).await;
+                    self.push_log_with_metadata(
+                        "info",
+                        &format!("event {service}.{event_name} sent to relay"),
+                        LogMetadata::category("event")
+                            .service(service)
+                            .event(event_name)
+                            .event_id(event_id)
+                            .outcome("sent"),
+                    )
+                    .await;
+                }
+                Some(audit) = audit_rx.recv() => {
+                    self.push_audit_log(audit).await;
                 }
                 _ = keepalive.tick() => {
                     write.send(Message::Ping(Vec::new().into())).await?;
@@ -537,9 +561,15 @@ impl RuntimeRunner {
                                 AgentMessage::InvokeRequest(request) => {
                                     let service = request.service.clone();
                                     let method = request.method.clone();
-                                    self.push_log(
+                                    let request_id = request.request_id.clone();
+                                    self.push_log_with_metadata(
                                         "info",
                                         &format!("invoke {service}.{method} started"),
+                                        LogMetadata::category("invoke")
+                                            .service(service.clone())
+                                            .method(method.clone())
+                                            .request_id(request_id.clone())
+                                            .outcome("started"),
                                     )
                                     .await;
                                     let result = self
@@ -555,12 +585,18 @@ impl RuntimeRunner {
                                         )
                                         .await;
                                     if result.success {
-                                        self.push_log(
+                                        self.push_log_with_metadata(
                                             "info",
                                             &format!(
                                                 "invoke {service}.{method} succeeded in {}ms",
                                                 result.duration_ms
                                             ),
+                                            LogMetadata::category("invoke")
+                                                .service(service.clone())
+                                                .method(method.clone())
+                                                .request_id(request_id.clone())
+                                                .outcome("succeeded")
+                                                .duration_ms(result.duration_ms),
                                         )
                                         .await;
                                     } else {
@@ -571,12 +607,18 @@ impl RuntimeRunner {
                                                 format!("{}: {}", err.code, err.message)
                                             })
                                             .unwrap_or_else(|| "unknown error".to_string());
-                                        self.push_log(
+                                        self.push_log_with_metadata(
                                             "warn",
                                             &format!(
                                                 "invoke {service}.{method} failed in {}ms: {error}",
                                                 result.duration_ms
                                             ),
+                                            LogMetadata::category("invoke")
+                                                .service(service.clone())
+                                                .method(method.clone())
+                                                .request_id(request_id.clone())
+                                                .outcome("failed")
+                                                .duration_ms(result.duration_ms),
                                         )
                                         .await;
                                     }
@@ -643,16 +685,45 @@ impl RuntimeRunner {
     }
 
     async fn push_log(&self, level: &str, message: &str) {
-        push_log_entry(&self.inner, self.log_limit, level, message).await;
+        push_log_entry(
+            &self.inner,
+            self.log_limit,
+            level,
+            message,
+            LogMetadata::default(),
+        )
+        .await;
+    }
+
+    async fn push_log_with_metadata(&self, level: &str, message: &str, metadata: LogMetadata) {
+        push_log_entry(&self.inner, self.log_limit, level, message, metadata).await;
+    }
+
+    async fn push_audit_log(&self, audit: RuntimeAuditLog) {
+        push_log_entry(
+            &self.inner,
+            self.log_limit,
+            &audit.level,
+            &audit.message,
+            audit.metadata,
+        )
+        .await;
     }
 }
 
-async fn push_log_entry(inner: &RuntimeInner, limit: usize, level: &str, message: &str) {
+async fn push_log_entry(
+    inner: &RuntimeInner,
+    limit: usize,
+    level: &str,
+    message: &str,
+    metadata: LogMetadata,
+) {
     emit_tracing(level, message);
     let entry = LogEntry {
         timestamp_ms: now_ms(),
         level: level.to_string(),
         message: message.to_string(),
+        metadata,
     };
     let mut logs = inner.logs.lock().await;
     logs.push_back(entry.clone());
@@ -666,7 +737,7 @@ async fn push_log_entry(inner: &RuntimeInner, limit: usize, level: &str, message
 async fn append_file_log(inner: &RuntimeInner, entry: &LogEntry) {
     let file_log = inner.file_log.lock().await.clone();
     if let Some(file_log) = file_log {
-        if let Err(err) = file_log.append(entry.timestamp_ms, &entry.level, &entry.message) {
+        if let Err(err) = file_log.append(entry) {
             warn!("failed to append file log: {err:#}");
         }
     }

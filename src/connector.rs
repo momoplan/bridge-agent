@@ -560,7 +560,10 @@ fn enrich_start_command_env<'a>(
 ) {
     let mut path_entries = Vec::new();
     let mut codex_binary = None;
-    for executable_path in executable_paths.into_iter().filter_map(|path| path.as_ref()) {
+    for executable_path in executable_paths
+        .into_iter()
+        .filter_map(|path| path.as_ref())
+    {
         if executable_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -578,7 +581,10 @@ fn enrich_start_command_env<'a>(
         append_split_path(&mut path_entries, Some(&shell_path));
     }
     if let Ok(joined_path) = env::join_paths(path_entries) {
-        env_vars.insert("PATH".to_string(), joined_path.to_string_lossy().to_string());
+        env_vars.insert(
+            "PATH".to_string(),
+            joined_path.to_string_lossy().to_string(),
+        );
     }
     if let Some(codex_binary) = codex_binary {
         env_vars
@@ -606,8 +612,9 @@ fn push_unique_path_entry(entries: &mut Vec<PathBuf>, entry: PathBuf) {
 }
 
 fn resolve_command_path(executable: &str) -> Option<PathBuf> {
-    find_command_in_path(executable, env::var("PATH").ok().as_ref())
-        .or_else(|| login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path))))
+    find_command_in_path(executable, env::var("PATH").ok().as_ref()).or_else(|| {
+        login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
+    })
 }
 
 fn find_command_in_path(executable: &str, path: Option<&String>) -> Option<PathBuf> {
@@ -915,8 +922,7 @@ mod tests {
             .unwrap();
         let ServiceStartCommand::ShellCommand {
             command, cwd, env, ..
-        } =
-            service.start_command.as_ref().unwrap();
+        } = service.start_command.as_ref().unwrap();
         let expected_node = resolve_command_path("node")
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "node".to_string());

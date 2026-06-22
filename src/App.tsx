@@ -45,6 +45,17 @@ interface LogEntry {
   timestamp_ms: number;
   level: string;
   message: string;
+  category?: string;
+  service?: string;
+  method?: string;
+  event?: string;
+  request_id?: string;
+  event_id?: string;
+  outcome?: string;
+  duration_ms?: number;
+  http_method?: string;
+  path?: string;
+  status_code?: number;
 }
 
 interface RelayConfig {
@@ -191,6 +202,7 @@ interface BrowserAuthPollResponse {
   status: "pending" | "authorized" | "denied" | "expired";
   message: string;
   config: AgentConfig | null;
+  runtime: RuntimeSnapshot | null;
 }
 
 interface ConfigDocument {
@@ -619,6 +631,7 @@ function App() {
   const [savedServiceSignatures, setSavedServiceSignatures] = useState<string[]>([]);
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logServiceFilter, setLogServiceFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -633,7 +646,6 @@ function App() {
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
   const [appUpdateCheckState, setAppUpdateCheckState] = useState<AppUpdateCheckState>("checking");
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
-  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
@@ -781,6 +793,24 @@ function App() {
     : "启动";
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
+  const logServiceOptions = useMemo(() => {
+    const names = new Set<string>();
+    config?.services.forEach((service) => {
+      if (service.name.trim()) {
+        names.add(service.name.trim());
+      }
+    });
+    logs.forEach((entry) => {
+      if (entry.service?.trim()) {
+        names.add(entry.service.trim());
+      }
+    });
+    return Array.from(names).sort((left, right) => left.localeCompare(right));
+  }, [config, logs]);
+  const filteredLogs = useMemo(
+    () => logs.filter((entry) => !logServiceFilter || entry.service === logServiceFilter),
+    [logServiceFilter, logs]
+  );
   const exposedCapabilityCount =
     config?.services.reduce(
       (count, service) =>
@@ -874,8 +904,6 @@ function App() {
     }
     setActiveLocalAppDetailTab("overview");
   }, [selectedLocalApp?.id]);
-  const visibleAppUpdate =
-    appUpdate?.updateAvailable && appUpdate.latestVersion !== dismissedUpdateVersion ? appUpdate : null;
   const appVersionLabel =
     appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "检查中";
   const appUpdateStatusLabel = appUpdate
@@ -1364,9 +1392,6 @@ function App() {
             : `当前已经是最新版本 ${status.currentVersion}`
         );
       }
-      if (!status.updateAvailable) {
-        setDismissedUpdateVersion(null);
-      }
     } catch (err) {
       const message = readError(err);
       setAppUpdateCheckState("error");
@@ -1398,7 +1423,6 @@ function App() {
         setMessage(`当前已经是最新版本 ${result.version}`);
         return;
       }
-      setDismissedUpdateVersion(result.version);
       setMessage(
         result.downloadedPath
           ? `更新包 ${result.assetName ?? ""} 已下载到 ${result.downloadedPath}，应用即将退出并自动完成替换。`
@@ -1697,8 +1721,11 @@ function App() {
         const uiConfig = toUiConfig(result.config);
         setConfig(uiConfig);
         setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
+        if (result.runtime) {
+          setRuntime(result.runtime);
+        }
         setBrowserAuth(null);
-        setMessage("浏览器授权成功，relay token 已自动写回配置");
+        setMessage("浏览器授权成功，Agent 已使用新凭证重启");
         return;
       }
       if (result.status === "denied" || result.status === "expired") {
@@ -1707,7 +1734,7 @@ function App() {
       }
     } catch (err) {
       setBrowserAuth(null);
-      setError(readError(err));
+      handleCommandError(err);
     }
   }
 
@@ -2283,9 +2310,8 @@ function App() {
     const needsAuthorization = !config.platform.workspace_id || !config.relay.token;
     const hasRuntimeConflict = Boolean(runtimeConflict);
     const hasRuntimeError = Boolean(runtime?.last_error);
-    const hasUpdate = Boolean(appUpdate?.updateAvailable);
     const hasAttention =
-      needsAuthorization || hasRuntimeConflict || hasRuntimeError || hasDesktopPermissionGap || hasUpdate;
+      needsAuthorization || hasRuntimeConflict || hasRuntimeError || hasDesktopPermissionGap;
 
     return (
       <div className="overview-grid">
@@ -2333,11 +2359,6 @@ function App() {
               value={runtime?.last_error || "无"}
               tone={runtime?.last_error ? "danger" : "normal"}
             />
-            <InfoRow
-              label="更新"
-              value={appUpdateStatusLabel}
-              tone={appUpdateTone}
-            />
           </div>
         </Card>
 
@@ -2376,12 +2397,6 @@ function App() {
                 <button className="attention-item" onClick={() => setActivePage("diagnostics")}>
                   <strong>运行错误</strong>
                   <span>{runtime?.last_error}</span>
-                </button>
-              ) : null}
-              {hasUpdate ? (
-                <button className="attention-item" onClick={() => void installAppUpdate()} disabled={updateBusy}>
-                  <strong>发现新版本 {appUpdate?.latestVersion}</strong>
-                  <span>下载并安装最新版本。</span>
                 </button>
               ) : null}
             </div>
@@ -3927,6 +3942,33 @@ function App() {
     return labels[kind];
   }
 
+  function renderLogMetadata(entry: LogEntry) {
+    const items = [
+      entry.category,
+      entry.service,
+      entry.method,
+      entry.event,
+      entry.outcome,
+      entry.request_id ? `request ${entry.request_id}` : null,
+      entry.event_id ? `event ${entry.event_id}` : null,
+      entry.duration_ms != null ? `${entry.duration_ms}ms` : null,
+      entry.http_method && entry.path ? `${entry.http_method} ${entry.path}` : null,
+      entry.status_code != null ? `${entry.status_code}` : null
+    ].filter((item): item is string => Boolean(item));
+
+    if (items.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="log-meta">
+        {items.map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+    );
+  }
+
   function renderDetailPanel() {
     if (!config) {
       return <div />;
@@ -3938,20 +3980,33 @@ function App() {
           title="日志"
           description="最近运行记录。"
           action={
-            <button className="ghost" onClick={() => void clearLogs()}>
-              清空日志
-            </button>
+            <div className="service-actions log-actions">
+              <select value={logServiceFilter} onChange={(event) => setLogServiceFilter(event.target.value)}>
+                <option value="">全部服务</option>
+                {logServiceOptions.map((serviceName) => (
+                  <option value={serviceName} key={serviceName}>
+                    {serviceName}
+                  </option>
+                ))}
+              </select>
+              <button className="ghost" onClick={() => void clearLogs()}>
+                清空日志
+              </button>
+            </div>
           }
         >
           <div className="log-panel">
-            {logs.length === 0 ? (
+            {filteredLogs.length === 0 ? (
               <div className="empty-state">暂无日志</div>
             ) : (
-              logs.map((entry, index) => (
+              filteredLogs.map((entry, index) => (
                 <div className={`log-line log-${entry.level}`} key={`${entry.timestamp_ms}-${index}`}>
                   <span>{formatTime(entry.timestamp_ms)}</span>
                   <strong>{entry.level.toUpperCase()}</strong>
-                  <p>{entry.message}</p>
+                  <div>
+                    <p>{entry.message}</p>
+                    {renderLogMetadata(entry)}
+                  </div>
                 </div>
               ))
             )}
@@ -4014,15 +4069,38 @@ function App() {
       );
     }
 
+    const isCheckingUpdate = appUpdateCheckState === "checking";
+
     return (
       <Card title="系统" description="版本与运行状态。">
+        <div className="app-version-panel">
+          <div>
+            <span>当前版本</span>
+            <strong>{appVersionLabel}</strong>
+            <p className={appUpdateTone === "danger" ? "danger-text" : undefined}>{appUpdateStatusLabel}</p>
+          </div>
+          <div className="app-version-actions">
+            {appUpdate?.updateAvailable ? (
+              appUpdate.autoDownloadAvailable ? (
+                <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
+                  {updateBusy ? "安装中" : `升级到 ${appUpdate.latestVersion}`}
+                </button>
+              ) : (
+                <button className="primary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+                  打开下载页
+                </button>
+              )
+            ) : null}
+            <button
+              className="secondary"
+              onClick={() => void checkAppUpdate(true)}
+              disabled={updateBusy || isCheckingUpdate}
+            >
+              {isCheckingUpdate ? "检查中" : "检查更新"}
+            </button>
+          </div>
+        </div>
         <div className="status-detail-grid">
-          <InfoRow label="应用版本" value={appVersionLabel} tone={appUpdateCheckState === "error" ? "danger" : "normal"} />
-          <InfoRow
-            label="更新状态"
-            value={appUpdateStatusLabel}
-            tone={appUpdateTone}
-          />
           <InfoRow label="当前状态" value={statusLabel} />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
@@ -4200,12 +4278,6 @@ function App() {
             </button>
           </nav>
 
-          <div className="sidebar-footer">
-            <div className="sidebar-stat">
-              <span>应用版本</span>
-              <strong>{appVersionLabel}</strong>
-            </div>
-          </div>
         </aside>
 
         <section className="main-panel">
@@ -4218,64 +4290,12 @@ function App() {
               </div>
               <div className="page-actions">
                 {activePage === "diagnostics" ? (
-                  <button
-                    className="secondary"
-                    onClick={() => void checkAppUpdate(true)}
-                    disabled={updateBusy}
-                  >
-                    检查更新
-                  </button>
-                ) : null}
-                {activePage === "diagnostics" ? (
                   <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
                     恢复示例
                   </button>
                 ) : null}
               </div>
             </header>
-          ) : null}
-
-          {visibleAppUpdate ? (
-            <div className="update-banner">
-              <div>
-                <p className="update-banner-eyebrow">发现新版本</p>
-                <strong>
-                  当前 {visibleAppUpdate.currentVersion}，可升级到 {visibleAppUpdate.latestVersion}
-                </strong>
-                <p>
-                  {visibleAppUpdate.releaseName || "平台发布"}
-                  {visibleAppUpdate.publishedAt
-                    ? `，发布于 ${formatReleaseTime(visibleAppUpdate.publishedAt)}`
-                    : ""}
-                </p>
-              </div>
-              <div className="update-banner-actions">
-                {visibleAppUpdate.autoDownloadAvailable ? (
-                  <button
-                    className="primary"
-                    onClick={() => void installAppUpdate()}
-                    disabled={updateBusy}
-                  >
-                    下载并安装
-                  </button>
-                ) : (
-                  <button
-                    className="primary"
-                    onClick={() => void openExternalUrl(visibleAppUpdate.releaseUrl)}
-                    disabled={updateBusy}
-                  >
-                    打开下载页
-                  </button>
-                )}
-                <button
-                  className="ghost"
-                  onClick={() => setDismissedUpdateVersion(visibleAppUpdate.latestVersion)}
-                  disabled={updateBusy}
-                >
-                  稍后提醒
-                </button>
-              </div>
-            </div>
           ) : null}
 
           {renderRuntimeConflictPanel()}
@@ -4822,18 +4842,6 @@ function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {
     online: "Agent 已启动"
   };
   return messages[snapshot.status] ?? "Agent 已启动";
-}
-
-function formatReleaseTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  });
 }
 
 function readError(error: unknown): string {

@@ -2,12 +2,14 @@ use crate::config::{
     load_config, resolve_config_base_dir, save_config, RuntimeConfig, ServiceConfig,
     ServiceRegistration,
 };
+use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
-use crate::runtime::RuntimeRegistryUpdate;
+use crate::runtime::{RuntimeAuditLog, RuntimeRegistryUpdate};
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -17,7 +19,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -47,6 +49,7 @@ struct EventServerState {
     registry: Arc<RwLock<ServiceRegistry>>,
     event_tx: mpsc::Sender<LocalEventEmitRequest>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
+    audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
     event_enabled: bool,
     event_token: Option<String>,
@@ -135,6 +138,7 @@ impl LocalEventServer {
         registry: Arc<RwLock<ServiceRegistry>>,
         event_tx: mpsc::Sender<LocalEventEmitRequest>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
+        audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {
         if !config.event_server_enabled && !config.service_registration_enabled {
             return Ok(None);
@@ -162,6 +166,7 @@ impl LocalEventServer {
                 registry,
                 event_tx,
                 apply_tx,
+                audit_tx,
                 config_path,
                 event_enabled: config.event_server_enabled,
                 event_token: token,
@@ -181,6 +186,7 @@ impl LocalEventServer {
     }
 
     pub(crate) async fn serve(self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
+        let state = self.state;
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/events", post(emit_event))
@@ -189,7 +195,8 @@ impl LocalEventServer {
                 "/v1/services/{service}",
                 put(replace_service).delete(delete_service),
             )
-            .with_state(self.state);
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, audit_http_request));
 
         axum::serve(self.listener, app)
             .with_graceful_shutdown(async move {
@@ -202,6 +209,43 @@ impl LocalEventServer {
             .await
             .context("local event server stopped unexpectedly")
     }
+}
+
+async fn audit_http_request(
+    State(state): State<EventServerState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let started = Instant::now();
+    let method = request.method().as_str().to_string();
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    let status = response.status();
+    let status_code = status.as_u16();
+    let level = if status.is_server_error() {
+        "error"
+    } else if status.is_client_error() {
+        "warn"
+    } else {
+        "info"
+    };
+    let outcome = if status.is_success() {
+        "succeeded"
+    } else {
+        "failed"
+    };
+
+    emit_audit_log(
+        &state,
+        level,
+        format!("local api {method} {path} -> {status_code}"),
+        LogMetadata::category("local_api")
+            .http(method, path, status_code)
+            .duration_ms(started.elapsed().as_millis() as u64)
+            .outcome(outcome),
+    );
+
+    response
 }
 
 async fn bind_event_listener(bind: SocketAddr) -> Result<TcpListener> {
@@ -591,6 +635,17 @@ async fn emit_event(
             ),
         })?;
 
+    emit_audit_log(
+        &state,
+        "info",
+        format!("local event {service}.{event} accepted"),
+        LogMetadata::category("local_event")
+            .service(service.to_string())
+            .event(event.to_string())
+            .event_id(event_id.clone())
+            .outcome("accepted"),
+    );
+
     Ok((
         StatusCode::ACCEPTED,
         Json(EmitEventResponse {
@@ -619,6 +674,12 @@ async fn register_service(
     authorize_service_registration(&state, &headers)?;
     let (service, replace) = service_request_parts(request)?;
     let response = upsert_service(&state, service, replace).await?;
+    emit_service_audit_log(
+        &state,
+        "registered",
+        &response.service.name,
+        response.replaced,
+    );
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -638,7 +699,14 @@ async fn replace_service(
             "service name in path and body must match",
         ));
     }
-    Ok(Json(upsert_service(&state, service, true).await?))
+    let response = upsert_service(&state, service, true).await?;
+    emit_service_audit_log(
+        &state,
+        "replaced",
+        &response.service.name,
+        response.replaced,
+    );
+    Ok(Json(response))
 }
 
 async fn delete_service(
@@ -669,11 +737,29 @@ async fn delete_service(
     }
     save_config(&state.config_path, &config).map_err(internal_error)?;
     apply_config_update(&state, &config).await?;
+    emit_service_audit_log(&state, "deleted", service_name, deleted);
     Ok(Json(DeleteServiceResponse {
         service: service_name.to_string(),
         deleted,
         runtime_applied: true,
     }))
+}
+
+fn emit_service_audit_log(
+    state: &EventServerState,
+    outcome: &str,
+    service_name: &str,
+    _replaced: bool,
+) {
+    let metadata = LogMetadata::category("service_registration")
+        .service(service_name.to_string())
+        .outcome(outcome.to_string());
+    emit_audit_log(
+        state,
+        "info",
+        format!("local service {service_name} {outcome}"),
+        metadata,
+    );
 }
 
 fn service_request_parts(
@@ -821,6 +907,19 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     }
 }
 
+fn emit_audit_log(
+    state: &EventServerState,
+    level: impl Into<String>,
+    message: impl Into<String>,
+    metadata: LogMetadata,
+) {
+    let _ = state.audit_tx.send(RuntimeAuditLog {
+        level: level.into(),
+        message: message.into(),
+        metadata,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -861,12 +960,19 @@ mod tests {
         ));
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let (apply_tx, _apply_rx) = mpsc::unbounded_channel();
+        let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
         let config_path = current_dir.join("agent-config.json");
-        let server =
-            LocalEventServer::bind(&config.runtime, config_path, registry, event_tx, apply_tx)
-                .await
-                .unwrap()
-                .unwrap();
+        let server = LocalEventServer::bind(
+            &config.runtime,
+            config_path,
+            registry,
+            event_tx,
+            apply_tx,
+            audit_tx,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let addr = server.bind_addr();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(server.serve(shutdown_rx));
@@ -992,12 +1098,14 @@ n*:18081
         ));
         let (event_tx, _event_rx) = mpsc::channel(1);
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
+        let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
         let server = LocalEventServer::bind(
             &config.runtime,
             config_path.clone(),
             registry,
             event_tx,
             apply_tx,
+            audit_tx,
         )
         .await
         .unwrap()

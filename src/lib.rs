@@ -22,9 +22,10 @@ pub use connector::{
     show_connector, start_connector, stop_connector, uninstall_connector, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorManifest, ConnectorStartResult, ConnectorSummary,
 };
+pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{
-    terminate_runtime_lock_owner, AgentRuntimeManager, LogEntry, RuntimeLockConflict,
-    RuntimeProcessInfo, RuntimeSnapshot, RuntimeStatus,
+    terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeLockConflict, RuntimeProcessInfo,
+    RuntimeSnapshot, RuntimeStatus,
 };
 
 pub fn install_rustls_crypto_provider() -> Result<()> {

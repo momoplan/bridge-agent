@@ -78,6 +78,12 @@ impl From<anyhow::Error> for CommandError {
     }
 }
 
+fn command_error_message(message: impl Into<String>) -> CommandError {
+    CommandError::Message {
+        message: message.into(),
+    }
+}
+
 #[derive(Serialize)]
 struct ConfigDocument {
     config_path: String,
@@ -111,6 +117,7 @@ struct BrowserAuthPollResponse {
     status: String,
     message: String,
     config: Option<AgentConfig>,
+    runtime: Option<RuntimeSnapshot>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -851,7 +858,7 @@ async fn poll_browser_auth(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
     device_code: String,
-) -> Result<BrowserAuthPollResponse, String> {
+) -> Result<BrowserAuthPollResponse, CommandError> {
     let client = Client::new();
     let base_url = config.platform.base_url.trim_end_matches('/');
     let response = client
@@ -863,38 +870,54 @@ async fn poll_browser_auth(
         }))
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| command_error_message(err.to_string()))?;
 
     if !response.status().is_success() {
         let payload = response.text().await.unwrap_or_default();
-        return Err(format!("轮询浏览器授权失败: {payload}"));
+        return Err(command_error_message(format!("轮询浏览器授权失败: {payload}")));
     }
 
     let payload: RawBrowserAuthPollResponse =
-        response.json().await.map_err(|err| err.to_string())?;
+        response
+            .json()
+            .await
+            .map_err(|err| command_error_message(err.to_string()))?;
     if payload.status != "authorized" {
         return Ok(BrowserAuthPollResponse {
             status: payload.status,
             message: payload.message,
             config: None,
+            runtime: None,
         });
     }
 
     let authorized = payload
         .authorized_payload
-        .ok_or_else(|| "授权成功但缺少 authorizedPayload".to_string())?;
+        .ok_or_else(|| command_error_message("授权成功但缺少 authorizedPayload"))?;
     let mut updated = config;
     updated.platform.workspace_id = Some(authorized.workspace_id);
     updated.relay.agent_id = authorized.device_id;
     updated.relay.url = authorized.relay_ws_url;
     updated.relay.token = authorized.agent_token;
-    save_agent_config(&state.config_path, &updated).map_err(|err| err.to_string())?;
+    save_agent_config(&state.config_path, &updated)
+        .map_err(|err| command_error_message(err.to_string()))?;
+    let runtime = restart_agent_from_saved_config(&state)
+        .await
+        .map_err(CommandError::from)?;
 
     Ok(BrowserAuthPollResponse {
         status: payload.status,
         message: payload.message,
         config: Some(updated),
+        runtime: Some(runtime),
     })
+}
+
+async fn restart_agent_from_saved_config(
+    state: &tauri::State<'_, DesktopState>,
+) -> anyhow::Result<RuntimeSnapshot> {
+    state.runtime.stop().await?;
+    state.runtime.start_from_path(&state.config_path).await
 }
 
 #[tauri::command]

@@ -707,7 +707,7 @@ pub fn default_config_path() -> Result<PathBuf> {
     }
 
     #[cfg(windows)]
-    if let Some(path) = windows_service_config_path().filter(|path| path.exists()) {
+    if let Some(path) = windows_service_config_path() {
         return Ok(path);
     }
 

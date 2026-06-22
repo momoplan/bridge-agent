@@ -294,30 +294,6 @@ select:focus {
   text-align: left;
 }
 
-.sidebar-footer {
-  display: grid;
-  gap: 12px;
-  margin-top: auto;
-}
-
-.sidebar-stat {
-  padding: 14px 16px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.62);
-}
-
-.sidebar-stat span {
-  display: block;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.sidebar-stat strong {
-  display: block;
-  margin-top: 6px;
-  font-size: 18px;
-}
-
 .main-panel {
   padding: 22px;
 }
@@ -937,45 +913,6 @@ select:focus {
   color: var(--accent-strong);
 }
 
-.update-banner {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 18px;
-  margin-bottom: 18px;
-  border-radius: 20px;
-  background: linear-gradient(135deg, rgba(22, 163, 167, 0.12), rgba(255, 255, 255, 0.92));
-  border: 1px solid rgba(22, 163, 167, 0.2);
-}
-
-.update-banner strong {
-  display: block;
-  margin: 6px 0 8px;
-}
-
-.update-banner p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-.update-banner-eyebrow {
-  margin-bottom: 4px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent-strong);
-}
-
-.update-banner-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  justify-content: flex-end;
-}
-
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -1509,6 +1446,44 @@ select:focus {
   gap: 12px;
 }
 
+.app-version-panel {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(22, 163, 167, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.app-version-panel span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.app-version-panel strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.app-version-panel p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.app-version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .connection-summary-grid {
   margin-bottom: 18px;
 }
@@ -1538,6 +1513,16 @@ select:focus {
   overflow: auto;
 }
 
+.log-actions {
+  align-items: center;
+}
+
+.log-actions select {
+  min-width: 180px;
+  max-width: 260px;
+  padding: 10px 12px;
+}
+
 .log-line {
   display: grid;
   grid-template-columns: 156px 68px minmax(0, 1fr);
@@ -1554,6 +1539,24 @@ select:focus {
 .log-line p {
   margin: 0;
   word-break: break-word;
+}
+
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.log-meta span {
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(30, 42, 68, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .log-info strong {
@@ -1599,7 +1602,7 @@ select:focus {
   .registered-service-runtime-main,
   .runtime-config-head,
   .permission-banner,
-  .update-banner,
+  .app-version-panel,
   .card-head {
     flex-direction: column;
   }
