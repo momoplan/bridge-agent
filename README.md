@@ -603,7 +603,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 - 通过平台 release service 申请预签名地址，并把构建产物直接上传到国内 OSS/CDN
 - 所有平台上传完成后发布最新版本元数据
 
-工作流在 Windows runner 上会自动完成这些事情：
+如果 Azure Artifact Signing secrets 已配齐，工作流在 Windows runner 上会自动完成这些事情：
 
 - 安装 `artifact-signing-cli`
 - 定位 Azure CLI 和 Windows SDK `signtool.exe`
@@ -611,7 +611,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 - 用 `Get-AuthenticodeSignature` 校验 Windows 产物签名有效
 - 只有验签通过后，才上传 GitHub release 和国内 release service
 
-如果这些 secrets 没配齐，发布任务会直接失败，避免产物只存在 GitHub 或未进入国内更新链路。
+如果这些 secrets 没配齐，Windows 签名步骤会明确跳过并生成未签名安装包；macOS/Linux 和国内更新链路仍会继续发布。配齐 secrets 后会自动恢复签名和验签。
 
 Windows Artifact Signing 资源准备：
 

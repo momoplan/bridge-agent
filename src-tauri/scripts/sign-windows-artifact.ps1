@@ -5,6 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($env:WINDOWS_SIGNING_ENABLED -ne "true") {
+    Write-Host "Windows signing is disabled; leaving artifact unsigned: $FilePath"
+    exit 0
+}
+
 $requiredVariables = @(
     "AZURE_CLIENT_ID",
     "AZURE_CLIENT_SECRET",

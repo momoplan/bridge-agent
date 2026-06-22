@@ -75,7 +75,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Validate Windows signing config
+      - name: Configure Windows signing
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -102,11 +102,14 @@ jobs:
             }
           }
           if ($missing.Count -gt 0) {
-            throw "Missing required Windows signing secrets: $($missing -join ', ')"
+            Write-Warning "Windows signing disabled because these secrets are missing: $($missing -join ', ')"
+            "WINDOWS_SIGNING_ENABLED=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "WINDOWS_SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Prepare Windows signing tools
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -190,13 +193,14 @@ jobs:
           AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
           AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
           AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          WINDOWS_SIGNING_ENABLED: ${{ env.WINDOWS_SIGNING_ENABLED }}
           WINDOWS_SIGNING_DESCRIPTION: "Bridge Agent"
         run: |
           set -euo pipefail
           npm run tauri -- build ${{ matrix.tauri_args }}
 
       - name: Verify Windows signatures
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
