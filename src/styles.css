@@ -688,6 +688,82 @@ select:focus {
   flex: 0 0 auto;
 }
 
+.capability-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.capability-test-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.capability-test-panel label {
+  display: grid;
+  gap: 6px;
+}
+
+.capability-test-panel label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.capability-test-panel textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.capability-test-result {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.capability-test-result.success {
+  border-color: rgba(76, 175, 80, 0.25);
+  background: rgba(76, 175, 80, 0.08);
+}
+
+.capability-test-result.error {
+  border-color: rgba(244, 67, 54, 0.25);
+  background: rgba(244, 67, 54, 0.08);
+}
+
+.capability-test-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.capability-test-result-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.capability-test-result pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

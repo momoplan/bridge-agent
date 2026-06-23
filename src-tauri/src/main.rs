@@ -10,9 +10,13 @@ use bridge_agent::{
     ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
     ServiceStartCommand,
 };
+use bridge_agent::config::resolve_config_base_dir;
+use bridge_agent::protocol::InvokeResult;
+use bridge_agent::services::ServiceRegistry;
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -462,6 +466,41 @@ async fn apply_saved_config_to_runtime(
         .apply_capabilities_from_path(&state.config_path)
         .await
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn test_capability(
+    state: tauri::State<'_, DesktopState>,
+    config: AgentConfig,
+    service: String,
+    method: String,
+    arguments: Value,
+    timeout_secs: Option<u64>,
+) -> Result<InvokeResult, String> {
+    let service = service.trim();
+    let method = method.trim();
+    if service.is_empty() {
+        return Err("服务名不能为空".to_string());
+    }
+    if method.is_empty() {
+        return Err("能力名不能为空".to_string());
+    }
+
+    let config_base_dir = resolve_config_base_dir(&state.config_path);
+    let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir)
+        .await
+        .map_err(|err| format!("构建本地能力运行环境失败: {err}"))?;
+    let request_id = format!("desktop-test-{}", now_ms());
+
+    Ok(registry
+        .invoke(
+            request_id,
+            service,
+            method,
+            arguments,
+            timeout_secs.filter(|value| *value > 0),
+        )
+        .await)
 }
 
 #[tauri::command]
@@ -1888,6 +1927,7 @@ fn main() {
             stop_conflicting_runtime,
             runtime_snapshot,
             apply_saved_config_to_runtime,
+            test_capability,
             list_logs,
             clear_logs,
             reset_example_config,

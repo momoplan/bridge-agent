@@ -205,6 +205,25 @@ interface BrowserAuthPollResponse {
   runtime: RuntimeSnapshot | null;
 }
 
+interface CapabilityInvokeError {
+  code: string;
+  message: string;
+}
+
+interface CapabilityInvokeResult {
+  request_id: string;
+  success: boolean;
+  data?: unknown | null;
+  error?: CapabilityInvokeError | null;
+  duration_ms: number;
+}
+
+interface CapabilityTestState {
+  status: "success" | "error";
+  result?: CapabilityInvokeResult;
+  message?: string;
+}
+
 interface ConfigDocument {
   config_path: string;
   manifest_preview: string;
@@ -653,6 +672,9 @@ function App() {
   const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
   const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
+  const [capabilityTestDrafts, setCapabilityTestDrafts] = useState<Record<string, string>>({});
+  const [capabilityTestResults, setCapabilityTestResults] = useState<Record<string, CapabilityTestState>>({});
+  const [capabilityTestBusy, setCapabilityTestBusy] = useState<string | null>(null);
   const [desktopPermissionBusy, setDesktopPermissionBusy] = useState<"accessibility" | "screen_recording" | null>(
     null
   );
@@ -924,6 +946,10 @@ function App() {
     return `${serviceIndex}:${methodIndex}`;
   }
 
+  function buildCapabilityTestKey(serviceIndex: number, methodIndex: number) {
+    return `${serviceIndex}:${methodIndex}`;
+  }
+
   function isMethodAdvancedOpen(serviceIndex: number, methodIndex: number) {
     return expandedMethodAdvancedKey === buildMethodEditorKey(serviceIndex, methodIndex);
   }
@@ -952,6 +978,8 @@ function App() {
     setServiceNotices({});
     setServiceJsonDrafts({});
     setServiceJsonErrors({});
+    setCapabilityTestDrafts({});
+    setCapabilityTestResults({});
   }
 
   function applySavedServiceDocument(document: ConfigDocument, serviceIndex: number) {
@@ -992,6 +1020,8 @@ function App() {
       delete next[serviceIndex];
       return next;
     });
+    setCapabilityTestDrafts({});
+    setCapabilityTestResults({});
   }
 
   function applyDeletedServiceDocument(document: ConfigDocument, serviceIndex: number) {
@@ -1012,6 +1042,8 @@ function App() {
     setServiceNotices((current) => reindexRecordAfterDelete(current, serviceIndex));
     setServiceJsonDrafts((current) => reindexRecordAfterDelete(current, serviceIndex));
     setServiceJsonErrors((current) => reindexRecordAfterDelete(current, serviceIndex));
+    setCapabilityTestDrafts({});
+    setCapabilityTestResults({});
   }
 
   function formatApplyMessage(base: string, snapshot: RuntimeSnapshot) {
@@ -1349,6 +1381,47 @@ function App() {
       handleCommandError(err);
     } finally {
       setConnectorBusy(null);
+    }
+  }
+
+  async function testCapability(serviceIndex: number, methodIndex: number) {
+    if (!config?.services[serviceIndex]?.methods[methodIndex]) {
+      return;
+    }
+    const service = config.services[serviceIndex];
+    const method = service.methods[methodIndex];
+    const testKey = buildCapabilityTestKey(serviceIndex, methodIndex);
+    const draft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(method);
+    try {
+      setCapabilityTestBusy(testKey);
+      setError("");
+      const argumentsValue = parseJson(draft);
+      const result = await invoke<CapabilityInvokeResult>("test_capability", {
+        config: fromUiConfig(config),
+        service: service.name,
+        method: method.name,
+        arguments: argumentsValue
+      });
+      setCapabilityTestResults((current) => ({
+        ...current,
+        [testKey]: {
+          status: result.success ? "success" : "error",
+          result,
+          message: result.success ? "测试通过" : result.error?.message ?? "测试失败"
+        }
+      }));
+      await refreshRuntime();
+      await refreshRegisteredServiceStatuses();
+    } catch (err) {
+      setCapabilityTestResults((current) => ({
+        ...current,
+        [testKey]: {
+          status: "error",
+          message: readError(err)
+        }
+      }));
+    } finally {
+      setCapabilityTestBusy(null);
     }
   }
 
@@ -3533,30 +3606,71 @@ function App() {
               </span>
             </div>
             <div className="method-list compact-method-list">
-              {service.methods.map((method, methodIndex) => (
-                <div className="method-card compact-method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
-                  <div className="method-topline compact-method-topline">
-                    <div className="method-copy">
-                      <div className="method-title-row">
-                        <h4>{method.name || "未命名方法"}</h4>
-                        <span className="method-badge">{formatMethodTypeLabel(method.binding.type)}</span>
-                        <span className={`service-badge ${method.enabled ? "enabled" : "disabled"}`}>
-                          {method.enabled ? "启用" : "停用"}
-                        </span>
+              {service.methods.map((method, methodIndex) => {
+                const testKey = buildCapabilityTestKey(serviceIndex, methodIndex);
+                const testDraft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(method);
+                const testResult = capabilityTestResults[testKey];
+                const testDisabled = !service.enabled || !method.enabled || capabilityTestBusy != null;
+                return (
+                  <div className="method-card compact-method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
+                    <div className="method-topline compact-method-topline">
+                      <div className="method-copy">
+                        <div className="method-title-row">
+                          <h4>{method.name || "未命名方法"}</h4>
+                          <span className="method-badge">{formatMethodTypeLabel(method.binding.type)}</span>
+                          <span className={`service-badge ${method.enabled ? "enabled" : "disabled"}`}>
+                            {method.enabled ? "启用" : "停用"}
+                          </span>
+                        </div>
+                        <p>{method.description || "本地方法"}</p>
                       </div>
-                      <p>{method.description || "本地方法"}</p>
+                      <div className="capability-card-actions">
+                        <button
+                          className="primary compact-config-button"
+                          onClick={() => void testCapability(serviceIndex, methodIndex)}
+                          disabled={testDisabled}
+                        >
+                          {capabilityTestBusy === testKey ? "测试中" : "测试"}
+                        </button>
+                        {canShowConfig ? (
+                          <button
+                            className="secondary compact-config-button"
+                            onClick={() => openLocalAppCapabilityConfig(serviceIndex, methodIndex)}
+                          >
+                            配置
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                    {canShowConfig ? (
-                      <button
-                        className="secondary compact-config-button"
-                        onClick={() => openLocalAppCapabilityConfig(serviceIndex, methodIndex)}
-                      >
-                        配置
-                      </button>
-                    ) : null}
+                    <div className="capability-test-panel">
+                      <label>
+                        <span>参数 JSON</span>
+                        <textarea
+                          rows={Math.max(3, Math.min(8, testDraft.split("\n").length))}
+                          value={testDraft}
+                          onChange={(event) =>
+                            setCapabilityTestDrafts((current) => ({
+                              ...current,
+                              [testKey]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                      {testResult ? (
+                        <div className={`capability-test-result ${testResult.status}`}>
+                          <div className="capability-test-result-head">
+                            <strong>{testResult.message}</strong>
+                            {testResult.result ? <span>{testResult.result.duration_ms}ms</span> : null}
+                          </div>
+                          {testResult.result ? (
+                            <pre>{prettyJson(testResult.result.success ? testResult.result.data ?? {} : testResult.result.error ?? {})}</pre>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {service.events.map((eventConfig, eventIndex) => (
                 <div
                   className="method-card compact-method-card"
@@ -4804,6 +4918,95 @@ function describeMethodBinding(method: UiMethodConfig): string {
   }
   const url = method.binding.url.trim() || "未填写 URL";
   return `${method.binding.http_method || "HTTP"} ${url}`;
+}
+
+function defaultCapabilityArgumentsText(method: UiMethodConfig): string {
+  try {
+    const schema = parseJson(method.input_schema_text);
+    return prettyJson(sampleJsonValue(schema, method.name));
+  } catch {
+    if (method.binding.type === "shell_command") {
+      return prettyJson({
+        command: ["echo", "bridge-agent local test"]
+      });
+    }
+    return "{}";
+  }
+}
+
+function sampleJsonValue(schema: unknown, propertyName = ""): unknown {
+  if (!schema || typeof schema !== "object") {
+    return {};
+  }
+  const candidate = schema as {
+    type?: unknown;
+    enum?: unknown;
+    required?: unknown;
+    properties?: unknown;
+    items?: unknown;
+    minimum?: unknown;
+    minItems?: unknown;
+  };
+  if (Array.isArray(candidate.enum) && candidate.enum.length > 0) {
+    return candidate.enum[0];
+  }
+
+  const type = Array.isArray(candidate.type) ? candidate.type[0] : candidate.type;
+  if (type === "object" || candidate.properties) {
+    const properties =
+      candidate.properties && typeof candidate.properties === "object"
+        ? (candidate.properties as Record<string, unknown>)
+        : {};
+    const required = Array.isArray(candidate.required)
+      ? candidate.required.filter((item): item is string => typeof item === "string")
+      : Object.keys(properties);
+    const result: Record<string, unknown> = {};
+    for (const key of required) {
+      if (properties[key]) {
+        result[key] = sampleJsonValue(properties[key], key);
+      }
+    }
+    return result;
+  }
+
+  if (type === "array") {
+    if (propertyName === "command") {
+      return ["echo", "bridge-agent local test"];
+    }
+    if (propertyName === "keys") {
+      return ["Enter"];
+    }
+    if (propertyName === "path") {
+      return [
+        { x: 100, y: 100 },
+        { x: 160, y: 160 }
+      ];
+    }
+    return [sampleJsonValue(candidate.items, propertyName)];
+  }
+
+  if (type === "integer") {
+    if (propertyName === "ms") {
+      return 500;
+    }
+    return typeof candidate.minimum === "number" ? candidate.minimum : 1;
+  }
+  if (type === "number") {
+    if (propertyName === "x" || propertyName === "y") {
+      return 100;
+    }
+    return typeof candidate.minimum === "number" ? candidate.minimum : 1;
+  }
+  if (type === "boolean") {
+    return true;
+  }
+  if (type === "string") {
+    if (propertyName === "text") {
+      return "本地测试";
+    }
+    return "";
+  }
+  return {};
 }
 
 function formatDesktopPermissionValue(
