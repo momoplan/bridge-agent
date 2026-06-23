@@ -98,12 +98,14 @@ jobs:
             }
           }
           if ($missing.Count -gt 0) {
-            throw "Missing required SSL.com Windows signing secrets: $($missing -join ', ')"
+            Write-Warning "Windows signing disabled because these SSL.com secrets are missing: $($missing -join ', ')"
+            "WINDOWS_SIGNING_ENABLED=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "WINDOWS_SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
-          "WINDOWS_SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Prepare Windows signing tools
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -230,7 +232,7 @@ jobs:
 
           Download the installer for your platform from the Assets section below:
           - macOS: universal `.dmg` (works on both Intel and Apple Silicon)
-          - Windows: signed `.msi` installer with the WebView2 offline installer bundled
+          - Windows: `.msi` installer with the WebView2 offline installer bundled
           - Linux: `.AppImage` / `.deb` / archive
 
           This release is built automatically by GitHub Actions from the tagged source.
