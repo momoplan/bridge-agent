@@ -11,12 +11,10 @@ if ($env:WINDOWS_SIGNING_ENABLED -ne "true") {
 }
 
 $requiredVariables = @(
-    "AZURE_CLIENT_ID",
-    "AZURE_CLIENT_SECRET",
-    "AZURE_TENANT_ID",
-    "AZURE_ARTIFACT_SIGNING_ENDPOINT",
-    "AZURE_ARTIFACT_SIGNING_ACCOUNT",
-    "AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE"
+    "SSL_COM_USERNAME",
+    "SSL_COM_PASSWORD",
+    "SSL_COM_CREDENTIAL_ID",
+    "SSL_COM_TOTP_SECRET"
 )
 
 $missingVariables = @()
@@ -31,21 +29,34 @@ if ($missingVariables.Count -gt 0) {
 }
 
 $resolvedFile = Resolve-Path -LiteralPath $FilePath
-$artifactSigningCli = (Get-Command artifact-signing-cli -ErrorAction Stop).Source
-$description = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION)) {
+$codeSignTool = if ([string]::IsNullOrWhiteSpace($env:CODESIGN_TOOL_PATH)) {
+    (Get-Command CodeSignTool.bat -ErrorAction Stop).Source
+} else {
+    $env:CODESIGN_TOOL_PATH
+}
+$programName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION)) {
     "Bridge Agent"
 } else {
     $env:WINDOWS_SIGNING_DESCRIPTION
 }
 
 Write-Host "Signing Windows artifact: $resolvedFile"
-& $artifactSigningCli `
-    --endpoint $env:AZURE_ARTIFACT_SIGNING_ENDPOINT `
-    --account $env:AZURE_ARTIFACT_SIGNING_ACCOUNT `
-    --certificate $env:AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE `
-    --description $description `
-    $resolvedFile
+$arguments = @(
+    "sign",
+    "-username=$env:SSL_COM_USERNAME",
+    "-password=$env:SSL_COM_PASSWORD",
+    "-credential_id=$env:SSL_COM_CREDENTIAL_ID",
+    "-totp_secret=$env:SSL_COM_TOTP_SECRET",
+    "-input_file_path=$($resolvedFile.Path)",
+    "-override=true"
+)
+
+if ($resolvedFile.Path.EndsWith(".msi", [StringComparison]::OrdinalIgnoreCase)) {
+    $arguments += "-program_name=$programName"
+}
+
+& $codeSignTool @arguments
 
 if ($LASTEXITCODE -ne 0) {
-    throw "artifact-signing-cli failed with exit code $LASTEXITCODE"
+    throw "CodeSignTool failed with exit code $LASTEXITCODE"
 }

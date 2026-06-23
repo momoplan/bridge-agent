@@ -1056,6 +1056,52 @@ select:focus {
   color: var(--danger);
 }
 
+.browser-auth-panel {
+  margin-top: 14px;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  border-radius: 16px;
+  border: 1px solid rgba(155, 103, 0, 0.18);
+  background: rgba(155, 103, 0, 0.08);
+}
+
+.browser-auth-copy {
+  min-width: 0;
+}
+
+.browser-auth-copy strong {
+  display: block;
+  color: var(--warn);
+  font-size: 16px;
+}
+
+.browser-auth-copy p {
+  margin: 6px 0 10px;
+  color: var(--text);
+}
+
+.browser-auth-copy input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid rgba(30, 42, 68, 0.14);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--text);
+  font: inherit;
+  padding: 0 12px;
+}
+
+.browser-auth-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .runtime-conflict-panel {
   margin-top: 14px;
   padding: 16px;
@@ -1592,8 +1638,14 @@ select:focus {
 }
 
 @media (max-width: 860px) {
+  .browser-auth-panel,
   .runtime-conflict-panel {
     grid-template-columns: 1fr;
+  }
+
+  .browser-auth-actions,
+  .runtime-conflict-actions {
+    justify-content: flex-start;
   }
 
   .page-header,

@@ -1650,6 +1650,47 @@ function App() {
     }
   }
 
+  async function openExternalUrlInEdge(url: string) {
+    try {
+      await invoke("open_in_edge", { url });
+    } catch (err) {
+      setError(readError(err));
+    }
+  }
+
+  async function copyText(text: string, label: string) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        copyTextWithSelection(text);
+      }
+      setMessage(`${label}已复制`);
+    } catch (err) {
+      try {
+        copyTextWithSelection(text);
+        setMessage(`${label}已复制`);
+      } catch {
+        setError(readError(err));
+      }
+    }
+  }
+
+  function copyTextWithSelection(text: string) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (!copied) {
+      throw new Error("复制失败");
+    }
+  }
+
   async function requestDesktopPermission(permission: "accessibility" | "screen_recording") {
     try {
       setDesktopPermissionBusy(permission);
@@ -1700,7 +1741,7 @@ function App() {
         config: fromUiConfig(config)
       });
       setBrowserAuth(session);
-      setMessage(`已打开浏览器授权页，用户码 ${session.userCode}。请在网页里选择工作区并完成批准。`);
+      setMessage(`已打开浏览器授权页，用户码 ${session.userCode}。如果浏览器没有正常弹出，可复制授权链接手动打开。`);
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -2461,6 +2502,47 @@ function App() {
           </button>
           <button className="secondary" onClick={() => setRuntimeConflict(null)} disabled={busy}>
             暂不处理
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderBrowserAuthPanel() {
+    if (!browserAuth) {
+      return null;
+    }
+
+    return (
+      <div className="browser-auth-panel" role="status">
+        <div className="browser-auth-copy">
+          <strong>等待浏览器授权</strong>
+          <p>用户码 {browserAuth.userCode}</p>
+          <input
+            aria-label="授权链接"
+            readOnly
+            value={browserAuth.verificationUriComplete}
+            onFocus={(event) => event.currentTarget.select()}
+          />
+        </div>
+        <div className="browser-auth-actions">
+          <button
+            className="primary"
+            onClick={() => void copyText(browserAuth.verificationUriComplete, "授权链接")}
+          >
+            复制链接
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void openExternalUrlInEdge(browserAuth.verificationUriComplete)}
+          >
+            用 Edge 打开
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void openExternalUrl(browserAuth.verificationUriComplete)}
+          >
+            默认浏览器打开
           </button>
         </div>
       </div>
@@ -4302,9 +4384,7 @@ function App() {
           {runtime?.last_error && activePage !== "diagnostics" ? (
             <div className="alert warning">{runtime.last_error}</div>
           ) : null}
-          {browserAuth ? (
-            <div className="alert warning">等待浏览器授权中，用户码 {browserAuth.userCode}。</div>
-          ) : null}
+          {renderBrowserAuthPanel()}
 
           <div className="page-body">
             {activePage === "overview" ? renderOverviewPage() : null}

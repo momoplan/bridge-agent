@@ -519,6 +519,46 @@ fn open_in_browser(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_in_edge(url: String) -> Result<(), String> {
+    open_url_in_edge(&url)
+}
+
+#[cfg(windows)]
+fn open_url_in_edge(url: &str) -> Result<(), String> {
+    let mut candidates = Vec::new();
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        candidates.push(PathBuf::from(program_files).join("Microsoft\\Edge\\Application\\msedge.exe"));
+    }
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        candidates.push(PathBuf::from(program_files_x86).join("Microsoft\\Edge\\Application\\msedge.exe"));
+    }
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local_app_data).join("Microsoft\\Edge\\Application\\msedge.exe"));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            Command::new(candidate)
+                .arg(url)
+                .spawn()
+                .map_err(|err| format!("打开 Microsoft Edge 失败: {err}"))?;
+            return Ok(());
+        }
+    }
+
+    Command::new("msedge")
+        .arg(url)
+        .spawn()
+        .map_err(|err| format!("未找到 Microsoft Edge，请复制授权链接后手动粘贴到浏览器: {err}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_url_in_edge(url: &str) -> Result<(), String> {
+    open::that(url).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn desktop_permission_status() -> Result<DesktopPermissionStatus, String> {
     Ok(read_desktop_permission_status())
 }
@@ -1123,7 +1163,7 @@ fn current_update_target() -> String {
 fn select_release_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleaseAsset> {
     let preferred_names = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", _) => vec!["_universal.dmg", ".dmg"],
-        ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi", ".exe"],
+        ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi"],
         ("linux", "x86_64") => vec!["_amd64.AppImage", ".AppImage", "_amd64.deb", ".deb"],
         _ => Vec::new(),
     };
@@ -1853,6 +1893,7 @@ fn main() {
             reset_example_config,
             recover_invalid_config,
             open_in_browser,
+            open_in_edge,
             desktop_permission_status,
             registered_service_statuses,
             start_registered_service,

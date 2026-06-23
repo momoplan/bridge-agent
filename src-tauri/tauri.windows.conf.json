@@ -1,7 +1,11 @@
 {
   "bundle": {
     "windows": {
-      "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows-artifact.ps1 %1"
+      "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows-artifact.ps1 %1",
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
     }
   }
 }
