@@ -1110,18 +1110,20 @@ impl HttpMethod {
         let bytes = response.bytes().await?;
         let body = decode_response_body(&bytes, &content_type);
 
+        if let Some(outcome) =
+            normalize_local_http_outcome(status.is_success(), status.as_u16(), &body)
+        {
+            return Ok(outcome);
+        }
+
         let error = if status.is_success() {
             None
         } else {
-            Some(InvokeError {
-                code: "HTTP_REQUEST_FAILED".to_string(),
-                message: format!(
-                    "local endpoint returned status {} for {}.{}",
-                    status.as_u16(),
-                    self.service_name,
-                    self.method_name
-                ),
-            })
+            Some(local_http_error(
+                status.as_u16(),
+                &self.service_name,
+                &self.method_name,
+            ))
         };
 
         Ok(ServiceOutcome {
@@ -1133,6 +1135,91 @@ impl HttpMethod {
             })),
             error,
         })
+    }
+}
+
+fn normalize_local_http_outcome(
+    http_success: bool,
+    status_code: u16,
+    body: &Value,
+) -> Option<ServiceOutcome> {
+    if let Some(success) = body.get("success").and_then(Value::as_bool) {
+        return Some(ServiceOutcome {
+            success: http_success && success,
+            data: body.get("data").cloned(),
+            error: if http_success && success {
+                None
+            } else {
+                Some(extract_invoke_error(body).unwrap_or_else(|| InvokeError {
+                    code: if http_success {
+                        "INVOKE_FAILED".to_string()
+                    } else {
+                        "HTTP_REQUEST_FAILED".to_string()
+                    },
+                    message: if http_success {
+                        "local connector returned success=false".to_string()
+                    } else {
+                        format!("local endpoint returned status {status_code}")
+                    },
+                }))
+            },
+        });
+    }
+
+    let error_code = body.get("errorCode").and_then(Value::as_str)?;
+    let success = http_success && error_code == "0";
+    Some(ServiceOutcome {
+        success,
+        data: body.get("data").cloned(),
+        error: if success {
+            None
+        } else {
+            Some(InvokeError {
+                code: error_code.to_string(),
+                message: body
+                    .get("value")
+                    .or_else(|| body.get("errorMessage"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("local connector returned an error")
+                    .to_string(),
+            })
+        },
+    })
+}
+
+fn extract_invoke_error(body: &Value) -> Option<InvokeError> {
+    let error = body.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    if let Some(message) = error.as_str() {
+        return Some(InvokeError {
+            code: "INVOKE_FAILED".to_string(),
+            message: message.to_string(),
+        });
+    }
+    Some(InvokeError {
+        code: error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("INVOKE_FAILED")
+            .to_string(),
+        message: error
+            .get("message")
+            .or_else(|| error.get("value"))
+            .and_then(Value::as_str)
+            .unwrap_or("local connector returned an error")
+            .to_string(),
+    })
+}
+
+fn local_http_error(status_code: u16, service_name: &str, method_name: &str) -> InvokeError {
+    InvokeError {
+        code: "HTTP_REQUEST_FAILED".to_string(),
+        message: format!(
+            "local endpoint returned status {} for {}.{}",
+            status_code, service_name, method_name
+        ),
     }
 }
 
@@ -3109,7 +3196,10 @@ mod tests {
         AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
         ServiceHealthCheck,
     };
-    use axum::{routing::get, Router};
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
@@ -3432,6 +3522,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_binding_unwraps_local_connector_success_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        Json(json!({
+                            "success": true,
+                            "data": {"messages": [{"text": "hello"}]},
+                            "error": null
+                        }))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-http".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["messages"][0]["text"], "hello");
+        assert!(result.error.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_binding_unwraps_local_connector_failure_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        Json(json!({
+                            "success": false,
+                            "data": null,
+                            "error": {
+                                "code": "LOCAL_FAILED",
+                                "message": "collector failed"
+                            }
+                        }))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-http".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "LOCAL_FAILED");
+        assert_eq!(error.message, "collector failed");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_binding_unwraps_cmodel_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        Json(json!({
+                            "errorCode": "0",
+                            "value": "成功",
+                            "data": {"ok": true}
+                        }))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-http".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["ok"], true);
+        assert!(result.error.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn unknown_service_returns_error() {
         let current_dir = std::env::current_dir().unwrap();
         let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
@@ -3440,5 +3669,29 @@ mod tests {
             .await;
         assert!(!result.success);
         assert_eq!(result.error.unwrap().code, "INVOKE_FAILED");
+    }
+
+    fn http_test_service(url: &str) -> ServiceConfig {
+        ServiceConfig {
+            name: "localTool".to_string(),
+            description: "Local HTTP tool.".to_string(),
+            enabled: true,
+            health_check: None,
+            start_command: None,
+            stop_command: None,
+            methods: vec![MethodConfig {
+                name: "fetch".to_string(),
+                description: "Fetch data.".to_string(),
+                enabled: true,
+                input_schema: json!({"type": "object"}),
+                binding: MethodBinding::Http(HttpBinding {
+                    url: url.to_string(),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(5),
+                }),
+            }],
+            events: Vec::new(),
+        }
     }
 }
