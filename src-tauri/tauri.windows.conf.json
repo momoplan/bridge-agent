@@ -3,7 +3,7 @@
     "windows": {
       "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows-artifact.ps1 %1",
       "webviewInstallMode": {
-        "type": "offlineInstaller",
+        "type": "downloadBootstrapper",
         "silent": true
       }
     }

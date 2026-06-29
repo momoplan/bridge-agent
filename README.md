@@ -16,7 +16,7 @@
 
 - 最新版本页：由 `BRIDGE_AGENT_RELEASE_PAGE_URL` 指向平台下载页
 - macOS：优先下载 universal `.dmg`
-- Windows：下载 `.msi` 安装包；安装包内置 WebView2 离线安装器
+- Windows：下载 `.msi` 安装包；安装时会检测 WebView2，缺失时自动下载并安装
 - Linux：下载 `.AppImage` / `.deb`
 
 如果你只是普通用户，直接下载对应平台安装包即可，不需要本地安装 Rust 或 Node 环境。
@@ -602,7 +602,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 
 工作流在 Windows runner 上会自动完成这些事情：
 
-- 把 WebView2 离线安装器内嵌到 MSI，确保未预装 WebView2 的 Windows 机器也能启动
+- 生成小体积 MSI，安装时检测 WebView2，缺失时自动下载并安装
 - 如果 SSL.com secrets 已配齐，下载并解压 SSL.com eSigner CodeSignTool
 - 如果 SSL.com secrets 已配齐，在 Tauri 打包过程中签名桌面端 exe 和 MSI 安装包
 - 如果 SSL.com secrets 已配齐，用 `Get-AuthenticodeSignature` 校验 Windows 产物签名有效

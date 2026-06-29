@@ -232,7 +232,7 @@ jobs:
 
           Download the installer for your platform from the Assets section below:
           - macOS: universal `.dmg` (works on both Intel and Apple Silicon)
-          - Windows: `.msi` installer with the WebView2 offline installer bundled
+          - Windows: `.msi` installer that downloads WebView2 only when it is missing
           - Linux: `.AppImage` / `.deb` / archive
 
           This release is built automatically by GitHub Actions from the tagged source.
