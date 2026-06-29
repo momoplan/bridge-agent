@@ -181,10 +181,27 @@ fn platform_shell_command(line: String) -> Vec<String> {
 
 #[derive(Debug, Serialize)]
 struct ShellExecData {
+    #[serde(rename = "executionId")]
+    execution_id: String,
+    status: ShellExecutionStatus,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
     timed_out: bool,
+    #[serde(rename = "timeoutSeconds")]
+    timeout_secs: u64,
+    #[serde(rename = "startedAtEpochMs")]
+    started_at_epoch_ms: u64,
+    #[serde(rename = "completedAtEpochMs")]
+    completed_at_epoch_ms: Option<u64>,
+    #[serde(rename = "durationMs")]
+    duration_ms: Option<u64>,
+    #[serde(rename = "recommendedAction", skip_serializing_if = "Option::is_none")]
+    recommended_action: Option<&'static str>,
+    #[serde(rename = "recommendedService", skip_serializing_if = "Option::is_none")]
+    recommended_service: Option<String>,
+    #[serde(rename = "recommendedMethod", skip_serializing_if = "Option::is_none")]
+    recommended_method: Option<&'static str>,
 }
 
 #[derive(Clone, Default)]
@@ -607,7 +624,7 @@ impl ShellMethod {
     async fn invoke(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
         match self.method_name.as_str() {
             "startExecution" => self.start_execution(arguments, timeout_secs).await,
-            "getExecution" => self.get_execution(arguments).await,
+            "queryExecution" => self.get_execution(arguments).await,
             "cancelExecution" => self.cancel_execution(arguments).await,
             _ => self.exec(arguments, timeout_secs).await,
         }
@@ -618,17 +635,24 @@ impl ShellMethod {
             Ok(prepared) => prepared,
             Err(outcome) => return Ok(outcome),
         };
-        let completed = run_shell_command(prepared, None).await;
+        let snapshot = self.executions.start(prepared).await;
+        let snapshot = self
+            .executions
+            .wait_for_terminal_snapshot(&snapshot.execution_id, shell_exec_sync_wait_duration())
+            .await
+            .unwrap_or(snapshot);
+        let running = matches!(snapshot.status, ShellExecutionStatus::Running);
+        let recommended_method = running.then_some("queryExecution");
 
         Ok(ServiceOutcome {
-            success: completed.success,
-            data: Some(serde_json::to_value(ShellExecData {
-                exit_code: completed.exit_code,
-                stdout: completed.stdout,
-                stderr: completed.stderr,
-                timed_out: completed.timed_out,
-            })?),
-            error: completed.error,
+            success: running || snapshot.success.unwrap_or(false),
+            data: Some(serde_json::to_value(ShellExecData::from_snapshot(
+                &snapshot,
+                recommended_method,
+                running.then(|| self.service_name.clone()),
+                recommended_method,
+            ))?),
+            error: if running { None } else { snapshot.error },
         })
     }
 
@@ -819,6 +843,24 @@ impl ShellExecutionStore {
             .map(ShellExecutionRecord::snapshot)
     }
 
+    async fn wait_for_terminal_snapshot(
+        &self,
+        execution_id: &str,
+        wait_duration: Duration,
+    ) -> Option<ShellExecutionSnapshot> {
+        let started = Instant::now();
+        loop {
+            let snapshot = self.get(execution_id).await?;
+            if !matches!(snapshot.status, ShellExecutionStatus::Running) {
+                return Some(snapshot);
+            }
+            if started.elapsed() >= wait_duration {
+                return Some(snapshot);
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     async fn cancel(&self, execution_id: &str) -> Option<ShellExecutionSnapshot> {
         let mut entries = self.entries.lock().await;
         let record = entries.get_mut(execution_id)?;
@@ -846,6 +888,31 @@ impl ShellExecutionStore {
             record.cancel_tx = None;
         }
         prune_shell_executions(&mut entries);
+    }
+}
+
+impl ShellExecData {
+    fn from_snapshot(
+        snapshot: &ShellExecutionSnapshot,
+        recommended_action: Option<&'static str>,
+        recommended_service: Option<String>,
+        recommended_method: Option<&'static str>,
+    ) -> Self {
+        Self {
+            execution_id: snapshot.execution_id.clone(),
+            status: snapshot.status.clone(),
+            exit_code: snapshot.exit_code,
+            stdout: snapshot.stdout.clone(),
+            stderr: snapshot.stderr.clone(),
+            timed_out: snapshot.timed_out,
+            timeout_secs: snapshot.timeout_secs,
+            started_at_epoch_ms: snapshot.started_at_epoch_ms,
+            completed_at_epoch_ms: snapshot.completed_at_epoch_ms,
+            duration_ms: snapshot.duration_ms,
+            recommended_action,
+            recommended_service,
+            recommended_method,
+        }
     }
 }
 
@@ -890,6 +957,16 @@ fn prune_shell_executions(entries: &mut BTreeMap<String, ShellExecutionRecord>) 
         }
         entries.remove(&execution_id);
     }
+}
+
+#[cfg(not(test))]
+fn shell_exec_sync_wait_duration() -> Duration {
+    Duration::from_secs(30)
+}
+
+#[cfg(test)]
+fn shell_exec_sync_wait_duration() -> Duration {
+    Duration::from_millis(100)
 }
 
 async fn run_shell_command(
@@ -3200,7 +3277,7 @@ mod tests {
         routing::{get, post},
         Json, Router,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
@@ -3338,16 +3415,13 @@ mod tests {
                 .methods
                 .iter()
                 .any(|method| method.name == "screenshot")));
-        assert!(definitions.iter().any(|service| service.name == "shellExec"
+        assert!(definitions.iter().any(|service| service.name == "shell"
+            && service.methods.iter().any(|method| method.name == "exec")));
+        assert!(definitions.iter().any(|service| service.name == "shell"
             && service
                 .methods
                 .iter()
-                .any(|method| method.name == "shellExec")));
-        assert!(definitions.iter().any(|service| service.name == "shellExec"
-            && service
-                .methods
-                .iter()
-                .any(|method| method.name == "startExecution")));
+                .any(|method| method.name == "queryExecution")));
     }
 
     #[tokio::test]
@@ -3357,7 +3431,7 @@ mod tests {
         let start = registry
             .invoke(
                 "req-start".to_string(),
-                "shellExec",
+                "shell",
                 "startExecution",
                 json!({"command": ["echo", "bridge-agent-ok"]}),
                 Some(5),
@@ -3375,8 +3449,8 @@ mod tests {
             let result = registry
                 .invoke(
                     "req-get".to_string(),
-                    "shellExec",
-                    "getExecution",
+                    "shell",
+                    "queryExecution",
                     json!({"executionId": execution_id}),
                     None,
                 )
@@ -3394,6 +3468,83 @@ mod tests {
 
         assert_eq!(status, "SUCCEEDED");
         assert!(stdout.contains("bridge-agent-ok"));
+    }
+
+    #[tokio::test]
+    async fn shell_exec_returns_execution_metadata_for_quick_commands() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-shell-quick".to_string(),
+                "shell",
+                "exec",
+                json!({"command": ["echo", "bridge-agent-ok"]}),
+                Some(5),
+            )
+            .await;
+
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert!(data["executionId"].as_str().is_some());
+        assert_eq!(data["status"].as_str(), Some("SUCCEEDED"));
+        assert_eq!(data["exit_code"].as_i64(), Some(0));
+        assert!(data["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bridge-agent-ok"));
+        assert!(data.get("recommendedAction").is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_exec_returns_running_execution_for_long_commands() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-shell-running".to_string(),
+                "shell",
+                "exec",
+                json!({"command": ["sh", "-lc", "sleep 1; echo bridge-agent-late"]}),
+                Some(5),
+            )
+            .await;
+
+        assert!(result.success);
+        let data = result.data.unwrap();
+        let execution_id = data["executionId"].as_str().unwrap().to_string();
+        assert_eq!(data["status"].as_str(), Some("RUNNING"));
+        assert_eq!(data["recommendedAction"].as_str(), Some("queryExecution"));
+        assert_eq!(data["recommendedService"].as_str(), Some("shell"));
+        assert_eq!(data["recommendedMethod"].as_str(), Some("queryExecution"));
+        assert_eq!(data["exit_code"], Value::Null);
+
+        let mut status = String::new();
+        let mut stdout = String::new();
+        for _ in 0..80 {
+            let polled = registry
+                .invoke(
+                    "req-shell-running-poll".to_string(),
+                    "shell",
+                    "queryExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(polled.success);
+            let data = polled.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            if status != "RUNNING" {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(status, "SUCCEEDED");
+        assert!(stdout.contains("bridge-agent-late"));
     }
 
     #[tokio::test]

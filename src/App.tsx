@@ -4732,7 +4732,7 @@ function emptyToNull(value: string): string | null {
 
 function createShellMethod(): UiMethodConfig {
   return {
-    name: "shellExec",
+    name: "exec",
     description: "Run one allowlisted command with optional cwd and env.",
     enabled: true,
     input_schema_text: prettyJson(SHELL_SCHEMA),
@@ -4856,7 +4856,7 @@ function isComputerService(service: Pick<UiServiceConfig, "name">): boolean {
 }
 
 function isShellExecService(service: Pick<UiServiceConfig, "name">): boolean {
-  return service.name.trim().toLowerCase() === "shellexec";
+  return service.name.trim().toLowerCase() === "shell";
 }
 
 function isSystemService(service: Pick<UiServiceConfig, "name">): boolean {

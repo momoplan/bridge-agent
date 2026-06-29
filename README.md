@@ -110,13 +110,13 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 产品语境里可以把概念分成两层：
 
 - 本地应用：用户安装、启动、卸载和授权的对象，例如 Codex Connector、WeChat Connector、桌面控制。
-- 服务：本机配置和协议里的内部对象，例如 `computer`、`shellExec`，以及 Connector 注册的运行项。
-- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`shellExec`。
+- 服务：本机配置和协议里的内部对象，例如 `computer`、`shell`，以及 Connector 注册的运行项。
+- 方法：服务下面的具体动作，例如 `screenshot`、`click`、`exec`、`queryExecution`。
 - 对外能力：启用后的 `service.method`，也就是外部 agent 最终能调用的能力。
 
 所以桌面端默认以“应用”为主概念；“服务”只在开发者配置、CLI、本机注册 API 和协议说明里出现。
 
-当前桌面端把 `computer` 和 `shellExec` 归到内置应用：它们由应用默认配置维护，不能删除或改名；用户可以启停应用，其中 `shellExec` 还允许在开发者配置里调整命令权限、根目录和超时。其他由用户新增的 HTTP / Shell 服务会显示为自定义应用。
+当前桌面端把 `computer` 和 `shell` 归到内置应用：它们由应用默认配置维护，不能删除或改名；用户可以启停应用，其中 `shell` 还允许在开发者配置里调整命令权限、根目录和超时。其他由用户新增的 HTTP / Shell 服务会显示为自定义应用。
 
 开发者配置仍按内部服务独立保存。点击“保存配置”只把当前运行项合并回本地配置文件，不会覆盖其他运行项的未保存草稿；点击“保存并应用”会在保存后刷新正在运行的 runtime registry，并通过当前 WebSocket 连接重新上报 capabilities。Agent 未运行时，保存仍会落盘，下一次启动后生效。
 
@@ -124,12 +124,13 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 
 - `computer.screenshot`
 - `computer.click`
-- `shellExec.shellExec`
+- `shell.exec`
+- `shell.queryExecution`
 
 这里：
 
-- `computer` / `shellExec` 是默认系统服务
-- `screenshot` / `click` / `shellExec` 是方法
+- `computer` / `shell` 是默认系统服务
+- `screenshot` / `click` / `exec` / `queryExecution` 是方法
 
 外部不会看到：
 
@@ -353,7 +354,7 @@ cargo run -- init-config
 
 - 开一个 `computer.screenshot`
 - 再开一个 `computer.click`
-- 使用默认的 `shellExec.shellExec`
+- 使用默认的 `shell.exec`
 - 或者注册一个映射本地 HTTP 服务的自定义方法，例如 `reportTool.generate`
 
 3. 启动 agent
@@ -757,7 +758,8 @@ npm run tauri build -- --debug
 
 适合终端类服务，例如：
 
-- `shellExec.shellExec`
+- `shell.exec`
+- `shell.queryExecution`
 
 本地策略包括：
 
@@ -766,7 +768,7 @@ npm run tauri build -- --debug
 - 超时限制
 - 环境变量白名单
 
-桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shellExec` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。macOS 如果只有 Apple 的 `/usr/bin/python3` shim，且本机尚未同意 Xcode license，该系统命令仍会被 Xcode license 拦截；此时需要用户同意 Xcode license，或安装 Homebrew / pyenv / conda 等独立 Python。
+桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shell` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。macOS 如果只有 Apple 的 `/usr/bin/python3` shim，且本机尚未同意 Xcode license，该系统命令仍会被 Xcode license 拦截；此时需要用户同意 Xcode license，或安装 Homebrew / pyenv / conda 等独立 Python。
 
 对外调用参数统一使用 argv 数组形式：
 
