@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-desktop"
-version = "0.1.61"
+version = "0.1.62"
 description = "Desktop manager for bridge-agent"
 edition = "2021"
 

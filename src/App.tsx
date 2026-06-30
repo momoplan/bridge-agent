@@ -4752,7 +4752,11 @@ function normalizePlatformBaseUrl(value: string): string {
 }
 
 function buildConsoleUrl(config: UiAgentConfig): string {
-  return normalizePlatformBaseUrl(config.platform.base_url);
+  try {
+    return new URL("/manager", normalizePlatformBaseUrl(config.platform.base_url)).toString();
+  } catch {
+    return new URL("/manager", DEFAULT_PLATFORM_BASE_URL).toString();
+  }
 }
 
 function emptyToNull(value: string): string | null {
