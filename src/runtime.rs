@@ -1,6 +1,7 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
+use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 #[cfg(windows)]
 use crate::process_identity::process_file_name;
@@ -207,6 +208,34 @@ impl AgentRuntimeManager {
         let config_path_string = config_path.display().to_string();
         let task = tokio::spawn(async move {
             let _runtime_lock = runtime_lock;
+            let system_sleep_prevention = match SystemSleepPrevention::acquire(
+                "Bridge Agent keeps the relay connection online",
+            ) {
+                Ok(assertion) => {
+                    if assertion.is_active() {
+                        push_log_entry(
+                            &inner,
+                            log_limit,
+                            "info",
+                            "system idle sleep prevention enabled while runtime is active",
+                            LogMetadata::category("power").outcome("enabled"),
+                        )
+                        .await;
+                    }
+                    Some(assertion)
+                }
+                Err(err) => {
+                    push_log_entry(
+                        &inner,
+                        log_limit,
+                        "warn",
+                        &format!("failed to enable system idle sleep prevention: {err:#}"),
+                        LogMetadata::category("power").outcome("failed"),
+                    )
+                    .await;
+                    None
+                }
+            };
             let event_server_task = event_server.map(|server| {
                 let bind_addr = server.bind_addr();
                 let server_inner = Arc::clone(&inner);
@@ -262,6 +291,19 @@ impl AgentRuntimeManager {
                     event_server_task.abort();
                 }
                 let _ = event_server_task.await;
+            }
+            if system_sleep_prevention
+                .as_ref()
+                .is_some_and(SystemSleepPrevention::is_active)
+            {
+                push_log_entry(
+                    &inner,
+                    log_limit,
+                    "info",
+                    "system idle sleep prevention released",
+                    LogMetadata::category("power").outcome("released"),
+                )
+                .await;
             }
         });
 

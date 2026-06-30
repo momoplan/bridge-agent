@@ -2,6 +2,7 @@ pub mod config;
 pub mod connector;
 mod event_server;
 pub mod logging;
+mod power;
 mod process_identity;
 pub mod protocol;
 pub mod runtime;
