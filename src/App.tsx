@@ -788,6 +788,9 @@ function App() {
   }, [config?.services.length]);
 
   const statusLabel = useMemo(() => {
+    if (config && needsBrowserAuthorization(config)) {
+      return "未授权";
+    }
     if (!runtime) {
       return "未加载";
     }
@@ -800,19 +803,23 @@ function App() {
       stopping: "停止中"
     };
     return textMap[runtime.status];
-  }, [runtime]);
+  }, [config, runtime]);
+  const needsAuthorization = config ? needsBrowserAuthorization(config) : false;
   const startActionLocked =
-    runtime?.status === "starting" ||
-    runtime?.status === "connecting" ||
-    runtime?.status === "backoff" ||
-    runtime?.status === "stopping";
-  const startActionLabel = runtime
-    ? startActionLocked
-      ? statusLabel
-      : runtime.status !== "stopped"
-        ? "重启"
-        : "启动"
-    : "启动";
+    !needsAuthorization &&
+    (runtime?.status === "starting" ||
+      runtime?.status === "connecting" ||
+      runtime?.status === "backoff" ||
+      runtime?.status === "stopping");
+  const startActionLabel = needsAuthorization
+    ? "去授权"
+    : !runtime
+      ? "启动"
+      : startActionLocked
+        ? statusLabel
+        : runtime.status !== "stopped"
+          ? "重启"
+          : "启动";
 
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const logServiceOptions = useMemo(() => {
@@ -1594,6 +1601,10 @@ function App() {
     if (!config) {
       return;
     }
+    if (needsBrowserAuthorization(config)) {
+      await beginBrowserAuth();
+      return;
+    }
     try {
       setBusy(true);
       setMessage("");
@@ -1721,6 +1732,17 @@ function App() {
     } catch (err) {
       setError(readError(err));
     }
+  }
+
+  async function openConsole() {
+    if (!config) {
+      return;
+    }
+    if (needsBrowserAuthorization(config)) {
+      await beginBrowserAuth();
+      return;
+    }
+    await openExternalUrl(buildConsoleUrl(config));
   }
 
   async function openExternalUrlInEdge(url: string) {
@@ -2421,9 +2443,8 @@ function App() {
     if (!config) {
       return <div />;
     }
-    const needsAuthorization = !config.platform.workspace_id || !config.relay.token;
     const hasRuntimeConflict = Boolean(runtimeConflict);
-    const hasRuntimeError = Boolean(runtime?.last_error);
+    const hasRuntimeError = Boolean(runtime?.last_error) && !needsAuthorization;
     const hasAttention =
       needsAuthorization || hasRuntimeConflict || hasRuntimeError || hasDesktopPermissionGap;
 
@@ -2452,6 +2473,11 @@ function App() {
               <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
                 重新授权
               </button>
+              {!needsAuthorization ? (
+                <button className="secondary" onClick={() => void openConsole()} disabled={busy}>
+                  打开控制台
+                </button>
+              ) : null}
             </div>
           </div>
         </Card>
@@ -2470,8 +2496,8 @@ function App() {
             <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
             <InfoRow
               label="最近错误"
-              value={runtime?.last_error || "无"}
-              tone={runtime?.last_error ? "danger" : "normal"}
+              value={hasRuntimeError ? runtime?.last_error || "无" : "无"}
+              tone={hasRuntimeError ? "danger" : "normal"}
             />
           </div>
         </Card>
@@ -4305,8 +4331,8 @@ function App() {
           <InfoRow label="配置文件" value={configPath} />
           <InfoRow
             label="最近错误"
-            value={runtime?.last_error || "无"}
-            tone={runtime?.last_error ? "danger" : "normal"}
+            value={needsAuthorization ? "无" : runtime?.last_error || "无"}
+            tone={!needsAuthorization && runtime?.last_error ? "danger" : "normal"}
           />
         </div>
       </Card>
@@ -4495,7 +4521,7 @@ function App() {
           ) : null}
 
           {renderRuntimeConflictPanel()}
-          {runtime?.last_error && activePage !== "diagnostics" ? (
+          {runtime?.last_error && !needsAuthorization && activePage !== "diagnostics" ? (
             <div className="alert warning">{runtime.last_error}</div>
           ) : null}
           {renderBrowserAuthPanel()}
@@ -4723,6 +4749,10 @@ function fromUiEvent(eventConfig: UiEventConfig): EventConfig {
 function normalizePlatformBaseUrl(value: string): string {
   const normalized = value.trim();
   return normalized || DEFAULT_PLATFORM_BASE_URL;
+}
+
+function buildConsoleUrl(config: UiAgentConfig): string {
+  return normalizePlatformBaseUrl(config.platform.base_url);
 }
 
 function emptyToNull(value: string): string | null {
@@ -5115,6 +5145,10 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
   });
+}
+
+function needsBrowserAuthorization(config: UiAgentConfig): boolean {
+  return !config.platform.workspace_id.trim() || !config.relay.token.trim();
 }
 
 function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {

@@ -1883,10 +1883,25 @@ fn auto_start_agent(runtime: AgentRuntimeManager, config_path: PathBuf) {
             eprintln!("failed to prepare bridge-agent config: {err:#}");
             return;
         }
+        match load_agent_config(&config_path) {
+            Ok(config) if !config_is_authorized(&config) => {
+                eprintln!("bridge-agent runtime auto start skipped: device is not authorized yet");
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("failed to load bridge-agent config before auto start: {err:#}");
+                return;
+            }
+        }
         if let Err(err) = runtime.start_from_path(&config_path).await {
             eprintln!("failed to auto start bridge-agent runtime: {err:#}");
         }
     });
+}
+
+fn config_is_authorized(config: &AgentConfig) -> bool {
+    config.platform.workspace_id.is_some() && !config.relay.token.trim().is_empty()
 }
 
 fn main() {
