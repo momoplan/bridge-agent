@@ -47,12 +47,6 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 #[cfg(target_os = "macos")]
 use core_foundation::string::CFString;
-#[cfg(target_os = "macos")]
-use objc2::MainThreadMarker;
-#[cfg(target_os = "macos")]
-use objc2_app_kit::NSApplication;
-#[cfg(target_os = "macos")]
-use tauri::ActivationPolicy;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
 const TRAY_ID: &str = "bridge-agent";
@@ -1895,7 +1889,7 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            TRAY_MENU_SHOW => show_main_window(app),
+            TRAY_MENU_SHOW => show_main_window(app, None),
             TRAY_MENU_QUIT => quit_app(app),
             _ => {}
         })
@@ -1908,7 +1902,7 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
             | TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
-            } => show_main_window(tray.app_handle()),
+            } => show_main_window(tray.app_handle(), None),
             _ => {}
         });
 
@@ -1923,19 +1917,29 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
     Ok(())
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
-    activate_app(app);
+fn show_main_window(app: &tauri::AppHandle, diagnostics: Option<&StartupDiagnostics>) {
+    show_dock_icon(app, diagnostics);
     if let Some(window) = app.get_webview_window("main") {
-        restore_main_window(&window);
+        restore_main_window(&window, diagnostics);
+    } else if let Some(diagnostics) = diagnostics {
+        diagnostics.warn("main window is unavailable during show request");
     }
 
     for delay_ms in [120, 400, 900] {
         let app = app.clone();
+        let diagnostics = diagnostics.cloned();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            activate_app(&app);
+            if let Some(diagnostics) = diagnostics.as_ref() {
+                diagnostics.info(format!("retrying main window restore after {delay_ms}ms"));
+            }
+            show_dock_icon(&app, diagnostics.as_ref());
             if let Some(window) = app.get_webview_window("main") {
-                restore_main_window(&window);
+                restore_main_window(&window, diagnostics.as_ref());
+            } else if let Some(diagnostics) = diagnostics.as_ref() {
+                diagnostics.warn(format!(
+                    "main window is unavailable during {delay_ms}ms restore retry"
+                ));
             }
         });
     }
@@ -1962,20 +1966,35 @@ fn show_main_window_deferred(
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         run_ui_action(&diagnostics, reason, || {
-            show_main_window(&app);
+            show_main_window(&app, Some(&diagnostics));
         });
     });
 }
 
-fn restore_main_window(window: &tauri::WebviewWindow) {
+fn restore_main_window(window: &tauri::WebviewWindow, diagnostics: Option<&StartupDiagnostics>) {
     if let Err(err) = window.show() {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.error(format!("failed to show main window: {err:#}"));
+        }
         eprintln!("failed to show main window: {err}");
+    } else if let Some(diagnostics) = diagnostics {
+        diagnostics.info("main window show completed");
     }
     if let Err(err) = window.unminimize() {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.error(format!("failed to unminimize main window: {err:#}"));
+        }
         eprintln!("failed to unminimize main window: {err}");
+    } else if let Some(diagnostics) = diagnostics {
+        diagnostics.info("main window unminimize completed");
     }
     if let Err(err) = window.set_focus() {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.error(format!("failed to focus main window: {err:#}"));
+        }
         eprintln!("failed to focus main window: {err}");
+    } else if let Some(diagnostics) = diagnostics {
+        diagnostics.info("main window focus completed");
     }
 }
 
@@ -1987,35 +2006,24 @@ fn hide_to_tray(window: &tauri::Window) {
 }
 
 #[cfg(target_os = "macos")]
-fn activate_app(app: &tauri::AppHandle) {
-    if let Err(err) = app.set_activation_policy(ActivationPolicy::Regular) {
-        eprintln!("failed to set regular activation policy: {err}");
-    }
+fn show_dock_icon(app: &tauri::AppHandle, diagnostics: Option<&StartupDiagnostics>) {
     if let Err(err) = app.set_dock_visibility(true) {
-        eprintln!("failed to show dock icon: {err}");
-    }
-    if let Err(err) = app.run_on_main_thread(move || {
-        if let Some(mtm) = MainThreadMarker::new() {
-            let ns_app = NSApplication::sharedApplication(mtm);
-            ns_app.activate();
-            #[allow(deprecated)]
-            ns_app.activateIgnoringOtherApps(true);
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.error(format!("failed to show dock icon: {err:#}"));
         }
-    }) {
-        eprintln!("failed to activate app on main thread: {err}");
+        eprintln!("failed to show dock icon: {err}");
+    } else if let Some(diagnostics) = diagnostics {
+        diagnostics.info("dock icon show completed");
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn activate_app(_app: &tauri::AppHandle) {}
+fn show_dock_icon(_app: &tauri::AppHandle, _diagnostics: Option<&StartupDiagnostics>) {}
 
 #[cfg(target_os = "macos")]
 fn hide_dock_icon(app: &tauri::AppHandle) {
     if let Err(err) = app.set_dock_visibility(false) {
         eprintln!("failed to hide dock icon: {err}");
-    }
-    if let Err(err) = app.set_activation_policy(ActivationPolicy::Accessory) {
-        eprintln!("failed to set accessory activation policy: {err}");
     }
 }
 
@@ -2114,7 +2122,7 @@ fn main() {
             move |app, _argv, _cwd| {
                 let diagnostics = single_instance_diagnostics.clone();
                 run_ui_action(&diagnostics, "single instance show main window", || {
-                    show_main_window(app);
+                    show_main_window(app, Some(&diagnostics));
                 });
             },
         ))
