@@ -18,6 +18,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -55,6 +58,7 @@ const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
+const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 
 struct DesktopState {
     runtime: AgentRuntimeManager,
@@ -1744,6 +1748,116 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Debug)]
+struct StartupDiagnostics {
+    primary_path: PathBuf,
+    fallback_path: PathBuf,
+}
+
+impl StartupDiagnostics {
+    fn bootstrap() -> Self {
+        Self {
+            primary_path: std::env::temp_dir().join(STARTUP_LOG_FILE_NAME),
+            fallback_path: std::env::temp_dir().join(STARTUP_LOG_FILE_NAME),
+        }
+    }
+
+    fn for_config_path(config_path: &Path) -> Self {
+        let primary_path = resolve_config_base_dir(config_path).join(STARTUP_LOG_FILE_NAME);
+        Self {
+            primary_path,
+            fallback_path: std::env::temp_dir().join(STARTUP_LOG_FILE_NAME),
+        }
+    }
+
+    fn info(&self, message: impl AsRef<str>) {
+        self.write("INFO", message.as_ref());
+    }
+
+    fn warn(&self, message: impl AsRef<str>) {
+        self.write("WARN", message.as_ref());
+    }
+
+    fn error(&self, message: impl AsRef<str>) {
+        self.write("ERROR", message.as_ref());
+    }
+
+    fn write(&self, level: &str, message: &str) {
+        let line = format!("{} [{level}] {message}\n", now_ms());
+        if append_startup_log_line(&self.primary_path, &line).is_err()
+            && self.fallback_path != self.primary_path
+        {
+            let _ = append_startup_log_line(&self.fallback_path, &line);
+        }
+        eprint!("{line}");
+    }
+}
+
+fn append_startup_log_line(path: &Path, line: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())
+}
+
+fn install_panic_diagnostics(diagnostics: StartupDiagnostics) {
+    panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown location".to_string());
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        diagnostics.error(format!("panic at {location}: {payload}"));
+    }));
+}
+
+fn log_startup_environment(diagnostics: &StartupDiagnostics, config_path: &Path) {
+    diagnostics.info(format!(
+        "starting Bridge Agent desktop version {}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    diagnostics.info(format!("config path: {}", config_path.display()));
+    match std::env::current_exe() {
+        Ok(path) => {
+            diagnostics.info(format!("current exe: {}", path.display()));
+            if is_probably_macos_translocated_path(&path) {
+                diagnostics.warn(
+                    "app appears to be running from /private/var/folders; move Bridge Agent.app to /Applications and launch it there before collecting final diagnostics",
+                );
+            }
+        }
+        Err(err) => diagnostics.warn(format!("failed to determine current exe: {err}")),
+    }
+    match std::env::current_dir() {
+        Ok(path) => diagnostics.info(format!("current dir: {}", path.display())),
+        Err(err) => diagnostics.warn(format!("failed to determine current dir: {err}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_probably_macos_translocated_path(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.starts_with("/private/var/folders/") || path.starts_with("/var/folders/")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_probably_macos_translocated_path(_path: &Path) -> bool {
+    false
+}
+
 #[cfg(target_os = "macos")]
 fn prompt_accessibility_permission() {
     let key = CFString::new("AXTrustedCheckOptionPrompt");
@@ -1752,7 +1866,8 @@ fn prompt_accessibility_permission() {
     let _ = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
 }
 
-fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Result<()> {
+    diagnostics.info("setting up tray icon");
     let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "打开 Bridge Agent", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -1782,9 +1897,12 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     if let Some(icon) = icon {
         tray = tray.icon(icon);
+    } else {
+        diagnostics.warn("default window icon is unavailable; building tray without an icon");
     }
 
     tray.build(app)?;
+    diagnostics.info("tray icon setup completed");
     Ok(())
 }
 
@@ -1877,25 +1995,41 @@ fn quit_app(app: &tauri::AppHandle) {
     });
 }
 
-fn auto_start_agent(runtime: AgentRuntimeManager, config_path: PathBuf) {
+fn auto_start_agent(
+    runtime: AgentRuntimeManager,
+    config_path: PathBuf,
+    diagnostics: StartupDiagnostics,
+) {
     tauri::async_runtime::spawn(async move {
+        diagnostics.info(format!(
+            "auto start preparing config at {}",
+            config_path.display()
+        ));
         if let Err(err) = ensure_config_exists(&config_path) {
-            eprintln!("failed to prepare bridge-agent config: {err:#}");
+            diagnostics.error(format!(
+                "failed to prepare bridge-agent config at {}: {err:#}",
+                config_path.display()
+            ));
             return;
         }
         match load_agent_config(&config_path) {
             Ok(config) if !config_is_authorized(&config) => {
-                eprintln!("bridge-agent runtime auto start skipped: device is not authorized yet");
+                diagnostics.info("bridge-agent runtime auto start skipped: device is not authorized yet");
                 return;
             }
-            Ok(_) => {}
+            Ok(_) => diagnostics.info("bridge-agent config loaded for auto start"),
             Err(err) => {
-                eprintln!("failed to load bridge-agent config before auto start: {err:#}");
+                diagnostics.error(format!(
+                    "failed to load bridge-agent config before auto start from {}: {err:#}",
+                    config_path.display()
+                ));
                 return;
             }
         }
         if let Err(err) = runtime.start_from_path(&config_path).await {
-            eprintln!("failed to auto start bridge-agent runtime: {err:#}");
+            diagnostics.error(format!("failed to auto start bridge-agent runtime: {err:#}"));
+        } else {
+            diagnostics.info("bridge-agent runtime auto start completed");
         }
     });
 }
@@ -1905,10 +2039,29 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
 }
 
 fn main() {
-    install_rustls_crypto_provider().expect("failed to install rustls provider");
-    let config_path = default_config_path().expect("failed to determine default config path");
+    let bootstrap_diagnostics = StartupDiagnostics::bootstrap();
+    install_panic_diagnostics(bootstrap_diagnostics.clone());
+
+    if let Err(err) = install_rustls_crypto_provider() {
+        bootstrap_diagnostics.error(format!("failed to install rustls provider: {err:#}"));
+        std::process::exit(1);
+    }
+
+    let config_path = match default_config_path() {
+        Ok(path) => path,
+        Err(err) => {
+            bootstrap_diagnostics
+                .error(format!("failed to determine default config path: {err:#}"));
+            std::process::exit(1);
+        }
+    };
+    let diagnostics = StartupDiagnostics::for_config_path(&config_path);
+    install_panic_diagnostics(diagnostics.clone());
+    log_startup_environment(&diagnostics, &config_path);
+
     let runtime = AgentRuntimeManager::new();
     let quitting = Arc::new(AtomicBool::new(false));
+    let setup_diagnostics = diagnostics.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
@@ -1919,8 +2072,18 @@ fn main() {
             quitting: Arc::clone(&quitting),
         })
         .setup(move |app| {
-            setup_tray(app)?;
-            auto_start_agent(runtime.clone(), config_path.clone());
+            setup_diagnostics.info("tauri setup started");
+            if let Err(err) = setup_tray(app, &setup_diagnostics) {
+                setup_diagnostics.error(format!(
+                    "failed to setup tray; continuing without tray icon: {err:#}"
+                ));
+            }
+            auto_start_agent(
+                runtime.clone(),
+                config_path.clone(),
+                setup_diagnostics.clone(),
+            );
+            setup_diagnostics.info("tauri setup completed");
             Ok(())
         })
         .on_window_event(move |window, event| {
@@ -1970,13 +2133,18 @@ fn main() {
             install_app_update
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| match event {
+        .unwrap_or_else(|err| {
+            diagnostics.error(format!("error while building tauri application: {err:#}"));
+            std::process::exit(1);
+        })
+        .run(move |app, event| match event {
             tauri::RunEvent::Ready => {
+                diagnostics.info("tauri runtime ready");
                 show_main_window(app);
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
+                diagnostics.info("tauri reopen event received");
                 show_main_window(app);
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
