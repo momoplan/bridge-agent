@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use bridge_agent::config::resolve_config_base_dir;
+use bridge_agent::protocol::InvokeResult;
+use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     install_connector_from_path, install_rustls_crypto_provider, list_connectors,
@@ -10,9 +13,6 @@ use bridge_agent::{
     ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
     ServiceStartCommand,
 };
-use bridge_agent::config::resolve_config_base_dir;
-use bridge_agent::protocol::InvokeResult;
-use bridge_agent::services::ServiceRegistry;
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::panic;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -570,13 +570,17 @@ fn open_in_edge(url: String) -> Result<(), String> {
 fn open_url_in_edge(url: &str) -> Result<(), String> {
     let mut candidates = Vec::new();
     if let Ok(program_files) = std::env::var("ProgramFiles") {
-        candidates.push(PathBuf::from(program_files).join("Microsoft\\Edge\\Application\\msedge.exe"));
+        candidates
+            .push(PathBuf::from(program_files).join("Microsoft\\Edge\\Application\\msedge.exe"));
     }
     if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
-        candidates.push(PathBuf::from(program_files_x86).join("Microsoft\\Edge\\Application\\msedge.exe"));
+        candidates.push(
+            PathBuf::from(program_files_x86).join("Microsoft\\Edge\\Application\\msedge.exe"),
+        );
     }
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local_app_data).join("Microsoft\\Edge\\Application\\msedge.exe"));
+        candidates
+            .push(PathBuf::from(local_app_data).join("Microsoft\\Edge\\Application\\msedge.exe"));
     }
 
     for candidate in candidates {
@@ -703,7 +707,11 @@ async fn list_market_connector_apps(
         let wrapped: RawLocalAppMarketResponse<Vec<RawMarketConnectorApp>> =
             serde_json::from_value(payload)
                 .map_err(|err| format!("解析 lowcode localApp 市场响应失败: {err}"))?;
-        if wrapped.error_code.as_deref().is_some_and(|code| code != "0") {
+        if wrapped
+            .error_code
+            .as_deref()
+            .is_some_and(|code| code != "0")
+        {
             return Err(format!(
                 "lowcode localApp 市场返回失败: {}",
                 wrapped.value.unwrap_or_else(|| "未知错误".to_string())
@@ -957,14 +965,15 @@ async fn poll_browser_auth(
 
     if !response.status().is_success() {
         let payload = response.text().await.unwrap_or_default();
-        return Err(command_error_message(format!("轮询浏览器授权失败: {payload}")));
+        return Err(command_error_message(format!(
+            "轮询浏览器授权失败: {payload}"
+        )));
     }
 
-    let payload: RawBrowserAuthPollResponse =
-        response
-            .json()
-            .await
-            .map_err(|err| command_error_message(err.to_string()))?;
+    let payload: RawBrowserAuthPollResponse = response
+        .json()
+        .await
+        .map_err(|err| command_error_message(err.to_string()))?;
     if payload.status != "authorized" {
         return Ok(BrowserAuthPollResponse {
             status: payload.status,
@@ -1682,7 +1691,10 @@ async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSourc
 
 impl From<RawMarketConnectorApp> for MarketConnectorApp {
     fn from(value: RawMarketConnectorApp) -> Self {
-        let source = with_revision(&value.latest_version.source, value.latest_version.revision.as_deref());
+        let source = with_revision(
+            &value.latest_version.source,
+            value.latest_version.revision.as_deref(),
+        );
         Self {
             id: value.id,
             connector_id: value.connector_id,
@@ -1818,7 +1830,12 @@ fn install_panic_diagnostics(diagnostics: StartupDiagnostics) {
             .payload()
             .downcast_ref::<&str>()
             .copied()
-            .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
             .unwrap_or("non-string panic payload");
         diagnostics.error(format!("panic at {location}: {payload}"));
     }));
@@ -1924,6 +1941,32 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn run_ui_action(diagnostics: &StartupDiagnostics, label: &str, action: impl FnOnce()) {
+    diagnostics.info(format!("{label} started"));
+    if panic::catch_unwind(AssertUnwindSafe(action)).is_err() {
+        diagnostics.error(format!("{label} panicked; continuing"));
+    } else {
+        diagnostics.info(format!("{label} completed"));
+    }
+}
+
+fn show_main_window_deferred(
+    app: tauri::AppHandle,
+    diagnostics: StartupDiagnostics,
+    reason: &'static str,
+    delay_ms: u64,
+) {
+    diagnostics.info(format!(
+        "deferring show main window for {reason} by {delay_ms}ms"
+    ));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        run_ui_action(&diagnostics, reason, || {
+            show_main_window(&app);
+        });
+    });
+}
+
 fn restore_main_window(window: &tauri::WebviewWindow) {
     if let Err(err) = window.show() {
         eprintln!("failed to show main window: {err}");
@@ -2014,7 +2057,8 @@ fn auto_start_agent(
         }
         match load_agent_config(&config_path) {
             Ok(config) if !config_is_authorized(&config) => {
-                diagnostics.info("bridge-agent runtime auto start skipped: device is not authorized yet");
+                diagnostics
+                    .info("bridge-agent runtime auto start skipped: device is not authorized yet");
                 return;
             }
             Ok(_) => diagnostics.info("bridge-agent config loaded for auto start"),
@@ -2027,7 +2071,9 @@ fn auto_start_agent(
             }
         }
         if let Err(err) = runtime.start_from_path(&config_path).await {
-            diagnostics.error(format!("failed to auto start bridge-agent runtime: {err:#}"));
+            diagnostics.error(format!(
+                "failed to auto start bridge-agent runtime: {err:#}"
+            ));
         } else {
             diagnostics.info("bridge-agent runtime auto start completed");
         }
@@ -2061,11 +2107,17 @@ fn main() {
 
     let runtime = AgentRuntimeManager::new();
     let quitting = Arc::new(AtomicBool::new(false));
+    let single_instance_diagnostics = diagnostics.clone();
     let setup_diagnostics = diagnostics.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
-        }))
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, _argv, _cwd| {
+                let diagnostics = single_instance_diagnostics.clone();
+                run_ui_action(&diagnostics, "single instance show main window", || {
+                    show_main_window(app);
+                });
+            },
+        ))
         .manage(DesktopState {
             runtime: runtime.clone(),
             config_path: config_path.clone(),
@@ -2140,12 +2192,22 @@ fn main() {
         .run(move |app, event| match event {
             tauri::RunEvent::Ready => {
                 diagnostics.info("tauri runtime ready");
-                show_main_window(app);
+                show_main_window_deferred(
+                    app.clone(),
+                    diagnostics.clone(),
+                    "ready show main window",
+                    700,
+                );
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 diagnostics.info("tauri reopen event received");
-                show_main_window(app);
+                show_main_window_deferred(
+                    app.clone(),
+                    diagnostics.clone(),
+                    "reopen show main window",
+                    120,
+                );
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 let state = app.state::<DesktopState>();
