@@ -17,6 +17,102 @@ impl SystemSleepPrevention {
     }
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+struct PlatformAssertion {
+    active: bool,
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl PlatformAssertion {
+    fn acquire(reason: &str) -> Result<Self> {
+        windows::acquire_system_sleep_prevention(reason)
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PlatformAssertion {
+    fn drop(&mut self) {
+        self.active = false;
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::PlatformAssertion;
+    use anyhow::{bail, Result};
+    use std::io;
+    use std::sync::mpsc;
+    use std::thread;
+    use windows_sys::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+    };
+
+    pub(super) fn acquire_system_sleep_prevention(reason: &str) -> Result<PlatformAssertion> {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread_name = format!("bridge-agent-power-{}", sanitize_thread_name(reason));
+        // SetThreadExecutionState is thread-scoped, so hold and release it on
+        // the same dedicated thread instead of a migratable async task.
+        let thread = thread::Builder::new().name(thread_name).spawn(move || {
+            let previous_state =
+                unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+            if previous_state == 0 {
+                let err = io::Error::last_os_error();
+                let _ = ready_tx.send(Err(format!("SetThreadExecutionState failed: {err}")));
+                return;
+            }
+
+            let _ = ready_tx.send(Ok(()));
+            let _ = shutdown_rx.recv();
+            unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+        })?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(PlatformAssertion {
+                active: true,
+                shutdown: Some(shutdown_tx),
+                thread: Some(thread),
+            }),
+            Ok(Err(err)) => {
+                let _ = thread.join();
+                bail!("{err}");
+            }
+            Err(err) => {
+                let _ = thread.join();
+                bail!("power assertion worker exited before reporting status: {err}");
+            }
+        }
+    }
+
+    fn sanitize_thread_name(reason: &str) -> String {
+        let value: String = reason
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .take(32)
+            .collect();
+        if value.is_empty() {
+            "runtime".to_string()
+        } else {
+            value
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct PlatformAssertion {
@@ -141,11 +237,11 @@ mod macos {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 #[derive(Debug)]
 struct PlatformAssertion;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 impl PlatformAssertion {
     fn acquire(_reason: &str) -> Result<Self> {
         Ok(Self)
