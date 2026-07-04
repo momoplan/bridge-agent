@@ -3671,6 +3671,7 @@ function App() {
                     <div className="capability-test-panel">
                       <label>
                         <span>参数 JSON</span>
+                        <small>请使用标准 JSON，属性名和字符串必须用英文双引号 "，不能用中文引号 “ ”。</small>
                         <textarea
                           rows={Math.max(3, Math.min(8, testDraft.split("\n").length))}
                           value={testDraft}
@@ -5113,11 +5114,18 @@ function textToHeaders(value: string): Record<string, string> {
 }
 
 function parseJson(text: string): unknown {
+  if (hasSmartJsonQuotes(text)) {
+    throw new Error('JSON 格式错误：请使用英文双引号 "，不要使用中文/智能引号 “ ”。');
+  }
   return JSON.parse(text);
 }
 
 function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function hasSmartJsonQuotes(text: string): boolean {
+  return /[“”]/.test(text);
 }
 
 function serviceSignature(service: UiServiceConfig): string {
