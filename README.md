@@ -603,12 +603,13 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 工作流在 Windows runner 上会自动完成这些事情：
 
 - 生成小体积 MSI，安装时检测 WebView2，缺失时自动下载并安装
-- 如果 SSL.com secrets 已配齐，下载并解压 SSL.com eSigner CodeSignTool
-- 如果 SSL.com secrets 已配齐，在 Tauri 打包过程中签名桌面端 exe 和 MSI 安装包
-- 如果 SSL.com secrets 已配齐，用 `Get-AuthenticodeSignature` 校验 Windows 产物签名有效
+- 校验 SSL.com secrets 是否齐全，缺失时直接失败
+- 下载并解压 SSL.com eSigner CodeSignTool
+- 在 Tauri 打包过程中签名桌面端 exe 和 MSI 安装包
+- 用 `Get-AuthenticodeSignature` 校验 Windows 产物签名有效
 - 上传 GitHub release 和国内 release service
 
-如果这些 secrets 没配齐，Windows 签名步骤会明确跳过并生成未签名安装包；配齐 secrets 后会自动恢复签名和验签。
+Windows 对外发布必须完成代码签名。如果这些 secrets 没配齐，Windows release 会直接失败，不会生成或上传未签名安装包。
 
 Windows eSigner 资源准备：
 

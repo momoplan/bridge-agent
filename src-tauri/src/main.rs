@@ -5,13 +5,13 @@ use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    install_connector_from_path, install_rustls_crypto_provider, list_connectors,
-    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
-    reset_invalid_config, save_config as save_agent_config, show_connector, start_connector,
-    stop_connector, terminate_runtime_lock_owner, uninstall_connector, AgentConfig,
-    AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult,
-    ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
-    ServiceStartCommand,
+    install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
+    list_connectors, load_config as load_agent_config, load_connector_manifest,
+    manifest_preview_json, reset_invalid_config, save_config as save_agent_config, show_connector,
+    start_connector, stop_connector, terminate_runtime_lock_owner, uninstall_connector,
+    AgentConfig, AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult,
+    ConnectorStartResult, ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
+    ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -775,8 +775,13 @@ async fn install_connector_app(
     }
 
     let resolved_source = resolve_connector_source(source).await?;
-    let install = install_connector_from_path(resolved_source.path(), &state.config_path, replace)
-        .map_err(|err| err.to_string())?;
+    let install = install_connector_from_path_with_source_reference(
+        resolved_source.path(),
+        &state.config_path,
+        replace,
+        Some(source),
+    )
+    .map_err(|err| err.to_string())?;
     let runtime = state
         .runtime
         .apply_capabilities_from_path(&state.config_path)

@@ -956,7 +956,11 @@ fn remove_stale_runtime_lock(path: &Path) -> Result<bool> {
         })?;
         return Ok(true);
     };
-    if process_is_running(document.pid) {
+    if document.pid == std::process::id() {
+        return Ok(false);
+    }
+    let process = describe_process(document.pid);
+    if runtime_lock_owner_is_active(&process) {
         return Ok(false);
     }
     fs::remove_file(path).with_context(|| {
@@ -967,6 +971,20 @@ fn remove_stale_runtime_lock(path: &Path) -> Result<bool> {
         )
     })?;
     Ok(true)
+}
+
+fn runtime_lock_owner_is_active(process: &RuntimeProcessInfo) -> bool {
+    if !process.running {
+        return false;
+    }
+    if process_looks_like_bridge_agent(process) {
+        return true;
+    }
+
+    // If the platform cannot describe a running PID, keep the lock rather than
+    // risking a second runtime. Identifiable non-Bridge-Agent PIDs are stale
+    // lock reuse and can be reclaimed.
+    process.name.is_none() && process.executable_path.is_none() && process.command_line.is_none()
 }
 
 fn read_runtime_lock(path: &Path) -> Result<RuntimeLockDocument> {
@@ -1423,10 +1441,10 @@ fn process_is_running(_pid: u32) -> bool {
 mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, parse_tasklist_image_name,
-        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_path,
-        runtime_start_is_active, terminate_runtime_lock_owner, wide_null_terminated_to_string,
-        AgentRuntimeManager, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo,
-        RuntimeStatus,
+        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_owner_is_active,
+        runtime_lock_path, runtime_start_is_active, terminate_runtime_lock_owner,
+        wide_null_terminated_to_string, AgentRuntimeManager, RuntimeInstanceLock,
+        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
     };
     use crate::config::AgentConfig;
     use std::fs;
@@ -1471,6 +1489,38 @@ mod tests {
         let lock = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
         let active = read_runtime_lock(&lock.path).unwrap();
         assert_eq!(active.pid, std::process::id());
+    }
+
+    #[test]
+    fn runtime_lock_owner_rejects_pid_reused_by_non_bridge_process() {
+        let process = RuntimeProcessInfo {
+            pid: 727,
+            parent_pid: Some(1),
+            name: Some("ViewBridgeAuxiliary".to_string()),
+            executable_path: Some(
+                "/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary".to_string(),
+            ),
+            command_line: Some(
+                "/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary".to_string(),
+            ),
+            running: true,
+        };
+
+        assert!(!runtime_lock_owner_is_active(&process));
+    }
+
+    #[test]
+    fn runtime_lock_owner_keeps_unidentifiable_running_process() {
+        let process = RuntimeProcessInfo {
+            pid: 42,
+            parent_pid: None,
+            name: None,
+            executable_path: None,
+            command_line: None,
+            running: true,
+        };
+
+        assert!(runtime_lock_owner_is_active(&process));
     }
 
     #[test]

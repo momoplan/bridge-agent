@@ -271,6 +271,14 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 - 更新不得悄悄迁移到另一个 `connectorId`。
 - 如果服务名、方法名、事件名发生破坏性变更，必须升级主版本，并在市场风险说明中写清楚。
 
+自定义同步规则：
+
+- 从本地目录或用户自己输入的 Git URL 安装的 Connector 不按市场版本判断升级。
+- Bridge Agent 记录原始安装来源 `sourceReference`、解析后的本地路径 `sourcePath`、首次安装时间和最近同步时间。
+- 用户点击“拉取最新”时，Bridge Agent 使用 `sourceReference` 重新解析来源；没有 `sourceReference` 的历史安装记录回退使用 `sourcePath`。
+- 重新同步会重新安装同一个 Connector 包，并替换该 Connector 管理的服务。
+- 自定义应用同步完成后更新 `lastSyncedAtEpochMs`，但保留首次 `installedAtEpochMs`。
+
 卸载规则：
 
 - 卸载 Connector 时，删除安装记录和该 Connector 注册的服务。
@@ -360,6 +368,8 @@ https://gitee.com/org/my-connector.git#v0.1.0
 
 自定义应用不应被 Bridge Agent 标成“市场应用”。只有当它拥有稳定 `connectorId`、版本、风险说明、可安装源和市场条目后，才是市场 Connector。
 
+自定义应用详情页应提供“拉取最新”或“重新同步”动作，不显示“升级到最新版本”。如果安装源是 Git URL，动作会重新 clone 指定仓库和 revision；如果安装源是本地目录，动作会重新读取该目录当前内容。没有市场条目的 Connector 不展示“检查更新”。
+
 ## 发布前验收清单
 
 Connector 发布到市场前至少确认：
@@ -384,7 +394,7 @@ Connector 发布到市场前至少确认：
 - 安装源支持本地目录和 Git URL。
 - Git URL 可以通过 `source#revision` 指定分支或 tag。
 - 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
-- 安装后记录写入本机 connectors 目录下的 `install.json`。
+- 安装后记录写入本机 connectors 目录下的 `install.json`，包括 `sourceReference`、`sourcePath`、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
 - Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
 - 服务注册 transport 目前支持 `http`。
 

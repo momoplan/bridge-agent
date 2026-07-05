@@ -373,8 +373,11 @@ interface ConnectorSummary {
   name: string;
   version: string;
   packagePath: string;
+  sourcePath: string;
+  sourceReference?: string | null;
   serviceNames: string[];
   installedAtEpochMs: number;
+  lastSyncedAtEpochMs: number;
 }
 
 interface ConnectorInstallResult {
@@ -811,8 +814,16 @@ function App() {
       runtime?.status === "connecting" ||
       runtime?.status === "backoff" ||
       runtime?.status === "stopping");
+  const runtimeCanStop = Boolean(
+    runtime &&
+      !needsAuthorization &&
+      runtime.status !== "stopped" &&
+      runtime.status !== "stopping"
+  );
   const startActionLabel = needsAuthorization
-    ? "去授权"
+    ? browserAuth
+      ? "授权中"
+      : "去授权"
     : !runtime
       ? "启动"
       : startActionLocked
@@ -1228,6 +1239,33 @@ function App() {
     return marketConnectors.find((marketApp) => marketApp.connectorId === app.connector?.id);
   }
 
+  function connectorSyncSource(app: LocalAppItem): string {
+    const connector = app.connector;
+    if (!connector) {
+      return "";
+    }
+    return (connector.sourceReference ?? connector.sourcePath ?? "").trim();
+  }
+
+  function connectorSourceKind(app: LocalAppItem, marketApp?: MarketConnector): string {
+    if (marketApp) {
+      return "市场应用";
+    }
+    const source = connectorSyncSource(app);
+    return isGitSourceText(source) ? "Git 仓库" : "本地目录";
+  }
+
+  function isGitSourceText(source: string): boolean {
+    const value = source.trim();
+    return (
+      value.startsWith("https://") ||
+      value.startsWith("http://") ||
+      value.startsWith("git@") ||
+      value.endsWith(".git") ||
+      value.includes(".git#")
+    );
+  }
+
   async function checkLocalAppUpdate(app: LocalAppItem, showLatestMessage = true) {
     const marketApp = marketConnectorForLocalApp(app);
     if (!app.connector || !marketApp) {
@@ -1294,6 +1332,42 @@ function App() {
       }));
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
       setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
+    } catch (err) {
+      handleCommandError(err);
+    } finally {
+      setConnectorUpdateBusy(null);
+    }
+  }
+
+  async function syncLocalApp(app: LocalAppItem) {
+    if (!app.connector) {
+      setError(`应用 ${app.name} 不是可同步安装应用`);
+      return;
+    }
+    const source = connectorSyncSource(app);
+    if (!source) {
+      setError(`应用 ${app.name} 没有记录安装来源，无法重新同步`);
+      return;
+    }
+    try {
+      setConnectorUpdateBusy(app.id);
+      setMessage("");
+      setError("");
+      setRuntimeConflict(null);
+      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
+        source,
+        replace: true
+      });
+      applyConfigDocument(document.config);
+      await refreshConnectorApps();
+      await refreshRegisteredServiceStatuses();
+      setConnectorUpdateStatuses((current) => {
+        const next = { ...current };
+        delete next[document.install.connectorId];
+        return next;
+      });
+      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
+      setMessage(`应用 ${document.install.name} 已重新同步到 ${document.install.version}`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -2467,9 +2541,11 @@ function App() {
               >
                 {startActionLabel}
               </button>
-              <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
-                停止
-              </button>
+              {runtimeCanStop ? (
+                <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
+                  停止
+                </button>
+              ) : null}
               <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
                 重新授权
               </button>
@@ -3972,6 +4048,7 @@ function App() {
     const updateBusy = connectorUpdateBusy === app.id;
     const appIsRunning = isLocalAppRunning(app);
     const appCanStop = hasLocalAppStopCommand(app);
+    const syncSource = connectorSyncSource(app);
     const closeDetail = () => setSelectedLocalAppId(null);
 
     return (
@@ -4017,7 +4094,7 @@ function App() {
               ) : null}
             </div>
             <div className="service-actions">
-              {marketApp && app.connector ? (
+              {app.connector && marketApp ? (
                 updateStatus?.updateAvailable ? (
                   <button
                     className="primary accent"
@@ -4035,6 +4112,14 @@ function App() {
                     {updateBusy ? "检查中" : "检查更新"}
                   </button>
                 )
+              ) : app.connector ? (
+                <button
+                  className="secondary"
+                  onClick={() => void syncLocalApp(app)}
+                  disabled={connectorBusy != null || connectorUpdateBusy != null || !syncSource}
+                >
+                  {updateBusy ? "同步中" : "拉取最新"}
+                </button>
               ) : null}
               {appIsRunning && appCanStop ? (
                 <button
@@ -4069,8 +4154,13 @@ function App() {
             <div className="app-detail-tab-panel">
               <div className="status-detail-grid">
                 <InfoRow label="类型" value={formatLocalAppKind(app.kind)} />
-                <InfoRow label="来源" value={app.connector?.packagePath ?? "内置"} />
+                <InfoRow label="来源类型" value={app.connector ? connectorSourceKind(app, marketApp) : "内置"} />
+                <InfoRow label="安装来源" value={syncSource || "内置"} />
+                <InfoRow label="安装位置" value={app.connector?.packagePath ?? "随客户端发布"} />
                 <InfoRow label="版本" value={app.connector?.version ?? "随客户端发布"} />
+                {app.connector ? (
+                  <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
+                ) : null}
                 {updateStatus ? (
                   <InfoRow
                     label="更新"

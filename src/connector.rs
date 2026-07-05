@@ -92,8 +92,12 @@ pub struct ConnectorInstallRecord {
     pub manifest: ConnectorManifest,
     pub package_path: String,
     pub source_path: String,
+    #[serde(default)]
+    pub source_reference: Option<String>,
     pub service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
+    #[serde(default)]
+    pub last_synced_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,8 +117,11 @@ pub struct ConnectorSummary {
     pub name: String,
     pub version: String,
     pub package_path: String,
+    pub source_path: String,
+    pub source_reference: Option<String>,
     pub service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
+    pub last_synced_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +174,15 @@ pub fn install_connector_from_path(
     config_path: &Path,
     replace: bool,
 ) -> Result<ConnectorInstallResult> {
+    install_connector_from_path_with_source_reference(source, config_path, replace, None)
+}
+
+pub fn install_connector_from_path_with_source_reference(
+    source: &Path,
+    config_path: &Path,
+    replace: bool,
+    source_reference: Option<&str>,
+) -> Result<ConnectorInstallResult> {
     ensure_config_exists(config_path)?;
     let source = source
         .canonicalize()
@@ -200,12 +216,21 @@ pub fn install_connector_from_path(
     }
     save_config(config_path, &config)?;
 
+    let now = now_ms();
+    let installed_at_epoch_ms = load_install_record(&manifest.id)
+        .map(|record| record.installed_at_epoch_ms)
+        .unwrap_or(now);
     let record = ConnectorInstallRecord {
         manifest: manifest.clone(),
         package_path: package_path.display().to_string(),
         source_path: source.display().to_string(),
+        source_reference: source_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         service_names: service_names.clone(),
-        installed_at_epoch_ms: now_ms(),
+        installed_at_epoch_ms,
+        last_synced_at_epoch_ms: now,
     };
     save_install_record(&record)?;
 
@@ -734,13 +759,21 @@ fn run_start_command(
 }
 
 fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
+    let last_synced_at_epoch_ms = if record.last_synced_at_epoch_ms == 0 {
+        record.installed_at_epoch_ms
+    } else {
+        record.last_synced_at_epoch_ms
+    };
     ConnectorSummary {
         id: record.manifest.id,
         name: record.manifest.name,
         version: record.manifest.version,
         package_path: record.package_path,
+        source_path: record.source_path,
+        source_reference: record.source_reference,
         service_names: record.service_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
+        last_synced_at_epoch_ms,
     }
 }
 
@@ -864,6 +897,75 @@ mod tests {
     }
 
     #[test]
+    fn reinstall_preserves_install_time_and_updates_sync_source() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.resync",
+                "name": "Resync Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "resyncService",
+                    "description": "Resync service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_connector_from_path_with_source_reference(
+            &source,
+            &config_path,
+            false,
+            Some("https://example.test/connector.git#main"),
+        )
+        .unwrap();
+        let first = show_connector("com.baijimu.connector.resync").unwrap();
+
+        install_connector_from_path_with_source_reference(
+            &source,
+            &config_path,
+            true,
+            Some("https://example.test/connector.git#next"),
+        )
+        .unwrap();
+        let second = show_connector("com.baijimu.connector.resync").unwrap();
+        assert_eq!(second.installed_at_epoch_ms, first.installed_at_epoch_ms);
+        assert_eq!(
+            second.source_reference.as_deref(),
+            Some("https://example.test/connector.git#next")
+        );
+        assert!(second.last_synced_at_epoch_ms >= first.last_synced_at_epoch_ms);
+
+        let summary = list_connectors()
+            .unwrap()
+            .into_iter()
+            .find(|connector| connector.id == "com.baijimu.connector.resync")
+            .unwrap();
+        assert_eq!(summary.source_reference, second.source_reference);
+        assert_eq!(
+            summary.last_synced_at_epoch_ms,
+            second.last_synced_at_epoch_ms
+        );
+    }
+
+    #[test]
     fn install_connector_resolves_package_bin_start_command() {
         let dir = tempdir().unwrap();
         std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
@@ -933,7 +1035,10 @@ mod tests {
         );
         assert_eq!(command[2], "--port");
         assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
-        if let Some(node_dir) = Path::new(&expected_node).parent() {
+        if let Some(node_dir) = Path::new(&expected_node)
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
             assert!(env
                 .get("PATH")
                 .is_some_and(|path| env::split_paths(path).any(|entry| entry == node_dir)));

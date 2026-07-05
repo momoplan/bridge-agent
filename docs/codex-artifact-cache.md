@@ -1,0 +1,100 @@
+# Codex 官方资产 OSS 缓存
+
+国内用户设备直接访问 `chatgpt.com`、`github.com` 或 GitHub release 资产时容易超时。Codex 安装流程应优先尝试官方源；官方源在用户设备不可达时，切换到百积木控制的 OSS 缓存，并在执行前校验 SHA256。
+
+## 存储选择
+
+二进制安装资产使用 OSS，不需要用户提供 Gitee 账号。
+
+Gitee 可用于同步源码仓库、发布说明或元数据，但不作为 Codex 安装包的主分发链路。安装包、DMG、zip、tarball、npm tgz 等资产应放在百积木自有 OSS bucket，并通过 manifest 明确记录 upstream URL、版本、抓取时间、文件大小和 SHA256。
+
+当前默认位置：
+
+```text
+oss://lowcode-common/codex-artifacts/
+https://lowcode-common.oss-cn-beijing.aliyuncs.com/codex-artifacts/latest.json
+```
+
+## 同步
+
+从一台能稳定访问 GitHub 的同步机运行：
+
+```bash
+OSS_BUCKET=lowcode-common \
+OSS_PREFIX=codex-artifacts \
+OSS_REGION=cn-beijing \
+OSS_ENDPOINT=oss-cn-beijing.aliyuncs.com \
+tools/codex-artifacts/sync-codex-artifacts.sh
+```
+
+默认同步生产安装常用资产：
+
+- `install.sh`
+- `install.ps1`
+- `codex-package_SHA256SUMS`
+- macOS Apple Silicon / Intel 的 Codex CLI tarball 和 DMG
+- Windows x64 / arm64 的 Codex CLI zip
+- Codex npm 平台包
+
+同步官方 Codex App DMG 时，加上：
+
+```bash
+INCLUDE_OFFICIAL_APP_DMG=1 \
+OFFICIAL_APP_DMG_ARCHES="arm64 x86_64" \
+tools/codex-artifacts/sync-codex-artifacts.sh
+```
+
+当前如只需要给 Apple Silicon 用户补 App，可先同步 arm64：
+
+```bash
+CODEX_ASSET_REGEX='^codex-aarch64-apple-darwin\.tar\.gz$' \
+INCLUDE_OFFICIAL_APP_DMG=1 \
+OFFICIAL_APP_DMG_ARCHES=arm64 \
+tools/codex-artifacts/sync-codex-artifacts.sh
+```
+
+需要临时只同步某个资产时，覆盖 `CODEX_ASSET_REGEX`：
+
+```bash
+CODEX_ASSET_REGEX='^codex-aarch64-apple-darwin\.tar\.gz$' \
+tools/codex-artifacts/sync-codex-artifacts.sh
+```
+
+同步脚本会：
+
+1. 调用 GitHub Release API 读取 `openai/codex` latest。
+2. 按白名单下载官方 release 资产。
+3. 校验下载文件大小。
+4. 计算 SHA256。
+5. 上传到 `codex-artifacts/releases/<tag>/`。
+6. 发布 `codex-artifacts/latest.json`。
+
+## 安装侧消费规则
+
+安装流程在用户设备上执行时：
+
+1. 先尝试官方 URL。
+2. 官方 URL 超时、连接失败或 HTTP2 断流后，下载 OSS `latest.json`。
+3. 从 manifest 中选择匹配当前 OS/arch 的资产。
+4. 下载 `mirror_url`。
+5. 用 manifest 中的 `sha256` 校验文件。
+6. 校验通过后再解压、复制、挂载或执行。
+
+用户设备上的安装脚本不要依赖 `python3` 解析 manifest；干净 macOS 可能会弹出 Xcode 命令行工具安装提示。优先使用系统自带 shell/awk/plutil/osascript，或者由平台侧预先解析后把明确的 URL、SHA256 和资产名传给设备。
+
+不得使用未记录 upstream 和 SHA256 的第三方镜像。OSS 缓存只是官方资产的缓存，不是新的上游源。
+
+## 当前 1393 问题对应资产
+
+工作区 1393 的 macOS Apple Silicon 设备卡在：
+
+```text
+https://github.com/openai/codex/releases/latest/download/codex-aarch64-apple-darwin.tar.gz
+```
+
+对应 OSS fallback 资产应从 manifest 中选择：
+
+```text
+codex-aarch64-apple-darwin.tar.gz
+codex-app-aarch64-apple-darwin.dmg
+```
