@@ -1,5 +1,5 @@
 const FALLBACK_DESKTOP_BINARY_NAME: &str = "bridge-agent-desktop";
-const FALLBACK_PRODUCT_NAME: &str = "Bridge Agent";
+const FALLBACK_PRODUCT_NAME: &str = "百积木";
 const FALLBACK_SERVICE_BINARY_NAME: &str = "bridge-agent-service";
 const WINDOWS_SERVICE_NAME: &str = "BridgeAgent";
 
@@ -58,21 +58,21 @@ mod tests {
 
         assert!(candidates.contains(&"bridge-agent"));
         assert!(candidates.contains(&"bridge-agent-desktop"));
-        assert!(candidates.contains(&"Bridge Agent"));
+        assert!(candidates.contains(&"百积木"));
         assert!(candidates.contains(&"bridge-agent-service"));
         assert!(candidates.contains(&"BridgeAgent"));
     }
 
     #[test]
     fn bridge_agent_process_name_allows_only_known_hosts() {
-        assert!(is_bridge_agent_process_name("Bridge Agent"));
-        assert!(is_bridge_agent_process_name("Bridge Agent.exe"));
+        assert!(is_bridge_agent_process_name("百积木"));
+        assert!(is_bridge_agent_process_name("百积木.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent"));
         assert!(is_bridge_agent_process_name("bridge-agent.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent-desktop.exe"));
         assert!(is_bridge_agent_process_name("bridge-agent-service.exe"));
         assert!(is_bridge_agent_process_name(
-            r#"C:\Program Files\Bridge Agent\bridge-agent-desktop.exe"#
+            r#"C:\Program Files\百积木\bridge-agent-desktop.exe"#
         ));
         assert!(!is_bridge_agent_process_name("node.exe"));
         assert!(!is_bridge_agent_process_name("my-bridge-agent-helper.exe"));

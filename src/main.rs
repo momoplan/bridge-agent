@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "bridge-agent")]
-#[command(about = "Local bridge agent with CLI and desktop runtime support")]
+#[command(about = "百积木 local connector with CLI and desktop runtime support")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

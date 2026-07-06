@@ -208,9 +208,8 @@ impl AgentRuntimeManager {
         let config_path_string = config_path.display().to_string();
         let task = tokio::spawn(async move {
             let _runtime_lock = runtime_lock;
-            let system_sleep_prevention = match SystemSleepPrevention::acquire(
-                "Bridge Agent keeps the relay connection online",
-            ) {
+            let system_sleep_prevention = match SystemSleepPrevention::acquire("百积木保持连接在线")
+            {
                 Ok(assertion) => {
                     if assertion.is_active() {
                         push_log_entry(
@@ -1008,14 +1007,14 @@ pub fn terminate_runtime_lock_owner(
         bail!("runtime lock changed; please retry with the latest conflict information");
     }
     if document.pid == std::process::id() {
-        bail!("runtime lock is owned by this Bridge Agent process; use the normal stop or restart action instead");
+        bail!("runtime lock is owned by this 百积木 process; use the normal stop or restart action instead");
     }
 
     let process = describe_process(document.pid);
     if process.running {
         if !process_looks_like_bridge_agent(&process) {
             bail!(
-                "pid {} is running but does not look like a Bridge Agent process",
+                "pid {} is running but does not look like a 百积木 process",
                 document.pid
             );
         }
@@ -1606,31 +1605,29 @@ mod tests {
             terminate_runtime_lock_owner(&lock_path, lock.pid, &lock.agent_id, &lock.config_path)
                 .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("owned by this Bridge Agent process"));
+        assert!(err.to_string().contains("owned by this 百积木 process"));
         assert!(lock_path.exists());
     }
 
     #[test]
-    fn tasklist_image_name_reads_bridge_agent_with_spaces() {
-        let output = r#""Bridge Agent.exe","18080","Console","1","64,000 K""#;
+    fn tasklist_image_name_reads_product_name_with_spaces() {
+        let output = r#""百积木.exe","18080","Console","1","64,000 K""#;
 
         assert_eq!(
             parse_tasklist_image_name(output),
-            Some("Bridge Agent.exe".to_string())
+            Some("百积木.exe".to_string())
         );
     }
 
     #[test]
     fn wide_process_name_reads_utf16_until_null() {
-        let mut value = "Bridge Agent.exe".encode_utf16().collect::<Vec<_>>();
+        let mut value = "百积木.exe".encode_utf16().collect::<Vec<_>>();
         value.push(0);
         value.extend("ignored".encode_utf16());
 
         assert_eq!(
             wide_null_terminated_to_string(&value),
-            Some("Bridge Agent.exe".to_string())
+            Some("百积木.exe".to_string())
         );
     }
 
@@ -1641,7 +1638,7 @@ mod tests {
             parent_pid: None,
             name: Some("bridge-agent-desktop.exe".to_string()),
             executable_path: Some(
-                r#"C:\Program Files\Bridge Agent\bridge-agent-desktop.exe"#.to_string(),
+                r#"C:\Program Files\百积木\bridge-agent-desktop.exe"#.to_string(),
             ),
             command_line: None,
             running: true,
@@ -1653,10 +1650,10 @@ mod tests {
     #[test]
     fn runtime_process_identity_accepts_quoted_install_path() {
         assert!(command_line_starts_with_bridge_agent(
-            r#""C:\Program Files\Bridge Agent\Bridge Agent.exe" --config agent-config.json"#
+            r#""C:\Program Files\百积木\百积木.exe" --config agent-config.json"#
         ));
         assert!(command_line_starts_with_bridge_agent(
-            r#""C:\Program Files\Bridge Agent\bridge-agent-desktop.exe" --config agent-config.json"#
+            r#""C:\Program Files\百积木\bridge-agent-desktop.exe" --config agent-config.json"#
         ));
     }
 

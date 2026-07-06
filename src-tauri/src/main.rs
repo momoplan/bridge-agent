@@ -1261,7 +1261,7 @@ fn expected_asset_sha256(asset: &UpdateReleaseAsset) -> Option<&str> {
 fn resolve_update_download_path(asset_name: &str) -> Result<PathBuf, String> {
     let base_dir =
         dirs::download_dir().unwrap_or_else(|| std::env::temp_dir().join("bridge-agent-downloads"));
-    let path = base_dir.join("Bridge Agent Updates").join(asset_name);
+    let path = base_dir.join("百积木更新").join(asset_name);
     if path.as_os_str().is_empty() {
         return Err("无法确定更新文件保存路径".to_string());
     }
@@ -1302,7 +1302,7 @@ fn schedule_macos_app_update(app: &tauri::AppHandle, dmg_path: &Path) -> Result<
     let app_name = target_bundle
         .file_stem()
         .and_then(|name| name.to_str())
-        .unwrap_or("Bridge Agent")
+        .unwrap_or("百积木")
         .to_string();
     let bundle_identifier = app.config().identifier.clone();
     let process_id = std::process::id().to_string();
@@ -1360,7 +1360,7 @@ APP_NAME="$3"
 APP_PID="$4"
 BUNDLE_IDENTIFIER="$5"
 LOG_DIR="$HOME/Library/Logs"
-LOG_FILE="$LOG_DIR/Bridge Agent Updater.log"
+LOG_FILE="$LOG_DIR/百积木更新器.log"
 
 mkdir -p "$LOG_DIR"
 exec >> "$LOG_FILE" 2>&1
@@ -1842,7 +1842,7 @@ fn install_panic_diagnostics(diagnostics: StartupDiagnostics) {
 
 fn log_startup_environment(diagnostics: &StartupDiagnostics, config_path: &Path) {
     diagnostics.info(format!(
-        "starting Bridge Agent desktop version {}",
+        "starting 百积木 desktop version {}",
         env!("CARGO_PKG_VERSION")
     ));
     diagnostics.info(format!("config path: {}", config_path.display()));
@@ -1851,7 +1851,7 @@ fn log_startup_environment(diagnostics: &StartupDiagnostics, config_path: &Path)
             diagnostics.info(format!("current exe: {}", path.display()));
             if is_probably_macos_translocated_path(&path) {
                 diagnostics.warn(
-                    "app appears to be running from /private/var/folders; move Bridge Agent.app to /Applications and launch it there before collecting final diagnostics",
+                    "app appears to be running from /private/var/folders; move 百积木.app to /Applications and launch it there before collecting final diagnostics",
                 );
             }
         }
@@ -1884,13 +1884,13 @@ fn prompt_accessibility_permission() {
 
 fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Result<()> {
     diagnostics.info("setting up tray icon");
-    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "打开 Bridge Agent", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "打开百积木", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
     let icon = app.default_window_icon().cloned();
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("Bridge Agent")
+        .tooltip("百积木")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

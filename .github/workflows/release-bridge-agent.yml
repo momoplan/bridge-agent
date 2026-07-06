@@ -190,7 +190,7 @@ jobs:
           SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
           SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
           WINDOWS_SIGNING_ENABLED: ${{ env.WINDOWS_SIGNING_ENABLED }}
-          WINDOWS_SIGNING_DESCRIPTION: "Bridge Agent"
+          WINDOWS_SIGNING_DESCRIPTION: "百积木"
         run: |
           set -euo pipefail
           npm run tauri -- build ${{ matrix.tauri_args }}
@@ -226,7 +226,7 @@ jobs:
 
           release_notes="$(mktemp)"
           cat > "$release_notes" <<'NOTES'
-          Bridge Agent desktop release.
+          百积木桌面端发布。
 
           Download the installer for your platform from the Assets section below:
           - macOS: universal `.dmg` (works on both Intel and Apple Silicon)
@@ -244,7 +244,7 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --verify-tag \
-              --title "Bridge Agent $RELEASE_TAG" \
+              --title "百积木 $RELEASE_TAG" \
               --notes-file "$release_notes" \
               "${prerelease_flag[@]}" \
               || gh release view "$RELEASE_TAG" >/dev/null
@@ -298,7 +298,7 @@ jobs:
             -X POST \
             -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
             -H "Content-Type: application/json" \
-            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"Bridge Agent $RELEASE_TAG\",\"source\":\"github-actions\"}" \
+            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"百积木 $RELEASE_TAG\",\"source\":\"github-actions\"}" \
             "$api/releases/$RELEASE_TAG"
 
           shopt -s nullglob

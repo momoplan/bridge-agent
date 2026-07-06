@@ -2652,7 +2652,7 @@ function App() {
     return (
       <div className="runtime-conflict-panel" role="alert">
         <div className="runtime-conflict-copy">
-          <strong>Bridge Agent 已经在运行</strong>
+          <strong>百积木已经在运行</strong>
           <p>
             当前配置被 PID {runtimeConflict.pid} 占用。确认这是旧实例后，可以停止旧实例并重新启动。
           </p>
@@ -4511,7 +4511,7 @@ function App() {
     return (
       <main className="app-shell app-loading">
         <section className="loading-panel">
-          <p className="eyebrow">Bridge Agent</p>
+          <p className="eyebrow">百积木</p>
           <h1>正在加载</h1>
           <p>读取配置和运行状态。</p>
           {error ? (
@@ -4556,8 +4556,8 @@ function App() {
             <div className="sidebar-brand-heading">
               <img className="sidebar-brand-logo" src={bjmLogoLight} alt="" aria-hidden="true" />
               <div>
-                <p className="eyebrow">Bridge Agent</p>
-                <h1>百积木桥接客户端</h1>
+                <p className="eyebrow">百积木</p>
+                <h1>本地连接客户端</h1>
               </div>
             </div>
             <p className="sidebar-device-name">{config.device.name}</p>
@@ -5269,7 +5269,7 @@ function readError(error: unknown): string {
   }
   if (isCommandError(error)) {
     if (error.code === "runtime_already_running") {
-      return `Bridge Agent 已经在运行，PID ${error.conflict.pid} 正在占用当前配置。`;
+      return `百积木已经在运行，PID ${error.conflict.pid} 正在占用当前配置。`;
     }
     return error.message;
   }

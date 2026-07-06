@@ -301,7 +301,7 @@ async fn reclaim_occupied_event_port(bind: SocketAddr) -> Result<Option<Occupied
 
     if !is_bridge_agent_process_name(&owner.image_name) {
         anyhow::bail!(
-            "local event server port {bind} is already occupied by {} (pid {}), not a Bridge Agent process",
+            "local event server port {bind} is already occupied by {} (pid {}), not a 百积木 process",
             owner.image_name,
             owner.pid
         );
@@ -1036,11 +1036,11 @@ mod tests {
 
     #[test]
     fn parse_tasklist_image_name_reads_csv_first_field() {
-        let output = r#""Bridge Agent.exe","1234","Console","1","64,000 K""#;
+        let output = r#""百积木.exe","1234","Console","1","64,000 K""#;
 
         assert_eq!(
             parse_tasklist_image_name(output),
-            Some("Bridge Agent.exe".to_string())
+            Some("百积木.exe".to_string())
         );
     }
 
@@ -1048,7 +1048,7 @@ mod tests {
     fn parse_lsof_owner_matches_loopback_listener() {
         let output = r#"
 p1234
-cBridge Agent
+c百积木
 n127.0.0.1:18081
 p5678
 cnode
@@ -1060,7 +1060,7 @@ n127.0.0.1:18082
             parse_lsof_listening_owner(output, bind),
             Some(super::OccupiedPortOwner {
                 pid: 1234,
-                image_name: "Bridge Agent".to_string()
+                image_name: "百积木".to_string()
             })
         );
     }

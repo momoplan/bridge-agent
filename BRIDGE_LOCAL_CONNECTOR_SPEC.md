@@ -1,4 +1,4 @@
-# Bridge Agent Local App and Connector Specification
+# 百积木 Local App and Connector Specification
 
 本文定义 `bridge-agent` 桌面端里的“本地应用”规范，用来约束 Codex、WeChat、Desktop Control 以及后续第三方本地能力如何接入、安装、启动、更新、卸载和对外暴露能力。
 
@@ -8,7 +8,7 @@
 - Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、服务注册信息和能力。
 - 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
 - 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
-- 服务：Bridge Agent 协议内部的能力组，例如 `wechatLocal`、`computer`、`shellExec`。
+- 服务：百积木协议内部的能力组，例如 `wechatLocal`、`computer`、`shellExec`。
 - 方法：服务下的可调用动作，例如 `wechatLocal.searchMessages`。
 - 事件：服务上报给外部订阅方的消息，例如 `wechatLocal.messageReceived`。
 
@@ -53,7 +53,7 @@ connector-root/
 
 - `connector.json` 必须位于包根目录。
 - 包内路径必须使用相对路径，不依赖安装前的源码绝对路径。
-- 安装后，Bridge Agent 会把包复制到本机 connectors 目录；运行命令应以安装后的包路径为准。
+- 安装后，百积木会把包复制到本机 connectors 目录；运行命令应以安装后的包路径为准。
 - 不要把用户 token、cookie、数据库副本或机器私有配置提交进 Connector 包。
 
 ## connector.json
@@ -86,7 +86,7 @@ connector-root/
   "id": "com.baijimu.connector.wechat",
   "name": "WeChat Connector",
   "version": "0.2.3",
-  "description": "Expose local WeChat search and message events to Bridge Agent.",
+  "description": "Expose local WeChat search and message events to 百积木.",
   "publisher": {
     "name": "Baijimu",
     "homepage": "https://baijimu.com"
@@ -190,7 +190,7 @@ Connector 通过 `services` 内联声明服务，或通过 `serviceRegistrationF
 
 ## 市场元数据
 
-市场服务 `local-app-market` 返回的是可安装版本列表。Bridge Agent 当前请求：
+市场服务 `local-app-market` 返回的是可安装版本列表。百积木当前请求：
 
 ```text
 GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
@@ -247,7 +247,7 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 - `connectorId` 必须等于 Connector 包内 `connector.json.id`。
 - `latestVersion.version` 必须等于 Connector 包内 `connector.json.version`。
 - `latestVersion.revision` 推荐指向不可变 tag，例如 `v0.2.3`。
-- `latestVersion.source` 是安装源。若带 `revision`，Bridge Agent 会按 `source#revision` 克隆。
+- `latestVersion.source` 是安装源。若带 `revision`，百积木会按 `source#revision` 克隆。
 - `platforms` 必须准确表达支持平台；不要把只支持 macOS 的 Connector 标成 Windows/Linux 可用。
 - `riskLevel` 建议使用 `low`、`medium`、`high`。
 
@@ -255,13 +255,13 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 
 安装流程：
 
-1. Bridge Agent 从市场读取条目。
+1. 百积木从市场读取条目。
 2. 用户选择市场应用。
-3. Bridge Agent 下载 `latestVersion.source`，如果有 `revision` 则 checkout 对应分支或 tag。
-4. Bridge Agent 读取 `connector.json` 并校验。
-5. Bridge Agent 安装 Connector 包到本机 connectors 目录。
-6. Bridge Agent 把服务注册写入本机 `agent-config.json`。
-7. Bridge Agent 刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
+3. 百积木下载 `latestVersion.source`，如果有 `revision` 则 checkout 对应分支或 tag。
+4. 百积木读取 `connector.json` 并校验。
+5. 百积木安装 Connector 包到本机 connectors 目录。
+6. 百积木把服务注册写入本机 `agent-config.json`。
+7. 百积木刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
 
 更新规则：
 
@@ -274,8 +274,8 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 自定义同步规则：
 
 - 从本地目录或用户自己输入的 Git URL 安装的 Connector 不按市场版本判断升级。
-- Bridge Agent 记录原始安装来源 `sourceReference`、解析后的本地路径 `sourcePath`、首次安装时间和最近同步时间。
-- 用户点击“拉取最新”时，Bridge Agent 使用 `sourceReference` 重新解析来源；没有 `sourceReference` 的历史安装记录回退使用 `sourcePath`。
+- 百积木记录原始安装来源 `sourceReference`、解析后的本地路径 `sourcePath`、首次安装时间和最近同步时间。
+- 用户点击“拉取最新”时，百积木使用 `sourceReference` 重新解析来源；没有 `sourceReference` 的历史安装记录回退使用 `sourcePath`。
 - 重新同步会重新安装同一个 Connector 包，并替换该 Connector 管理的服务。
 - 自定义应用同步完成后更新 `lastSyncedAtEpochMs`，但保留首次 `installedAtEpochMs`。
 
@@ -314,9 +314,9 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 正确流程：
 
 1. Connector 本地服务声明 `events[]`。
-2. Connector 运行时向 Bridge Agent 本机事件入口发送事件。
-3. Bridge Agent 校验 `service.event` 已声明且启用。
-4. Bridge Agent 通过已有 agent WebSocket 上报 relay。
+2. Connector 运行时向百积木本机事件入口发送事件。
+3. 百积木校验 `service.event` 已声明且启用。
+4. 百积木通过已有 agent WebSocket 上报 relay。
 5. relay 再按订阅关系投递给外部 app / agent。
 
 事件 payload 应保持结构化，并避免发送无边界的大对象。需要传大文件时，应走文件引用或上传协议。
@@ -366,7 +366,7 @@ https://gitee.com/org/my-connector.git#v0.1.0
 - AI 生成的本地脚本服务。
 - 尚未进入市场审核的 Connector。
 
-自定义应用不应被 Bridge Agent 标成“市场应用”。只有当它拥有稳定 `connectorId`、版本、风险说明、可安装源和市场条目后，才是市场 Connector。
+自定义应用不应被百积木标成“市场应用”。只有当它拥有稳定 `connectorId`、版本、风险说明、可安装源和市场条目后，才是市场 Connector。
 
 自定义应用详情页应提供“拉取最新”或“重新同步”动作，不显示“升级到最新版本”。如果安装源是 Git URL，动作会重新 clone 指定仓库和 revision；如果安装源是本地目录，动作会重新读取该目录当前内容。没有市场条目的 Connector 不展示“检查更新”。
 
@@ -374,21 +374,21 @@ https://gitee.com/org/my-connector.git#v0.1.0
 
 Connector 发布到市场前至少确认：
 
-- `connector.json` 可以被 Bridge Agent 解析。
+- `connector.json` 可以被百积木解析。
 - `connector.json.id` 与市场 `connectorId` 一致。
 - `connector.json.version` 与市场 `latestVersion.version` 一致。
 - Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
 - 安装后服务能写入 `agent-config.json`。
 - `startCommand` 可执行，且不会永久阻塞。
 - `healthCheck` 通过。
-- 方法能通过 Bridge Agent 调用。
-- 事件能通过 Bridge Agent 本机事件入口上报。
+- 方法能通过百积木调用。
+- 事件能通过百积木本机事件入口上报。
 - 卸载只删除该 Connector 管理的服务。
 - `risk`、`riskLevel`、`platforms` 与真实行为一致。
 
 ## 当前实现约束
 
-当前 Bridge Agent 实现中：
+当前百积木实现中：
 
 - Connector 清单文件名固定为 `connector.json`。
 - 安装源支持本地目录和 Git URL。

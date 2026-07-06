@@ -35,7 +35,7 @@ $codeSignTool = if ([string]::IsNullOrWhiteSpace($env:CODESIGN_TOOL_PATH)) {
     $env:CODESIGN_TOOL_PATH
 }
 $programName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION)) {
-    "Bridge Agent"
+    "百积木"
 } else {
     $env:WINDOWS_SIGNING_DESCRIPTION
 }

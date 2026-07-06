@@ -248,7 +248,7 @@ impl AgentConfig {
                 reconnect_secs: default_reconnect_secs(),
             },
             device: DeviceConfig {
-                name: "My Bridge Agent".to_string(),
+                name: "我的百积木".to_string(),
                 description: "Installed on the user's local machine.".to_string(),
                 tags: vec!["desktop".to_string(), "local".to_string()],
             },
@@ -2089,7 +2089,7 @@ mod tests {
     "reconnect_secs": 3
   },
   "device": {
-    "name": "My Bridge Agent",
+    "name": "我的百积木",
     "description": "Installed on the user's local machine.",
     "tags": ["desktop", "local"]
   },
@@ -2169,7 +2169,7 @@ mod tests {
     "reconnect_secs": 3
   },
   "device": {
-    "name": "My Bridge Agent",
+    "name": "我的百积木",
     "description": "Installed on the user's local machine.",
     "tags": ["desktop", "local"]
   },

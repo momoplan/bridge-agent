@@ -21,7 +21,7 @@ fn main() {
 
     let tauri_config = read_to_string(manifest_dir.join("src-tauri").join("tauri.conf.json"));
     let product_name =
-        tauri_product_name_from_json(&tauri_config).unwrap_or_else(|| "Bridge Agent".to_string());
+        tauri_product_name_from_json(&tauri_config).unwrap_or_else(|| "百积木".to_string());
     set_rustc_env("BRIDGE_AGENT_PRODUCT_NAME", &product_name);
 
     set_rustc_env("BRIDGE_AGENT_SERVICE_BIN_NAME", "bridge-agent-service");
