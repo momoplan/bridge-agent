@@ -126,7 +126,13 @@ jobs:
             throw "Unable to locate CodeSignTool.bat"
           }
           "CODESIGN_TOOL_PATH=$($codeSignTool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          & $($codeSignTool.FullName) --version
+
+          Push-Location $codeSignTool.DirectoryName
+          try {
+            & ".\CodeSignTool.bat" --version
+          } finally {
+            Pop-Location
+          }
 
       - name: Prepare Apple notarization credentials
         if: runner.os == 'macOS'
@@ -200,12 +206,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $files = @()
-          $files += Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" -File -ErrorAction Stop
-          $files += Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File -ErrorAction Stop
+          $diagnosticFiles = Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" -File -ErrorAction SilentlyContinue
+          foreach ($file in $diagnosticFiles) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            Write-Host "$($file.FullName): $($signature.Status) (intermediate exe)"
+          }
+
+          $files = Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File -ErrorAction Stop
 
           if ($files.Count -eq 0) {
-            throw "No Windows artifacts found to verify"
+            throw "No Windows MSI artifacts found to verify"
           }
 
           foreach ($file in $files) {
