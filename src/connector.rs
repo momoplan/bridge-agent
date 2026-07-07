@@ -209,6 +209,7 @@ pub fn install_connector_from_path_with_source_reference(
     }
     copy_connector_package(&source, &package_path)?;
     resolve_installed_start_commands(&mut services, &package_path)?;
+    cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
     let mut config = load_config(config_path)?;
     for service in &services {
@@ -246,6 +247,9 @@ pub fn install_connector_from_path_with_source_reference(
 pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
     let record = load_install_record(connector_id)?;
+    let _ = stop_connector(connector_id, config_path);
+    cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
+
     let mut config = load_config(config_path)?;
     config.services.retain(|service| {
         !record
@@ -269,28 +273,54 @@ pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<Con
 }
 
 pub fn list_connectors() -> Result<Vec<ConnectorSummary>> {
-    let dir = connectors_dir()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut connectors = Vec::new();
-    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().to_string();
-        match load_install_record(&id) {
-            Ok(record) => connectors.push(summary_from_record(record)),
-            Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
-        }
-    }
+    let mut connectors = load_install_records()?
+        .into_iter()
+        .map(summary_from_record)
+        .collect::<Vec<_>>();
     connectors.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(connectors)
 }
 
 pub fn show_connector(connector_id: &str) -> Result<ConnectorInstallRecord> {
     load_install_record(connector_id)
+}
+
+pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSummary>> {
+    ensure_config_exists(config_path)?;
+    let records = load_install_records()?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut config = load_config(config_path)?;
+    let now = now_ms();
+    let mut summaries = Vec::new();
+
+    for mut record in records {
+        cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
+        let package_path = PathBuf::from(&record.package_path);
+        let connector_id = record.manifest.id.clone();
+        let registrations = load_connector_service_registrations(&package_path, &record.manifest)
+            .with_context(|| {
+            format!("failed to reload service registrations for connector `{connector_id}`")
+        })?;
+        let mut services = registrations
+            .into_iter()
+            .map(ServiceRegistration::into_service_config)
+            .collect::<Result<Vec<_>>>()?;
+        resolve_installed_start_commands(&mut services, &package_path)?;
+
+        for service in services {
+            upsert_synced_service(&mut config.services, service);
+        }
+
+        record.last_synced_at_epoch_ms = now;
+        save_install_record(&record)?;
+        summaries.push(summary_from_record(record));
+    }
+
+    save_config(config_path, &config)?;
+    Ok(summaries)
 }
 
 pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
@@ -421,6 +451,27 @@ fn save_install_record(record: &ConnectorInstallRecord) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn load_install_records() -> Result<Vec<ConnectorInstallRecord>> {
+    let dir = connectors_dir()?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        match load_install_record(&id) {
+            Ok(record) => records.push(record),
+            Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
+        }
+    }
+    records.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
+    Ok(records)
 }
 
 fn load_install_record(connector_id: &str) -> Result<ConnectorInstallRecord> {
@@ -721,6 +772,79 @@ fn upsert_service(
             services.push(service);
             Ok(())
         }
+    }
+}
+
+fn upsert_synced_service(services: &mut Vec<ServiceConfig>, mut service: ServiceConfig) {
+    match services
+        .iter()
+        .position(|candidate| candidate.name == service.name)
+    {
+        Some(index) => {
+            service.enabled = services[index].enabled;
+            services[index] = service;
+        }
+        None => services.push(service),
+    }
+}
+
+fn cleanup_legacy_connector_autostarts_for_manifest(manifest: &ConnectorManifest) {
+    for value in manifest.hooks.values() {
+        if value.contains("install-autostart") {
+            cleanup_legacy_autostart_label(&manifest.id);
+            break;
+        }
+    }
+    match manifest.id.as_str() {
+        "com.baijimu.connector.wechat" => {
+            cleanup_legacy_autostart_label("com.baijimu.wechat-bridge-collector");
+        }
+        "com.baijimu.connector.wecom" => {
+            cleanup_legacy_autostart_label("com.baijimu.wecom-bridge-collector");
+        }
+        _ => {}
+    }
+}
+
+fn cleanup_legacy_autostart_label(label: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let label = label.trim();
+        if label.is_empty() {
+            return;
+        }
+        let uid = Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(uid) = uid {
+            let target = format!("gui/{uid}/{label}");
+            let _ = Command::new("launchctl")
+                .args(["bootout", &target])
+                .output();
+        }
+
+        if let Some(home) = env::var_os("HOME") {
+            let plist = PathBuf::from(home)
+                .join("Library")
+                .join("LaunchAgents")
+                .join(format!("{label}.plist"));
+            match fs::remove_file(&plist) {
+                Ok(()) => tracing::info!("removed legacy connector autostart {}", plist.display()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => tracing::warn!(
+                    "failed to remove legacy connector autostart {}: {err:#}",
+                    plist.display()
+                ),
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = label;
     }
 }
 
@@ -1115,5 +1239,64 @@ mod tests {
         assert_eq!(command[2], "stop");
         assert_eq!(command[3], "--port");
         assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn sync_installed_connectors_restores_lifecycle_commands_and_preserves_enabled() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.sync",
+                "name": "Sync Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "syncService",
+                    "description": "Sync service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["/bin/sh", "-c", "sleep 60"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let mut config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter_mut()
+            .find(|service| service.name == "syncService")
+            .unwrap();
+        service.enabled = false;
+        service.start_command = None;
+        save_config(&config_path, &config).unwrap();
+
+        sync_installed_connectors(&config_path).unwrap();
+        let config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter()
+            .find(|service| service.name == "syncService")
+            .unwrap();
+        assert!(!service.enabled);
+        assert!(service.start_command.is_some());
     }
 }

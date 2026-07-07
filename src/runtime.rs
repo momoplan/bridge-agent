@@ -1,4 +1,7 @@
-use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::config::{
+    load_config, resolve_config_base_dir, AgentConfig, ServiceConfig, ServiceStartCommand,
+};
+use crate::connector::sync_installed_connectors;
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
@@ -17,9 +20,10 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::process::{Child, Command as AsyncCommand};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{interval_at, sleep, Duration};
+use tokio::time::{interval_at, sleep, timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{error, info, warn};
@@ -138,6 +142,7 @@ impl AgentRuntimeManager {
     }
 
     pub async fn start_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
+        sync_installed_connectors(path)?;
         let config = load_config(path)?;
         self.start(config, path).await
     }
@@ -260,6 +265,8 @@ impl AgentRuntimeManager {
                     }
                 })
             });
+            let mut managed_connectors =
+                ManagedConnectorProcesses::start(&config.services, &inner, log_limit).await;
             let runner = RuntimeRunner {
                 inner: Arc::clone(&inner),
                 log_limit,
@@ -285,6 +292,7 @@ impl AgentRuntimeManager {
                     .push_log("error", &format!("runtime stopped with error: {err:#}"))
                     .await;
             }
+            managed_connectors.stop_all(&inner, log_limit).await;
             if let Some(event_server_task) = event_server_task {
                 if !event_server_task.is_finished() {
                     event_server_task.abort();
@@ -314,6 +322,7 @@ impl AgentRuntimeManager {
     }
 
     pub async fn apply_capabilities_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
+        sync_installed_connectors(path)?;
         let config = load_config(path)?;
         let config_base_dir = resolve_config_base_dir(path);
         let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir).await?;
@@ -437,6 +446,205 @@ struct RuntimeRunner {
     config_path: String,
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
+}
+
+struct ManagedConnectorProcesses {
+    processes: Vec<ManagedConnectorProcess>,
+}
+
+struct ManagedConnectorProcess {
+    service: String,
+    child: Child,
+}
+
+impl ManagedConnectorProcesses {
+    async fn start(
+        services: &[ServiceConfig],
+        inner: &Arc<RuntimeInner>,
+        log_limit: usize,
+    ) -> Self {
+        let mut processes = Vec::new();
+        for service in services {
+            if !service.enabled {
+                continue;
+            }
+            let Some(command) = service.start_command.as_ref() else {
+                continue;
+            };
+            match spawn_managed_connector_process(service, command).await {
+                Ok(Some(process)) => processes.push(process),
+                Ok(None) => {}
+                Err(err) => {
+                    push_log_entry(
+                        inner,
+                        log_limit,
+                        "warn",
+                        &format!(
+                            "failed to start managed connector `{}`: {err:#}",
+                            service.name
+                        ),
+                        LogMetadata::category("connector")
+                            .service(service.name.clone())
+                            .outcome("start_failed"),
+                    )
+                    .await;
+                }
+            }
+        }
+        Self { processes }
+    }
+
+    async fn stop_all(&mut self, inner: &Arc<RuntimeInner>, log_limit: usize) {
+        while let Some(mut process) = self.processes.pop() {
+            stop_managed_connector_process(&mut process, inner, log_limit).await;
+        }
+    }
+}
+
+async fn spawn_managed_connector_process(
+    service: &ServiceConfig,
+    start_command: &ServiceStartCommand,
+) -> Result<Option<ManagedConnectorProcess>> {
+    match start_command {
+        ServiceStartCommand::ShellCommand {
+            command,
+            cwd,
+            env,
+            timeout_secs: _,
+        } => {
+            let command = managed_start_command(command);
+            if command.is_empty() || command[0].trim().is_empty() {
+                bail!("start command is empty");
+            }
+            let mut child = AsyncCommand::new(&command[0]);
+            child.args(command.iter().skip(1));
+            if let Some(cwd) = cwd.as_deref().filter(|value| !value.trim().is_empty()) {
+                child.current_dir(cwd);
+            }
+            child.envs(env);
+            child.env("BRIDGE_AGENT_MANAGED_CONNECTOR", "1");
+            let child = child
+                .spawn()
+                .with_context(|| format!("failed to spawn `{}`", command.join(" ")))?;
+            Ok(Some(ManagedConnectorProcess {
+                service: service.name.clone(),
+                child,
+            }))
+        }
+    }
+}
+
+fn managed_start_command(command: &[String]) -> Vec<String> {
+    let mut managed = command
+        .iter()
+        .filter(|part| part.as_str() != "--daemon")
+        .cloned()
+        .collect::<Vec<_>>();
+    if is_bridge_collector_command(&managed) {
+        if let Some(index) = managed.iter().position(|part| part == "start") {
+            managed[index] = "run".to_string();
+        }
+    }
+    managed
+}
+
+fn is_bridge_collector_command(command: &[String]) -> bool {
+    command.iter().any(|part| {
+        let normalized = part.replace('\\', "/");
+        normalized.ends_with("wechat-bridge-collector")
+            || normalized.ends_with("wecom-bridge-collector")
+            || normalized.contains("/wechat_bridge_collector/")
+            || normalized.contains("/wecom_bridge_collector/")
+    })
+}
+
+async fn stop_managed_connector_process(
+    process: &mut ManagedConnectorProcess,
+    inner: &Arc<RuntimeInner>,
+    log_limit: usize,
+) {
+    let pid = process.child.id();
+    if let Some(pid) = pid {
+        signal_process(pid, "TERM").await;
+    }
+    match timeout(Duration::from_secs(5), process.child.wait()).await {
+        Ok(Ok(status)) => {
+            push_log_entry(
+                inner,
+                log_limit,
+                "info",
+                &format!(
+                    "managed connector `{}` stopped with status {}",
+                    process.service, status
+                ),
+                LogMetadata::category("connector")
+                    .service(process.service.clone())
+                    .outcome("stopped"),
+            )
+            .await;
+        }
+        Ok(Err(err)) => {
+            push_log_entry(
+                inner,
+                log_limit,
+                "warn",
+                &format!(
+                    "failed to wait for managed connector `{}`: {err:#}",
+                    process.service
+                ),
+                LogMetadata::category("connector")
+                    .service(process.service.clone())
+                    .outcome("wait_failed"),
+            )
+            .await;
+        }
+        Err(_) => {
+            if let Some(pid) = pid {
+                signal_process(pid, "KILL").await;
+            } else {
+                let _ = process.child.start_kill();
+            }
+            let _ = timeout(Duration::from_secs(2), process.child.wait()).await;
+            push_log_entry(
+                inner,
+                log_limit,
+                "warn",
+                &format!(
+                    "managed connector `{}` did not exit after TERM and was killed",
+                    process.service
+                ),
+                LogMetadata::category("connector")
+                    .service(process.service.clone())
+                    .outcome("killed"),
+            )
+            .await;
+        }
+    }
+}
+
+async fn signal_process(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    {
+        let pid_text = pid.to_string();
+        let _ = AsyncCommand::new("pkill")
+            .args([format!("-{signal}"), "-P".to_string(), pid_text.clone()])
+            .status()
+            .await;
+        let _ = AsyncCommand::new("kill")
+            .args([format!("-{signal}"), pid_text])
+            .status()
+            .await;
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        let _ = signal;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        let _ = signal;
+    }
 }
 
 impl RuntimeRunner {
@@ -1439,11 +1647,11 @@ fn process_is_running(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_url, command_line_starts_with_bridge_agent, parse_tasklist_image_name,
-        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_owner_is_active,
-        runtime_lock_path, runtime_start_is_active, terminate_runtime_lock_owner,
-        wide_null_terminated_to_string, AgentRuntimeManager, RuntimeInstanceLock,
-        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
+        build_agent_url, command_line_starts_with_bridge_agent, managed_start_command,
+        parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
+        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
+        terminate_runtime_lock_owner, wide_null_terminated_to_string, AgentRuntimeManager,
+        RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
     };
     use crate::config::AgentConfig;
     use std::fs;
@@ -1530,6 +1738,45 @@ mod tests {
         assert!(!runtime_start_is_active(RuntimeStatus::Online));
         assert!(!runtime_start_is_active(RuntimeStatus::Stopped));
         assert!(!runtime_start_is_active(RuntimeStatus::Stopping));
+    }
+
+    #[test]
+    fn managed_start_command_removes_daemon_flag() {
+        let command = vec![
+            "baijimu-connector-codex".to_string(),
+            "start".to_string(),
+            "--daemon".to_string(),
+            "--port".to_string(),
+            "18110".to_string(),
+        ];
+        assert_eq!(
+            managed_start_command(&command),
+            vec![
+                "baijimu-connector-codex".to_string(),
+                "start".to_string(),
+                "--port".to_string(),
+                "18110".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_start_command_runs_collectors_in_foreground() {
+        let command = vec![
+            "wechat-bridge-collector".to_string(),
+            "--config".to_string(),
+            "/tmp/config.json".to_string(),
+            "start".to_string(),
+        ];
+        assert_eq!(
+            managed_start_command(&command),
+            vec![
+                "wechat-bridge-collector".to_string(),
+                "--config".to_string(),
+                "/tmp/config.json".to_string(),
+                "run".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

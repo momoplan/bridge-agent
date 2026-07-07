@@ -8,10 +8,10 @@ use bridge_agent::{
     install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
     list_connectors, load_config as load_agent_config, load_connector_manifest,
     manifest_preview_json, reset_invalid_config, save_config as save_agent_config, show_connector,
-    start_connector, stop_connector, terminate_runtime_lock_owner, uninstall_connector,
-    AgentConfig, AgentRuntimeManager, ConnectorInstallRecord, ConnectorInstallResult,
-    ConnectorStartResult, ConnectorSummary, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
-    ServiceHealthCheck, ServiceStartCommand,
+    start_connector, stop_connector, sync_installed_connectors, terminate_runtime_lock_owner,
+    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
+    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -671,7 +671,10 @@ async fn stop_registered_service(
 }
 
 #[tauri::command]
-async fn list_connector_apps() -> Result<Vec<ConnectorSummary>, String> {
+async fn list_connector_apps(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<ConnectorSummary>, String> {
+    sync_installed_connectors(&state.config_path).map_err(|err| err.to_string())?;
     list_connectors().map_err(|err| err.to_string())
 }
 

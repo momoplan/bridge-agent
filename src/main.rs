@@ -117,9 +117,31 @@ async fn run_command(config: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("failed to start runtime from {}", config_path.display()))?;
 
     tracing::info!("bridge-agent started, press Ctrl+C to stop");
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
     runtime.stop().await?;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("failed to install SIGTERM handler")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("failed to install Ctrl+C handler")?,
+            _ = terminate.recv() => {},
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to install Ctrl+C handler")?;
+        Ok(())
+    }
 }
 
 async fn init_config_command(output: Option<PathBuf>, force: bool) -> Result<()> {

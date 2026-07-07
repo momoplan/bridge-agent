@@ -21,8 +21,8 @@ pub use config::{
 pub use connector::{
     connectors_dir, install_connector_from_path, install_connector_from_path_with_source_reference,
     list_connectors, load_connector_manifest, show_connector, start_connector, stop_connector,
-    uninstall_connector, ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest,
-    ConnectorStartResult, ConnectorSummary,
+    sync_installed_connectors, uninstall_connector, ConnectorInstallRecord, ConnectorInstallResult,
+    ConnectorManifest, ConnectorStartResult, ConnectorSummary,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{
