@@ -8,7 +8,7 @@ use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 #[cfg(windows)]
 use crate::process_identity::process_file_name;
-use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
+use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted, FEATURE_REGISTERED_ACK};
 use crate::services::ServiceRegistry;
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -929,6 +929,7 @@ impl RuntimeRunner {
     async fn current_capabilities(&self) -> AgentMessage {
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
+            features: vec![FEATURE_REGISTERED_ACK.to_string()],
             services: self.registry.read().await.definitions(),
         })
     }
@@ -940,6 +941,7 @@ impl RuntimeRunner {
         }
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
+            features: vec![FEATURE_REGISTERED_ACK.to_string()],
             services: update.services,
         })
     }

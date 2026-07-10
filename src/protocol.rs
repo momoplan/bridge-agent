@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const FEATURE_REGISTERED_ACK: &str = "registered_ack";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -15,6 +17,8 @@ pub enum AgentMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapabilities {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
     pub services: Vec<ServiceDefinition>,
 }
 
