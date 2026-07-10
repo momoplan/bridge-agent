@@ -30,6 +30,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
+const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 
@@ -50,6 +51,9 @@ pub struct RuntimeSnapshot {
     pub config_path: Option<String>,
     pub agent_id: Option<String>,
     pub relay_url: Option<String>,
+    pub relay_registered: bool,
+    pub relay_registered_at: Option<u64>,
+    pub last_relay_seen_at: Option<u64>,
     pub log_file_path: Option<String>,
     pub last_error: Option<String>,
     pub last_event_at: u64,
@@ -125,6 +129,9 @@ impl Default for ManagedState {
                 config_path: None,
                 agent_id: None,
                 relay_url: None,
+                relay_registered: false,
+                relay_registered_at: None,
+                last_relay_seen_at: None,
                 log_file_path: None,
                 last_error: None,
                 last_event_at: now_ms(),
@@ -194,6 +201,9 @@ impl AgentRuntimeManager {
             config_path: Some(config_path.display().to_string()),
             agent_id: Some(config.relay.agent_id.clone()),
             relay_url: Some(ws_url.to_string()),
+            relay_registered: false,
+            relay_registered_at: None,
+            last_relay_seen_at: None,
             log_file_path: log_file_path.clone(),
             last_error: None,
             last_event_at: now_ms(),
@@ -673,15 +683,8 @@ impl RuntimeRunner {
 
             match connect_async(self.ws_url.as_str()).await {
                 Ok((stream, _)) => {
-                    self.update_snapshot(
-                        RuntimeStatus::Online,
-                        None,
-                        self.config.relay.agent_id.clone(),
-                        self.ws_url.to_string(),
-                        self.config_path.clone(),
-                    )
-                    .await;
-                    self.push_log("info", "connected to relay").await;
+                    self.push_log("info", "connected to relay, waiting for registration")
+                        .await;
 
                     if let Err(err) = self
                         .handle_connection(stream, &mut shutdown_rx, apply_rx, event_rx, audit_rx)
@@ -753,16 +756,18 @@ impl RuntimeRunner {
         let capabilities = self.current_capabilities().await;
         write_json(&mut write, &capabilities).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
+        let heartbeat_timeout = Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS);
         let mut keepalive = interval_at(
             tokio::time::Instant::now() + keepalive_interval,
             keepalive_interval,
         );
+        let mut last_relay_seen = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     write.send(Message::Close(None)).await.ok();
-                    break;
+                    break Ok(());
                 }
                 Some(update) = apply_rx.recv() => {
                     let capabilities = self.apply_registry_update(update).await;
@@ -796,17 +801,36 @@ impl RuntimeRunner {
                     self.push_audit_log(audit).await;
                 }
                 _ = keepalive.tick() => {
+                    if last_relay_seen.elapsed() > heartbeat_timeout {
+                        bail!(
+                            "relay heartbeat timed out after {}s without server frame",
+                            RELAY_HEARTBEAT_TIMEOUT_SECS
+                        );
+                    }
                     write.send(Message::Ping(Vec::new().into())).await?;
                 }
                 message = read.next() => {
                     let Some(message) = message else {
-                        break;
+                        bail!("relay websocket ended");
                     };
                     match message? {
                         Message::Text(text) => {
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
                             let incoming: AgentMessage = serde_json::from_str(&text)
                                 .with_context(|| format!("invalid relay message: {text}"))?;
                             match incoming {
+                                AgentMessage::RegisteredAck(ack) => {
+                                    self.update_registered_snapshot(&ack).await;
+                                    self.push_log(
+                                        "info",
+                                        &format!(
+                                            "registered on relay as {} connection {}",
+                                            ack.agent_id, ack.connection_id
+                                        ),
+                                    )
+                                    .await;
+                                }
                                 AgentMessage::InvokeRequest(request) => {
                                     let service = request.service.clone();
                                     let method = request.method.clone();
@@ -884,15 +908,22 @@ impl RuntimeRunner {
                             }
                         }
                         Message::Ping(payload) => {
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
                             write.send(Message::Pong(payload)).await?;
                         }
-                        Message::Close(_) => break,
-                        Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+                        Message::Close(_) => {
+                            bail!("relay closed websocket");
+                        }
+                        Message::Pong(_) => {
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
+                        }
+                        Message::Binary(_) | Message::Frame(_) => {}
                     }
                 }
             }
         }
-        Ok(())
     }
 
     async fn current_capabilities(&self) -> AgentMessage {
@@ -927,10 +958,28 @@ impl RuntimeRunner {
             config_path: Some(config_path),
             agent_id: Some(agent_id),
             relay_url: Some(relay_url),
+            relay_registered: false,
+            relay_registered_at: None,
+            last_relay_seen_at: None,
             log_file_path: state.snapshot.log_file_path.clone(),
             last_error,
             last_event_at: now_ms(),
         };
+    }
+
+    async fn update_registered_snapshot(&self, ack: &crate::protocol::RegisteredAck) {
+        let mut state = self.inner.state.lock().await;
+        state.snapshot.status = RuntimeStatus::Online;
+        state.snapshot.relay_registered = true;
+        state.snapshot.relay_registered_at = Some(ack.registered_at_epoch_seconds);
+        state.snapshot.last_relay_seen_at = Some(now_ms());
+        state.snapshot.last_error = None;
+        state.snapshot.last_event_at = now_ms();
+    }
+
+    async fn update_relay_seen(&self) {
+        let mut state = self.inner.state.lock().await;
+        state.snapshot.last_relay_seen_at = Some(now_ms());
     }
 
     async fn push_log(&self, level: &str, message: &str) {

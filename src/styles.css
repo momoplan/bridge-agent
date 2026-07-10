@@ -1628,6 +1628,10 @@ select:focus {
   color: var(--danger);
 }
 
+.warning-text {
+  color: var(--warn);
+}
+
 .log-panel {
   display: grid;
   gap: 10px;

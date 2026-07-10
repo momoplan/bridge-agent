@@ -5,6 +5,7 @@ use serde_json::Value;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
     Capabilities(AgentCapabilities),
+    RegisteredAck(RegisteredAck),
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
     EventEmitted(EventEmitted),
@@ -15,6 +16,15 @@ pub enum AgentMessage {
 pub struct AgentCapabilities {
     pub agent_id: String,
     pub services: Vec<ServiceDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredAck {
+    pub agent_id: String,
+    pub workspace_id: u64,
+    pub connection_id: String,
+    pub registered_at_epoch_seconds: u64,
+    pub heartbeat_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

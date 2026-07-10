@@ -15,6 +15,9 @@ interface RuntimeSnapshot {
   config_path: string | null;
   agent_id: string | null;
   relay_url: string | null;
+  relay_registered: boolean;
+  relay_registered_at: number | null;
+  last_relay_seen_at: number | null;
   log_file_path: string | null;
   last_error: string | null;
   last_event_at: number;
@@ -2569,6 +2572,11 @@ function App() {
         <Card title="状态">
           <div className="status-detail-grid">
             <InfoRow label="连接状态" value={statusLabel} />
+            <InfoRow
+              label="Relay 注册"
+              value={formatRelayRegistration(runtime)}
+              tone={runtime?.relay_registered ? "normal" : "warning"}
+            />
             <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
             <InfoRow
               label="最近错误"
@@ -4415,6 +4423,12 @@ function App() {
         </div>
         <div className="status-detail-grid">
           <InfoRow label="当前状态" value={statusLabel} />
+          <InfoRow
+            label="Relay 注册"
+            value={formatRelayRegistration(runtime)}
+            tone={runtime?.relay_registered ? "normal" : "warning"}
+          />
+          <InfoRow label="Relay 最近响应" value={formatRelaySeen(runtime)} />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
@@ -4668,12 +4682,14 @@ function Card(props: {
 function InfoRow(props: {
   label: string;
   value: string;
-  tone?: "normal" | "danger";
+  tone?: "normal" | "warning" | "danger";
 }) {
+  const valueClass =
+    props.tone === "danger" ? "danger-text" : props.tone === "warning" ? "warning-text" : "";
   return (
     <div className="info-row">
       <span>{props.label}</span>
-      <strong className={props.tone === "danger" ? "danger-text" : ""}>{props.value}</strong>
+      <strong className={valueClass}>{props.value}</strong>
     </div>
   );
 }
@@ -5247,6 +5263,29 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
   });
+}
+
+function formatRelayRegistration(snapshot: RuntimeSnapshot | null): string {
+  if (!snapshot) {
+    return "-";
+  }
+  if (!snapshot.relay_registered) {
+    return "未注册";
+  }
+  return snapshot.relay_registered_at
+    ? `已注册 ${formatEpochSeconds(snapshot.relay_registered_at)}`
+    : "已注册";
+}
+
+function formatRelaySeen(snapshot: RuntimeSnapshot | null): string {
+  if (!snapshot?.last_relay_seen_at) {
+    return "-";
+  }
+  return formatTime(snapshot.last_relay_seen_at);
+}
+
+function formatEpochSeconds(timestamp: number): string {
+  return formatTime(timestamp * 1000);
 }
 
 function needsBrowserAuthorization(config: UiAgentConfig): boolean {
