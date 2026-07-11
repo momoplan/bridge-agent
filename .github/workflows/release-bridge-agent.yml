@@ -179,6 +179,18 @@ jobs:
               exit 1
             fi
           done
+          case "$BRIDGE_AGENT_UPDATE_API_URL" in
+            *://relay.baijimu.com/*)
+              echo "BRIDGE_AGENT_UPDATE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
+              exit 1
+              ;;
+          esac
+          case "$BRIDGE_AGENT_RELEASE_API_URL" in
+            *://relay.baijimu.com/*)
+              echo "BRIDGE_AGENT_RELEASE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Build release bundles
         shell: bash
