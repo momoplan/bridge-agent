@@ -32,9 +32,20 @@ case "$(uname -s)" in
     ;;
 esac
 
-cargo build --release --manifest-path "${cli_dir}/Cargo.toml"
 mkdir -p "${resource_dir}"
-cp "${cli_dir}/target/release/${binary_name}" "${resource_dir}/${binary_name}"
+
+if [ "$(uname -s)" = "Darwin" ] && [ "${BAIJIMU_CLI_RS_MACOS_UNIVERSAL:-}" = "true" ]; then
+  cargo build --release --target x86_64-apple-darwin --manifest-path "${cli_dir}/Cargo.toml"
+  cargo build --release --target aarch64-apple-darwin --manifest-path "${cli_dir}/Cargo.toml"
+  lipo -create \
+    "${cli_dir}/target/x86_64-apple-darwin/release/${binary_name}" \
+    "${cli_dir}/target/aarch64-apple-darwin/release/${binary_name}" \
+    -output "${resource_dir}/${binary_name}"
+else
+  cargo build --release --manifest-path "${cli_dir}/Cargo.toml"
+  cp "${cli_dir}/target/release/${binary_name}" "${resource_dir}/${binary_name}"
+fi
+
 chmod 755 "${resource_dir}/${binary_name}" 2>/dev/null || true
 
 "${resource_dir}/${binary_name}" --version --json
