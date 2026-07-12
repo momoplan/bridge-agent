@@ -17,6 +17,7 @@ const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
 const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
+const LEGACY_DEFAULT_DEVICE_NAME: &str = "我的百积木";
 const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
 const DEFAULT_INLINE_LIMIT_BYTES: usize = 256 * 1024;
 const LEGACY_INLINE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
@@ -248,7 +249,7 @@ impl AgentConfig {
                 reconnect_secs: default_reconnect_secs(),
             },
             device: DeviceConfig {
-                name: "我的百积木".to_string(),
+                name: default_device_name(),
                 description: "Installed on the user's local machine.".to_string(),
                 tags: vec!["desktop".to_string(), "local".to_string()],
             },
@@ -697,6 +698,38 @@ fn generate_registration_token() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
+fn default_device_name() -> String {
+    let username = first_env_value(&["BRIDGE_AGENT_DEVICE_USER", "USER", "USERNAME"]);
+    let hostname = first_env_value(&[
+        "BRIDGE_AGENT_DEVICE_HOST",
+        "COMPUTERNAME",
+        "HOSTNAME",
+        "NAME",
+    ]);
+    format_default_device_name(username.as_deref(), hostname.as_deref())
+}
+
+fn first_env_value(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn format_default_device_name(username: Option<&str>, hostname: Option<&str>) -> String {
+    match (
+        username.map(str::trim).filter(|value| !value.is_empty()),
+        hostname.map(str::trim).filter(|value| !value.is_empty()),
+    ) {
+        (Some(user), Some(host)) if !user.eq_ignore_ascii_case(host) => format!("{user}@{host}"),
+        (Some(user), _) => user.to_string(),
+        (_, Some(host)) => host.to_string(),
+        _ => LEGACY_DEFAULT_DEVICE_NAME.to_string(),
+    }
+}
+
 fn is_legacy_default_agent_id(agent_id: &str) -> bool {
     agent_id.trim() == LEGACY_DEFAULT_AGENT_ID
 }
@@ -922,6 +955,13 @@ fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
     if config.upload.inline_limit_bytes == LEGACY_INLINE_LIMIT_BYTES {
         config.upload.inline_limit_bytes = DEFAULT_INLINE_LIMIT_BYTES;
         changed = true;
+    }
+    if config.device.name.trim() == LEGACY_DEFAULT_DEVICE_NAME {
+        let device_name = default_device_name();
+        if device_name != LEGACY_DEFAULT_DEVICE_NAME {
+            config.device.name = device_name;
+            changed = true;
+        }
     }
     changed |= remove_legacy_default_local_java_service(config);
     changed
@@ -1656,10 +1696,10 @@ fn project_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_shell_exec_allow_commands, ensure_browser_auth_agent_id, load_config,
-        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, EventConfig,
-        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
-        ServiceRegistration, ServiceStartCommand,
+        default_shell_exec_allow_commands, ensure_browser_auth_agent_id,
+        format_default_device_name, load_config, manifest_preview_json, reset_invalid_config,
+        save_config, AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig,
+        ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1674,6 +1714,23 @@ mod tests {
     #[test]
     fn example_config_is_valid() {
         AgentConfig::example().validate().unwrap();
+    }
+
+    #[test]
+    fn default_device_name_uses_user_and_host() {
+        assert_eq!(
+            format_default_device_name(Some("alice"), Some("workstation-1")),
+            "alice@workstation-1"
+        );
+        assert_eq!(
+            format_default_device_name(Some("alice"), Some("alice")),
+            "alice"
+        );
+        assert_eq!(format_default_device_name(Some("alice"), None), "alice");
+        assert_eq!(
+            format_default_device_name(None, Some("workstation-1")),
+            "workstation-1"
+        );
     }
 
     #[test]
@@ -1731,6 +1788,34 @@ mod tests {
         assert!(backup.contains("\"name\": \"first\""));
         let current = load_config(&path).unwrap();
         assert_eq!(current.device.name, "second");
+    }
+
+    #[test]
+    fn load_config_migrates_legacy_default_device_name_when_identity_is_available() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.device.name = "我的百积木".to_string();
+        save_config(&path, &config).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+
+        if loaded.device.name != "我的百积木" {
+            assert!(!loaded.device.name.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn load_config_preserves_custom_device_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.device.name = "会议室开发机".to_string();
+        save_config(&path, &config).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+
+        assert_eq!(loaded.device.name, "会议室开发机");
     }
 
     #[test]

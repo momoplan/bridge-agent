@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;
@@ -25,6 +27,9 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+#[cfg(windows)]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -189,7 +194,7 @@ struct ShellExecData {
     stderr: String,
     timed_out: bool,
     #[serde(rename = "timeoutSeconds")]
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     #[serde(rename = "startedAtEpochMs")]
     started_at_epoch_ms: u64,
     #[serde(rename = "completedAtEpochMs")]
@@ -220,7 +225,7 @@ struct ShellExecutionRecord {
     timed_out: bool,
     success: Option<bool>,
     error: Option<InvokeError>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     started_at_epoch_ms: u64,
     completed_at_epoch_ms: Option<u64>,
     duration_ms: Option<u64>,
@@ -251,7 +256,7 @@ struct ShellExecutionSnapshot {
     timed_out: bool,
     success: Option<bool>,
     error: Option<InvokeError>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     started_at_epoch_ms: u64,
     completed_at_epoch_ms: Option<u64>,
     duration_ms: Option<u64>,
@@ -263,7 +268,7 @@ struct PreparedShellExec {
     command_args: Vec<String>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     path_for_diagnostics: String,
 }
 
@@ -612,7 +617,7 @@ async fn run_registered_service_start_command(
                 command_args: command.clone(),
                 cwd,
                 env: env.clone(),
-                timeout_secs: timeout_secs.unwrap_or(15).max(1),
+                timeout_secs: Some(timeout_secs.unwrap_or(15).max(1)),
                 path_for_diagnostics,
             };
             Ok(run_shell_command(prepared, None).await)
@@ -631,7 +636,7 @@ impl ShellMethod {
     }
 
     async fn exec(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
-        let prepared = match self.prepare_execution(arguments, timeout_secs)? {
+        let prepared = match self.prepare_execution(arguments, timeout_secs, true, true)? {
             Ok(prepared) => prepared,
             Err(outcome) => return Ok(outcome),
         };
@@ -661,7 +666,7 @@ impl ShellMethod {
         arguments: Value,
         timeout_secs: Option<u64>,
     ) -> Result<ServiceOutcome> {
-        let prepared = match self.prepare_execution(arguments, timeout_secs)? {
+        let prepared = match self.prepare_execution(arguments, timeout_secs, false, false)? {
             Ok(prepared) => prepared,
             Err(outcome) => return Ok(outcome),
         };
@@ -746,6 +751,8 @@ impl ShellMethod {
         &self,
         arguments: Value,
         request_timeout_secs: Option<u64>,
+        use_request_timeout: bool,
+        use_default_timeout: bool,
     ) -> Result<std::result::Result<PreparedShellExec, ServiceOutcome>> {
         let args: ShellExecArgs = serde_json::from_value(arguments).map_err(|err| {
             anyhow!(
@@ -776,10 +783,15 @@ impl ShellMethod {
         }
 
         let cwd = resolve_cwd(&self.root_dir, args.cwd.as_deref())?;
-        let timeout_secs = request_timeout_secs
-            .or(args.timeout_secs)
-            .unwrap_or(self.default_timeout_secs)
-            .min(self.max_timeout_secs);
+        let requested_timeout_secs = if use_request_timeout {
+            request_timeout_secs.or(args.timeout_secs)
+        } else {
+            args.timeout_secs
+        };
+        let timeout_secs = requested_timeout_secs
+            .filter(|value| *value > 0)
+            .map(|value| value.min(self.max_timeout_secs))
+            .or_else(|| use_default_timeout.then_some(self.default_timeout_secs));
         let env = sanitize_env(args.env);
         let path_for_diagnostics = env.get("PATH").cloned().unwrap_or_default();
 
@@ -977,6 +989,8 @@ async fn run_shell_command(
     let completed_at = || current_epoch_ms();
 
     let mut command = Command::new(&prepared.command_args[0]);
+    #[cfg(windows)]
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
     command
         .args(prepared.command_args.iter().skip(1))
         .current_dir(&prepared.cwd)
@@ -1023,7 +1037,7 @@ async fn run_shell_command(
 
 async fn wait_for_shell_command(
     mut child: Child,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     cancel_rx: Option<oneshot::Receiver<()>>,
     started: Instant,
 ) -> CompletedShellExec {
@@ -1042,26 +1056,39 @@ async fn wait_for_shell_command(
         })
     });
 
-    let wait_result = if let Some(mut cancel_rx) = cancel_rx {
-        tokio::select! {
-            result = child.wait() => ShellWaitResult::Exited(result),
-            _ = sleep(Duration::from_secs(timeout_secs)) => {
-                let _ = child.kill().await;
-                ShellWaitResult::TimedOut(child.wait().await)
-            }
-            _ = &mut cancel_rx => {
-                let _ = child.kill().await;
-                ShellWaitResult::Canceled(child.wait().await)
-            }
-        }
-    } else {
-        tokio::select! {
-            result = child.wait() => ShellWaitResult::Exited(result),
-            _ = sleep(Duration::from_secs(timeout_secs)) => {
-                let _ = child.kill().await;
-                ShellWaitResult::TimedOut(child.wait().await)
+    let wait_result = match (timeout_secs, cancel_rx) {
+        (Some(timeout_secs), Some(mut cancel_rx)) => {
+            tokio::select! {
+                result = child.wait() => ShellWaitResult::Exited(result),
+                _ = sleep(Duration::from_secs(timeout_secs)) => {
+                    let _ = child.kill().await;
+                    ShellWaitResult::TimedOut(timeout_secs, child.wait().await)
+                }
+                _ = &mut cancel_rx => {
+                    let _ = child.kill().await;
+                    ShellWaitResult::Canceled(child.wait().await)
+                }
             }
         }
+        (Some(timeout_secs), None) => {
+            tokio::select! {
+                result = child.wait() => ShellWaitResult::Exited(result),
+                _ = sleep(Duration::from_secs(timeout_secs)) => {
+                    let _ = child.kill().await;
+                    ShellWaitResult::TimedOut(timeout_secs, child.wait().await)
+                }
+            }
+        }
+        (None, Some(mut cancel_rx)) => {
+            tokio::select! {
+                result = child.wait() => ShellWaitResult::Exited(result),
+                _ = &mut cancel_rx => {
+                    let _ = child.kill().await;
+                    ShellWaitResult::Canceled(child.wait().await)
+                }
+            }
+        }
+        (None, None) => ShellWaitResult::Exited(child.wait().await),
     };
 
     let stdout = join_output(stdout_task).await;
@@ -1085,7 +1112,7 @@ async fn wait_for_shell_command(
             duration_ms,
             completed_at_epoch_ms,
         },
-        ShellWaitResult::TimedOut(status) => CompletedShellExec {
+        ShellWaitResult::TimedOut(timeout_secs, status) => CompletedShellExec {
             status: ShellExecutionStatus::TimedOut,
             exit_code: status.ok().and_then(|status| status.code()),
             stdout,
@@ -1132,7 +1159,7 @@ async fn wait_for_shell_command(
 
 enum ShellWaitResult {
     Exited(std::io::Result<std::process::ExitStatus>),
-    TimedOut(std::io::Result<std::process::ExitStatus>),
+    TimedOut(u64, std::io::Result<std::process::ExitStatus>),
     Canceled(std::io::Result<std::process::ExitStatus>),
 }
 
@@ -3471,6 +3498,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_start_execution_does_not_use_invoke_timeout_as_process_timeout() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+        let start = registry
+            .invoke(
+                "req-start-no-process-timeout".to_string(),
+                "shell",
+                "startExecution",
+                json!({"command": ["sh", "-lc", "sleep 2; echo bridge-agent-late"]}),
+                Some(1),
+            )
+            .await;
+        assert!(start.success);
+        let start_data = start.data.unwrap();
+        assert_eq!(start_data["timeoutSecs"], Value::Null);
+        let execution_id = start_data["executionId"].as_str().unwrap().to_string();
+
+        let mut status = String::new();
+        let mut stdout = String::new();
+        for _ in 0..80 {
+            let result = registry
+                .invoke(
+                    "req-start-no-process-timeout-poll".to_string(),
+                    "shell",
+                    "queryExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(result.success);
+            let data = result.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            if status != "RUNNING" {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(status, "SUCCEEDED");
+        assert!(stdout.contains("bridge-agent-late"));
+    }
+
+    #[tokio::test]
+    async fn shell_start_execution_honors_explicit_argument_timeout() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+        let start = registry
+            .invoke(
+                "req-start-explicit-process-timeout".to_string(),
+                "shell",
+                "startExecution",
+                json!({
+                    "command": ["sh", "-lc", "sleep 2; echo bridge-agent-too-late"],
+                    "timeoutSeconds": 1
+                }),
+                Some(5),
+            )
+            .await;
+        assert!(start.success);
+        let start_data = start.data.unwrap();
+        assert_eq!(start_data["timeoutSecs"].as_u64(), Some(1));
+        let execution_id = start_data["executionId"].as_str().unwrap().to_string();
+
+        let mut status = String::new();
+        for _ in 0..80 {
+            let result = registry
+                .invoke(
+                    "req-start-explicit-process-timeout-poll".to_string(),
+                    "shell",
+                    "queryExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(result.success);
+            let data = result.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            if status != "RUNNING" {
+                assert_eq!(data["timedOut"].as_bool(), Some(true));
+                assert_eq!(data["error"]["code"].as_str(), Some("TIMEOUT"));
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(status, "TIMED_OUT");
+    }
+
+    #[tokio::test]
     async fn shell_exec_returns_execution_metadata_for_quick_commands() {
         let current_dir = std::env::current_dir().unwrap();
         let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
@@ -3486,7 +3603,27 @@ mod tests {
             .await;
 
         assert!(result.success);
-        let data = result.data.unwrap();
+        let mut data = result.data.unwrap();
+        if data["status"].as_str() == Some("RUNNING") {
+            let execution_id = data["executionId"].as_str().unwrap().to_string();
+            for _ in 0..20 {
+                let polled = registry
+                    .invoke(
+                        "req-shell-quick-poll".to_string(),
+                        "shell",
+                        "queryExecution",
+                        json!({"executionId": execution_id}),
+                        None,
+                    )
+                    .await;
+                assert!(polled.success);
+                data = polled.data.unwrap();
+                if data["status"].as_str() != Some("RUNNING") {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        }
         assert!(data["executionId"].as_str().is_some());
         assert_eq!(data["status"].as_str(), Some("SUCCEEDED"));
         assert_eq!(data["exit_code"].as_i64(), Some(0));
@@ -3494,7 +3631,6 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("bridge-agent-ok"));
-        assert!(data.get("recommendedAction").is_none());
     }
 
     #[tokio::test]

@@ -8,7 +8,10 @@ use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 #[cfg(windows)]
 use crate::process_identity::process_file_name;
-use crate::protocol::{AgentCapabilities, AgentMessage, EventEmitted};
+use crate::protocol::{
+    AgentCapabilities, AgentMessage, EventEmitted, AGENT_PROTOCOL_FEATURE_REGISTERED_ACK,
+    AGENT_PROTOCOL_VERSION,
+};
 use crate::services::ServiceRegistry;
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -30,6 +33,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
+const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 
@@ -50,6 +54,9 @@ pub struct RuntimeSnapshot {
     pub config_path: Option<String>,
     pub agent_id: Option<String>,
     pub relay_url: Option<String>,
+    pub relay_registered: bool,
+    pub relay_registered_at: Option<u64>,
+    pub last_relay_seen_at: Option<u64>,
     pub log_file_path: Option<String>,
     pub last_error: Option<String>,
     pub last_event_at: u64,
@@ -125,6 +132,9 @@ impl Default for ManagedState {
                 config_path: None,
                 agent_id: None,
                 relay_url: None,
+                relay_registered: false,
+                relay_registered_at: None,
+                last_relay_seen_at: None,
                 log_file_path: None,
                 last_error: None,
                 last_event_at: now_ms(),
@@ -194,6 +204,9 @@ impl AgentRuntimeManager {
             config_path: Some(config_path.display().to_string()),
             agent_id: Some(config.relay.agent_id.clone()),
             relay_url: Some(ws_url.to_string()),
+            relay_registered: false,
+            relay_registered_at: None,
+            last_relay_seen_at: None,
             log_file_path: log_file_path.clone(),
             last_error: None,
             last_event_at: now_ms(),
@@ -553,6 +566,8 @@ fn is_bridge_collector_command(command: &[String]) -> bool {
         let normalized = part.replace('\\', "/");
         normalized.ends_with("wechat-bridge-collector")
             || normalized.ends_with("wecom-bridge-collector")
+            || normalized == "wechat_bridge_collector"
+            || normalized == "wecom_bridge_collector"
             || normalized.contains("/wechat_bridge_collector/")
             || normalized.contains("/wecom_bridge_collector/")
     })
@@ -673,15 +688,8 @@ impl RuntimeRunner {
 
             match connect_async(self.ws_url.as_str()).await {
                 Ok((stream, _)) => {
-                    self.update_snapshot(
-                        RuntimeStatus::Online,
-                        None,
-                        self.config.relay.agent_id.clone(),
-                        self.ws_url.to_string(),
-                        self.config_path.clone(),
-                    )
-                    .await;
-                    self.push_log("info", "connected to relay").await;
+                    self.push_log("info", "connected to relay, waiting for registration")
+                        .await;
 
                     if let Err(err) = self
                         .handle_connection(stream, &mut shutdown_rx, apply_rx, event_rx, audit_rx)
@@ -753,10 +761,12 @@ impl RuntimeRunner {
         let capabilities = self.current_capabilities().await;
         write_json(&mut write, &capabilities).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
+        let heartbeat_timeout = Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS);
         let mut keepalive = interval_at(
             tokio::time::Instant::now() + keepalive_interval,
             keepalive_interval,
         );
+        let mut last_relay_seen = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -796,17 +806,41 @@ impl RuntimeRunner {
                     self.push_audit_log(audit).await;
                 }
                 _ = keepalive.tick() => {
+                    if last_relay_seen.elapsed() > heartbeat_timeout {
+                        bail!(
+                            "relay heartbeat timed out after {}s without server frame",
+                            RELAY_HEARTBEAT_TIMEOUT_SECS
+                        );
+                    }
                     write.send(Message::Ping(Vec::new().into())).await?;
                 }
                 message = read.next() => {
                     let Some(message) = message else {
-                        break;
+                        bail!("relay websocket ended");
                     };
                     match message? {
                         Message::Text(text) => {
-                            let incoming: AgentMessage = serde_json::from_str(&text)
-                                .with_context(|| format!("invalid relay message: {text}"))?;
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
+                            let Some(incoming) = decode_relay_message(&text)
+                                .with_context(|| format!("invalid relay message: {text}"))?
+                            else {
+                                self.push_log("warn", "ignored unsupported relay message type")
+                                    .await;
+                                continue;
+                            };
                             match incoming {
+                                AgentMessage::RegisteredAck(ack) => {
+                                    self.update_registered_snapshot(&ack).await;
+                                    self.push_log(
+                                        "info",
+                                        &format!(
+                                            "registered on relay as {} connection {}",
+                                            ack.agent_id, ack.connection_id
+                                        ),
+                                    )
+                                    .await;
+                                }
                                 AgentMessage::InvokeRequest(request) => {
                                     let service = request.service.clone();
                                     let method = request.method.clone();
@@ -884,10 +918,18 @@ impl RuntimeRunner {
                             }
                         }
                         Message::Ping(payload) => {
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
                             write.send(Message::Pong(payload)).await?;
                         }
-                        Message::Close(_) => break,
-                        Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+                        Message::Close(_) => {
+                            bail!("relay closed websocket");
+                        }
+                        Message::Pong(_) => {
+                            last_relay_seen = tokio::time::Instant::now();
+                            self.update_relay_seen().await;
+                        }
+                        Message::Binary(_) | Message::Frame(_) => {}
                     }
                 }
             }
@@ -898,6 +940,8 @@ impl RuntimeRunner {
     async fn current_capabilities(&self) -> AgentMessage {
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            protocol_features: vec![AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string()],
             services: self.registry.read().await.definitions(),
         })
     }
@@ -909,6 +953,8 @@ impl RuntimeRunner {
         }
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            protocol_features: vec![AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string()],
             services: update.services,
         })
     }
@@ -927,10 +973,28 @@ impl RuntimeRunner {
             config_path: Some(config_path),
             agent_id: Some(agent_id),
             relay_url: Some(relay_url),
+            relay_registered: false,
+            relay_registered_at: None,
+            last_relay_seen_at: None,
             log_file_path: state.snapshot.log_file_path.clone(),
             last_error,
             last_event_at: now_ms(),
         };
+    }
+
+    async fn update_registered_snapshot(&self, ack: &crate::protocol::RegisteredAck) {
+        let mut state = self.inner.state.lock().await;
+        state.snapshot.status = RuntimeStatus::Online;
+        state.snapshot.relay_registered = true;
+        state.snapshot.relay_registered_at = Some(ack.registered_at_epoch_seconds);
+        state.snapshot.last_relay_seen_at = Some(now_ms());
+        state.snapshot.last_error = None;
+        state.snapshot.last_event_at = now_ms();
+    }
+
+    async fn update_relay_seen(&self) {
+        let mut state = self.inner.state.lock().await;
+        state.snapshot.last_relay_seen_at = Some(now_ms());
     }
 
     async fn push_log(&self, level: &str, message: &str) {
@@ -999,6 +1063,33 @@ where
     let payload = serde_json::to_string(message)?;
     sink.send(Message::Text(payload.into())).await?;
     Ok(())
+}
+
+fn decode_relay_message(text: &str) -> Result<Option<AgentMessage>> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let Some(message_type) = value.get("type").and_then(serde_json::Value::as_str) else {
+        let message = serde_json::from_value(value)?;
+        return Ok(Some(message));
+    };
+
+    if !relay_message_type_is_supported(message_type) {
+        return Ok(None);
+    }
+
+    let message = serde_json::from_value(value)?;
+    Ok(Some(message))
+}
+
+fn relay_message_type_is_supported(message_type: &str) -> bool {
+    matches!(
+        message_type,
+        "capabilities"
+            | "registered_ack"
+            | "invoke_request"
+            | "invoke_result"
+            | "event_emitted"
+            | "error"
+    )
 }
 
 fn build_agent_url(base: &str, agent_id: &str, token: &str) -> Result<Url> {
@@ -1647,13 +1738,15 @@ fn process_is_running(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_url, command_line_starts_with_bridge_agent, managed_start_command,
-        parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
-        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, wide_null_terminated_to_string, AgentRuntimeManager,
-        RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
+        build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
+        managed_start_command, parse_tasklist_image_name, process_looks_like_bridge_agent,
+        read_runtime_lock, runtime_lock_owner_is_active, runtime_lock_path,
+        runtime_start_is_active, terminate_runtime_lock_owner, wide_null_terminated_to_string,
+        AgentRuntimeManager, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo,
+        RuntimeStatus,
     };
     use crate::config::AgentConfig;
+    use crate::protocol::AgentMessage;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1664,6 +1757,34 @@ mod tests {
             url.as_str(),
             "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
         );
+    }
+
+    #[test]
+    fn relay_decoder_ignores_unknown_message_type() {
+        let message = r#"{"type":"server_notice","message":"hello"}"#;
+
+        assert!(decode_relay_message(message).unwrap().is_none());
+    }
+
+    #[test]
+    fn relay_decoder_accepts_registered_ack() {
+        let message = r#"{"type":"registered_ack","agent_id":"dev_1","workspace_id":1327,"connection_id":"conn_1","registered_at_epoch_seconds":1783680377,"heartbeat_timeout_secs":75}"#;
+
+        match decode_relay_message(message).unwrap().unwrap() {
+            AgentMessage::RegisteredAck(ack) => {
+                assert_eq!(ack.agent_id, "dev_1");
+                assert_eq!(ack.workspace_id, 1327);
+                assert_eq!(ack.connection_id, "conn_1");
+            }
+            other => panic!("expected registered_ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_decoder_rejects_invalid_known_message() {
+        let message = r#"{"type":"invoke_request","request_id":"req_1"}"#;
+
+        assert!(decode_relay_message(message).is_err());
     }
 
     #[test]
@@ -1772,6 +1893,29 @@ mod tests {
             managed_start_command(&command),
             vec![
                 "wechat-bridge-collector".to_string(),
+                "--config".to_string(),
+                "/tmp/config.json".to_string(),
+                "run".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_start_command_runs_python_module_collectors_in_foreground() {
+        let command = vec![
+            "/opt/anaconda3/bin/python".to_string(),
+            "-m".to_string(),
+            "wechat_bridge_collector".to_string(),
+            "--config".to_string(),
+            "/tmp/config.json".to_string(),
+            "start".to_string(),
+        ];
+        assert_eq!(
+            managed_start_command(&command),
+            vec![
+                "/opt/anaconda3/bin/python".to_string(),
+                "-m".to_string(),
+                "wechat_bridge_collector".to_string(),
                 "--config".to_string(),
                 "/tmp/config.json".to_string(),
                 "run".to_string(),

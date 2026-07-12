@@ -610,9 +610,18 @@ select:focus {
 .app-ability-group-head,
 .local-app-runtime-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 14px;
   align-items: flex-start;
+}
+
+.app-ability-group-head > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 220px;
 }
 
 .local-app-runtime-row {
@@ -700,6 +709,14 @@ select:focus {
   display: grid;
   gap: 10px;
   margin-top: 12px;
+}
+
+.capability-config-panel {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(30, 42, 68, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
 }
 
 .capability-test-panel label {
@@ -1606,6 +1623,52 @@ select:focus {
   justify-content: flex-end;
 }
 
+.force-update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.48);
+  backdrop-filter: blur(8px);
+}
+
+.force-update-panel {
+  width: min(560px, 100%);
+  padding: 28px;
+  border-radius: 18px;
+  background: var(--panel-strong);
+  border: 1px solid rgba(244, 67, 54, 0.18);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.24);
+}
+
+.force-update-panel h2 {
+  margin: 4px 0 10px;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.force-update-panel p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.force-update-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.force-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+
 .connection-summary-grid {
   margin-bottom: 18px;
 }
@@ -1626,6 +1689,10 @@ select:focus {
 
 .danger-text {
   color: var(--danger);
+}
+
+.warning-text {
+  color: var(--warn);
 }
 
 .log-panel {
@@ -1756,8 +1823,21 @@ select:focus {
   }
 
   .form-grid,
-  .overview-grid {
+  .overview-grid,
+  .force-update-meta {
     grid-template-columns: 1fr;
+  }
+
+  .force-update-overlay {
+    padding: 14px;
+  }
+
+  .force-update-panel {
+    padding: 20px;
+  }
+
+  .force-update-panel h2 {
+    font-size: 23px;
   }
 
   .log-line {

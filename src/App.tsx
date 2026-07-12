@@ -15,6 +15,9 @@ interface RuntimeSnapshot {
   config_path: string | null;
   agent_id: string | null;
   relay_url: string | null;
+  relay_registered: boolean;
+  relay_registered_at: number | null;
+  last_relay_seen_at: number | null;
   log_file_path: string | null;
   last_error: string | null;
   last_event_at: number;
@@ -239,6 +242,9 @@ interface AppUpdateStatus {
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
+  forceUpdateRequired: boolean;
+  minimumSupportedVersion: string | null;
+  forceUpdateMessage: string | null;
   releaseUrl: string;
   releaseName: string | null;
   publishedAt: string | null;
@@ -946,14 +952,18 @@ function App() {
   }, [selectedLocalApp?.id]);
   const appVersionLabel =
     appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "检查中";
+  const forceUpdateRequired = appUpdate?.forceUpdateRequired === true;
   const appUpdateStatusLabel = appUpdate
-    ? appUpdate.updateAvailable
+    ? forceUpdateRequired
+      ? `必须升级到 ${appUpdate.latestVersion ?? appUpdate.minimumSupportedVersion ?? "最新版本"}`
+      : appUpdate.updateAvailable
       ? `可升级到 ${appUpdate.latestVersion ?? "-"}`
       : "已是最新版本"
     : appUpdateCheckState === "error"
       ? appUpdateError || "检查失败"
       : "检查中";
-  const appUpdateTone = appUpdate?.updateAvailable || appUpdateCheckState === "error" ? "danger" : "normal";
+  const appUpdateTone =
+    forceUpdateRequired || appUpdate?.updateAvailable || appUpdateCheckState === "error" ? "danger" : "normal";
   const hasDesktopPermissionGap =
     enabledComputerMethodCount > 0 &&
     desktopPermissions != null &&
@@ -978,11 +988,10 @@ function App() {
   }
 
   function openLocalAppCapabilityConfig(serviceIndex: number, methodIndex?: number) {
-    setExpandedServiceIndex(serviceIndex);
     if (methodIndex != null) {
-      setExpandedMethodAdvancedKey(buildMethodEditorKey(serviceIndex, methodIndex));
+      toggleMethodAdvanced(serviceIndex, methodIndex);
     }
-    setActiveLocalAppDetailTab("config");
+    setExpandedServiceIndex(serviceIndex);
   }
 
   function applyConfigDocument(document: ConfigDocument) {
@@ -1539,7 +1548,9 @@ function App() {
       setAppUpdateCheckState("ready");
       if (showLatestMessage) {
         setMessage(
-          status.updateAvailable
+          status.forceUpdateRequired
+            ? `当前版本 ${status.currentVersion} 已停止支持，需要升级到 ${status.latestVersion ?? status.minimumSupportedVersion ?? "最新版本"} 后继续使用。`
+            : status.updateAvailable
             ? status.autoDownloadAvailable
               ? `发现新版本 ${status.latestVersion}，可以下载后自动退出、替换并重启。`
               : `发现新版本 ${status.latestVersion}，但当前平台需要跳转发布页手工下载。`
@@ -2569,6 +2580,11 @@ function App() {
         <Card title="状态">
           <div className="status-detail-grid">
             <InfoRow label="连接状态" value={statusLabel} />
+            <InfoRow
+              label="Relay 注册"
+              value={formatRelayRegistration(runtime)}
+              tone={runtime?.relay_registered ? "normal" : "warning"}
+            />
             <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
             <InfoRow
               label="最近错误"
@@ -3683,6 +3699,237 @@ function App() {
     );
   }
 
+  function renderCapabilityMethodConfig(method: UiMethodConfig, serviceIndex: number, methodIndex: number) {
+    if (!isMethodAdvancedOpen(serviceIndex, methodIndex)) {
+      return null;
+    }
+    const configuresShellExecution =
+      method.binding.type === "shell_command" &&
+      ["exec", "startExecution", "shellExec"].includes(method.name);
+
+    return (
+      <div className="method-advanced capability-config-panel">
+        <div className="method-advanced-head">
+          <strong>方法配置</strong>
+          <small>这里直接配置当前能力的方法权限和本地绑定。</small>
+        </div>
+        <div className="form-grid">
+          <Field label="方法状态">
+            <label className="switch inline-switch">
+              <input
+                type="checkbox"
+                checked={method.enabled}
+                onChange={(event) =>
+                  updateMethod(serviceIndex, methodIndex, (current) => ({
+                    ...current,
+                    enabled: event.target.checked
+                  }))
+                }
+              />
+              启用
+            </label>
+          </Field>
+
+          {method.binding.type === "computer_use" ? (
+            <Field
+              label="显示器 ID"
+              hint="留空表示主显示器；截图时可指定其他显示器。"
+            >
+              <input
+                value={method.binding.display_id}
+                onChange={(event) =>
+                  updateMethod(serviceIndex, methodIndex, (current) => ({
+                    ...current,
+                    binding:
+                      current.binding.type === "computer_use"
+                        ? {
+                            ...current.binding,
+                            display_id: event.target.value
+                          }
+                        : current.binding
+                  }))
+                }
+                placeholder="留空使用主屏"
+              />
+            </Field>
+          ) : null}
+
+          {method.binding.type === "shell_command" ? (
+            <>
+              {configuresShellExecution ? (
+                <>
+                  <Field label="权限模式">
+                    <div className="mode-toggle">
+                      <button
+                        className={!isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                        onClick={() => restoreSafeShellAccess(serviceIndex, methodIndex)}
+                      >
+                        受限
+                      </button>
+                      <button
+                        className={isFullShellAccess(method.binding) ? "secondary active-toggle" : "ghost"}
+                        onClick={() => grantFullShellAccess(serviceIndex, methodIndex)}
+                      >
+                        全部权限
+                      </button>
+                    </div>
+                  </Field>
+                  <Field label="根目录" hint="默认相对配置目录，填 / 表示整机根目录。">
+                    <input
+                      value={method.binding.root_dir}
+                      onChange={(event) =>
+                        updateMethod(serviceIndex, methodIndex, (current) => ({
+                          ...current,
+                          binding:
+                            current.binding.type === "shell_command"
+                              ? {
+                                  ...current.binding,
+                                  root_dir: event.target.value
+                                }
+                              : current.binding
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field label="允许命令" hint="逗号分隔；填 * 表示任意命令。">
+                    <input
+                      value={method.binding.allow_commands_text}
+                      onChange={(event) =>
+                        updateMethod(serviceIndex, methodIndex, (current) => ({
+                          ...current,
+                          binding:
+                            current.binding.type === "shell_command"
+                              ? {
+                                  ...current.binding,
+                                  allow_commands_text: event.target.value
+                                }
+                              : current.binding
+                        }))
+                      }
+                      placeholder="echo, pwd, git 或 *"
+                    />
+                  </Field>
+                </>
+              ) : null}
+              <Field label="默认超时">
+                <input
+                  value={method.binding.default_timeout_secs}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "shell_command"
+                          ? {
+                              ...current.binding,
+                              default_timeout_secs: event.target.value
+                            }
+                          : current.binding
+                    }))
+                  }
+                  placeholder="留空则使用全局"
+                />
+              </Field>
+              <Field label="最大超时">
+                <input
+                  value={method.binding.max_timeout_secs}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "shell_command"
+                          ? {
+                              ...current.binding,
+                              max_timeout_secs: event.target.value
+                            }
+                          : current.binding
+                    }))
+                  }
+                  placeholder="留空则使用全局"
+                />
+              </Field>
+            </>
+          ) : null}
+
+          {method.binding.type === "http" ? (
+            <>
+              <Field label="本地 URL" wide>
+                <input
+                  value={method.binding.url}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "http"
+                          ? {
+                              ...current.binding,
+                              url: event.target.value
+                            }
+                          : current.binding
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="HTTP 方法">
+                <input
+                  value={method.binding.http_method}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "http"
+                          ? {
+                              ...current.binding,
+                              http_method: event.target.value.toUpperCase()
+                            }
+                          : current.binding
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="超时">
+                <input
+                  value={method.binding.timeout_secs}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "http"
+                          ? {
+                              ...current.binding,
+                              timeout_secs: event.target.value
+                            }
+                          : current.binding
+                    }))
+                  }
+                  placeholder="留空则使用全局"
+                />
+              </Field>
+              <Field label="请求头" wide>
+                <textarea
+                  rows={4}
+                  value={method.binding.headers_text}
+                  onChange={(event) =>
+                    updateMethod(serviceIndex, methodIndex, (current) => ({
+                      ...current,
+                      binding:
+                        current.binding.type === "http"
+                          ? {
+                              ...current.binding,
+                              headers_text: event.target.value
+                            }
+                          : current.binding
+                    }))
+                  }
+                  placeholder={"Authorization: Bearer xxx\nX-App: local-java"}
+                />
+              </Field>
+            </>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   function renderLocalAppAbilityList(app: LocalAppItem, canShowConfig: boolean) {
     if (!config) {
       return <div />;
@@ -3702,10 +3949,37 @@ function App() {
         {services.map(({ serviceIndex, service }) => (
           <div className="app-ability-group" key={service.name}>
             <div className="app-ability-group-head">
-              <strong>{service.description || service.name}</strong>
-              <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
-                {service.enabled ? "启用" : "停用"}
-              </span>
+              <div>
+                <strong>{service.description || service.name}</strong>
+                <span className={`service-badge ${service.enabled ? "enabled" : "disabled"}`}>
+                  {service.enabled ? "启用" : "停用"}
+                </span>
+              </div>
+              {canShowConfig ? (
+                <div className="service-actions">
+                  <span
+                    className={`service-save-state ${
+                      savedServiceSignatures[serviceIndex] !== serviceSignature(service) ? "dirty" : "clean"
+                    }`}
+                  >
+                    {savedServiceSignatures[serviceIndex] !== serviceSignature(service) ? "未保存" : "已保存"}
+                  </span>
+                  <button
+                    className="secondary compact-config-button"
+                    onClick={() => void saveService(serviceIndex)}
+                    disabled={busy}
+                  >
+                    保存配置
+                  </button>
+                  <button
+                    className="primary compact-config-button"
+                    onClick={() => void saveService(serviceIndex, true)}
+                    disabled={busy}
+                  >
+                    保存并应用
+                  </button>
+                </div>
+              ) : null}
             </div>
             <div className="method-list compact-method-list">
               {service.methods.map((method, methodIndex) => {
@@ -3713,6 +3987,7 @@ function App() {
                 const testDraft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(method);
                 const testResult = capabilityTestResults[testKey];
                 const testDisabled = !service.enabled || !method.enabled || capabilityTestBusy != null;
+                const configOpen = isMethodAdvancedOpen(serviceIndex, methodIndex);
                 return (
                   <div className="method-card compact-method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
                     <div className="method-topline compact-method-topline">
@@ -3736,14 +4011,19 @@ function App() {
                         </button>
                         {canShowConfig ? (
                           <button
-                            className="secondary compact-config-button"
+                            className={
+                              configOpen
+                                ? "secondary compact-config-button active-toggle"
+                                : "secondary compact-config-button"
+                            }
                             onClick={() => openLocalAppCapabilityConfig(serviceIndex, methodIndex)}
                           >
-                            配置
+                            {configOpen ? "收起配置" : "配置"}
                           </button>
                         ) : null}
                       </div>
                     </div>
+                    {canShowConfig ? renderCapabilityMethodConfig(method, serviceIndex, methodIndex) : null}
                     <div className="capability-test-panel">
                       <label>
                         <span>参数 JSON</span>
@@ -4036,13 +4316,12 @@ function App() {
     const appComputerService = app
       .serviceIndexes.map((serviceIndex) => config.services[serviceIndex])
       .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)));
-    const canShowConfig =
-      showAdvancedSettings ||
-      app.kind === "custom" ||
-      app.serviceIndexes.some((serviceIndex) => {
-        const service = config.services[serviceIndex];
-        return service ? isShellExecService(service) : false;
-      });
+    const hasShellCapability = app.serviceIndexes.some((serviceIndex) => {
+      const service = config.services[serviceIndex];
+      return service ? isShellExecService(service) : false;
+    });
+    const canConfigureCapabilities = showAdvancedSettings || app.kind === "custom" || hasShellCapability;
+    const canShowDeveloperConfig = showAdvancedSettings || app.kind === "custom";
     const marketApp = marketConnectorForLocalApp(app);
     const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
     const updateBusy = connectorUpdateBusy === app.id;
@@ -4084,7 +4363,7 @@ function App() {
               >
                 能力
               </button>
-              {canShowConfig ? (
+              {canShowDeveloperConfig ? (
                 <button
                   className={`section-tab ${activeLocalAppDetailTab === "config" ? "active" : ""}`}
                   onClick={() => setActiveLocalAppDetailTab("config")}
@@ -4184,11 +4463,11 @@ function App() {
                 <strong>能力</strong>
                 <small>这些能力会在授权后开放给工作区调用。</small>
               </div>
-              {renderLocalAppAbilityList(app, canShowConfig)}
+              {renderLocalAppAbilityList(app, canConfigureCapabilities)}
             </div>
           ) : null}
 
-          {activeLocalAppDetailTab === "config" && canShowConfig ? (
+          {activeLocalAppDetailTab === "config" && canShowDeveloperConfig ? (
             <div className="app-detail-tab-panel developer-config-stack">
               <div className="method-advanced-head">
                 <strong>开发者配置</strong>
@@ -4415,6 +4694,12 @@ function App() {
         </div>
         <div className="status-detail-grid">
           <InfoRow label="当前状态" value={statusLabel} />
+          <InfoRow
+            label="Relay 注册"
+            value={formatRelayRegistration(runtime)}
+            tone={runtime?.relay_registered ? "normal" : "warning"}
+          />
+          <InfoRow label="Relay 最近响应" value={formatRelaySeen(runtime)} />
           <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
           <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
           <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
@@ -4535,6 +4820,48 @@ function App() {
     );
   }
 
+  function renderForceUpdateOverlay() {
+    if (!appUpdate?.forceUpdateRequired) {
+      return null;
+    }
+    const targetVersion = appUpdate.latestVersion ?? appUpdate.minimumSupportedVersion ?? "最新版本";
+    const message =
+      appUpdate.forceUpdateMessage ||
+      `当前版本 ${appUpdate.currentVersion} 已停止支持，需要升级到 ${targetVersion} 后继续使用。`;
+
+    return (
+      <div className="force-update-overlay" role="dialog" aria-modal="true" aria-labelledby="force-update-title">
+        <section className="force-update-panel">
+          <p className="eyebrow">必须更新</p>
+          <h2 id="force-update-title">请升级百积木本地连接客户端</h2>
+          <p>{message}</p>
+          <div className="force-update-meta">
+            <InfoRow label="当前版本" value={appUpdate.currentVersion} tone="warning" />
+            <InfoRow label="目标版本" value={targetVersion} />
+          </div>
+          <div className="force-update-actions">
+            {appUpdate.autoDownloadAvailable ? (
+              <button className="primary danger" onClick={() => void installAppUpdate()} disabled={updateBusy}>
+                {updateBusy ? "安装中" : "立即更新"}
+              </button>
+            ) : (
+              <button className="primary danger" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+                打开下载页
+              </button>
+            )}
+            <button
+              className="secondary"
+              onClick={() => void checkAppUpdate(true)}
+              disabled={updateBusy || appUpdateCheckState === "checking"}
+            >
+              {appUpdateCheckState === "checking" ? "检查中" : "重新检查"}
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
     apps: "本地应用",
@@ -4626,6 +4953,7 @@ function App() {
       </div>
       {renderToastStack()}
       {renderInstallLocalAppPanel()}
+      {renderForceUpdateOverlay()}
     </main>
   );
 }
@@ -4668,12 +4996,14 @@ function Card(props: {
 function InfoRow(props: {
   label: string;
   value: string;
-  tone?: "normal" | "danger";
+  tone?: "normal" | "warning" | "danger";
 }) {
+  const valueClass =
+    props.tone === "danger" ? "danger-text" : props.tone === "warning" ? "warning-text" : "";
   return (
     <div className="info-row">
       <span>{props.label}</span>
-      <strong className={props.tone === "danger" ? "danger-text" : ""}>{props.value}</strong>
+      <strong className={valueClass}>{props.value}</strong>
     </div>
   );
 }
@@ -5247,6 +5577,29 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
   });
+}
+
+function formatRelayRegistration(snapshot: RuntimeSnapshot | null): string {
+  if (!snapshot) {
+    return "-";
+  }
+  if (!snapshot.relay_registered) {
+    return "未注册";
+  }
+  return snapshot.relay_registered_at
+    ? `已注册 ${formatEpochSeconds(snapshot.relay_registered_at)}`
+    : "已注册";
+}
+
+function formatRelaySeen(snapshot: RuntimeSnapshot | null): string {
+  if (!snapshot?.last_relay_seen_at) {
+    return "-";
+  }
+  return formatTime(snapshot.last_relay_seen_at);
+}
+
+function formatEpochSeconds(timestamp: number): string {
+  return formatTime(timestamp * 1000);
 }
 
 function needsBrowserAuthorization(config: UiAgentConfig): boolean {

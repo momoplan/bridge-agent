@@ -15,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
+const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
+const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -510,6 +512,9 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
         fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
         let entry = entry?;
+        if should_skip_connector_package_entry(&entry.file_name()) {
+            continue;
+        }
         let from = entry.path();
         let to = destination.join(entry.file_name());
         let file_type = entry.file_type()?;
@@ -524,11 +529,20 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn should_skip_connector_package_entry(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(CONNECTOR_PYTHON_ENV_DIR | ".venv" | "__pycache__" | ".pytest_cache")
+    )
+}
+
 fn resolve_installed_start_commands(
     services: &mut [ServiceConfig],
     package_path: &Path,
 ) -> Result<()> {
     let package_bins = read_package_bins(package_path)?;
+    let python_scripts = read_python_project_scripts(package_path)?;
+    let python_env = ensure_python_project_environment(package_path, &python_scripts)?;
     let node_path = resolve_command_path("node");
     let codex_path = resolve_command_path("codex");
     for service in services {
@@ -548,6 +562,8 @@ fn resolve_installed_start_commands(
                 env,
                 package_path,
                 &package_bins,
+                &python_scripts,
+                python_env.as_deref(),
                 &node_path,
                 &codex_path,
             );
@@ -586,6 +602,8 @@ fn resolve_installed_shell_command(
     env: &mut BTreeMap<String, String>,
     package_path: &Path,
     package_bins: &BTreeMap<String, String>,
+    python_scripts: &BTreeMap<String, String>,
+    python_env: Option<&Path>,
     node_path: &Option<PathBuf>,
     codex_path: &Option<PathBuf>,
 ) {
@@ -595,6 +613,20 @@ fn resolve_installed_shell_command(
     let executable = command[0].trim();
     if executable.is_empty() || Path::new(executable).is_absolute() {
         return;
+    }
+
+    if python_scripts.contains_key(executable) {
+        if let Some(env_path) = python_env {
+            command[0] = python_script_path(env_path, executable)
+                .display()
+                .to_string();
+            enrich_start_command_env(env, [node_path, codex_path]);
+            prepend_path_entry(env, python_bin_dir(env_path));
+            if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                *cwd = Some(package_path.display().to_string());
+            }
+            return;
+        }
     }
 
     if let Some(relative_bin) = package_bins.get(executable) {
@@ -627,6 +659,17 @@ fn resolve_installed_shell_command(
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(package_path.display().to_string());
         }
+    }
+}
+
+fn prepend_path_entry(env_vars: &mut BTreeMap<String, String>, entry: PathBuf) {
+    let mut path_entries = vec![entry];
+    append_split_path(&mut path_entries, env_vars.get("PATH"));
+    if let Ok(joined_path) = env::join_paths(path_entries) {
+        env_vars.insert(
+            "PATH".to_string(),
+            joined_path.to_string_lossy().to_string(),
+        );
     }
 }
 
@@ -751,6 +794,300 @@ fn read_package_bins(package_path: &Path) -> Result<BTreeMap<String, String>> {
     Ok(bins)
 }
 
+fn read_python_project_scripts(package_path: &Path) -> Result<BTreeMap<String, String>> {
+    let path = package_path.join("pyproject.toml");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read Python project metadata {}", path.display()))?;
+    let project: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("failed to parse Python project metadata {}", path.display()))?;
+    let mut scripts = BTreeMap::new();
+    let Some(table) = project
+        .get("project")
+        .and_then(|value| value.get("scripts"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(scripts);
+    };
+    for (name, value) in table {
+        let Some(entrypoint) = value.as_str() else {
+            continue;
+        };
+        let Some(module) = entrypoint.split(':').next() else {
+            continue;
+        };
+        let module = module.trim();
+        if !name.trim().is_empty() && !module.is_empty() {
+            scripts.insert(name.trim().to_string(), module.to_string());
+        }
+    }
+    Ok(scripts)
+}
+
+fn ensure_python_project_environment(
+    package_path: &Path,
+    scripts: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    if scripts.is_empty() {
+        return Ok(None);
+    }
+    let env_path = package_path.join(CONNECTOR_PYTHON_ENV_DIR);
+    let python = python_env_executable(&env_path);
+    if !python.exists() {
+        create_python_env(package_path, &env_path)?;
+    }
+    if python_project_install_needed(package_path, &env_path)? {
+        install_python_project(package_path, &python)?;
+        mark_python_project_installed(package_path, &env_path)?;
+    }
+    Ok(Some(env_path))
+}
+
+fn python_project_install_needed(package_path: &Path, env_path: &Path) -> Result<bool> {
+    let marker = env_path.join(CONNECTOR_PYTHON_ENV_MARKER);
+    if !marker.exists() {
+        return Ok(true);
+    }
+    let marker_modified = marker
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .with_context(|| format!("failed to inspect {}", marker.display()))?;
+    for relative in ["pyproject.toml", "setup.py", "setup.cfg"] {
+        let path = package_path.join(relative);
+        if !path.exists() {
+            continue;
+        }
+        let modified = path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if modified > marker_modified {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn create_python_env(package_path: &Path, env_path: &Path) -> Result<()> {
+    let parent = env_path
+        .parent()
+        .with_context(|| format!("failed to resolve parent for {}", env_path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let requires_python = read_python_requires_python(package_path)?;
+    let python = resolve_python_for_project(requires_python.as_deref())?;
+    let output = Command::new(&python)
+        .args(["-m", "venv"])
+        .arg(env_path)
+        .output()
+        .with_context(|| format!("failed to create Python environment with `{python} -m venv`"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to create Python connector environment {}\nstdout:\n{}\nstderr:\n{}",
+            env_path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn read_python_requires_python(package_path: &Path) -> Result<Option<String>> {
+    let path = package_path.join("pyproject.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read Python project metadata {}", path.display()))?;
+    let project: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("failed to parse Python project metadata {}", path.display()))?;
+    Ok(project
+        .get("project")
+        .and_then(|value| value.get("requires-python"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string))
+}
+
+fn resolve_python_for_project(requires_python: Option<&str>) -> Result<String> {
+    for candidate in python_candidates() {
+        if python_matches_requirement(&candidate, requires_python) {
+            return Ok(candidate.display().to_string());
+        }
+    }
+    bail!(
+        "failed to find a Python interpreter matching {}. Install Python 3.10+ and make it available in PATH.",
+        requires_python.unwrap_or("the connector requirement")
+    )
+}
+
+fn python_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(value) = env::var("BRIDGE_AGENT_PYTHON")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        push_unique_path_entry(&mut candidates, PathBuf::from(value));
+    }
+    for executable in [
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "python3",
+        "python",
+    ] {
+        for path in find_commands_in_paths(executable) {
+            push_unique_path_entry(&mut candidates, path);
+        }
+    }
+    for path in [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/opt/anaconda3/bin/python",
+        "/usr/bin/python3",
+    ] {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            push_unique_path_entry(&mut candidates, path);
+        }
+    }
+    candidates
+}
+
+fn find_commands_in_paths(executable: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(path) = env::var("PATH") {
+        append_split_path(&mut paths, Some(&path));
+    }
+    if let Some(path) = login_shell_path() {
+        append_split_path(&mut paths, Some(&path));
+    }
+    paths
+        .into_iter()
+        .map(|dir| dir.join(executable))
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+fn python_matches_requirement(candidate: &Path, requires_python: Option<&str>) -> bool {
+    let Some(version) = python_version(candidate) else {
+        return false;
+    };
+    match minimum_python_version(requires_python) {
+        Some(minimum) => version >= minimum,
+        None => true,
+    }
+}
+
+fn python_version(candidate: &Path) -> Option<(u32, u32, u32)> {
+    let output = Command::new(candidate).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    parse_python_version(&text)
+}
+
+fn parse_python_version(value: &str) -> Option<(u32, u32, u32)> {
+    let version = value
+        .split_whitespace()
+        .find(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))?;
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|part| {
+            part.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn minimum_python_version(requires_python: Option<&str>) -> Option<(u32, u32, u32)> {
+    let requires_python = requires_python?;
+    requires_python
+        .split(',')
+        .filter_map(|part| part.trim().strip_prefix(">="))
+        .filter_map(parse_python_version)
+        .max()
+}
+
+fn install_python_project(package_path: &Path, python: &Path) -> Result<()> {
+    let output = Command::new(python)
+        .args(["-m", "pip", "install", "--disable-pip-version-check"])
+        .arg(package_path)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to install Python connector package with {}",
+                python.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "failed to install Python connector package {}\nstdout:\n{}\nstderr:\n{}",
+            package_path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn mark_python_project_installed(package_path: &Path, env_path: &Path) -> Result<()> {
+    let marker = env_path.join(CONNECTOR_PYTHON_ENV_MARKER);
+    fs::write(
+        &marker,
+        format!("package={}\n", package_path.display()).as_bytes(),
+    )
+    .with_context(|| format!("failed to write {}", marker.display()))?;
+    Ok(())
+}
+
+fn python_env_executable(env_path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        env_path.join("Scripts").join("python.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        env_path.join("bin").join("python")
+    }
+}
+
+fn python_script_path(env_path: &Path, script: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        env_path.join("Scripts").join(format!("{script}.exe"))
+    }
+    #[cfg(not(windows))]
+    {
+        env_path.join("bin").join(script)
+    }
+}
+
+fn python_bin_dir(env_path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        env_path.join("Scripts")
+    }
+    #[cfg(not(windows))]
+    {
+        env_path.join("bin")
+    }
+}
+
 fn upsert_service(
     services: &mut Vec<ServiceConfig>,
     service: ServiceConfig,
@@ -789,21 +1126,20 @@ fn upsert_synced_service(services: &mut Vec<ServiceConfig>, mut service: Service
 }
 
 fn cleanup_legacy_connector_autostarts_for_manifest(manifest: &ConnectorManifest) {
+    for label in legacy_autostart_labels_for_manifest(manifest) {
+        cleanup_legacy_autostart_label(&label);
+    }
+}
+
+fn legacy_autostart_labels_for_manifest(manifest: &ConnectorManifest) -> Vec<String> {
+    let mut labels = Vec::new();
     for value in manifest.hooks.values() {
         if value.contains("install-autostart") {
-            cleanup_legacy_autostart_label(&manifest.id);
+            labels.push(manifest.id.clone());
             break;
         }
     }
-    match manifest.id.as_str() {
-        "com.baijimu.connector.wechat" => {
-            cleanup_legacy_autostart_label("com.baijimu.wechat-bridge-collector");
-        }
-        "com.baijimu.connector.wecom" => {
-            cleanup_legacy_autostart_label("com.baijimu.wecom-bridge-collector");
-        }
-        _ => {}
-    }
+    labels
 }
 
 fn cleanup_legacy_autostart_label(label: &str) {
@@ -1242,6 +1578,76 @@ mod tests {
     }
 
     #[test]
+    fn reads_python_project_scripts() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            r#"
+[project.scripts]
+wechat-bridge-collector = "wechat_bridge_collector.app:main"
+"#,
+        )
+        .unwrap();
+
+        let scripts = read_python_project_scripts(dir.path()).unwrap();
+        assert_eq!(
+            scripts.get("wechat-bridge-collector").map(String::as_str),
+            Some("wechat_bridge_collector.app")
+        );
+    }
+
+    #[test]
+    fn resolves_python_project_script_to_connector_environment() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(CONNECTOR_PYTHON_ENV_DIR);
+        fs::create_dir_all(python_bin_dir(&env_path)).unwrap();
+        let mut command = vec!["wechat-bridge-collector".to_string(), "start".to_string()];
+        let mut cwd = None;
+        let mut env_vars = BTreeMap::new();
+        let scripts = BTreeMap::from([(
+            "wechat-bridge-collector".to_string(),
+            "wechat_bridge_collector.app".to_string(),
+        )]);
+
+        resolve_installed_shell_command(
+            &mut command,
+            &mut cwd,
+            &mut env_vars,
+            dir.path(),
+            &BTreeMap::new(),
+            &scripts,
+            Some(&env_path),
+            &None,
+            &None,
+        );
+
+        assert_eq!(
+            command[0],
+            python_script_path(&env_path, "wechat-bridge-collector")
+                .display()
+                .to_string()
+        );
+        assert_eq!(command[1], "start");
+        assert_eq!(cwd.as_deref(), Some(dir.path().to_str().unwrap()));
+        assert!(env_vars
+            .get("PATH")
+            .is_some_and(|path| env::split_paths(path)
+                .next()
+                .is_some_and(|entry| entry == python_bin_dir(&env_path))));
+    }
+
+    #[test]
+    fn parses_python_version_requirements() {
+        assert_eq!(parse_python_version("Python 3.12.7"), Some((3, 12, 7)));
+        assert_eq!(parse_python_version("3.10"), Some((3, 10, 0)));
+        assert_eq!(minimum_python_version(Some(">=3.10,<4")), Some((3, 10, 0)));
+        assert_eq!(
+            minimum_python_version(Some(">=3.10,>=3.11")),
+            Some((3, 11, 0))
+        );
+    }
+
+    #[test]
     fn sync_installed_connectors_restores_lifecycle_commands_and_preserves_enabled() {
         let dir = tempdir().unwrap();
         std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
@@ -1298,5 +1704,32 @@ mod tests {
             .unwrap();
         assert!(!service.enabled);
         assert!(service.start_command.is_some());
+    }
+
+    #[test]
+    fn legacy_autostart_cleanup_does_not_remove_current_wechat_collector_label() {
+        let manifest = ConnectorManifest {
+            schema_version: "1.0".to_string(),
+            id: "com.baijimu.connector.wechat".to_string(),
+            name: "WeChat Connector".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            publisher: None,
+            source: None,
+            runtime: None,
+            config_schema: None,
+            remote_capabilities: Vec::new(),
+            services: Vec::new(),
+            service_registration_files: Vec::new(),
+            hooks: BTreeMap::from([(
+                "installAutostart".to_string(),
+                "wechat-bridge-collector install-autostart".to_string(),
+            )]),
+        };
+
+        assert_eq!(
+            legacy_autostart_labels_for_manifest(&manifest),
+            vec!["com.baijimu.connector.wechat".to_string()]
+        );
     }
 }

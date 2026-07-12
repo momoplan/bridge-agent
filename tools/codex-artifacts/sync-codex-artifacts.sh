@@ -26,6 +26,9 @@ GITHUB_RELEASE_API="${GITHUB_RELEASE_API:-https://api.github.com/repos/openai/co
 export CURL_EXTRA_ARGS="${CURL_EXTRA_ARGS:---http1.1}"
 INCLUDE_OFFICIAL_APP_DMG="${INCLUDE_OFFICIAL_APP_DMG:-0}"
 OFFICIAL_APP_DMG_ARCHES="${OFFICIAL_APP_DMG_ARCHES:-arm64 x86_64}"
+INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER="${INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER:-0}"
+INCLUDE_WINDOWS_APP_MSIX="${INCLUDE_WINDOWS_APP_MSIX:-1}"
+WINDOWS_APP_MSIX_ARCHES="${WINDOWS_APP_MSIX_ARCHES:-x64}"
 
 # Keep the default set intentionally narrow enough for production installer use.
 # Override CODEX_ASSET_REGEX to mirror additional official release assets.
@@ -44,7 +47,7 @@ trap cleanup EXIT
 mkdir -p "$WORK_DIR"
 
 echo "Fetching release metadata from $GITHUB_RELEASE_API"
-INCLUDE_OFFICIAL_APP_DMG="$INCLUDE_OFFICIAL_APP_DMG" OFFICIAL_APP_DMG_ARCHES="$OFFICIAL_APP_DMG_ARCHES" python3 - "$GITHUB_RELEASE_API" "$CODEX_ASSET_REGEX" "$WORK_DIR/release.json" "$WORK_DIR/assets.json" <<'PY'
+INCLUDE_OFFICIAL_APP_DMG="$INCLUDE_OFFICIAL_APP_DMG" OFFICIAL_APP_DMG_ARCHES="$OFFICIAL_APP_DMG_ARCHES" INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER="$INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER" INCLUDE_WINDOWS_APP_MSIX="$INCLUDE_WINDOWS_APP_MSIX" WINDOWS_APP_MSIX_ARCHES="$WINDOWS_APP_MSIX_ARCHES" python3 - "$GITHUB_RELEASE_API" "$CODEX_ASSET_REGEX" "$WORK_DIR/release.json" "$WORK_DIR/assets.json" <<'PY'
 import json
 import os
 import re
@@ -93,6 +96,38 @@ if os.environ.get("INCLUDE_OFFICIAL_APP_DMG") == "1":
         if arch not in app_assets:
             raise SystemExit(f"unsupported OFFICIAL_APP_DMG_ARCHES entry: {arch}")
         assets.append(app_assets[arch])
+
+if os.environ.get("INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER") == "1":
+    assets.append(
+        {
+            "name": "codex-app-windows-msstore-installer.exe",
+            "size": None,
+            "upstream_url": "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi",
+            "content_type": "application/vnd.microsoft.portable-executable",
+        }
+    )
+
+if os.environ.get("INCLUDE_WINDOWS_APP_MSIX") == "1":
+    msix_assets = {
+        "x64": {
+            "name": "codex-app-windows-x64.msix",
+            "size": None,
+            "upstream_url": "https://codexapp.agentsmirror.com/latest/win-x64",
+            "content_type": "application/vnd.ms-appx",
+            "license_notice": "Mirrored without modification from the Microsoft Store Codex package resolved by codex-app-mirror; verify package signature and SHA256 before installation.",
+        },
+        "arm64": {
+            "name": "codex-app-windows-arm64.msix",
+            "size": None,
+            "upstream_url": "https://codexapp.agentsmirror.com/latest/win-arm64",
+            "content_type": "application/vnd.ms-appx",
+            "license_notice": "Mirrored without modification from the Microsoft Store Codex package resolved by codex-app-mirror; verify package signature and SHA256 before installation.",
+        },
+    }
+    for arch in os.environ.get("WINDOWS_APP_MSIX_ARCHES", "").split():
+        if arch not in msix_assets:
+            raise SystemExit(f"unsupported WINDOWS_APP_MSIX_ARCHES entry: {arch}")
+        assets.append(msix_assets[arch])
 
 if not assets:
     raise SystemExit(f"no release assets matched CODEX_ASSET_REGEX={pattern!r}")
@@ -190,7 +225,7 @@ for asset in assets:
             "sha256": digest,
             "size": len(data),
             "content_type": asset.get("content_type"),
-            "license_notice": "Mirrored from the official OpenAI Codex GitHub release without modification.",
+            "license_notice": asset.get("license_notice") or "Mirrored from the official OpenAI Codex GitHub release without modification.",
         }
     )
 

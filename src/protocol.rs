@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const AGENT_PROTOCOL_VERSION: u32 = 2;
+pub const AGENT_PROTOCOL_FEATURE_REGISTERED_ACK: &str = "registered_ack";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
     Capabilities(AgentCapabilities),
+    RegisteredAck(RegisteredAck),
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
     EventEmitted(EventEmitted),
@@ -14,7 +18,24 @@ pub enum AgentMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapabilities {
     pub agent_id: String,
+    #[serde(default = "default_agent_protocol_version")]
+    pub protocol_version: u32,
+    #[serde(default)]
+    pub protocol_features: Vec<String>,
     pub services: Vec<ServiceDefinition>,
+}
+
+fn default_agent_protocol_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredAck {
+    pub agent_id: String,
+    pub workspace_id: u64,
+    pub connection_id: String,
+    pub registered_at_epoch_seconds: u64,
+    pub heartbeat_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

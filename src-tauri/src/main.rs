@@ -23,6 +23,8 @@ use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -53,6 +55,8 @@ const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
+#[cfg(windows)]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct DesktopState {
     runtime: AgentRuntimeManager,
@@ -161,6 +165,9 @@ struct AppUpdateStatus {
     current_version: String,
     latest_version: Option<String>,
     update_available: bool,
+    force_update_required: bool,
+    minimum_supported_version: Option<String>,
+    force_update_message: Option<String>,
     release_url: String,
     release_name: Option<String>,
     published_at: Option<String>,
@@ -297,6 +304,12 @@ struct UpdateReleaseResponse {
     published_at: Option<String>,
     #[serde(default, alias = "update_available")]
     update_available: Option<bool>,
+    #[serde(default, alias = "force_update")]
+    force_update: Option<bool>,
+    #[serde(default, alias = "minimum_supported_version", alias = "minSupportedVersion")]
+    minimum_supported_version: Option<String>,
+    #[serde(default, alias = "force_update_message")]
+    force_update_message: Option<String>,
     #[serde(default)]
     assets: Vec<UpdateReleaseAsset>,
 }
@@ -1119,7 +1132,9 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let published_at = release.published_at.clone();
     let asset_name = preferred_asset.map(|asset| asset.name.clone());
     let auto_download_available = preferred_asset.is_some();
-    let update_available = release
+    let force_update_required = release_force_update_required(&release, &current_version);
+    let update_available = force_update_required
+        || release
         .update_available
         .unwrap_or(latest_version > current_version);
 
@@ -1127,6 +1142,9 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
         current_version: current_version.to_string(),
         latest_version: Some(latest_version.to_string()),
         update_available,
+        force_update_required,
+        minimum_supported_version: release.minimum_supported_version.clone(),
+        force_update_message: release.force_update_message.clone(),
         release_url,
         release_name,
         published_at,
@@ -1144,10 +1162,12 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     let latest_version = release_version(&release)?;
     let release_url = release_page_url(&release);
 
-    let update_available = release
+    let force_update_required = release_force_update_required(&release, &current_version);
+    let update_available = force_update_required
+        || release
         .update_available
         .unwrap_or(latest_version > current_version);
-    if !update_available || latest_version <= current_version {
+    if (!update_available || latest_version <= current_version) && !force_update_required {
         return Ok(AppUpdateInstallResult {
             status: "up_to_date".to_string(),
             version: current_version.to_string(),
@@ -1266,6 +1286,18 @@ fn release_version(release: &UpdateReleaseResponse) -> Result<Version, String> {
         .or(release.tag_name.as_deref())
         .ok_or_else(|| "更新服务未返回最新版本号".to_string())?;
     parse_release_version(raw_version).map_err(|err| format!("最新版本号无效: {err}"))
+}
+
+fn release_force_update_required(release: &UpdateReleaseResponse, current_version: &Version) -> bool {
+    if release.force_update.unwrap_or(false) {
+        return true;
+    }
+    let Some(minimum_version) = release.minimum_supported_version.as_deref() else {
+        return false;
+    };
+    parse_release_version(minimum_version)
+        .map(|minimum_version| current_version < &minimum_version)
+        .unwrap_or(false)
 }
 
 async fn fetch_latest_release() -> Result<UpdateReleaseResponse, String> {
@@ -1690,6 +1722,8 @@ async fn run_start_command(
                 return Err(format!("服务 `{service}` 的启动命令为空"));
             }
             let mut process = AsyncCommand::new(&command[0]);
+            #[cfg(windows)]
+            process.creation_flags(WINDOWS_CREATE_NO_WINDOW);
             process.args(command.iter().skip(1));
             if let Some(cwd) = cwd
                 .as_deref()
@@ -2185,6 +2219,84 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
     config.platform.workspace_id.is_some() && !config.relay.token.trim().is_empty()
 }
 
+fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
+    let Some(source) = bundled_baijimu_cli_path() else {
+        diagnostics.info("bundled baijimu CLI resource not found; skipping CLI install");
+        return Ok(());
+    };
+    let target = user_baijimu_cli_path();
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let should_copy = match (fs::read(&source), fs::read(&target)) {
+        (Ok(source_bytes), Ok(target_bytes)) => source_bytes != target_bytes,
+        (Ok(_), Err(_)) => true,
+        (Err(err), _) => return Err(err.into()),
+    };
+    if should_copy {
+        fs::copy(&source, &target)?;
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&target)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&target, permissions)?;
+        }
+        diagnostics.info(format!(
+            "installed bundled baijimu CLI to {}",
+            target.display()
+        ));
+    } else {
+        diagnostics.info(format!(
+            "bundled baijimu CLI already up to date at {}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+fn bundled_baijimu_cli_path() -> Option<PathBuf> {
+    let binary_name = baijimu_cli_binary_name();
+    let exe = std::env::current_exe().ok();
+    let mut candidates = Vec::new();
+    if let Some(exe) = exe.as_ref() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("resources").join("bin").join(binary_name));
+            candidates.push(dir.join("..").join("Resources").join("resources").join("bin").join(binary_name));
+            candidates.push(dir.join("..").join("resources").join("bin").join(binary_name));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("src-tauri").join("resources").join("bin").join(binary_name));
+        candidates.push(cwd.join("resources").join("bin").join(binary_name));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+fn user_baijimu_cli_path() -> PathBuf {
+    let binary_name = baijimu_cli_binary_name();
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("Baijimu")
+                .join("bin")
+                .join(binary_name);
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local").join("bin").join(binary_name)
+}
+
+fn baijimu_cli_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "baijimu.exe"
+    } else {
+        "baijimu"
+    }
+}
+
 fn main() {
     let bootstrap_diagnostics = StartupDiagnostics::bootstrap();
     install_panic_diagnostics(bootstrap_diagnostics.clone());
@@ -2229,6 +2341,11 @@ fn main() {
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"
+                ));
+            }
+            if let Err(err) = install_bundled_baijimu_cli(&setup_diagnostics) {
+                setup_diagnostics.warn(format!(
+                    "failed to install bundled baijimu CLI; continuing without CLI install: {err:#}"
                 ));
             }
             auto_start_agent(
@@ -2319,4 +2436,51 @@ fn main() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update_release_response(
+        force_update: Option<bool>,
+        minimum_supported_version: Option<&str>,
+    ) -> UpdateReleaseResponse {
+        UpdateReleaseResponse {
+            tag_name: Some("bridge-agent-v0.1.72".to_string()),
+            version: Some("0.1.72".to_string()),
+            release_url: None,
+            release_name: None,
+            published_at: None,
+            update_available: None,
+            force_update,
+            minimum_supported_version: minimum_supported_version.map(str::to_string),
+            force_update_message: None,
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn force_update_required_should_follow_minimum_supported_version() {
+        let release = update_release_response(None, Some("0.1.72"));
+
+        assert!(release_force_update_required(
+            &release,
+            &Version::parse("0.1.71").unwrap()
+        ));
+        assert!(!release_force_update_required(
+            &release,
+            &Version::parse("0.1.72").unwrap()
+        ));
+    }
+
+    #[test]
+    fn force_update_flag_should_override_version_comparison() {
+        let release = update_release_response(Some(true), Some("0.1.70"));
+
+        assert!(release_force_update_required(
+            &release,
+            &Version::parse("0.1.72").unwrap()
+        ));
+    }
 }

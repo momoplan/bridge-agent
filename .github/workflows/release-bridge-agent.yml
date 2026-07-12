@@ -241,6 +241,18 @@ jobs:
               exit 1
             fi
           done
+          case "$BRIDGE_AGENT_UPDATE_API_URL" in
+            *://relay.baijimu.com/*)
+              echo "BRIDGE_AGENT_UPDATE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
+              exit 1
+              ;;
+          esac
+          case "$BRIDGE_AGENT_RELEASE_API_URL" in
+            *://relay.baijimu.com/*)
+              echo "BRIDGE_AGENT_RELEASE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Build release bundles
         shell: bash
@@ -262,6 +274,34 @@ jobs:
         run: |
           set -euo pipefail
           npm run tauri -- build ${{ matrix.tauri_args }}
+
+      - name: Normalize public bundle names
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#bridge-agent-v}"
+          bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+          expected_name="百积木_${version}_universal.dmg"
+          expected_path="$bundle_dir/$expected_name"
+
+          shopt -s nullglob
+          bundle_files=("$bundle_dir"/*.dmg)
+          if [ "${#bundle_files[@]}" -eq 0 ]; then
+            echo "No macOS dmg bundle found in $bundle_dir" >&2
+            exit 1
+          fi
+          if [ "${#bundle_files[@]}" -gt 1 ]; then
+            echo "Expected one macOS dmg bundle, found ${#bundle_files[@]}:" >&2
+            printf ' - %s\n' "${bundle_files[@]}" >&2
+            exit 1
+          fi
+
+          actual_path="${bundle_files[0]}"
+          if [ "$actual_path" != "$expected_path" ]; then
+            mv "$actual_path" "$expected_path"
+          fi
+          test -f "$expected_path"
 
       - name: Verify Windows signatures
         if: runner.os == 'Windows'
