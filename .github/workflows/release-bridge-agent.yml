@@ -75,6 +75,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Prepare bundled Baijimu CLI
+        shell: bash
+        env:
+          BAIJIMU_CLI_RS_GIT_URL: https://gitee.com/zxflimit_admin/baijimu-cli-rs.git
+          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          ./tools/baijimu-cli/prepare-bundled-cli.sh
+
       - name: Configure Windows signing
         if: runner.os == 'Windows'
         shell: pwsh
