@@ -140,6 +140,12 @@ struct AuthorizedPayload {
     relay_ws_url: String,
     #[serde(rename = "agentToken")]
     agent_token: String,
+    #[serde(rename = "localClientToken")]
+    local_client_token: Option<String>,
+    #[serde(rename = "localClientTokenType")]
+    local_client_token_type: Option<String>,
+    #[serde(rename = "localClientKeyId")]
+    local_client_key_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -990,10 +996,12 @@ async fn poll_browser_auth(
         .ok_or_else(|| command_error_message("授权成功但缺少 authorizedPayload"))?;
     let mut updated = config;
     updated.platform.workspace_id = Some(authorized.workspace_id);
-    updated.relay.agent_id = authorized.device_id;
-    updated.relay.url = authorized.relay_ws_url;
-    updated.relay.token = authorized.agent_token;
+    updated.relay.agent_id = authorized.device_id.clone();
+    updated.relay.url = authorized.relay_ws_url.clone();
+    updated.relay.token = authorized.agent_token.clone();
     save_agent_config(&state.config_path, &updated)
+        .map_err(|err| command_error_message(err.to_string()))?;
+    write_shared_cli_auth(&updated, &authorized)
         .map_err(|err| command_error_message(err.to_string()))?;
     let runtime = restart_agent_from_saved_config(&state)
         .await
@@ -1005,6 +1013,83 @@ async fn poll_browser_auth(
         config: Some(updated),
         runtime: Some(runtime),
     })
+}
+
+fn write_shared_cli_auth(config: &AgentConfig, authorized: &AuthorizedPayload) -> anyhow::Result<()> {
+    let Some(local_client_token) = authorized.local_client_token.as_deref() else {
+        return Ok(());
+    };
+    if local_client_token.trim().is_empty() {
+        return Ok(());
+    }
+
+    let path = shared_cli_auth_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut document = if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !document.is_object() {
+        document = serde_json::json!({});
+    }
+
+    document["currentEnvironment"] = serde_json::json!("prod");
+    if !document
+        .get("environments")
+        .map(|value| value.is_object())
+        .unwrap_or(false)
+    {
+        document["environments"] = serde_json::json!({});
+    }
+    document["environments"]["prod"] = serde_json::json!({
+        "baseUrl": config.platform.base_url.trim_end_matches('/'),
+    });
+
+    let mut credentials = document
+        .get("machineCredentials")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    credentials.retain(|item| {
+        item.get("workspaceId").and_then(|value| value.as_u64()) != Some(authorized.workspace_id)
+            || item.get("clientId").and_then(|value| value.as_str()) != Some(authorized.device_id.as_str())
+    });
+    credentials.push(serde_json::json!({
+        "workspaceId": authorized.workspace_id,
+        "clientId": authorized.device_id,
+        "keyId": authorized.local_client_key_id,
+        "token": local_client_token,
+        "tokenType": authorized.local_client_token_type.as_deref().unwrap_or("workspace_user_api_key"),
+        "issuedAtEpochSeconds": now_epoch_seconds(),
+    }));
+    document["machineCredentials"] = Value::Array(credentials);
+
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, serde_json::to_vec_pretty(&document)?)?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn shared_cli_auth_path() -> PathBuf {
+    if let Some(config_home) = std::env::var_os("BAIJIMU_CONFIG_HOME") {
+        return PathBuf::from(config_home).join("baijimu").join("auth.json");
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config").join("baijimu").join("auth.json")
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 async fn restart_agent_from_saved_config(
