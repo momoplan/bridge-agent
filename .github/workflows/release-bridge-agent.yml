@@ -82,6 +82,9 @@ jobs:
           BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
         run: |
           set -euo pipefail
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export BAIJIMU_CLI_RS_MACOS_UNIVERSAL=true
+          fi
           ./tools/baijimu-cli/prepare-bundled-cli.sh
 
       - name: Configure Windows signing
@@ -162,6 +165,56 @@ jobs:
           mkdir -p "$RUNNER_TEMP/private_keys"
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY}.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
+
+      - name: Sign bundled Baijimu CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)"
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          cli_path="src-tauri/resources/bin/baijimu"
+          if [ ! -x "$cli_path" ]; then
+            echo "Bundled Baijimu CLI is missing or not executable: $cli_path" >&2
+            exit 1
+          fi
+
+          certificate_path="$RUNNER_TEMP/baijimu-cli-signing-certificate.p12"
+          keychain_path="$RUNNER_TEMP/baijimu-cli-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$cli_path"
+          codesign --verify --strict --verbose=2 "$cli_path"
+          lipo -info "$cli_path"
 
       - name: Validate release tag
         shell: bash
