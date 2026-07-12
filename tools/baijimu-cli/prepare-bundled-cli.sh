@@ -17,7 +17,7 @@ if [ ! -f "${cli_dir}/Cargo.toml" ]; then
   rm -rf "${clone_dir}"
   clone_url="${default_cli_git_url}"
   if [ -n "${BAIJIMU_CLI_RS_GIT_TOKEN:-}" ] && [[ "${clone_url}" == https://gitee.com/* ]]; then
-    clone_url="${clone_url/https:\\/\\/gitee.com\\//https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@gitee.com/}"
+    clone_url="https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
   fi
   git clone --depth 1 "${clone_url}" "${clone_dir}"
   cli_dir="${clone_dir}"
