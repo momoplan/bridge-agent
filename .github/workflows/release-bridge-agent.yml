@@ -276,32 +276,60 @@ jobs:
           npm run tauri -- build ${{ matrix.tauri_args }}
 
       - name: Normalize public bundle names
-        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#bridge-agent-v}"
-          bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
-          expected_name="百积木_${version}_universal.dmg"
-          expected_path="$bundle_dir/$expected_name"
+
+          normalize_one() {
+            local label="$1"
+            local expected_path="$2"
+            shift 2
+            local bundle_files=("$@")
+            if [ "${#bundle_files[@]}" -eq 0 ]; then
+              echo "No $label bundle found" >&2
+              exit 1
+            fi
+            if [ "${#bundle_files[@]}" -gt 1 ]; then
+              echo "Expected one $label bundle, found ${#bundle_files[@]}:" >&2
+              printf ' - %s\n' "${bundle_files[@]}" >&2
+              exit 1
+            fi
+            if [ "${bundle_files[0]}" != "$expected_path" ]; then
+              mv "${bundle_files[0]}" "$expected_path"
+            fi
+            test -f "$expected_path"
+          }
 
           shopt -s nullglob
-          bundle_files=("$bundle_dir"/*.dmg)
-          if [ "${#bundle_files[@]}" -eq 0 ]; then
-            echo "No macOS dmg bundle found in $bundle_dir" >&2
-            exit 1
-          fi
-          if [ "${#bundle_files[@]}" -gt 1 ]; then
-            echo "Expected one macOS dmg bundle, found ${#bundle_files[@]}:" >&2
-            printf ' - %s\n' "${bundle_files[@]}" >&2
-            exit 1
-          fi
-
-          actual_path="${bundle_files[0]}"
-          if [ "$actual_path" != "$expected_path" ]; then
-            mv "$actual_path" "$expected_path"
-          fi
-          test -f "$expected_path"
+          case "${{ runner.os }}" in
+            macOS)
+              bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+              normalize_one "macOS dmg" \
+                "$bundle_dir/Baijimu_${version}_universal.dmg" \
+                "$bundle_dir"/*.dmg
+              ;;
+            Windows)
+              bundle_dir="src-tauri/target/release/bundle/msi"
+              normalize_one "Windows msi" \
+                "$bundle_dir/Baijimu_${version}_x64_en-US.msi" \
+                "$bundle_dir"/*.msi
+              ;;
+            Linux)
+              appimage_dir="src-tauri/target/release/bundle/appimage"
+              deb_dir="src-tauri/target/release/bundle/deb"
+              normalize_one "Linux AppImage" \
+                "$appimage_dir/Baijimu_${version}_amd64.AppImage" \
+                "$appimage_dir"/*.AppImage
+              normalize_one "Linux deb" \
+                "$deb_dir/Baijimu_${version}_amd64.deb" \
+                "$deb_dir"/*.deb
+              ;;
+            *)
+              echo "Unsupported runner OS: ${{ runner.os }}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Verify Windows signatures
         if: runner.os == 'Windows'
