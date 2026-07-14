@@ -74,6 +74,10 @@ pub struct DeviceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
+    #[serde(default)]
+    pub node_path: Option<String>,
+    #[serde(default)]
+    pub codex_binary_path: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub default_timeout_secs: u64,
     #[serde(default = "default_max_timeout_secs")]
@@ -254,6 +258,8 @@ impl AgentConfig {
                 tags: vec!["desktop".to_string(), "local".to_string()],
             },
             runtime: RuntimeConfig {
+                node_path: None,
+                codex_binary_path: None,
                 default_timeout_secs: default_timeout_secs(),
                 max_timeout_secs: default_max_timeout_secs(),
                 log_limit: default_log_limit(),
@@ -302,6 +308,11 @@ impl AgentConfig {
         if self.runtime.default_timeout_secs == 0 || self.runtime.max_timeout_secs == 0 {
             bail!("runtime timeouts must be greater than zero");
         }
+        validate_optional_runtime_path("runtime.node_path", self.runtime.node_path.as_deref())?;
+        validate_optional_runtime_path(
+            "runtime.codex_binary_path",
+            self.runtime.codex_binary_path.as_deref(),
+        )?;
         if self.runtime.default_timeout_secs > self.runtime.max_timeout_secs {
             bail!("runtime.default_timeout_secs cannot exceed runtime.max_timeout_secs");
         }
@@ -1571,6 +1582,13 @@ fn default_enabled() -> bool {
 
 fn default_timeout_secs() -> u64 {
     30
+}
+
+fn validate_optional_runtime_path(label: &str, value: Option<&str>) -> Result<()> {
+    if value.is_some_and(|path| path.trim().is_empty()) {
+        bail!("{label} cannot be empty when set");
+    }
+    Ok(())
 }
 
 fn default_max_timeout_secs() -> u64 {
