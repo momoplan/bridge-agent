@@ -37,8 +37,8 @@
 | 用户授权 | bridge-agent 授权成功后拿到 `desktopChatSession`、`projectId`、`agentConfigId` 和设备上下文。 | bridge-agent 与平台授权服务 |
 | AI 识别安装意图 | 用户输入“请使用 Codex 设备安装能力，给当前工作区的设备安装 Codex。”或“安装 Codex 终端”后，对话服务能自动搜索并加载 Codex 设备安装能力，而不是普通聊天回复。 | 对话服务/agent 编排 |
 | 安装 Codex App | AI 通过当前设备暴露的 `shellExec.shellExec` 方法执行官方 Codex App 安装、启动和验证命令。 | bridge-agent/relay/安装技能 |
-| 申请专用 key | 仅当需要 Codex 终端能力时，AI 调用 lowcode-apikey 对应市场模块方法，为当前用户、工作区、项目申请或复用专用凭证。 | lowcode-apikey 市场模块 |
-| 配置 router | 仅当需要 Codex 终端能力时，router 地址固定为 `https://router.baijimu.com/api/claudecode/v1`，由安装工具链自动写入终端配置；`model`、`model_provider`、权限默认值必须写在 `~/.codex/config.toml` 根节点顶部。 | 安装工具链/技能 |
+| 写入百积木 CLI token | 仅当需要 Codex 终端能力时，bridge-agent 客户端在设备授权阶段把当前工作区的百积木本地 CLI token 写入 `~/.config/baijimu/auth.json`。 | bridge-agent 客户端 |
+| 配置 router | 仅当需要 Codex 终端能力时，router 地址固定为 `https://router.baijimu.com/api/claudecode/v1`，由安装脚本消费本机 CLI token 并自动写入 Codex 终端配置；`model`、`model_provider`、权限默认值必须写在 `~/.codex/config.toml` 根节点顶部。 | 安装工具链/技能 |
 | 设备执行配置 | AI 通过当前设备暴露的 `shellExec.shellExec` 方法执行配置写入、启动和健康检查。 | bridge-agent/relay |
 | 结果校验 | 安装后校验 Codex App 状态和可见窗口；需要终端能力时，再通过 router `/responses`、凭证、计量日志确认归属一致。 | 安装工具链/平台日志 |
 
@@ -59,8 +59,8 @@
 2. 读取当前授权上下文，包括用户、工作区、项目、agent 配置、对话 session 和设备。
 3. 检查当前设备是否已暴露 `shellExec.shellExec`，以及安装所需命令是否在 allowlist 内。
 4. 在用户明确授权后，通过 `shellExec.shellExec` 安装 Codex App，并执行启动和安装验证。
-5. 如果需要 Codex 终端能力，再调用市场模块方法 `createUserApiKey`，为当前用户和项目创建或复用独立 API Key。
-6. 由 Codex 安装技能使用固定 router 地址 `https://router.baijimu.com/api/claudecode/v1` 生成终端配置。
+5. 如果需要 Codex 终端能力，由客户端授权流程先把当前工作区的百积木本地 CLI token 写入 `~/.config/baijimu/auth.json`。
+6. 由 Codex 安装技能消费这个本机 CLI token，并使用固定 router 地址 `https://router.baijimu.com/api/claudecode/v1` 生成终端配置。
 7. 重启或打开 Codex App，并确认主进程、app-server 和可见窗口都存在。
 8. 返回安装结果；涉及终端能力时，在平台侧校验 router、凭证、计量和审计归属。
 
@@ -189,7 +189,7 @@ wire_api = "responses"
 requires_openai_auth = true
 ```
 
-这些根级配置必须位于 `~/.codex/config.toml` 的第一个 TOML 表之前；不能追加到 `[marketplaces.*]`、`[desktop]` 或 `[projects.*]` 表内部。用户专属 API Key 应写入 `~/.codex/auth.json`，权限为 `600`，不得在日志或对话中显示完整值。
+这些根级配置必须位于 `~/.codex/config.toml` 的第一个 TOML 表之前；不能追加到 `[marketplaces.*]`、`[desktop]` 或 `[projects.*]` 表内部。Codex 终端使用的本地凭证由安装脚本从客户端已写入的百积木本地 CLI token 转写到 `~/.codex/auth.json`，权限为 `600`，不得在日志或对话中显示完整值。
 
 命令行试点或排障时，可以由授权实施人员在用户设备上写入自动生成的凭证：
 
