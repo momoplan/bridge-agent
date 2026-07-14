@@ -21,7 +21,7 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
+const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -282,6 +283,18 @@ struct CompletedShellExec {
     error: Option<InvokeError>,
     duration_ms: u64,
     completed_at_epoch_ms: u64,
+}
+
+#[derive(Clone)]
+struct ShellLiveOutput {
+    store: ShellExecutionStore,
+    execution_id: String,
+}
+
+#[derive(Clone, Copy)]
+enum ShellOutputStream {
+    Stdout,
+    Stderr,
 }
 
 #[derive(Debug, Deserialize)]
@@ -620,7 +633,7 @@ async fn run_registered_service_start_command(
                 timeout_secs: Some(timeout_secs.unwrap_or(15).max(1)),
                 path_for_diagnostics,
             };
-            Ok(run_shell_command(prepared, None).await)
+            Ok(run_shell_command(prepared, None, None).await)
         }
     }
 }
@@ -835,7 +848,11 @@ impl ShellExecutionStore {
         self.insert(record).await;
 
         tokio::spawn(async move {
-            let completed = run_shell_command(prepared, Some(cancel_rx)).await;
+            let live_output = ShellLiveOutput {
+                store: store.clone(),
+                execution_id: task_execution_id.clone(),
+            };
+            let completed = run_shell_command(prepared, Some(cancel_rx), Some(live_output)).await;
             store.complete(&task_execution_id, completed).await;
         });
 
@@ -900,6 +917,27 @@ impl ShellExecutionStore {
             record.cancel_tx = None;
         }
         prune_shell_executions(&mut entries);
+    }
+
+    async fn append_output(&self, execution_id: &str, stream: ShellOutputStream, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let mut entries = self.entries.lock().await;
+        let Some(record) = entries.get_mut(execution_id) else {
+            return;
+        };
+        if !matches!(record.status, ShellExecutionStatus::Running) {
+            return;
+        }
+
+        let output = match stream {
+            ShellOutputStream::Stdout => &mut record.stdout,
+            ShellOutputStream::Stderr => &mut record.stderr,
+        };
+        output.push_str(chunk);
+        trim_string_to_max_bytes(output, RUNNING_SHELL_OUTPUT_TAIL_BYTES);
     }
 }
 
@@ -971,6 +1009,18 @@ fn prune_shell_executions(entries: &mut BTreeMap<String, ShellExecutionRecord>) 
     }
 }
 
+fn trim_string_to_max_bytes(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+
+    let mut start = value.len().saturating_sub(max_bytes);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value.drain(..start);
+}
+
 #[cfg(not(test))]
 fn shell_exec_sync_wait_duration() -> Duration {
     Duration::from_secs(30)
@@ -984,6 +1034,7 @@ fn shell_exec_sync_wait_duration() -> Duration {
 async fn run_shell_command(
     prepared: PreparedShellExec,
     cancel_rx: Option<oneshot::Receiver<()>>,
+    live_output: Option<ShellLiveOutput>,
 ) -> CompletedShellExec {
     let started = Instant::now();
     let completed_at = || current_epoch_ms();
@@ -1032,7 +1083,14 @@ async fn run_shell_command(
         }
     };
 
-    wait_for_shell_command(child, prepared.timeout_secs, cancel_rx, started).await
+    wait_for_shell_command(
+        child,
+        prepared.timeout_secs,
+        cancel_rx,
+        started,
+        live_output,
+    )
+    .await
 }
 
 async fn wait_for_shell_command(
@@ -1040,19 +1098,17 @@ async fn wait_for_shell_command(
     timeout_secs: Option<u64>,
     cancel_rx: Option<oneshot::Receiver<()>>,
     started: Instant,
+    live_output: Option<ShellLiveOutput>,
 ) -> CompletedShellExec {
-    let stdout_task = child.stdout.take().map(|mut stdout| {
+    let stdout_task = child.stdout.take().map(|stdout| {
+        let live_output = live_output.clone();
         tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = stdout.read_to_end(&mut buffer).await;
-            buffer
+            read_shell_output(stdout, live_output, ShellOutputStream::Stdout).await
         })
     });
-    let stderr_task = child.stderr.take().map(|mut stderr| {
+    let stderr_task = child.stderr.take().map(|stderr| {
         tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer).await;
-            buffer
+            read_shell_output(stderr, live_output, ShellOutputStream::Stderr).await
         })
     });
 
@@ -1161,6 +1217,37 @@ enum ShellWaitResult {
     Exited(std::io::Result<std::process::ExitStatus>),
     TimedOut(u64, std::io::Result<std::process::ExitStatus>),
     Canceled(std::io::Result<std::process::ExitStatus>),
+}
+
+async fn read_shell_output<R>(
+    mut stream: R,
+    live_output: Option<ShellLiveOutput>,
+    stream_kind: ShellOutputStream,
+) -> Vec<u8>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                buffer.extend_from_slice(&chunk[..read]);
+                if let Some(live_output) = live_output.as_ref() {
+                    let text = String::from_utf8_lossy(&chunk[..read]);
+                    live_output
+                        .store
+                        .append_output(&live_output.execution_id, stream_kind, &text)
+                        .await;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    buffer
 }
 
 async fn join_output(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> String {
@@ -3495,6 +3582,76 @@ mod tests {
 
         assert_eq!(status, "SUCCEEDED");
         assert!(stdout.contains("bridge-agent-ok"));
+    }
+
+    #[tokio::test]
+    async fn shell_query_execution_returns_running_output_tail() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+        let start = registry
+            .invoke(
+                "req-start-live-output".to_string(),
+                "shell",
+                "startExecution",
+                json!({
+                    "command": [
+                        "sh",
+                        "-lc",
+                        "printf '%s' bridge-agent-live-out; printf '%s' bridge-agent-live-err >&2; sleep 1; printf '%s' -done"
+                    ]
+                }),
+                Some(5),
+            )
+            .await;
+        assert!(start.success);
+        let execution_id = start.data.unwrap()["executionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut saw_running_stdout = false;
+        let mut saw_running_stderr = false;
+        let mut status = String::new();
+        let mut final_stdout = String::new();
+        let mut final_stderr = String::new();
+        for _ in 0..80 {
+            let result = registry
+                .invoke(
+                    "req-get-live-output".to_string(),
+                    "shell",
+                    "queryExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(result.success);
+            let data = result.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            let stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            let stderr = data["stderr"].as_str().unwrap_or_default().to_string();
+
+            if status == "RUNNING" {
+                saw_running_stdout |= stdout.contains("bridge-agent-live-out");
+                saw_running_stderr |= stderr.contains("bridge-agent-live-err");
+            } else {
+                final_stdout = stdout;
+                final_stderr = stderr;
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(status, "SUCCEEDED");
+        assert!(
+            saw_running_stdout,
+            "expected queryExecution to expose stdout while running"
+        );
+        assert!(
+            saw_running_stderr,
+            "expected queryExecution to expose stderr while running"
+        );
+        assert!(final_stdout.contains("bridge-agent-live-out-done"));
+        assert!(final_stderr.contains("bridge-agent-live-err"));
     }
 
     #[tokio::test]
