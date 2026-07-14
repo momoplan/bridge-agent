@@ -21,7 +21,7 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
@@ -124,6 +124,8 @@ struct ShellExecArgs {
     cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    stdin: Option<String>,
     #[serde(default, alias = "timeoutSeconds", alias = "timeout_secs")]
     timeout_secs: Option<u64>,
 }
@@ -269,6 +271,7 @@ struct PreparedShellExec {
     command_args: Vec<String>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
+    stdin: Option<String>,
     timeout_secs: Option<u64>,
     path_for_diagnostics: String,
 }
@@ -630,6 +633,7 @@ async fn run_registered_service_start_command(
                 command_args: command.clone(),
                 cwd,
                 env: env.clone(),
+                stdin: None,
                 timeout_secs: Some(timeout_secs.unwrap_or(15).max(1)),
                 path_for_diagnostics,
             };
@@ -812,6 +816,7 @@ impl ShellMethod {
             command_args,
             cwd,
             env,
+            stdin: args.stdin,
             timeout_secs,
             path_for_diagnostics,
         }))
@@ -1047,12 +1052,16 @@ async fn run_shell_command(
         .current_dir(&prepared.cwd)
         .env_clear()
         .envs(prepared.env)
-        .stdin(Stdio::null())
+        .stdin(if prepared.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let child = match command.spawn() {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
             let executable = &prepared.command_args[0];
@@ -1082,6 +1091,14 @@ async fn run_shell_command(
             };
         }
     };
+
+    if let Some(stdin) = prepared.stdin {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            tokio::spawn(async move {
+                let _ = child_stdin.write_all(stdin.as_bytes()).await;
+            });
+        }
+    }
 
     wait_for_shell_command(
         child,
@@ -3488,6 +3505,17 @@ mod tests {
     }
 
     #[test]
+    fn shell_args_accept_stdin() {
+        let args: ShellExecArgs = serde_json::from_value(json!({
+            "command": ["sh", "-lc", "cat"],
+            "stdin": "bridge-agent-stdin\n"
+        }))
+        .unwrap();
+
+        assert_eq!(args.stdin.as_deref(), Some("bridge-agent-stdin\n"));
+    }
+
+    #[test]
     fn prepare_upload_request_uses_relay_camel_case_schema() {
         let payload = serde_json::to_value(PrepareUploadRequest {
             agent_id: "devbox".to_string(),
@@ -3582,6 +3610,54 @@ mod tests {
 
         assert_eq!(status, "SUCCEEDED");
         assert!(stdout.contains("bridge-agent-ok"));
+    }
+
+    #[tokio::test]
+    async fn shell_execution_writes_stdin_to_process() {
+        let current_dir = std::env::current_dir().unwrap();
+        let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+        let start = registry
+            .invoke(
+                "req-start-stdin".to_string(),
+                "shell",
+                "startExecution",
+                json!({
+                    "command": ["sh", "-lc", "read value; printf 'stdin:%s' \"$value\""],
+                    "stdin": "bridge-agent-stdin\n"
+                }),
+                Some(5),
+            )
+            .await;
+        assert!(start.success);
+        let execution_id = start.data.unwrap()["executionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut status = String::new();
+        let mut stdout = String::new();
+        for _ in 0..20 {
+            let result = registry
+                .invoke(
+                    "req-get-stdin".to_string(),
+                    "shell",
+                    "queryExecution",
+                    json!({"executionId": execution_id}),
+                    None,
+                )
+                .await;
+            assert!(result.success);
+            let data = result.data.unwrap();
+            status = data["status"].as_str().unwrap().to_string();
+            stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            if status != "RUNNING" {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(status, "SUCCEEDED");
+        assert_eq!(stdout, "stdin:bridge-agent-stdin");
     }
 
     #[tokio::test]

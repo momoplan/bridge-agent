@@ -1049,7 +1049,7 @@ pub fn shell_input_schema() -> Value {
         "required": ["command"],
         "properties": {
             "command": {
-                "description": "Command argv array for direct execution. On Windows, run shell built-ins or PATH lookup through cmd /C, for example [\"cmd\", \"/C\", \"where\", \"wechat-decrypt\"].",
+                "description": "Command argv array for direct execution. On Windows, run shell built-ins or PATH lookup through cmd /C, for example [\"cmd\", \"/C\", \"where\", \"wechat-decrypt\"]. For multi-line PowerShell scripts, avoid putting the script body in -Command; pass [\"powershell\", \"-NoProfile\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", \"-\"] and put the script body in stdin.",
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1
@@ -1058,6 +1058,10 @@ pub fn shell_input_schema() -> Value {
             "env": {
                 "type": "object",
                 "additionalProperties": {"type": "string"}
+            },
+            "stdin": {
+                "description": "Optional text to write to the process standard input. Use this for multi-line scripts instead of embedding long script bodies in command arguments.",
+                "type": "string"
             }
         }
     })
@@ -1264,7 +1268,7 @@ fn default_shell_exec_method(name: &str) -> MethodConfig {
     MethodConfig {
         name: name.to_string(),
         description:
-            "Run one allowlisted command with optional cwd and env. The command is tracked as an execution; quick commands return their result directly, while longer commands return status=RUNNING with executionId and recommendedService/recommendedMethod for polling."
+            "Run one allowlisted command with optional cwd, env, and stdin. The command is tracked as an execution; quick commands return their result directly, while longer commands return status=RUNNING with executionId and recommendedService/recommendedMethod for polling. For multi-line PowerShell scripts, pass the script via stdin with powershell -File - instead of embedding it in -Command."
                 .to_string(),
         enabled: true,
         input_schema: shell_input_schema(),
@@ -1281,7 +1285,7 @@ fn default_shell_start_execution_method() -> MethodConfig {
     MethodConfig {
         name: "startExecution".to_string(),
         description:
-            "Start one allowlisted shell command and immediately return an executionId for status polling. Prefer this for installs, downloads, builds, service startup, or any command expected to run longer than 30 seconds."
+            "Start one allowlisted shell command and immediately return an executionId for status polling. Prefer this for installs, downloads, builds, service startup, or any command expected to run longer than 30 seconds. For multi-line PowerShell scripts, pass the script via stdin with powershell -File - instead of embedding it in -Command."
                 .to_string(),
         enabled: true,
         input_schema: shell_input_schema(),
