@@ -1,6 +1,6 @@
 use crate::config::{
-    ensure_config_exists, load_config, save_config, ServiceConfig, ServiceRegistration,
-    ServiceStartCommand,
+    ensure_config_exists, load_config, save_config, RuntimeConfig, ServiceConfig,
+    ServiceRegistration, ServiceStartCommand,
 };
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
@@ -186,6 +186,7 @@ pub fn install_connector_from_path_with_source_reference(
     source_reference: Option<&str>,
 ) -> Result<ConnectorInstallResult> {
     ensure_config_exists(config_path)?;
+    let mut config = load_config(config_path)?;
     let source = source
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
@@ -209,10 +210,9 @@ pub fn install_connector_from_path_with_source_reference(
         prepare_connector_package_destination(&package_path, replace)?;
     }
     copy_connector_package(&source, &package_path)?;
-    resolve_installed_start_commands(&mut services, &package_path)?;
+    resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
     cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
-    let mut config = load_config(config_path)?;
     for service in &services {
         upsert_service(&mut config.services, service.clone(), replace)?;
     }
@@ -309,7 +309,7 @@ pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSumm
             .into_iter()
             .map(ServiceRegistration::into_service_config)
             .collect::<Result<Vec<_>>>()?;
-        resolve_installed_start_commands(&mut services, &package_path)?;
+        resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
 
         for service in services {
             upsert_synced_service(&mut config.services, service);
@@ -591,19 +591,27 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
 fn should_skip_connector_package_entry(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
-        Some(CONNECTOR_PYTHON_ENV_DIR | ".venv" | "__pycache__" | ".pytest_cache")
+        Some(
+            CONNECTOR_PYTHON_ENV_DIR
+                | ".venv"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".git"
+                | "target"
+        )
     )
 }
 
 fn resolve_installed_start_commands(
     services: &mut [ServiceConfig],
     package_path: &Path,
+    runtime_config: &RuntimeConfig,
 ) -> Result<()> {
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
     let python_env = ensure_python_project_environment(package_path, &python_scripts)?;
-    let node_path = resolve_command_path("node");
-    let codex_path = resolve_command_path("codex");
+    let node_path = resolve_command_path("node", runtime_config);
+    let codex_path = resolve_command_path("codex", runtime_config);
     for service in services {
         if service.stop_command.is_none() {
             service.stop_command = derive_stop_command_from_start(service.start_command.as_ref());
@@ -674,6 +682,15 @@ fn resolve_installed_shell_command(
         return;
     }
 
+    if let Some(direct_path) = native_command_path(package_path, executable) {
+        command[0] = direct_path.display().to_string();
+        enrich_start_command_env(env, [node_path, codex_path]);
+        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            *cwd = Some(package_path.display().to_string());
+        }
+        return;
+    }
+
     if python_scripts.contains_key(executable) {
         if let Some(env_path) = python_env {
             command[0] = python_script_path(env_path, executable)
@@ -700,25 +717,39 @@ fn resolve_installed_shell_command(
         }
         return;
     }
+}
 
+fn native_command_path(package_path: &Path, executable: &str) -> Option<PathBuf> {
+    for platform_dir in native_platform_bin_dirs() {
+        let candidate = package_path.join("bin").join(platform_dir).join(executable);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
     let direct_path = package_path.join(executable);
     if direct_path.exists() {
-        command[0] = direct_path.display().to_string();
-        enrich_start_command_env(env, [node_path, codex_path]);
-        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-            *cwd = Some(package_path.display().to_string());
-        }
-        return;
+        return Some(direct_path);
     }
-
     let bin_path = package_path.join("bin").join(executable);
     if bin_path.exists() {
-        command[0] = bin_path.display().to_string();
-        enrich_start_command_env(env, [node_path, codex_path]);
-        if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-            *cwd = Some(package_path.display().to_string());
-        }
+        return Some(bin_path);
     }
+    None
+}
+
+fn native_platform_bin_dirs() -> Vec<String> {
+    let os = match env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        other => other,
+    };
+    let arch = match env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => other,
+    };
+    vec![format!("{os}-{arch}"), os.to_string()]
 }
 
 fn prepend_path_entry(env_vars: &mut BTreeMap<String, String>, entry: PathBuf) {
@@ -789,19 +820,36 @@ fn push_unique_path_entry(entries: &mut Vec<PathBuf>, entry: PathBuf) {
     }
 }
 
-fn resolve_command_path(executable: &str) -> Option<PathBuf> {
-    find_command_in_path(executable, env::var("PATH").ok().as_ref())
+fn resolve_command_path(executable: &str, runtime_config: &RuntimeConfig) -> Option<PathBuf> {
+    configured_runtime_command_path(executable, runtime_config)
+        .or_else(|| find_command_in_path(executable, env::var("PATH").ok().as_ref()))
         .or_else(|| {
             login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
         })
         .or_else(|| bundled_runtime_command_path(executable))
 }
 
+fn configured_runtime_command_path(
+    executable: &str,
+    runtime_config: &RuntimeConfig,
+) -> Option<PathBuf> {
+    let path = match executable {
+        "node" => runtime_config.node_path.as_deref(),
+        "codex" => runtime_config.codex_binary_path.as_deref(),
+        _ => None,
+    }?;
+    let path = PathBuf::from(path.trim());
+    path.is_file().then_some(path)
+}
+
 fn bundled_runtime_command_path(executable: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let candidates: &[&str] = match executable {
-            "node" => &["/Applications/Codex.app/Contents/Resources/cua_node/bin/node"],
+            "node" => &[
+                "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+                "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+            ],
             _ => &[],
         };
         return candidates
@@ -1463,7 +1511,36 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, MethodBinding};
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::tempdir;
+
+    static CONNECTOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ConnectorTestEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for ConnectorTestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", previous);
+            } else {
+                std::env::remove_var("BRIDGE_AGENT_CONNECTORS_DIR");
+            }
+        }
+    }
+
+    fn connector_test_env(path: impl AsRef<Path>) -> ConnectorTestEnvGuard {
+        let lock = CONNECTOR_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("BRIDGE_AGENT_CONNECTORS_DIR");
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", path.as_ref());
+        ConnectorTestEnvGuard {
+            _lock: lock,
+            previous,
+        }
+    }
 
     #[test]
     fn connector_manifest_loads_service_registration_files() {
@@ -1520,7 +1597,7 @@ mod tests {
     #[test]
     fn install_connector_updates_agent_config() {
         let dir = tempdir().unwrap();
-        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
@@ -1563,7 +1640,7 @@ mod tests {
     #[test]
     fn reinstall_preserves_install_time_and_updates_sync_source() {
         let dir = tempdir().unwrap();
-        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
@@ -1632,7 +1709,7 @@ mod tests {
     #[test]
     fn install_connector_resolves_package_bin_start_command() {
         let dir = tempdir().unwrap();
-        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
@@ -1689,7 +1766,7 @@ mod tests {
         let ServiceStartCommand::ShellCommand {
             command, cwd, env, ..
         } = service.start_command.as_ref().unwrap();
-        let expected_node = resolve_command_path("node")
+        let expected_node = resolve_command_path("node", &config.runtime)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "node".to_string());
         assert_eq!(command[0], expected_node);
@@ -1710,9 +1787,164 @@ mod tests {
     }
 
     #[test]
+    fn install_connector_resolves_platform_native_bin_start_command() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+
+        let source = dir.path().join("connector");
+        let platform_dir = native_platform_bin_dirs().remove(0);
+        fs::create_dir_all(source.join("bin").join(&platform_dir)).unwrap();
+        fs::write(
+            source.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "native-connector",
+                "bin": {
+                    "native-connector": "./bin/legacy.js"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            source.join("bin").join("legacy.js"),
+            "console.log('legacy');\n",
+        )
+        .unwrap();
+        fs::write(source.join("native-connector"), "#!/bin/sh\n").unwrap();
+        fs::write(
+            source
+                .join("bin")
+                .join(&platform_dir)
+                .join("native-connector"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.native",
+                "name": "Native Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "nativeService",
+                    "description": "Native service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["native-connector", "start"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = install_connector_from_path(&source, &config_path, false).unwrap();
+        let package_path = PathBuf::from(result.package_path);
+        let config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter()
+            .find(|service| service.name == "nativeService")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand { command, cwd, .. } =
+            service.start_command.as_ref().unwrap();
+        assert_eq!(
+            command[0],
+            package_path
+                .join("bin")
+                .join(platform_dir)
+                .join("native-connector")
+                .display()
+                .to_string()
+        );
+        assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn install_connector_prefers_configured_node_path() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        let configured_node = dir.path().join("custom-node");
+        fs::write(&configured_node, "").unwrap();
+        let mut agent_config = AgentConfig::example();
+        agent_config.runtime.node_path = Some(configured_node.display().to_string());
+        save_config(&config_path, &agent_config).unwrap();
+
+        let source = dir.path().join("connector");
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::write(
+            source.join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "test-connector",
+                "bin": {
+                    "test-connector": "./bin/start.js"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.configured-node",
+                "name": "Configured Node Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "configuredNodeService",
+                    "description": "Configured Node service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let config = load_config(&config_path).unwrap();
+        let service = config
+            .services
+            .iter()
+            .find(|service| service.name == "configuredNodeService")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand { command, env, .. } =
+            service.start_command.as_ref().unwrap();
+        assert_eq!(command[0], configured_node.display().to_string());
+        assert!(env
+            .get("PATH")
+            .is_some_and(|path| { env::split_paths(path).any(|entry| entry == dir.path()) }));
+    }
+
+    #[test]
     fn install_connector_derives_package_bin_stop_command() {
         let dir = tempdir().unwrap();
-        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
@@ -1768,7 +2000,7 @@ mod tests {
             .unwrap();
         let ServiceStartCommand::ShellCommand { command, cwd, .. } =
             service.stop_command.as_ref().unwrap();
-        let expected_node = resolve_command_path("node")
+        let expected_node = resolve_command_path("node", &config.runtime)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "node".to_string());
         assert_eq!(command[0], expected_node);
@@ -1881,7 +2113,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
     #[test]
     fn sync_installed_connectors_restores_lifecycle_commands_and_preserves_enabled() {
         let dir = tempdir().unwrap();
-        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", dir.path().join("connectors"));
+        let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
