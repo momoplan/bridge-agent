@@ -790,9 +790,31 @@ fn push_unique_path_entry(entries: &mut Vec<PathBuf>, entry: PathBuf) {
 }
 
 fn resolve_command_path(executable: &str) -> Option<PathBuf> {
-    find_command_in_path(executable, env::var("PATH").ok().as_ref()).or_else(|| {
-        login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
-    })
+    find_command_in_path(executable, env::var("PATH").ok().as_ref())
+        .or_else(|| {
+            login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
+        })
+        .or_else(|| bundled_runtime_command_path(executable))
+}
+
+fn bundled_runtime_command_path(executable: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let candidates: &[&str] = match executable {
+            "node" => &["/Applications/Codex.app/Contents/Resources/cua_node/bin/node"],
+            _ => &[],
+        };
+        return candidates
+            .iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.is_file());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = executable;
+        None
+    }
 }
 
 fn find_command_in_path(executable: &str, path: Option<&String>) -> Option<PathBuf> {

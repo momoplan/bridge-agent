@@ -34,6 +34,7 @@ use url::Url;
 
 const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
+const RELAY_CONNECT_TIMEOUT_SECS: u64 = 15;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 
@@ -690,8 +691,13 @@ impl RuntimeRunner {
             self.push_log("info", &format!("connecting to {}", self.config.relay.url))
                 .await;
 
-            match connect_async(self.ws_url.as_str()).await {
-                Ok((stream, _)) => {
+            match timeout(
+                Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS),
+                connect_async(self.ws_url.as_str()),
+            )
+            .await
+            {
+                Ok(Ok((stream, _))) => {
                     self.push_log("info", "connected to relay, waiting for registration")
                         .await;
 
@@ -711,7 +717,7 @@ impl RuntimeRunner {
                             .await;
                     }
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     self.update_snapshot(
                         RuntimeStatus::Backoff,
                         Some(err.to_string()),
@@ -722,6 +728,19 @@ impl RuntimeRunner {
                     .await;
                     self.push_log("warn", &format!("connect failed: {err}"))
                         .await;
+                }
+                Err(_) => {
+                    let message =
+                        format!("relay connect timed out after {RELAY_CONNECT_TIMEOUT_SECS}s");
+                    self.update_snapshot(
+                        RuntimeStatus::Backoff,
+                        Some(message.clone()),
+                        self.config.relay.agent_id.clone(),
+                        self.ws_url.to_string(),
+                        self.config_path.clone(),
+                    )
+                    .await;
+                    self.push_log("warn", &message).await;
                 }
             }
 
@@ -1934,6 +1953,7 @@ mod tests {
         let mut config = AgentConfig::example();
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_concurrent_start".to_string();
+        config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
         config.runtime.event_server_enabled = false;
         config.runtime.service_registration_enabled = false;
         config.services.clear();
@@ -1963,6 +1983,7 @@ mod tests {
         let mut config = AgentConfig::example();
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_duplicate_start".to_string();
+        config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
         config.runtime.event_server_enabled = false;
         config.runtime.service_registration_enabled = false;
         config.services.clear();
