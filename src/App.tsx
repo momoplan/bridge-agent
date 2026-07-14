@@ -1225,7 +1225,8 @@ function App() {
       setRuntimeConflict(null);
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source,
-        replace: true
+        replace: true,
+        allowGit: installSourceMode === "custom"
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -1288,7 +1289,8 @@ function App() {
       setRuntimeConflict(null);
       const status = await invoke<ConnectorAppUpdateStatus>("check_connector_app_update", {
         id: app.connector.id,
-        source: marketApp.source
+        source: marketApp.source,
+        allowGit: false
       });
       setConnectorUpdateStatuses((current) => ({
         ...current,
@@ -1323,7 +1325,8 @@ function App() {
       setRuntimeConflict(null);
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source: marketApp.source,
-        replace: true
+        replace: true,
+        allowGit: false
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -1365,7 +1368,8 @@ function App() {
       setRuntimeConflict(null);
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source,
-        replace: true
+        replace: true,
+        allowGit: true
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();

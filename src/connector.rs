@@ -206,8 +206,7 @@ pub fn install_connector_from_path_with_source_reference(
 
     let package_path = installed_connector_package_path(&manifest)?;
     if package_path.exists() {
-        fs::remove_dir_all(&package_path)
-            .with_context(|| format!("failed to replace connector {}", package_path.display()))?;
+        prepare_connector_package_destination(&package_path, replace)?;
     }
     copy_connector_package(&source, &package_path)?;
     resolve_installed_start_commands(&mut services, &package_path)?;
@@ -486,6 +485,66 @@ fn load_install_record(connector_id: &str) -> Result<ConnectorInstallRecord> {
             path.display()
         )
     })
+}
+
+fn prepare_connector_package_destination(package_path: &Path, replace: bool) -> Result<()> {
+    if !replace {
+        bail!(
+            "connector package already exists at {}; pass replace to overwrite it",
+            package_path.display()
+        );
+    }
+    match fs::remove_dir_all(package_path) {
+        Ok(()) => Ok(()),
+        Err(remove_err) => {
+            let quarantine_path =
+                quarantine_connector_package_path(package_path).with_context(|| {
+                    format!(
+                        "failed to replace connector {}; also failed to move aside the existing package after remove failed: {remove_err}",
+                        package_path.display()
+                    )
+                })?;
+            tracing::warn!(
+                "moved undeletable connector package {} to {} after remove failed: {remove_err}",
+                package_path.display(),
+                quarantine_path.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn quarantine_connector_package_path(package_path: &Path) -> Result<PathBuf> {
+    let parent = package_path
+        .parent()
+        .with_context(|| format!("failed to resolve parent for {}", package_path.display()))?;
+    let name = package_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("package");
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let quarantine_path = parent.join(format!("{name}.replaced-{}{}", now_ms(), suffix));
+        if quarantine_path.exists() {
+            continue;
+        }
+        fs::rename(package_path, &quarantine_path).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                package_path.display(),
+                quarantine_path.display()
+            )
+        })?;
+        return Ok(quarantine_path);
+    }
+    bail!(
+        "failed to choose replacement path for existing connector package {}",
+        package_path.display()
+    )
 }
 
 fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
@@ -815,12 +874,13 @@ fn read_python_project_scripts(package_path: &Path) -> Result<BTreeMap<String, S
         let Some(entrypoint) = value.as_str() else {
             continue;
         };
+        let entrypoint = entrypoint.trim();
         let Some(module) = entrypoint.split(':').next() else {
             continue;
         };
         let module = module.trim();
-        if !name.trim().is_empty() && !module.is_empty() {
-            scripts.insert(name.trim().to_string(), module.to_string());
+        if !name.trim().is_empty() && !module.is_empty() && !entrypoint.is_empty() {
+            scripts.insert(name.trim().to_string(), entrypoint.to_string());
         }
     }
     Ok(scripts)
@@ -839,8 +899,11 @@ fn ensure_python_project_environment(
         create_python_env(package_path, &env_path)?;
     }
     if python_project_install_needed(package_path, &env_path)? {
-        install_python_project(package_path, &python)?;
+        install_python_project_dependencies(package_path, &python)?;
+        write_python_project_scripts(package_path, &env_path, scripts)?;
         mark_python_project_installed(package_path, &env_path)?;
+    } else {
+        write_python_project_scripts(package_path, &env_path, scripts)?;
     }
     Ok(Some(env_path))
 }
@@ -894,14 +957,9 @@ fn create_python_env(package_path: &Path, env_path: &Path) -> Result<()> {
 }
 
 fn read_python_requires_python(package_path: &Path) -> Result<Option<String>> {
-    let path = package_path.join("pyproject.toml");
-    if !path.exists() {
+    let Some(project) = read_python_project_metadata(package_path)? else {
         return Ok(None);
-    }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read Python project metadata {}", path.display()))?;
-    let project: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("failed to parse Python project metadata {}", path.display()))?;
+    };
     Ok(project
         .get("project")
         .and_then(|value| value.get("requires-python"))
@@ -909,6 +967,38 @@ fn read_python_requires_python(package_path: &Path) -> Result<Option<String>> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string))
+}
+
+fn read_python_project_dependencies(package_path: &Path) -> Result<Vec<String>> {
+    let Some(project) = read_python_project_metadata(package_path)? else {
+        return Ok(Vec::new());
+    };
+    let Some(dependencies) = project
+        .get("project")
+        .and_then(|value| value.get("dependencies"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(dependencies
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn read_python_project_metadata(package_path: &Path) -> Result<Option<toml::Value>> {
+    let path = package_path.join("pyproject.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read Python project metadata {}", path.display()))?;
+    let project = toml::from_str(&content)
+        .with_context(|| format!("failed to parse Python project metadata {}", path.display()))?;
+    Ok(Some(project))
 }
 
 fn resolve_python_for_project(requires_python: Option<&str>) -> Result<String> {
@@ -1023,26 +1113,118 @@ fn minimum_python_version(requires_python: Option<&str>) -> Option<(u32, u32, u3
         .max()
 }
 
-fn install_python_project(package_path: &Path, python: &Path) -> Result<()> {
+fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Result<()> {
+    let dependencies = read_python_project_dependencies(package_path)?;
+    if dependencies.is_empty() {
+        return Ok(());
+    }
     let output = Command::new(python)
         .args(["-m", "pip", "install", "--disable-pip-version-check"])
-        .arg(package_path)
+        .args(&dependencies)
         .output()
         .with_context(|| {
             format!(
-                "failed to install Python connector package with {}",
+                "failed to install Python connector dependencies with {}",
                 python.display()
             )
         })?;
     if !output.status.success() {
         bail!(
-            "failed to install Python connector package {}\nstdout:\n{}\nstderr:\n{}",
+            "failed to install Python connector dependencies for {}\nstdout:\n{}\nstderr:\n{}",
             package_path.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
     }
     Ok(())
+}
+
+fn write_python_project_scripts(
+    package_path: &Path,
+    env_path: &Path,
+    scripts: &BTreeMap<String, String>,
+) -> Result<()> {
+    if scripts.is_empty() {
+        return Ok(());
+    }
+    let bin_dir = python_bin_dir(env_path);
+    fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+    for (script, module) in scripts {
+        write_python_project_script(package_path, env_path, script, module)?;
+    }
+    Ok(())
+}
+
+fn write_python_project_script(
+    package_path: &Path,
+    env_path: &Path,
+    script: &str,
+    entrypoint: &str,
+) -> Result<()> {
+    let target = python_script_path(env_path, script);
+    let (module, function) = python_entrypoint_parts(entrypoint);
+    #[cfg(windows)]
+    {
+        let python = python_env_executable(env_path);
+        let runner = format!(
+            "@echo off\r\n\"{}\" -c \"import sys; sys.path.insert(0, r'{}'); from {} import {}; raise SystemExit({}())\" %*\r\n",
+            python.display(),
+            package_path.display(),
+            module,
+            function,
+            function
+        );
+        fs::write(&target, runner.as_bytes()).with_context(|| {
+            format!(
+                "failed to write Python connector script {}",
+                target.display()
+            )
+        })?;
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let python = python_env_executable(env_path);
+        let runner = format!(
+            "#!/bin/sh\nexec {} - \"$@\" <<'PY'\nimport sys\nsys.path.insert(0, {:?})\nfrom {} import {}\nif __name__ == '__main__':\n    raise SystemExit({}())\nPY\n",
+            shell_single_quote(&python.display().to_string()),
+            package_path.display().to_string(),
+            module,
+            function,
+            function
+        );
+        fs::write(&target, runner.as_bytes()).with_context(|| {
+            format!(
+                "failed to write Python connector script {}",
+                target.display()
+            )
+        })?;
+        let mut permissions = fs::metadata(&target)
+            .with_context(|| format!("failed to inspect {}", target.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&target, permissions)
+            .with_context(|| format!("failed to make {} executable", target.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn python_entrypoint_parts(entrypoint: &str) -> (&str, &str) {
+    let (module, function) = entrypoint.split_once(':').unwrap_or((entrypoint, "main"));
+    let module = module.trim();
+    let function = function.trim();
+    if function.is_empty() {
+        (module, "main")
+    } else {
+        (module, function)
+    }
 }
 
 fn mark_python_project_installed(package_path: &Path, env_path: &Path) -> Result<()> {
@@ -1069,7 +1251,7 @@ fn python_env_executable(env_path: &Path) -> PathBuf {
 fn python_script_path(env_path: &Path, script: &str) -> PathBuf {
     #[cfg(windows)]
     {
-        env_path.join("Scripts").join(format!("{script}.exe"))
+        env_path.join("Scripts").join(format!("{script}.cmd"))
     }
     #[cfg(not(windows))]
     {
@@ -1592,8 +1774,35 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let scripts = read_python_project_scripts(dir.path()).unwrap();
         assert_eq!(
             scripts.get("wechat-bridge-collector").map(String::as_str),
-            Some("wechat_bridge_collector.app")
+            Some("wechat_bridge_collector.app:main")
         );
+    }
+
+    #[test]
+    fn writes_python_project_script_for_source_tree() {
+        let dir = tempdir().unwrap();
+        let package_path = dir.path().join("package");
+        let env_path = package_path.join(CONNECTOR_PYTHON_ENV_DIR);
+        fs::create_dir_all(python_bin_dir(&env_path)).unwrap();
+        fs::create_dir_all(package_path.join("sample_connector")).unwrap();
+        fs::write(
+            package_path.join("sample_connector").join("app.py"),
+            "def run():\n    print('ok')\n    return 0\n",
+        )
+        .unwrap();
+
+        write_python_project_script(
+            &package_path,
+            &env_path,
+            "sample-connector",
+            "sample_connector.app:run",
+        )
+        .unwrap();
+
+        let script = fs::read_to_string(python_script_path(&env_path, "sample-connector")).unwrap();
+        assert!(script.contains("sys.path.insert"));
+        assert!(script.contains("sample_connector.app"));
+        assert!(script.contains("run()"));
     }
 
     #[test]

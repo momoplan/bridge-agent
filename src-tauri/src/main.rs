@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Cursor, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt as _;
 use std::panic::{self, AssertUnwindSafe};
@@ -52,6 +52,7 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
+const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
@@ -280,6 +281,7 @@ struct RawMarketConnectorApp {
 struct RawMarketConnectorVersion {
     version: String,
     source: String,
+    source_type: Option<String>,
     revision: Option<String>,
 }
 
@@ -755,6 +757,7 @@ async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String
 async fn check_connector_app_update(
     id: String,
     source: String,
+    allow_git: Option<bool>,
 ) -> Result<ConnectorAppUpdateStatus, String> {
     let connector_id = id.trim();
     if connector_id.is_empty() {
@@ -766,7 +769,7 @@ async fn check_connector_app_update(
     }
 
     let installed = show_connector(connector_id).map_err(|err| err.to_string())?;
-    let resolved_source = resolve_connector_source(source).await?;
+    let resolved_source = resolve_connector_source(source, allow_git.unwrap_or(true)).await?;
     let latest_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
     if latest_manifest.id != installed.manifest.id {
@@ -794,6 +797,7 @@ async fn install_connector_app(
     state: tauri::State<'_, DesktopState>,
     source: String,
     replace: bool,
+    allow_git: Option<bool>,
 ) -> Result<ConnectorAppInstallDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
     let source = source.trim();
@@ -801,7 +805,7 @@ async fn install_connector_app(
         return Err("安装来源不能为空".to_string());
     }
 
-    let resolved_source = resolve_connector_source(source).await?;
+    let resolved_source = resolve_connector_source(source, allow_git.unwrap_or(true)).await?;
     let install = install_connector_from_path_with_source_reference(
         resolved_source.path(),
         &state.config_path,
@@ -1828,6 +1832,10 @@ enum ResolvedConnectorSource {
         path: PathBuf,
         _temp_dir: tempfile::TempDir,
     },
+    Archive {
+        path: PathBuf,
+        _temp_dir: tempfile::TempDir,
+    },
 }
 
 impl ResolvedConnectorSource {
@@ -1835,13 +1843,23 @@ impl ResolvedConnectorSource {
         match self {
             Self::Local(path) => path.as_path(),
             Self::Git { path, .. } => path.as_path(),
+            Self::Archive { path, .. } => path.as_path(),
         }
     }
 }
 
-async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSource, String> {
+async fn resolve_connector_source(source: &str, allow_git: bool) -> Result<ResolvedConnectorSource, String> {
     let (source, git_revision) = split_source_revision(source);
+    if let Some(archive_url) = connector_archive_download_url(&source, git_revision.as_deref(), allow_git)? {
+        return resolve_connector_archive_source(&archive_url).await;
+    }
+
     if is_git_connector_source(&source) {
+        if !allow_git {
+            return Err(
+                "市场本地应用不能依赖本机 git，请将安装源发布为 .zip 或 .tar.gz 下载包。".to_string(),
+            );
+        }
         let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let checkout_path = temp_dir.path().join("connector");
         let mut command = Command::new("git");
@@ -1875,10 +1893,7 @@ async fn resolve_connector_source(source: &str) -> Result<ResolvedConnectorSourc
 
 impl From<RawMarketConnectorApp> for MarketConnectorApp {
     fn from(value: RawMarketConnectorApp) -> Self {
-        let source = with_revision(
-            &value.latest_version.source,
-            value.latest_version.revision.as_deref(),
-        );
+        let source = market_connector_source(&value.latest_version);
         Self {
             id: value.id,
             connector_id: value.connector_id,
@@ -1890,6 +1905,19 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             capability: value.capability,
             version: value.latest_version.version,
         }
+    }
+}
+
+fn market_connector_source(version: &RawMarketConnectorVersion) -> String {
+    let source_type = version
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if source_type.eq_ignore_ascii_case("git") || is_git_connector_source(&version.source) {
+        with_revision(&version.source, version.revision.as_deref())
+    } else {
+        version.source.trim().to_string()
     }
 }
 
@@ -1922,10 +1950,249 @@ fn normalized_platform() -> &'static str {
 
 fn is_git_connector_source(source: &str) -> bool {
     let value = source.trim();
-    value.starts_with("https://")
-        || value.starts_with("http://")
-        || value.starts_with("git@")
+    value.starts_with("git@")
         || value.ends_with(".git")
+        || value.starts_with("ssh://")
+        || value.starts_with("git://")
+        || parse_https_git_repo(value, "github.com").is_some()
+        || parse_https_git_repo(value, "gitee.com").is_some()
+}
+
+fn is_http_connector_source(source: &str) -> bool {
+    let value = source.trim();
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
+#[derive(Clone, Copy)]
+enum ConnectorArchiveKind {
+    Zip,
+    TarGz,
+}
+
+async fn resolve_connector_archive_source(archive_url: &str) -> Result<ResolvedConnectorSource, String> {
+    let kind = connector_archive_kind(archive_url)
+        .ok_or_else(|| "本地应用下载源必须是 .zip、.tar.gz 或 .tgz 文件。".to_string())?;
+    let response = Client::new()
+        .get(archive_url)
+        .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
+        .send()
+        .await
+        .map_err(|err| format!("下载本地应用失败: {err}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let payload = response.text().await.unwrap_or_default();
+        return Err(format!("下载本地应用失败 ({status}): {payload}"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| format!("读取本地应用下载包失败: {err}"))?;
+    let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
+    let extract_dir = temp_dir.path().join("connector-archive");
+    fs::create_dir_all(&extract_dir).map_err(|err| format!("创建本地应用解压目录失败: {err}"))?;
+    extract_connector_archive(bytes.as_ref(), kind, &extract_dir)?;
+    let path = find_extracted_connector_root(&extract_dir)?;
+    Ok(ResolvedConnectorSource::Archive {
+        path,
+        _temp_dir: temp_dir,
+    })
+}
+
+fn connector_archive_download_url(
+    source: &str,
+    revision: Option<&str>,
+    allow_git: bool,
+) -> Result<Option<String>, String> {
+    if connector_archive_kind(source).is_some() {
+        return Ok(Some(source.trim().to_string()));
+    }
+    if !is_http_connector_source(source) {
+        return Ok(None);
+    }
+    if !is_git_connector_source(source) {
+        return Err(
+            "HTTP(S) 本地应用安装源必须是 .zip、.tar.gz、.tgz，或可转换为源码包的 GitHub/Gitee 仓库 URL。".to_string(),
+        );
+    }
+    if allow_git {
+        return Ok(None);
+    }
+    github_archive_url(source, revision)
+        .or_else(|| gitee_archive_url(source, revision))
+        .map(Some)
+        .ok_or_else(|| {
+            "市场本地应用不能依赖本机 git，请将安装源发布为 .zip 或 .tar.gz 下载包。".to_string()
+        })
+}
+
+fn connector_archive_kind(source: &str) -> Option<ConnectorArchiveKind> {
+    let source = source
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source)
+        .to_ascii_lowercase();
+    if source.ends_with(".zip") {
+        Some(ConnectorArchiveKind::Zip)
+    } else if source.ends_with(".tar.gz") || source.ends_with(".tgz") {
+        Some(ConnectorArchiveKind::TarGz)
+    } else {
+        None
+    }
+}
+
+fn github_archive_url(source: &str, revision: Option<&str>) -> Option<String> {
+    let (owner, repo) = parse_https_git_repo(source, "github.com")?;
+    let revision = revision?.trim();
+    if revision.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://github.com/{owner}/{repo}/archive/{revision}.zip"
+    ))
+}
+
+fn gitee_archive_url(source: &str, revision: Option<&str>) -> Option<String> {
+    let (owner, repo) = parse_https_git_repo(source, "gitee.com")?;
+    let revision = revision?.trim();
+    if revision.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://gitee.com/{owner}/{repo}/repository/archive/{revision}.zip"
+    ))
+}
+
+fn parse_https_git_repo(source: &str, host: &str) -> Option<(String, String)> {
+    let without_scheme = source
+        .strip_prefix("https://")
+        .or_else(|| source.strip_prefix("http://"))?;
+    let path = without_scheme.strip_prefix(host)?.trim_start_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim().trim_end_matches(".git");
+    if parts.next().is_some() {
+        return None;
+    }
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn extract_connector_archive(bytes: &[u8], kind: ConnectorArchiveKind, destination: &Path) -> Result<(), String> {
+    match kind {
+        ConnectorArchiveKind::Zip => extract_connector_zip(bytes, destination),
+        ConnectorArchiveKind::TarGz => extract_connector_tar_gz(bytes, destination),
+    }
+}
+
+fn extract_connector_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|err| format!("解析本地应用 zip 失败: {err}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("读取本地应用 zip 条目失败: {err}"))?;
+        let Some(relative_path) = entry.enclosed_name().map(PathBuf::from) else {
+            return Err("本地应用 zip 包含不安全路径。".to_string());
+        };
+        let target = destination.join(relative_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&target).map_err(|err| format!("创建解压目录失败: {err}"))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("创建解压目录失败: {err}"))?;
+        }
+        let mut file = fs::File::create(&target).map_err(|err| format!("写入解压文件失败: {err}"))?;
+        std::io::copy(&mut entry, &mut file).map_err(|err| format!("写入解压文件失败: {err}"))?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            let mut permissions = file
+                .metadata()
+                .map_err(|err| format!("读取解压文件权限失败: {err}"))?
+                .permissions();
+            permissions.set_mode(mode);
+            fs::set_permissions(&target, permissions).map_err(|err| format!("设置解压文件权限失败: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_connector_tar_gz(bytes: &[u8], destination: &Path) -> Result<(), String> {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|err| format!("解析本地应用 tar.gz 失败: {err}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|err| format!("读取本地应用 tar.gz 条目失败: {err}"))?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err("本地应用 tar.gz 包含不支持的链接文件。".to_string());
+        }
+        let relative_path = sanitize_archive_path(&entry.path().map_err(|err| format!("读取 tar.gz 路径失败: {err}"))?)?;
+        let target = destination.join(relative_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("创建解压目录失败: {err}"))?;
+        }
+        entry
+            .unpack(&target)
+            .map_err(|err| format!("解压本地应用 tar.gz 失败: {err}"))?;
+    }
+    Ok(())
+}
+
+fn sanitize_archive_path(path: &Path) -> Result<PathBuf, String> {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => clean.push(part),
+            std::path::Component::CurDir => {}
+            _ => return Err("本地应用压缩包包含不安全路径。".to_string()),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err("本地应用压缩包包含空路径。".to_string());
+    }
+    Ok(clean)
+}
+
+fn find_extracted_connector_root(extract_dir: &Path) -> Result<PathBuf, String> {
+    let mut manifests = Vec::new();
+    collect_connector_manifests(extract_dir, &mut manifests)
+        .map_err(|err| format!("查找本地应用清单失败: {err}"))?;
+    match manifests.len() {
+        0 => Err("下载包中没有找到 connector.json。".to_string()),
+        1 => Ok(manifests
+            .remove(0)
+            .parent()
+            .unwrap_or(extract_dir)
+            .to_path_buf()),
+        _ => Err("下载包中包含多个 connector.json，无法确定应用根目录。".to_string()),
+    }
+}
+
+fn collect_connector_manifests(dir: &Path, manifests: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name.to_str().is_some_and(|name| name == "__MACOSX") {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_connector_manifests(&path, manifests)?;
+        } else if file_type.is_file()
+            && file_name
+                .to_str()
+                .is_some_and(|name| name == CONNECTOR_MANIFEST_FILE)
+        {
+            manifests.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn connector_version_is_newer(latest: &str, current: &str) -> bool {
@@ -2569,5 +2836,44 @@ mod tests {
 
         assert!(path.ends_with(Path::new(".config").join("baijimu").join("auth.json")));
         assert!(path.is_absolute() || std::env::var_os("HOME").is_none());
+    }
+
+    #[test]
+    fn market_git_source_converts_to_github_archive() {
+        let archive = connector_archive_download_url(
+            "https://github.com/momoplan/wechat-bridge-collector.git",
+            Some("v0.2.3"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            archive.as_deref(),
+            Some("https://github.com/momoplan/wechat-bridge-collector/archive/v0.2.3.zip")
+        );
+    }
+
+    #[test]
+    fn custom_git_source_keeps_git_clone_path() {
+        let archive = connector_archive_download_url(
+            "https://github.com/momoplan/wechat-bridge-collector.git",
+            Some("v0.2.3"),
+            true,
+        )
+        .unwrap();
+        assert!(archive.is_none());
+    }
+
+    #[test]
+    fn archive_source_downloads_directly() {
+        let archive = connector_archive_download_url(
+            "https://download.baijimu.com/connectors/wechat.zip",
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            archive.as_deref(),
+            Some("https://download.baijimu.com/connectors/wechat.zip")
+        );
     }
 }
