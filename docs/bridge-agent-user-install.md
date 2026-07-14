@@ -11,7 +11,7 @@ https://baijimu.com/bridge-agent/download
 ```
 
 2. 下载适合自己电脑系统的安装包：
-   - Windows：下载 `.msi`
+   - Windows：下载 `.msi`，安装完成后桌面会出现“百积木”图标
    - macOS：下载 `.dmg`
    - Linux：下载 `.deb` 或 `.AppImage`
 3. 打开安装包，按系统提示完成安装。

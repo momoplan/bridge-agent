@@ -1292,7 +1292,25 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         });
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        schedule_windows_app_update(&app, &download_path)?;
+        let app_to_exit = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            quit_app(&app_to_exit);
+        });
+
+        return Ok(AppUpdateInstallResult {
+            status: "downloaded".to_string(),
+            version: latest_version.to_string(),
+            asset_name: Some(asset.name.clone()),
+            downloaded_path: Some(download_path.display().to_string()),
+            release_url,
+        });
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         open::that(&download_path).map_err(|err| format!("打开安装包失败: {err}"))?;
 
@@ -1399,12 +1417,8 @@ fn current_update_target() -> String {
 }
 
 fn select_release_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleaseAsset> {
-    let preferred_names = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", _) => vec!["_universal.dmg", ".dmg"],
-        ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi"],
-        ("linux", "x86_64") => vec!["_amd64.AppImage", ".AppImage", "_amd64.deb", ".deb"],
-        _ => Vec::new(),
-    };
+    let preferred_names =
+        preferred_update_asset_suffixes(std::env::consts::OS, std::env::consts::ARCH);
 
     for suffix in preferred_names {
         if let Some(asset) = release
@@ -1417,6 +1431,16 @@ fn select_release_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleas
     }
 
     None
+}
+
+fn preferred_update_asset_suffixes(os: &str, arch: &str) -> Vec<&'static str> {
+    match (os, arch) {
+        ("macos", _) => vec!["_universal.dmg", ".dmg"],
+        ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi", "_x64-setup.exe"],
+        ("windows", "aarch64") => vec!["_arm64_en-US.msi", "_arm64-setup.exe", ".msi"],
+        ("linux", "x86_64") => vec!["_amd64.AppImage", ".AppImage", "_amd64.deb", ".deb"],
+        _ => Vec::new(),
+    }
 }
 
 fn verify_asset_digest(asset: &UpdateReleaseAsset, bytes: &[u8]) -> Result<(), String> {
@@ -1622,6 +1646,74 @@ fi
 /usr/bin/open "$TARGET_APP"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] update installed and relaunched $APP_NAME"
+"#
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_windows_app_update(
+    _app: &tauri::AppHandle,
+    installer_path: &Path,
+) -> Result<(), String> {
+    let process_id = std::process::id().to_string();
+    let script_path = std::env::temp_dir().join(format!(
+        "bridge-agent-update-{}-{}.ps1",
+        process_id,
+        now_ms()
+    ));
+    std::fs::write(&script_path, windows_update_script())
+        .map_err(|err| format!("写入 Windows 更新启动脚本失败: {err}"))?;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script_path)
+        .arg("-ParentPid")
+        .arg(&process_id)
+        .arg("-InstallerPath")
+        .arg(installer_path);
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    command
+        .spawn()
+        .map_err(|err| format!("启动 Windows 更新安装器失败: {err}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_script() -> &'static str {
+    r#"
+param(
+  [Parameter(Mandatory = $true)]
+  [int]$ParentPid,
+  [Parameter(Mandatory = $true)]
+  [string]$InstallerPath
+)
+
+$ErrorActionPreference = 'Stop'
+
+try {
+  Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+} catch {
+}
+
+Start-Sleep -Milliseconds 300
+
+if ([System.IO.Path]::GetExtension($InstallerPath) -ieq '.msi') {
+  Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $InstallerPath)
+} else {
+  Start-Process -FilePath $InstallerPath
+}
+
+try {
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+} catch {
+}
 "#
 }
 
@@ -2375,6 +2467,12 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
 }
 
 fn show_main_window(app: &tauri::AppHandle, diagnostics: Option<&StartupDiagnostics>) {
+    if app_is_quitting(app) {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.info("skipping main window restore because app is quitting");
+        }
+        return;
+    }
     show_dock_icon(app, diagnostics);
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window(&window, diagnostics);
@@ -2387,19 +2485,30 @@ fn show_main_window(app: &tauri::AppHandle, diagnostics: Option<&StartupDiagnost
         let diagnostics = diagnostics.cloned();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            if let Some(diagnostics) = diagnostics.as_ref() {
-                diagnostics.info(format!("retrying main window restore after {delay_ms}ms"));
+            if app_is_quitting(&app) {
+                if let Some(diagnostics) = diagnostics.as_ref() {
+                    diagnostics.info(format!(
+                        "skipping {delay_ms}ms main window restore retry because app is quitting"
+                    ));
+                }
+                return;
             }
-            show_dock_icon(&app, diagnostics.as_ref());
-            if let Some(window) = app.get_webview_window("main") {
-                restore_main_window(&window, diagnostics.as_ref());
-            } else if let Some(diagnostics) = diagnostics.as_ref() {
-                diagnostics.warn(format!(
-                    "main window is unavailable during {delay_ms}ms restore retry"
-                ));
+            if let Some(diagnostics) = diagnostics.as_ref() {
+                run_ui_action(
+                    diagnostics,
+                    &format!("{delay_ms}ms main window restore retry"),
+                    || restore_main_window_once(&app, Some(diagnostics), delay_ms),
+                );
+            } else {
+                restore_main_window_once(&app, None, delay_ms);
             }
         });
     }
+}
+
+fn app_is_quitting(app: &tauri::AppHandle) -> bool {
+    app.try_state::<DesktopState>()
+        .is_some_and(|state| state.quitting.load(Ordering::SeqCst))
 }
 
 fn run_ui_action(diagnostics: &StartupDiagnostics, label: &str, action: impl FnOnce()) {
@@ -2429,29 +2538,62 @@ fn show_main_window_deferred(
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow, diagnostics: Option<&StartupDiagnostics>) {
-    if let Err(err) = window.show() {
-        if let Some(diagnostics) = diagnostics {
-            diagnostics.error(format!("failed to show main window: {err:#}"));
+    run_window_action(diagnostics, "show main window", "main window show completed", || {
+        window.show()
+    });
+    run_window_action(
+        diagnostics,
+        "unminimize main window",
+        "main window unminimize completed",
+        || window.unminimize(),
+    );
+    run_window_action(
+        diagnostics,
+        "focus main window",
+        "main window focus completed",
+        || window.set_focus(),
+    );
+}
+
+fn run_window_action(
+    diagnostics: Option<&StartupDiagnostics>,
+    label: &str,
+    success_message: &str,
+    action: impl FnOnce() -> tauri::Result<()>,
+) {
+    match panic::catch_unwind(AssertUnwindSafe(action)) {
+        Ok(Ok(())) => {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.info(success_message);
+            }
         }
-        eprintln!("failed to show main window: {err}");
-    } else if let Some(diagnostics) = diagnostics {
-        diagnostics.info("main window show completed");
+        Ok(Err(err)) => {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.error(format!("failed to {label}: {err:#}"));
+            }
+            eprintln!("failed to {label}: {err}");
+        }
+        Err(_) => {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.error(format!("{label} panicked; skipping"));
+            }
+            eprintln!("{label} panicked; skipping");
+        }
     }
-    if let Err(err) = window.unminimize() {
-        if let Some(diagnostics) = diagnostics {
-            diagnostics.error(format!("failed to unminimize main window: {err:#}"));
-        }
-        eprintln!("failed to unminimize main window: {err}");
+}
+
+fn restore_main_window_once(
+    app: &tauri::AppHandle,
+    diagnostics: Option<&StartupDiagnostics>,
+    delay_ms: u64,
+) {
+    show_dock_icon(app, diagnostics);
+    if let Some(window) = app.get_webview_window("main") {
+        restore_main_window(&window, diagnostics);
     } else if let Some(diagnostics) = diagnostics {
-        diagnostics.info("main window unminimize completed");
-    }
-    if let Err(err) = window.set_focus() {
-        if let Some(diagnostics) = diagnostics {
-            diagnostics.error(format!("failed to focus main window: {err:#}"));
-        }
-        eprintln!("failed to focus main window: {err}");
-    } else if let Some(diagnostics) = diagnostics {
-        diagnostics.info("main window focus completed");
+        diagnostics.warn(format!(
+            "main window is unavailable during {delay_ms}ms restore retry"
+        ));
     }
 }
 
@@ -2490,7 +2632,7 @@ fn hide_dock_icon(_app: &tauri::AppHandle) {}
 fn quit_app(app: &tauri::AppHandle) {
     let state = app.state::<DesktopState>();
     if state.quitting.swap(true, Ordering::SeqCst) {
-        app.exit(0);
+        eprintln!("quit requested while app is already quitting");
         return;
     }
     let runtime = state.runtime.clone();
@@ -2828,6 +2970,18 @@ mod tests {
             &release,
             &Version::parse("0.1.72").unwrap()
         ));
+    }
+
+    #[test]
+    fn windows_update_assets_prefer_msi_then_nsis_setup() {
+        assert_eq!(
+            preferred_update_asset_suffixes("windows", "x86_64"),
+            vec!["_x64_en-US.msi", ".msi", "_x64-setup.exe"]
+        );
+        assert_eq!(
+            preferred_update_asset_suffixes("windows", "aarch64"),
+            vec!["_arm64_en-US.msi", "_arm64-setup.exe", ".msi"]
+        );
     }
 
     #[test]

@@ -37,6 +37,9 @@ const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const RELAY_CONNECT_TIMEOUT_SECS: u64 = 15;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
+const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
+const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
+const DEFAULT_LOG_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -421,9 +424,76 @@ impl AgentRuntimeManager {
         }
         drop(apply);
         if let Some(task) = task {
-            let _ = task.await;
+            self.wait_for_runtime_stop(task).await;
         }
         Ok(())
+    }
+
+    async fn wait_for_runtime_stop(&self, mut task: JoinHandle<()>) {
+        match timeout(Duration::from_secs(RUNTIME_STOP_TIMEOUT_SECS), &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let message = format!("runtime task ended before stop completed: {err:#}");
+                self.force_stopped_after_failed_stop(message.clone()).await;
+                self.push_log("error", &message, DEFAULT_LOG_LIMIT).await;
+            }
+            Err(_) => {
+                let message = format!(
+                    "runtime stop timed out after {RUNTIME_STOP_TIMEOUT_SECS}s; aborting runtime task"
+                );
+                self.push_log("warn", &message, DEFAULT_LOG_LIMIT).await;
+                task.abort();
+                match timeout(Duration::from_secs(RUNTIME_ABORT_TIMEOUT_SECS), task).await {
+                    Ok(Ok(())) => {
+                        self.push_log(
+                            "warn",
+                            "runtime task aborted after stop timeout",
+                            DEFAULT_LOG_LIMIT,
+                        )
+                        .await;
+                    }
+                    Ok(Err(err)) if err.is_cancelled() => {
+                        self.push_log(
+                            "warn",
+                            "runtime task cancelled after stop timeout",
+                            DEFAULT_LOG_LIMIT,
+                        )
+                        .await;
+                    }
+                    Ok(Err(err)) => {
+                        self.push_log(
+                            "error",
+                            &format!(
+                                "runtime task failed while aborting after stop timeout: {err:#}"
+                            ),
+                            DEFAULT_LOG_LIMIT,
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        self.push_log(
+                            "error",
+                            &format!(
+                                "runtime task did not finish within {RUNTIME_ABORT_TIMEOUT_SECS}s after abort"
+                            ),
+                            DEFAULT_LOG_LIMIT,
+                        )
+                        .await;
+                    }
+                }
+                self.force_stopped_after_failed_stop(message).await;
+            }
+        }
+    }
+
+    async fn force_stopped_after_failed_stop(&self, last_error: String) {
+        let mut state = self.inner.state.lock().await;
+        state.snapshot.status = RuntimeStatus::Stopped;
+        state.snapshot.relay_registered = false;
+        state.snapshot.relay_registered_at = None;
+        state.snapshot.last_relay_seen_at = None;
+        state.snapshot.last_error = Some(last_error);
+        state.snapshot.last_event_at = now_ms();
     }
 
     async fn active_start_snapshot(

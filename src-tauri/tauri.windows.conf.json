@@ -6,6 +6,17 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
+      },
+      "wix": {
+        "fragmentPaths": [
+          "wix/desktop-shortcut.wxs"
+        ],
+        "componentRefs": [
+          "BaijimuDesktopShortcut"
+        ]
+      },
+      "nsis": {
+        "installerHooks": "nsis/desktop-shortcut.nsh"
       }
     }
   }
