@@ -151,6 +151,10 @@ impl AgentRuntimeManager {
         Self::default()
     }
 
+    pub async fn push_desktop_log(&self, level: &str, message: &str, metadata: LogMetadata) {
+        push_log_entry(&self.inner, 500, level, message, metadata).await;
+    }
+
     pub async fn start_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
         sync_installed_connectors(path)?;
         let config = load_config(path)?;

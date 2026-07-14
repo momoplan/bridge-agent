@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use bridge_agent::config::resolve_config_base_dir;
+use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
@@ -20,11 +21,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -306,7 +307,11 @@ struct UpdateReleaseResponse {
     update_available: Option<bool>,
     #[serde(default, alias = "force_update")]
     force_update: Option<bool>,
-    #[serde(default, alias = "minimum_supported_version", alias = "minSupportedVersion")]
+    #[serde(
+        default,
+        alias = "minimum_supported_version",
+        alias = "minSupportedVersion"
+    )]
     minimum_supported_version: Option<String>,
     #[serde(default, alias = "force_update_message")]
     force_update_message: Option<String>,
@@ -1014,8 +1019,45 @@ async fn poll_browser_auth(
     updated.relay.token = authorized.agent_token.clone();
     save_agent_config(&state.config_path, &updated)
         .map_err(|err| command_error_message(err.to_string()))?;
-    write_shared_cli_auth(&updated, &authorized)
-        .map_err(|err| command_error_message(err.to_string()))?;
+    match write_shared_cli_auth(&updated, &authorized) {
+        Ok(Some(result)) => {
+            state
+                .runtime
+                .push_desktop_log(
+                    "info",
+                    &format!("shared CLI auth written to {}", result.path.display()),
+                    LogMetadata::category("desktop_auth")
+                        .event("shared_cli_auth")
+                        .outcome("written"),
+                )
+                .await;
+        }
+        Ok(None) => {
+            state
+                .runtime
+                .push_desktop_log(
+                    "warn",
+                    "authorized payload did not include a local client token; skipped shared CLI auth",
+                    LogMetadata::category("desktop_auth")
+                        .event("shared_cli_auth")
+                        .outcome("skipped"),
+                )
+                .await;
+        }
+        Err(err) => {
+            state
+                .runtime
+                .push_desktop_log(
+                    "error",
+                    &format!("failed to write shared CLI auth: {err:#}"),
+                    LogMetadata::category("desktop_auth")
+                        .event("shared_cli_auth")
+                        .outcome("failed"),
+                )
+                .await;
+            return Err(command_error_message(err.to_string()));
+        }
+    }
     let runtime = restart_agent_from_saved_config(&state)
         .await
         .map_err(CommandError::from)?;
@@ -1028,12 +1070,19 @@ async fn poll_browser_auth(
     })
 }
 
-fn write_shared_cli_auth(config: &AgentConfig, authorized: &AuthorizedPayload) -> anyhow::Result<()> {
+struct SharedCliAuthWriteResult {
+    path: PathBuf,
+}
+
+fn write_shared_cli_auth(
+    config: &AgentConfig,
+    authorized: &AuthorizedPayload,
+) -> anyhow::Result<Option<SharedCliAuthWriteResult>> {
     let Some(local_client_token) = authorized.local_client_token.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     if local_client_token.trim().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let path = shared_cli_auth_path();
@@ -1070,7 +1119,8 @@ fn write_shared_cli_auth(config: &AgentConfig, authorized: &AuthorizedPayload) -
         .unwrap_or_default();
     credentials.retain(|item| {
         item.get("workspaceId").and_then(|value| value.as_u64()) != Some(authorized.workspace_id)
-            || item.get("clientId").and_then(|value| value.as_str()) != Some(authorized.device_id.as_str())
+            || item.get("clientId").and_then(|value| value.as_str())
+                != Some(authorized.device_id.as_str())
     });
     credentials.push(serde_json::json!({
         "workspaceId": authorized.workspace_id,
@@ -1084,18 +1134,28 @@ fn write_shared_cli_auth(config: &AgentConfig, authorized: &AuthorizedPayload) -
 
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, serde_json::to_vec_pretty(&document)?)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
+    fs::rename(&tmp_path, &path)?;
+    Ok(Some(SharedCliAuthWriteResult { path }))
 }
 
 fn shared_cli_auth_path() -> PathBuf {
     if let Some(config_home) = std::env::var_os("BAIJIMU_CONFIG_HOME") {
         return PathBuf::from(config_home).join("baijimu").join("auth.json");
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = shared_cli_home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".config").join("baijimu").join("auth.json")
+}
+
+fn shared_cli_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(user_profile));
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -1135,8 +1195,8 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let force_update_required = release_force_update_required(&release, &current_version);
     let update_available = force_update_required
         || release
-        .update_available
-        .unwrap_or(latest_version > current_version);
+            .update_available
+            .unwrap_or(latest_version > current_version);
 
     Ok(AppUpdateStatus {
         current_version: current_version.to_string(),
@@ -1165,8 +1225,8 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     let force_update_required = release_force_update_required(&release, &current_version);
     let update_available = force_update_required
         || release
-        .update_available
-        .unwrap_or(latest_version > current_version);
+            .update_available
+            .unwrap_or(latest_version > current_version);
     if (!update_available || latest_version <= current_version) && !force_update_required {
         return Ok(AppUpdateInstallResult {
             status: "up_to_date".to_string(),
@@ -1288,7 +1348,10 @@ fn release_version(release: &UpdateReleaseResponse) -> Result<Version, String> {
     parse_release_version(raw_version).map_err(|err| format!("最新版本号无效: {err}"))
 }
 
-fn release_force_update_required(release: &UpdateReleaseResponse, current_version: &Version) -> bool {
+fn release_force_update_required(
+    release: &UpdateReleaseResponse,
+    current_version: &Version,
+) -> bool {
     if release.force_update.unwrap_or(false) {
         return true;
     }
@@ -2261,12 +2324,28 @@ fn bundled_baijimu_cli_path() -> Option<PathBuf> {
     if let Some(exe) = exe.as_ref() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("resources").join("bin").join(binary_name));
-            candidates.push(dir.join("..").join("Resources").join("resources").join("bin").join(binary_name));
-            candidates.push(dir.join("..").join("resources").join("bin").join(binary_name));
+            candidates.push(
+                dir.join("..")
+                    .join("Resources")
+                    .join("resources")
+                    .join("bin")
+                    .join(binary_name),
+            );
+            candidates.push(
+                dir.join("..")
+                    .join("resources")
+                    .join("bin")
+                    .join(binary_name),
+            );
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("src-tauri").join("resources").join("bin").join(binary_name));
+        candidates.push(
+            cwd.join("src-tauri")
+                .join("resources")
+                .join("bin")
+                .join(binary_name),
+        );
         candidates.push(cwd.join("resources").join("bin").join(binary_name));
     }
     candidates.into_iter().find(|candidate| candidate.is_file())
@@ -2482,5 +2561,13 @@ mod tests {
             &release,
             &Version::parse("0.1.72").unwrap()
         ));
+    }
+
+    #[test]
+    fn shared_cli_auth_path_should_live_under_home_config() {
+        let path = shared_cli_auth_path();
+
+        assert!(path.ends_with(Path::new(".config").join("baijimu").join("auth.json")));
+        assert!(path.is_absolute() || std::env::var_os("HOME").is_none());
     }
 }
