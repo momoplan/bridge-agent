@@ -30,11 +30,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
@@ -52,6 +52,10 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
+const UPDATE_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 20;
+const UPDATE_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 60;
+const UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 30 * 60;
+const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
@@ -186,6 +190,18 @@ struct AppUpdateInstallResult {
     asset_name: Option<String>,
     downloaded_path: Option<String>,
     release_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    phase: String,
+    message: String,
+    version: Option<String>,
+    asset_name: Option<String>,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    downloaded_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1220,6 +1236,19 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
 
 #[tauri::command]
 async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallResult, String> {
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "checking".to_string(),
+            message: "正在获取最新版本信息".to_string(),
+            version: None,
+            asset_name: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            downloaded_path: None,
+        },
+    );
+
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
@@ -1247,7 +1276,27 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             current_update_target()
         )
     })?;
-    let response = Client::new()
+
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "downloading".to_string(),
+            message: "正在下载更新包".to_string(),
+            version: Some(latest_version.to_string()),
+            asset_name: Some(asset.name.clone()),
+            downloaded_bytes: Some(0),
+            total_bytes: None,
+            downloaded_path: None,
+        },
+    );
+
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(UPDATE_DOWNLOAD_CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(UPDATE_DOWNLOAD_READ_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS))
+        .build()
+        .map_err(|err| format!("创建更新下载客户端失败: {err}"))?;
+    let mut response = client
         .get(&asset.download_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
         .send()
@@ -1260,19 +1309,84 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         return Err(format!("下载更新失败 ({status}): {payload}"));
     }
 
-    let bytes = response
-        .bytes()
+    let total_bytes = response.content_length();
+    let mut bytes = Vec::new();
+    let mut downloaded_bytes = 0_u64;
+    let mut last_progress_at = Instant::now();
+
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| format!("读取更新文件失败: {err}"))?;
+        .map_err(|err| format!("读取更新文件失败: {err}"))?
+    {
+        downloaded_bytes += chunk.len() as u64;
+        bytes.extend_from_slice(chunk.as_ref());
+
+        if last_progress_at.elapsed() >= Duration::from_millis(250)
+            || total_bytes.is_some_and(|total| downloaded_bytes >= total)
+        {
+            emit_app_update_progress(
+                &app,
+                AppUpdateProgress {
+                    phase: "downloading".to_string(),
+                    message: "正在下载更新包".to_string(),
+                    version: Some(latest_version.to_string()),
+                    asset_name: Some(asset.name.clone()),
+                    downloaded_bytes: Some(downloaded_bytes),
+                    total_bytes,
+                    downloaded_path: None,
+                },
+            );
+            last_progress_at = Instant::now();
+        }
+    }
+
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "verifying".to_string(),
+            message: "正在校验更新包".to_string(),
+            version: Some(latest_version.to_string()),
+            asset_name: Some(asset.name.clone()),
+            downloaded_bytes: Some(downloaded_bytes),
+            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+            downloaded_path: None,
+        },
+    );
     verify_asset_digest(asset, bytes.as_ref())?;
 
     let download_path = resolve_update_download_path(&asset.name)?;
     if let Some(parent) = download_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("创建更新目录失败: {err}"))?;
     }
-    std::fs::write(&download_path, bytes.as_ref())
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "saving".to_string(),
+            message: "正在保存更新包".to_string(),
+            version: Some(latest_version.to_string()),
+            asset_name: Some(asset.name.clone()),
+            downloaded_bytes: Some(downloaded_bytes),
+            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+            downloaded_path: Some(download_path.display().to_string()),
+        },
+    );
+    std::fs::write(&download_path, bytes.as_slice())
         .map_err(|err| format!("写入更新文件失败: {err}"))?;
     make_asset_ready_to_open(&download_path)?;
+
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "scheduling".to_string(),
+            message: "正在准备安装并重启".to_string(),
+            version: Some(latest_version.to_string()),
+            asset_name: Some(asset.name.clone()),
+            downloaded_bytes: Some(downloaded_bytes),
+            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+            downloaded_path: Some(download_path.display().to_string()),
+        },
+    );
 
     #[cfg(target_os = "macos")]
     {
@@ -1282,6 +1396,19 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             std::thread::sleep(Duration::from_millis(1200));
             app_to_exit.exit(0);
         });
+
+        emit_app_update_progress(
+            &app,
+            AppUpdateProgress {
+                phase: "ready_to_install".to_string(),
+                message: "更新包已就绪，应用即将退出安装".to_string(),
+                version: Some(latest_version.to_string()),
+                asset_name: Some(asset.name.clone()),
+                downloaded_bytes: Some(downloaded_bytes),
+                total_bytes: total_bytes.or(Some(downloaded_bytes)),
+                downloaded_path: Some(download_path.display().to_string()),
+            },
+        );
 
         return Ok(AppUpdateInstallResult {
             status: "downloaded".to_string(),
@@ -1301,6 +1428,19 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             quit_app(&app_to_exit);
         });
 
+        emit_app_update_progress(
+            &app,
+            AppUpdateProgress {
+                phase: "ready_to_install".to_string(),
+                message: "更新包已就绪，应用即将退出安装".to_string(),
+                version: Some(latest_version.to_string()),
+                asset_name: Some(asset.name.clone()),
+                downloaded_bytes: Some(downloaded_bytes),
+                total_bytes: total_bytes.or(Some(downloaded_bytes)),
+                downloaded_path: Some(download_path.display().to_string()),
+            },
+        );
+
         return Ok(AppUpdateInstallResult {
             status: "downloaded".to_string(),
             version: latest_version.to_string(),
@@ -1314,6 +1454,19 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     {
         open::that(&download_path).map_err(|err| format!("打开安装包失败: {err}"))?;
 
+        emit_app_update_progress(
+            &app,
+            AppUpdateProgress {
+                phase: "ready_to_install".to_string(),
+                message: "更新包已打开，请按系统提示完成安装".to_string(),
+                version: Some(latest_version.to_string()),
+                asset_name: Some(asset.name.clone()),
+                downloaded_bytes: Some(downloaded_bytes),
+                total_bytes: total_bytes.or(Some(downloaded_bytes)),
+                downloaded_path: Some(download_path.display().to_string()),
+            },
+        );
+
         Ok(AppUpdateInstallResult {
             status: "downloaded".to_string(),
             version: latest_version.to_string(),
@@ -1322,6 +1475,10 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             release_url,
         })
     }
+}
+
+fn emit_app_update_progress(app: &tauri::AppHandle, progress: AppUpdateProgress) {
+    let _ = app.emit(UPDATE_PROGRESS_EVENT, progress);
 }
 
 fn parse_release_version(tag_name: &str) -> Result<Version, String> {

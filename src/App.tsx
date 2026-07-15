@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import bjmLogoLight from "./assets/brand/bjm-logo-light.svg";
 
@@ -268,6 +269,24 @@ interface AppUpdateInstallResult {
   assetName: string | null;
   downloadedPath: string | null;
   releaseUrl: string;
+}
+
+type AppUpdateProgressPhase =
+  | "checking"
+  | "downloading"
+  | "verifying"
+  | "saving"
+  | "scheduling"
+  | "ready_to_install";
+
+interface AppUpdateProgress {
+  phase: AppUpdateProgressPhase;
+  message: string;
+  version: string | null;
+  assetName: string | null;
+  downloadedBytes: number | null;
+  totalBytes: number | null;
+  downloadedPath: string | null;
 }
 
 interface DesktopPermissionStatus {
@@ -677,6 +696,7 @@ function App() {
   const [appUpdateCheckState, setAppUpdateCheckState] = useState<AppUpdateCheckState>("checking");
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
   const [connectorUpdateBusy, setConnectorUpdateBusy] = useState<string | null>(null);
@@ -723,6 +743,26 @@ function App() {
 
   useEffect(() => {
     void refreshConnectorApps();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<AppUpdateProgress>("app-update-progress", (event) => {
+      if (active) {
+        setAppUpdateProgress(event.payload);
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -966,6 +1006,7 @@ function App() {
       : "检查中";
   const appUpdateTone =
     forceUpdateRequired || appUpdate?.updateAvailable || appUpdateCheckState === "error" ? "danger" : "normal";
+  const appUpdateProgressPercent = calculateAppUpdateProgressPercent(appUpdateProgress);
   const hasDesktopPermissionGap =
     enabledComputerMethodCount > 0 &&
     desktopPermissions != null &&
@@ -1583,9 +1624,45 @@ function App() {
     }
   }
 
+  function renderAppUpdateProgress() {
+    if (!updateBusy && appUpdateProgress?.phase !== "ready_to_install") {
+      return null;
+    }
+    const progress = appUpdateProgress;
+    const label = progress?.message ?? "正在准备更新";
+    const detail = progress
+      ? formatAppUpdateProgressDetail(progress)
+      : "正在连接更新服务，请稍候。";
+
+    return (
+      <div className="app-update-progress" role="status" aria-live="polite">
+        <div className="app-update-progress-head">
+          <strong>{label}</strong>
+          <span>{appUpdateProgressPercent == null ? "等待响应" : `${appUpdateProgressPercent}%`}</span>
+        </div>
+        <div className="app-update-progress-track" aria-hidden="true">
+          <div
+            className={`app-update-progress-bar ${appUpdateProgressPercent == null ? "indeterminate" : ""}`}
+            style={appUpdateProgressPercent == null ? undefined : { width: `${appUpdateProgressPercent}%` }}
+          />
+        </div>
+        <p>{detail}</p>
+      </div>
+    );
+  }
+
   async function installAppUpdate() {
     try {
       setUpdateBusy(true);
+      setAppUpdateProgress({
+        phase: "checking",
+        message: "正在获取最新版本信息",
+        version: appUpdate?.latestVersion ?? null,
+        assetName: appUpdate?.assetName ?? null,
+        downloadedBytes: null,
+        totalBytes: null,
+        downloadedPath: null
+      });
       setMessage("");
       setError("");
       setRuntimeConflict(null);
@@ -1600,6 +1677,7 @@ function App() {
           : `更新包 ${result.assetName ?? ""} 已下载，应用即将退出并自动完成替换。`
       );
     } catch (err) {
+      setAppUpdateProgress(null);
       handleCommandError(err);
     } finally {
       setUpdateBusy(false);
@@ -4697,7 +4775,7 @@ function App() {
             {appUpdate?.updateAvailable ? (
               appUpdate.autoDownloadAvailable ? (
                 <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
-                  {updateBusy ? "安装中" : `升级到 ${appUpdate.latestVersion}`}
+                  {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : `升级到 ${appUpdate.latestVersion}`}
                 </button>
               ) : (
                 <button className="primary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
@@ -4714,6 +4792,7 @@ function App() {
             </button>
           </div>
         </div>
+        {renderAppUpdateProgress()}
         <div className="status-detail-grid">
           <InfoRow label="当前状态" value={statusLabel} />
           <InfoRow
@@ -4864,7 +4943,7 @@ function App() {
           <div className="force-update-actions">
             {appUpdate.autoDownloadAvailable ? (
               <button className="primary danger" onClick={() => void installAppUpdate()} disabled={updateBusy}>
-                {updateBusy ? "安装中" : "立即更新"}
+                {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "立即更新"}
               </button>
             ) : (
               <button className="primary danger" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
@@ -4879,6 +4958,7 @@ function App() {
               {appUpdateCheckState === "checking" ? "检查中" : "重新检查"}
             </button>
           </div>
+          {renderAppUpdateProgress()}
         </section>
       </div>
     );
@@ -5622,6 +5702,66 @@ function formatRelaySeen(snapshot: RuntimeSnapshot | null): string {
 
 function formatEpochSeconds(timestamp: number): string {
   return formatTime(timestamp * 1000);
+}
+
+function calculateAppUpdateProgressPercent(progress: AppUpdateProgress | null): number | null {
+  if (progress?.downloadedBytes == null || !progress.totalBytes || progress.totalBytes <= 0) {
+    if (progress?.phase === "ready_to_install") {
+      return 100;
+    }
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100)));
+}
+
+function formatAppUpdateProgressButton(progress: AppUpdateProgress | null): string {
+  const percent = calculateAppUpdateProgressPercent(progress);
+  if (percent != null && progress?.phase === "downloading") {
+    return `下载中 ${percent}%`;
+  }
+  switch (progress?.phase) {
+    case "checking":
+      return "检查中";
+    case "verifying":
+      return "校验中";
+    case "saving":
+      return "保存中";
+    case "scheduling":
+      return "准备安装";
+    case "ready_to_install":
+      return "即将重启";
+    default:
+      return "准备更新";
+  }
+}
+
+function formatAppUpdateProgressDetail(progress: AppUpdateProgress): string {
+  const sizeText =
+    progress.downloadedBytes == null
+      ? null
+      : progress.totalBytes
+        ? `${formatByteSize(progress.downloadedBytes)} / ${formatByteSize(progress.totalBytes)}`
+        : `${formatByteSize(progress.downloadedBytes)} 已下载`;
+  const parts = [
+    progress.assetName ? `更新包 ${progress.assetName}` : null,
+    sizeText,
+    progress.downloadedPath && progress.phase !== "downloading" ? `保存到 ${progress.downloadedPath}` : null
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join("，") : "正在连接更新服务，请稍候。";
+}
+
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function needsBrowserAuthorization(config: UiAgentConfig): boolean {
