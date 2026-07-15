@@ -469,6 +469,26 @@ type DetailPanel = "system" | "settings" | "logs" | "manifest";
 type LocalAppKind = "connector" | "built_in" | "custom";
 type InstallSourceMode = "choose" | "market" | "custom";
 type LocalAppDetailTab = "overview" | "capabilities" | "config";
+type LocalAppLifecycleState =
+  | "installed"
+  | "starting"
+  | "running"
+  | "start_failed"
+  | "stopped"
+  | "stopping"
+  | "unknown";
+
+interface LocalAppLifecycleOverride {
+  state: LocalAppLifecycleState;
+  detail?: string;
+}
+
+interface LocalAppLifecycle {
+  state: LocalAppLifecycleState;
+  label: string;
+  detail: string;
+  statusClass: string;
+}
 
 interface LocalAppItem {
   id: string;
@@ -699,6 +719,9 @@ function App() {
   const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
+  const [localAppLifecycleOverrides, setLocalAppLifecycleOverrides] = useState<
+    Record<string, LocalAppLifecycleOverride>
+  >({});
   const [connectorUpdateBusy, setConnectorUpdateBusy] = useState<string | null>(null);
   const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
@@ -1199,7 +1222,7 @@ function App() {
     }
   }
 
-  async function startRegisteredService(serviceName: string) {
+  async function startRegisteredService(serviceName: string): Promise<boolean> {
     try {
       setServiceStartBusy(serviceName);
       setMessage("");
@@ -1212,22 +1235,25 @@ function App() {
         const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
         setRuntime(snapshot);
         setMessage(formatApplyMessage(`应用 ${serviceName} 的启动命令已执行`, snapshot));
+        return true;
       } else {
         setError(
           `应用 ${serviceName} 启动命令执行失败` +
             (result.exitCode == null ? "" : `，退出码 ${result.exitCode}`) +
             (result.stderr.trim() ? `：${result.stderr.trim()}` : "")
         );
+        return false;
       }
-      await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
+      return false;
     } finally {
+      await refreshRegisteredServiceStatuses();
       setServiceStartBusy(null);
     }
   }
 
-  async function stopRegisteredService(serviceName: string) {
+  async function stopRegisteredService(serviceName: string): Promise<boolean> {
     try {
       setServiceStartBusy(serviceName);
       setMessage("");
@@ -1238,17 +1264,20 @@ function App() {
       });
       if (result.success) {
         setMessage(`应用 ${serviceName} 已停止`);
+        return true;
       } else {
         setError(
           `应用 ${serviceName} 停止命令执行失败` +
             (result.exitCode == null ? "" : `，退出码 ${result.exitCode}`) +
             (result.stderr.trim() ? `：${result.stderr.trim()}` : "")
         );
+        return false;
       }
-      await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
+      return false;
     } finally {
+      await refreshRegisteredServiceStatuses();
       setServiceStartBusy(null);
     }
   }
@@ -1437,6 +1466,10 @@ function App() {
     }
     try {
       setConnectorBusy(app.id);
+      setLocalAppLifecycleOverride(app.id, {
+        state: "starting",
+        detail: "正在执行应用启动命令"
+      });
       setMessage("");
       setError("");
       setRuntimeConflict(null);
@@ -1447,16 +1480,22 @@ function App() {
         const failed = result.services.filter((service) => service.exitCode !== 0);
         await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
+          setLocalAppLifecycleOverride(app.id, {
+            state: "start_failed",
+            detail: formatConnectorServiceFailures(failed)
+          });
           setError(
             `应用 ${app.name} 启动失败：` +
-              failed
-                .map((service) =>
-                  `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`
-                )
-                .join("；")
+              formatConnectorServiceFailures(failed)
           );
         } else {
-          setMessage(`应用 ${app.name} 已启动`);
+          const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
+          setRuntime(snapshot);
+          setLocalAppLifecycleOverride(app.id, {
+            state: "running",
+            detail: "启动命令已执行"
+          });
+          setMessage(formatApplyMessage(`应用 ${app.name} 已启动`, snapshot));
         }
         return;
       }
@@ -1468,8 +1507,16 @@ function App() {
         setError(`应用 ${app.name} 没有配置启动命令`);
         return;
       }
-      await startRegisteredService(startableService.name);
+      const started = await startRegisteredService(startableService.name);
+      setLocalAppLifecycleOverride(app.id, {
+        state: started ? "running" : "start_failed",
+        detail: started ? "启动命令已执行" : "启动命令执行失败"
+      });
     } catch (err) {
+      setLocalAppLifecycleOverride(app.id, {
+        state: "start_failed",
+        detail: readError(err)
+      });
       handleCommandError(err);
     } finally {
       setConnectorBusy(null);
@@ -1482,6 +1529,10 @@ function App() {
     }
     try {
       setConnectorBusy(app.id);
+      setLocalAppLifecycleOverride(app.id, {
+        state: "stopping",
+        detail: "正在执行应用停止命令"
+      });
       setMessage("");
       setError("");
       setRuntimeConflict(null);
@@ -1492,15 +1543,19 @@ function App() {
         const failed = result.services.filter((service) => service.exitCode !== 0);
         await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
+          setLocalAppLifecycleOverride(app.id, {
+            state: "running",
+            detail: `停止失败：${formatConnectorServiceFailures(failed)}`
+          });
           setError(
             `应用 ${app.name} 停止失败：` +
-              failed
-                .map((service) =>
-                  `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`
-                )
-                .join("；")
+              formatConnectorServiceFailures(failed)
           );
         } else {
+          setLocalAppLifecycleOverride(app.id, {
+            state: "stopped",
+            detail: "停止命令已执行"
+          });
           setMessage(`应用 ${app.name} 已停止`);
         }
         return;
@@ -1513,8 +1568,18 @@ function App() {
         setError(`应用 ${app.name} 没有配置停止命令`);
         return;
       }
-      await stopRegisteredService(stoppableService.name);
+      const stopped = await stopRegisteredService(stoppableService.name);
+      if (stopped) {
+        setLocalAppLifecycleOverride(app.id, {
+          state: "stopped",
+          detail: "停止命令已执行"
+        });
+      }
     } catch (err) {
+      setLocalAppLifecycleOverride(app.id, {
+        state: "running",
+        detail: `停止失败：${readError(err)}`
+      });
       handleCommandError(err);
     } finally {
       setConnectorBusy(null);
@@ -4193,9 +4258,17 @@ function App() {
     if (services.length === 0) {
       return null;
     }
+    const lifecycle = localAppLifecycle(app);
 
     return (
       <div className="local-app-runtime-list">
+        <div className="local-app-lifecycle-row">
+          <div>
+            <strong>应用生命周期</strong>
+            <p>{lifecycle.detail}</p>
+          </div>
+          <div className={`status-pill status-${lifecycle.statusClass}`}>{lifecycle.label}</div>
+        </div>
         {services.map((service) => {
           const runtimeView = serviceRuntimeView(service);
           return (
@@ -4376,9 +4449,8 @@ function App() {
     if (!config) {
       return null;
     }
-    const primaryService = app.serviceIndexes.length > 0 ? config.services[app.serviceIndexes[0]] : null;
-    const runtimeView = primaryService ? serviceRuntimeView(primaryService) : null;
     const hasStartCommand = hasLocalAppStartCommand(app);
+    const lifecycle = localAppLifecycle(app);
     return (
       <button
         className="local-app-card"
@@ -4393,11 +4465,9 @@ function App() {
       >
         <div className="local-app-card-top">
           <strong>{app.name}</strong>
-          {runtimeView?.statusLabel && runtimeView.statusClass ? (
-            <span className={`sidebar-service-status status-${runtimeView.statusClass}`}>
-              {runtimeView.statusLabel}
-            </span>
-          ) : null}
+          <span className={`sidebar-service-status status-${lifecycle.statusClass}`}>
+            {lifecycle.label}
+          </span>
         </div>
         <p>{app.description}</p>
         <div className="local-app-card-meta">
@@ -4425,7 +4495,8 @@ function App() {
     const marketApp = marketConnectorForLocalApp(app);
     const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
     const updateBusy = connectorUpdateBusy === app.id;
-    const appIsRunning = isLocalAppRunning(app);
+    const lifecycle = localAppLifecycle(app);
+    const appIsRunning = lifecycle.state === "running";
     const appCanStop = hasLocalAppStopCommand(app);
     const syncSource = connectorSyncSource(app);
     const closeDetail = () => setSelectedLocalAppId(null);
@@ -4606,16 +4677,53 @@ function App() {
     return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.stop_command));
   }
 
-  function isLocalAppRunning(app: LocalAppItem) {
+  function setLocalAppLifecycleOverride(appId: string, override: LocalAppLifecycleOverride) {
+    setLocalAppLifecycleOverrides((current) => ({
+      ...current,
+      [appId]: override
+    }));
+  }
+
+  function localAppLifecycle(app: LocalAppItem): LocalAppLifecycle {
     if (!config) {
-      return false;
+      return formatLocalAppLifecycle("unknown", "等待配置加载");
     }
-    return app.serviceIndexes.some((serviceIndex) => {
-      const service = config.services[serviceIndex];
-      return service
-        ? registeredServiceStatuses.find((status) => status.service === service.name)?.status === "healthy"
-        : false;
-    });
+
+    const override = localAppLifecycleOverrides[app.id];
+    if (override && ["starting", "stopping", "start_failed", "stopped"].includes(override.state)) {
+      return formatLocalAppLifecycle(override.state, override.detail);
+    }
+
+    const services = app.serviceIndexes
+      .map((serviceIndex) => config.services[serviceIndex])
+      .filter((service): service is UiServiceConfig => Boolean(service));
+    if (services.length === 0) {
+      return formatLocalAppLifecycle("installed", "已安装，尚未关联本地服务");
+    }
+
+    const statuses = services
+      .map((service) => registeredServiceStatuses.find((status) => status.service === service.name))
+      .filter((status): status is RegisteredServiceStatus => Boolean(status));
+    if (statuses.some((status) => status.status === "healthy")) {
+      return formatLocalAppLifecycle("running", "healthCheck 已通过");
+    }
+    if (override?.state === "running") {
+      return formatLocalAppLifecycle("running", override.detail ?? "启动命令已执行");
+    }
+    if (statuses.some((status) => status.status === "unhealthy")) {
+      return formatLocalAppLifecycle("stopped", "healthCheck 未通过");
+    }
+    if (statuses.some((status) => status.status === "unknown")) {
+      return formatLocalAppLifecycle("unknown", "等待运行状态检查");
+    }
+    if (hasLocalAppStartCommand(app)) {
+      return formatLocalAppLifecycle("installed", "已安装，等待手动启动");
+    }
+    return formatLocalAppLifecycle("installed", "已安装");
+  }
+
+  function isLocalAppRunning(app: LocalAppItem) {
+    return localAppLifecycle(app).state === "running";
   }
 
   function countLocalAppCapabilities(app: LocalAppItem, agentConfig: UiAgentConfig) {
@@ -5609,6 +5717,51 @@ function formatRegisteredServiceStatus(status: RegisteredServiceState): string {
     unknown: "未知"
   };
   return labels[status];
+}
+
+function formatLocalAppLifecycle(
+  state: LocalAppLifecycleState,
+  detail?: string
+): LocalAppLifecycle {
+  const labels: Record<LocalAppLifecycleState, string> = {
+    installed: "已安装",
+    starting: "启动中",
+    running: "运行中",
+    start_failed: "启动失败",
+    stopped: "已停止",
+    stopping: "停止中",
+    unknown: "状态未知"
+  };
+  const details: Record<LocalAppLifecycleState, string> = {
+    installed: "已安装，等待手动启动",
+    starting: "正在执行应用启动命令",
+    running: "应用正在运行",
+    start_failed: "应用启动失败",
+    stopped: "应用已停止",
+    stopping: "正在执行应用停止命令",
+    unknown: "等待运行状态检查"
+  };
+  const statusClasses: Record<LocalAppLifecycleState, string> = {
+    installed: "installed",
+    starting: "starting",
+    running: "running",
+    start_failed: "start_failed",
+    stopped: "stopped",
+    stopping: "stopping",
+    unknown: "unknown"
+  };
+  return {
+    state,
+    label: labels[state],
+    detail: detail ?? details[state],
+    statusClass: statusClasses[state]
+  };
+}
+
+function formatConnectorServiceFailures(services: ConnectorServiceStartResult[]): string {
+  return services
+    .map((service) => `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`)
+    .join("；");
 }
 
 function headersToText(headers: Record<string, string>): string {

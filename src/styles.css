@@ -608,6 +608,7 @@ select:focus {
 }
 
 .app-ability-group-head,
+.local-app-lifecycle-row,
 .local-app-runtime-row {
   display: flex;
   flex-wrap: wrap;
@@ -624,6 +625,7 @@ select:focus {
   min-width: 220px;
 }
 
+.local-app-lifecycle-row,
 .local-app-runtime-row {
   padding: 14px;
   border: 1px solid rgba(30, 42, 68, 0.08);
@@ -631,6 +633,12 @@ select:focus {
   background: rgba(255, 255, 255, 0.58);
 }
 
+.local-app-lifecycle-row {
+  border-color: rgba(22, 163, 167, 0.16);
+  background: rgba(22, 163, 167, 0.07);
+}
+
+.local-app-lifecycle-row p,
 .local-app-runtime-row p {
   margin: 6px 0 0;
   color: var(--muted);
@@ -1028,13 +1036,25 @@ select:focus {
   color: var(--success);
 }
 
+.status-running {
+  background: rgba(23, 114, 69, 0.12);
+  color: var(--success);
+}
+
 .status-unhealthy {
   background: rgba(152, 43, 43, 0.12);
   color: var(--danger);
 }
 
+.status-start_failed {
+  background: rgba(152, 43, 43, 0.12);
+  color: var(--danger);
+}
+
 .status-unknown,
-.status-not_configured {
+.status-not_configured,
+.status-installed,
+.status-stopped {
   background: rgba(33, 28, 23, 0.08);
   color: var(--muted);
 }

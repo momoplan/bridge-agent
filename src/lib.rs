@@ -19,10 +19,12 @@ pub use config::{
     ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use connector::{
-    connectors_dir, install_connector_from_path, install_connector_from_path_with_source_reference,
-    list_connectors, load_connector_manifest, show_connector, start_connector, stop_connector,
-    sync_installed_connectors, uninstall_connector, ConnectorInstallRecord, ConnectorInstallResult,
-    ConnectorManifest, ConnectorStartResult, ConnectorSummary,
+    connectors_dir, format_connector_sync_failures, install_connector_from_path,
+    install_connector_from_path_with_source_reference, list_connectors, load_connector_manifest,
+    show_connector, start_connector, stop_connector, sync_installed_connector,
+    sync_installed_connectors, sync_installed_connectors_report, uninstall_connector,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest, ConnectorStartResult,
+    ConnectorSummary, ConnectorSyncFailure, ConnectorSyncReport,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

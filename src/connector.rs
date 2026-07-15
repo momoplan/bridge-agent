@@ -128,6 +128,21 @@ pub struct ConnectorSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectorSyncFailure {
+    pub connector_id: String,
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorSyncReport {
+    pub summaries: Vec<ConnectorSummary>,
+    pub failures: Vec<ConnectorSyncFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectorStartResult {
     pub connector_id: String,
     pub services: Vec<ConnectorServiceStartResult>,
@@ -287,45 +302,119 @@ pub fn show_connector(connector_id: &str) -> Result<ConnectorInstallRecord> {
 }
 
 pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSummary>> {
+    let report = sync_installed_connectors_report(config_path)?;
+    if !report.failures.is_empty() {
+        bail!("{}", format_connector_sync_failures(&report.failures));
+    }
+    Ok(report.summaries)
+}
+
+pub fn sync_installed_connector(
+    config_path: &Path,
+    connector_id: &str,
+) -> Result<ConnectorSummary> {
+    ensure_config_exists(config_path)?;
+    let mut config = load_config(config_path)?;
+    let record = load_install_record(connector_id)?;
+    let summary = sync_installed_connector_record(&mut config, record, now_ms())?;
+    save_config(config_path, &config)?;
+    Ok(summary)
+}
+
+pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorSyncReport> {
     ensure_config_exists(config_path)?;
     let records = load_install_records()?;
     if records.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ConnectorSyncReport {
+            summaries: Vec::new(),
+            failures: Vec::new(),
+        });
     }
 
     let mut config = load_config(config_path)?;
     let now = now_ms();
     let mut summaries = Vec::new();
+    let mut failures = Vec::new();
 
-    for mut record in records {
-        cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
-        let package_path = PathBuf::from(&record.package_path);
+    for record in records {
         let connector_id = record.manifest.id.clone();
-        let registrations = load_connector_service_registrations(&package_path, &record.manifest)
-            .with_context(|| {
-            format!("failed to reload service registrations for connector `{connector_id}`")
-        })?;
-        let mut services = registrations
-            .into_iter()
-            .map(ServiceRegistration::into_service_config)
-            .collect::<Result<Vec<_>>>()?;
-        resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
-
-        for service in services {
-            upsert_synced_service(&mut config.services, service);
+        let name = record.manifest.name.clone();
+        match sync_installed_connector_record(&mut config, record, now) {
+            Ok(summary) => summaries.push(summary),
+            Err(err) => {
+                let error = format!("{err:#}");
+                tracing::warn!(
+                    connector_id = %connector_id,
+                    name = %name,
+                    error = %error,
+                    "failed to sync installed connector"
+                );
+                failures.push(ConnectorSyncFailure {
+                    connector_id,
+                    name,
+                    error,
+                });
+            }
         }
-
-        record.last_synced_at_epoch_ms = now;
-        save_install_record(&record)?;
-        summaries.push(summary_from_record(record));
     }
 
     save_config(config_path, &config)?;
-    Ok(summaries)
+    Ok(ConnectorSyncReport {
+        summaries,
+        failures,
+    })
+}
+
+pub fn format_connector_sync_failures(failures: &[ConnectorSyncFailure]) -> String {
+    if failures.is_empty() {
+        return "no connector sync failures".to_string();
+    }
+    let details = failures
+        .iter()
+        .map(|failure| {
+            format!(
+                "{} ({}) failed: {}",
+                failure.name, failure.connector_id, failure.error
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "failed to sync {} installed connector(s): {details}",
+        failures.len()
+    )
+}
+
+fn sync_installed_connector_record(
+    config: &mut crate::config::AgentConfig,
+    mut record: ConnectorInstallRecord,
+    now: u64,
+) -> Result<ConnectorSummary> {
+    cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
+    let package_path = PathBuf::from(&record.package_path);
+    let connector_id = record.manifest.id.clone();
+    let registrations = load_connector_service_registrations(&package_path, &record.manifest)
+        .with_context(|| {
+            format!("failed to reload service registrations for connector `{connector_id}`")
+        })?;
+    let mut services = registrations
+        .into_iter()
+        .map(ServiceRegistration::into_service_config)
+        .collect::<Result<Vec<_>>>()?;
+    resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
+
+    for service in services {
+        upsert_synced_service(&mut config.services, service);
+    }
+
+    record.last_synced_at_epoch_ms = now;
+    save_install_record(&record)?;
+    Ok(summary_from_record(record))
 }
 
 pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
     ensure_config_exists(config_path)?;
+    sync_installed_connector(config_path, connector_id)?;
     let record = load_install_record(connector_id)?;
     let config = load_config(config_path)?;
     let mut results = Vec::new();
@@ -2167,6 +2256,114 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             .unwrap();
         assert!(!service.enabled);
         assert!(service.start_command.is_some());
+    }
+
+    #[test]
+    fn sync_report_records_bad_connector_without_blocking_good_connectors() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+
+        let good_source = dir.path().join("good-connector");
+        fs::create_dir_all(&good_source).unwrap();
+        fs::write(
+            good_source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.good",
+                "name": "Good Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "goodService",
+                    "description": "Good service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        install_connector_from_path(&good_source, &config_path, false).unwrap();
+
+        let bad_manifest: ConnectorManifest = serde_json::from_value(json!({
+            "schemaVersion": "1.0",
+            "id": "com.baijimu.connector.bad-python",
+            "name": "Bad Python Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badPythonService",
+                "description": "Bad Python service.",
+                "transport": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18083"
+                },
+                "startCommand": {
+                    "type": "shell_command",
+                    "command": ["bad-python-connector", "start"]
+                },
+                "methods": [{
+                    "name": "invoke",
+                    "description": "Invoke.",
+                    "path": "/invoke"
+                }]
+            }]
+        }))
+        .unwrap();
+        let bad_package_path = installed_connector_package_path(&bad_manifest).unwrap();
+        fs::create_dir_all(&bad_package_path).unwrap();
+        fs::write(
+            bad_package_path.join("pyproject.toml"),
+            r#"[project]
+name = "bad-python-connector"
+version = "0.1.0"
+requires-python = ">=999.0"
+
+[project.scripts]
+bad-python-connector = "bad_python_connector.app:main"
+"#,
+        )
+        .unwrap();
+        save_install_record(&ConnectorInstallRecord {
+            manifest: bad_manifest,
+            package_path: bad_package_path.display().to_string(),
+            source_path: dir
+                .path()
+                .join("bad-connector-source")
+                .display()
+                .to_string(),
+            source_reference: None,
+            service_names: vec!["badPythonService".to_string()],
+            installed_at_epoch_ms: 1,
+            last_synced_at_epoch_ms: 1,
+        })
+        .unwrap();
+
+        let report = sync_installed_connectors_report(&config_path).unwrap();
+        assert!(report
+            .summaries
+            .iter()
+            .any(|summary| summary.id == "com.baijimu.connector.good"));
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].connector_id,
+            "com.baijimu.connector.bad-python"
+        );
+        assert!(report.failures[0]
+            .error
+            .contains("failed to find a Python interpreter matching >=999.0"));
+
+        let strict_error = sync_installed_connectors(&config_path).unwrap_err();
+        assert!(strict_error
+            .to_string()
+            .contains("failed to sync 1 installed connector"));
     }
 
     #[test]

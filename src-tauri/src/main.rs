@@ -6,10 +6,11 @@ use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
-    list_connectors, load_config as load_agent_config, load_connector_manifest,
-    manifest_preview_json, reset_invalid_config, save_config as save_agent_config, show_connector,
-    start_connector, stop_connector, sync_installed_connectors, terminate_runtime_lock_owner,
+    format_connector_sync_failures, install_connector_from_path_with_source_reference,
+    install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
+    load_connector_manifest, manifest_preview_json, reset_invalid_config,
+    save_config as save_agent_config, show_connector, start_connector, stop_connector,
+    sync_installed_connectors_report, terminate_runtime_lock_owner,
     uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
     RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
@@ -716,7 +717,18 @@ async fn stop_registered_service(
 async fn list_connector_apps(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<ConnectorSummary>, String> {
-    sync_installed_connectors(&state.config_path).map_err(|err| err.to_string())?;
+    let report =
+        sync_installed_connectors_report(&state.config_path).map_err(|err| err.to_string())?;
+    if !report.failures.is_empty() {
+        state
+            .runtime
+            .push_desktop_log(
+                "warn",
+                &format_connector_sync_failures(&report.failures),
+                LogMetadata::category("connector").outcome("sync_failed"),
+            )
+            .await;
+    }
     list_connectors().map_err(|err| err.to_string())
 }
 
