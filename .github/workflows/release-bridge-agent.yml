@@ -281,9 +281,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/百积木.app"
-          info_plist="${app_path}/Contents/Info.plist"
           configured_min="10.13"
+          dmg_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+
+          shopt -s nullglob
+          dmg_files=("$dmg_dir"/*.dmg)
+          if [ "${#dmg_files[@]}" -ne 1 ]; then
+            echo "Expected one macOS DMG, found ${#dmg_files[@]}:" >&2
+            printf ' - %s\n' "${dmg_files[@]}" >&2
+            exit 1
+          fi
+
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "${dmg_files[0]}" -readonly -nobrowse -mountpoint "$mount_dir"
+          cleanup_mount() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup_mount EXIT
+
+          app_path="$mount_dir/百积木.app"
+          if [ ! -d "$app_path" ]; then
+            app_path="$(find "$mount_dir" -maxdepth 2 -name '*.app' -type d | head -n 1)"
+          fi
+          if [ -z "$app_path" ] || [ ! -d "$app_path" ]; then
+            echo "Unable to locate app bundle inside ${dmg_files[0]}" >&2
+            exit 1
+          fi
+          info_plist="${app_path}/Contents/Info.plist"
 
           version_lte() {
             python3 - "$1" "$2" <<'PY'
@@ -302,7 +327,10 @@ jobs:
           verify_macho_min() {
             local binary="$1"
             local label="$2"
-            test -x "$binary"
+            if [ ! -x "$binary" ]; then
+              echo "${label} is missing or not executable: ${binary}" >&2
+              exit 1
+            fi
             for arch in $(lipo -archs "$binary"); do
               local min_version
               min_version="$(
