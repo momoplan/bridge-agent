@@ -34,6 +34,11 @@ esac
 
 mkdir -p "${resource_dir}"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+  echo "Building bundled Baijimu CLI with MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
+fi
+
 if [ "$(uname -s)" = "Darwin" ] && [ "${BAIJIMU_CLI_RS_MACOS_UNIVERSAL:-}" = "true" ]; then
   cargo build --release --target x86_64-apple-darwin --manifest-path "${cli_dir}/Cargo.toml"
   cargo build --release --target aarch64-apple-darwin --manifest-path "${cli_dir}/Cargo.toml"
