@@ -36,7 +36,7 @@ jobs:
             rust_targets: ""
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
 
     steps:
       - name: Checkout
@@ -284,8 +284,8 @@ jobs:
           app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/百积木.app"
           info_plist="${app_path}/Contents/Info.plist"
           min_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist")"
-          if [ "$min_version" != "12.0" ]; then
-            echo "Expected LSMinimumSystemVersion=12.0, got ${min_version}" >&2
+          if [ "$min_version" != "10.13" ]; then
+            echo "Expected LSMinimumSystemVersion=10.13, got ${min_version}" >&2
             exit 1
           fi
 

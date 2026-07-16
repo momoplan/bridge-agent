@@ -35,7 +35,7 @@ esac
 mkdir -p "${resource_dir}"
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.13}"
   echo "Building bundled Baijimu CLI with MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
 fi
 
