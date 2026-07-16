@@ -281,7 +281,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          configured_min="10.13"
+          intel_configured_min="10.13"
+          apple_silicon_configured_min="11.0"
           dmg_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
 
           shopt -s nullglob
@@ -332,6 +333,10 @@ jobs:
               exit 1
             fi
             for arch in $(lipo -archs "$binary"); do
+              local configured_min="$intel_configured_min"
+              if [ "$arch" = "arm64" ]; then
+                configured_min="$apple_silicon_configured_min"
+              fi
               local min_version
               min_version="$(
                 otool -arch "$arch" -l "$binary" | awk '
@@ -353,8 +358,8 @@ jobs:
           }
 
           if plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null)"; then
-            if ! version_lte "$plist_min" "$configured_min"; then
-              echo "LSMinimumSystemVersion=${plist_min}, expected <= ${configured_min}" >&2
+            if ! version_lte "$plist_min" "$apple_silicon_configured_min"; then
+              echo "LSMinimumSystemVersion=${plist_min}, expected <= ${apple_silicon_configured_min}" >&2
               exit 1
             fi
           else
