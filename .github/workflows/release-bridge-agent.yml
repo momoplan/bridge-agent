@@ -283,11 +283,58 @@ jobs:
           set -euo pipefail
           app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/百积木.app"
           info_plist="${app_path}/Contents/Info.plist"
-          min_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist")"
-          if [ "$min_version" != "10.13" ]; then
-            echo "Expected LSMinimumSystemVersion=10.13, got ${min_version}" >&2
-            exit 1
+          configured_min="10.13"
+
+          version_lte() {
+            python3 - "$1" "$2" <<'PY'
+          import sys
+          def parts(value):
+              return tuple(int(part) for part in value.split(".")[:3])
+          left = parts(sys.argv[1])
+          right = parts(sys.argv[2])
+          size = max(len(left), len(right))
+          left += (0,) * (size - len(left))
+          right += (0,) * (size - len(right))
+          sys.exit(0 if left <= right else 1)
+          PY
+          }
+
+          verify_macho_min() {
+            local binary="$1"
+            local label="$2"
+            test -x "$binary"
+            for arch in $(lipo -archs "$binary"); do
+              local min_version
+              min_version="$(
+                otool -arch "$arch" -l "$binary" | awk '
+                  /LC_BUILD_VERSION/ { in_build = 1; in_min = 0; next }
+                  in_build && /minos/ { print $2; exit }
+                  /LC_VERSION_MIN_MACOSX/ { in_min = 1; in_build = 0; next }
+                  in_min && /version/ { print $2; exit }
+                '
+              )"
+              if [ -z "$min_version" ]; then
+                echo "Unable to read ${label} ${arch} minimum macOS version" >&2
+                exit 1
+              fi
+              if ! version_lte "$min_version" "$configured_min"; then
+                echo "${label} ${arch} requires macOS ${min_version}, expected <= ${configured_min}" >&2
+                exit 1
+              fi
+            done
+          }
+
+          if plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null)"; then
+            if ! version_lte "$plist_min" "$configured_min"; then
+              echo "LSMinimumSystemVersion=${plist_min}, expected <= ${configured_min}" >&2
+              exit 1
+            fi
+          else
+            echo "LSMinimumSystemVersion not present; relying on Mach-O deployment target checks."
           fi
+
+          verify_macho_min "${app_path}/Contents/MacOS/bridge-agent-desktop" "bridge-agent-desktop"
+          verify_macho_min "${app_path}/Contents/Resources/resources/bin/baijimu" "bundled baijimu CLI"
 
       - name: Normalize public bundle names
         shell: bash
