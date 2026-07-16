@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Mirrors official OpenAI Codex release artifacts into a baijimu-controlled OSS
-# prefix and publishes a SHA256 manifest for installer fallback use.
+# Mirrors official OpenAI Codex CLI and ChatGPT desktop app artifacts into a
+# baijimu-controlled OSS prefix and publishes a SHA256 manifest for installer
+# fallback use.
 
 OSSUTIL="${OSSUTIL:-}"
 if [ -z "$OSSUTIL" ]; then
@@ -22,13 +23,18 @@ OSS_REGION="${OSS_REGION:-cn-beijing}"
 OSS_ENDPOINT="${OSS_ENDPOINT:-oss-cn-beijing.aliyuncs.com}"
 OSS_CONFIG_FILE="${OSS_CONFIG_FILE:-$HOME/.ossutilconfig}"
 OSS_PUBLIC_BASE_URL="${OSS_PUBLIC_BASE_URL:-https://${OSS_BUCKET}.${OSS_ENDPOINT}}"
+OSS_PARALLEL="${OSS_PARALLEL:-8}"
+OSS_PART_SIZE="${OSS_PART_SIZE:-16Mi}"
+OSS_READ_TIMEOUT="${OSS_READ_TIMEOUT:-120}"
+OSS_CHECKPOINT_DIR="${OSS_CHECKPOINT_DIR:-$WORK_DIR/oss-checkpoints}"
+PRESERVE_EXISTING_MANIFEST_URL="${PRESERVE_EXISTING_MANIFEST_URL:-}"
 GITHUB_RELEASE_API="${GITHUB_RELEASE_API:-https://api.github.com/repos/openai/codex/releases/latest}"
 export CURL_EXTRA_ARGS="${CURL_EXTRA_ARGS:---http1.1}"
 INCLUDE_OFFICIAL_APP_DMG="${INCLUDE_OFFICIAL_APP_DMG:-0}"
 OFFICIAL_APP_DMG_ARCHES="${OFFICIAL_APP_DMG_ARCHES:-arm64 x86_64}"
 INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER="${INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER:-0}"
 INCLUDE_WINDOWS_APP_MSIX="${INCLUDE_WINDOWS_APP_MSIX:-1}"
-WINDOWS_APP_MSIX_ARCHES="${WINDOWS_APP_MSIX_ARCHES:-x64}"
+WINDOWS_APP_MSIX_ARCHES="${WINDOWS_APP_MSIX_ARCHES:-x64 arm64}"
 
 # Keep the default set intentionally narrow enough for production installer use.
 # Override CODEX_ASSET_REGEX to mirror additional official release assets.
@@ -55,13 +61,14 @@ import sys
 import urllib.request
 
 api_url, pattern, release_path, assets_path = sys.argv[1:]
-req = urllib.request.Request(
-    api_url,
-    headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "baijimu-codex-artifact-sync",
-    },
-)
+headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "baijimu-codex-artifact-sync",
+}
+github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+if github_token:
+    headers["Authorization"] = f"Bearer {github_token}"
+req = urllib.request.Request(api_url, headers=headers)
 with urllib.request.urlopen(req, timeout=60) as response:
     release = json.load(response)
 
@@ -82,14 +89,16 @@ if os.environ.get("INCLUDE_OFFICIAL_APP_DMG") == "1":
         "arm64": {
             "name": "codex-app-aarch64-apple-darwin.dmg",
             "size": None,
-            "upstream_url": "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg",
+            "upstream_url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg",
             "content_type": "application/x-apple-diskimage",
+            "license_notice": "Mirrored without modification from the official OpenAI ChatGPT desktop app DMG that includes Codex.",
         },
         "x86_64": {
             "name": "codex-app-x86_64-apple-darwin.dmg",
             "size": None,
-            "upstream_url": "https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg",
+            "upstream_url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-latest-x64.dmg",
             "content_type": "application/x-apple-diskimage",
+            "license_notice": "Mirrored without modification from the official OpenAI ChatGPT desktop app DMG that includes Codex.",
         },
     }
     for arch in os.environ.get("OFFICIAL_APP_DMG_ARCHES", "").split():
@@ -104,6 +113,7 @@ if os.environ.get("INCLUDE_OFFICIAL_WINDOWS_APP_INSTALLER") == "1":
             "size": None,
             "upstream_url": "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi",
             "content_type": "application/vnd.microsoft.portable-executable",
+            "license_notice": "Mirrored without modification from the official Microsoft Store ChatGPT desktop app installer for product 9PLM9XGG6VKS.",
         }
     )
 
@@ -114,14 +124,14 @@ if os.environ.get("INCLUDE_WINDOWS_APP_MSIX") == "1":
             "size": None,
             "upstream_url": "https://codexapp.agentsmirror.com/latest/win-x64",
             "content_type": "application/vnd.ms-appx",
-            "license_notice": "Mirrored without modification from the Microsoft Store Codex package resolved by codex-app-mirror; verify package signature and SHA256 before installation.",
+            "license_notice": "Mirrored without modification from the Microsoft Store ChatGPT desktop app package that includes Codex; verify package signature and SHA256 before installation.",
         },
         "arm64": {
             "name": "codex-app-windows-arm64.msix",
             "size": None,
             "upstream_url": "https://codexapp.agentsmirror.com/latest/win-arm64",
             "content_type": "application/vnd.ms-appx",
-            "license_notice": "Mirrored without modification from the Microsoft Store Codex package resolved by codex-app-mirror; verify package signature and SHA256 before installation.",
+            "license_notice": "Mirrored without modification from the Microsoft Store ChatGPT desktop app package that includes Codex; verify package signature and SHA256 before installation.",
         },
     }
     for arch in os.environ.get("WINDOWS_APP_MSIX_ARCHES", "").split():
@@ -164,12 +174,30 @@ import pathlib
 import shlex
 import subprocess
 import sys
+import urllib.request
 
 assets = json.load(open(sys.argv[1], encoding="utf-8"))
 release_dir = pathlib.Path(sys.argv[2])
+
+def expected_size(asset):
+    if asset.get("size") is not None:
+        return int(asset["size"])
+    request = urllib.request.Request(
+        asset["upstream_url"],
+        method="HEAD",
+        headers={"User-Agent": "baijimu-codex-artifact-sync"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_length = response.headers.get("Content-Length")
+            return int(content_length) if content_length else None
+    except Exception:
+        return None
+
 for asset in assets:
     out = release_dir / asset["name"]
-    if out.exists() and out.stat().st_size == asset.get("size"):
+    wanted_size = expected_size(asset)
+    if out.exists() and wanted_size is not None and out.stat().st_size == wanted_size:
         print(f"reuse {asset['name']}")
         continue
     print(f"download {asset['name']} <- {asset['upstream_url']}")
@@ -186,6 +214,8 @@ for asset in assets:
         "30",
         "--max-time",
         "1200",
+        "--continue-at",
+        "-",
     ]
     command.extend(shlex.split(os.environ.get("CURL_EXTRA_ARGS", "--http1.1")))
     command.extend(["-o", str(out), asset["upstream_url"]])
@@ -195,14 +225,15 @@ for asset in assets:
     )
 PY
 
-python3 - "$WORK_DIR/release.json" "$WORK_DIR/assets.json" "$RELEASE_DIR" "$OSS_PUBLIC_BASE_URL" "$OSS_PREFIX" > "$RELEASE_DIR/manifest.json" <<'PY'
+python3 - "$WORK_DIR/release.json" "$WORK_DIR/assets.json" "$RELEASE_DIR" "$OSS_PUBLIC_BASE_URL" "$OSS_PREFIX" "$PRESERVE_EXISTING_MANIFEST_URL" > "$RELEASE_DIR/manifest.json" <<'PY'
 import datetime
 import hashlib
 import json
 import pathlib
 import sys
+import urllib.request
 
-release_path, assets_path, release_dir, public_base, prefix = sys.argv[1:]
+release_path, assets_path, release_dir, public_base, prefix, preserve_manifest_url = sys.argv[1:]
 release = json.load(open(release_path, encoding="utf-8"))
 assets = json.load(open(assets_path, encoding="utf-8"))
 release_dir = pathlib.Path(release_dir)
@@ -229,27 +260,66 @@ for asset in assets:
         }
     )
 
-json.dump(
-    {
-        "schema_version": 1,
-        "source": "github.com/openai/codex",
-        "upstream_release": release,
-        "fetched_at": fetched_at,
-        "assets": manifest_assets,
-    },
-    sys.stdout,
-    ensure_ascii=False,
-    indent=2,
-)
+manifest = {
+    "schema_version": 1,
+    "source": "github.com/openai/codex",
+    "upstream_release": release,
+    "fetched_at": fetched_at,
+    "assets": manifest_assets,
+}
+
+if preserve_manifest_url:
+    headers = {"User-Agent": "baijimu-codex-artifact-sync"}
+    req = urllib.request.Request(preserve_manifest_url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as response:
+        existing_manifest = json.load(response)
+
+    replaced_names = {asset["name"] for asset in manifest_assets}
+    preserved_assets = []
+    for asset in existing_manifest.get("assets", []):
+        if asset.get("name") in replaced_names:
+            continue
+        preserved = dict(asset)
+        preserved["preserved_from_manifest"] = True
+        preserved_assets.append(preserved)
+
+    manifest["assets"].extend(preserved_assets)
+    manifest["preserved_from_manifest"] = {
+        "manifest_url": preserve_manifest_url,
+        "fetched_at": existing_manifest.get("fetched_at"),
+        "upstream_release": existing_manifest.get("upstream_release"),
+        "preserved_asset_count": len(preserved_assets),
+    }
+
+json.dump(manifest, sys.stdout, ensure_ascii=False, indent=2)
 print()
 PY
 
 cp "$RELEASE_DIR/manifest.json" "$WORK_DIR/latest.json"
 
-OSS_FLAGS=(--config-file "$OSS_CONFIG_FILE" --region "$OSS_REGION" --endpoint "$OSS_ENDPOINT" --force --no-progress)
+OSS_FLAGS=(
+  --config-file "$OSS_CONFIG_FILE"
+  --region "$OSS_REGION"
+  --endpoint "$OSS_ENDPOINT"
+  --force
+  --no-progress
+  --parallel "$OSS_PARALLEL"
+  --part-size "$OSS_PART_SIZE"
+  --checkpoint-dir "$OSS_CHECKPOINT_DIR"
+  --read-timeout "$OSS_READ_TIMEOUT"
+)
 
 echo "Uploading release assets to oss://${OSS_BUCKET}/${OSS_PREFIX}/releases/${TAG}/"
-"$OSSUTIL" cp "$RELEASE_DIR/" "oss://${OSS_BUCKET}/${OSS_PREFIX}/releases/${TAG}/" -r "${OSS_FLAGS[@]}"
+python3 - "$WORK_DIR/assets.json" <<'PY' | while IFS= read -r asset_name; do
+import json
+import sys
+
+for asset in json.load(open(sys.argv[1], encoding="utf-8")):
+    print(asset["name"])
+PY
+  "$OSSUTIL" cp "$RELEASE_DIR/$asset_name" "oss://${OSS_BUCKET}/${OSS_PREFIX}/releases/${TAG}/$asset_name" "${OSS_FLAGS[@]}"
+done
+"$OSSUTIL" cp "$RELEASE_DIR/manifest.json" "oss://${OSS_BUCKET}/${OSS_PREFIX}/releases/${TAG}/manifest.json" "${OSS_FLAGS[@]}"
 
 echo "Publishing latest manifest to oss://${OSS_BUCKET}/${OSS_PREFIX}/latest.json"
 "$OSSUTIL" cp "$WORK_DIR/latest.json" "oss://${OSS_BUCKET}/${OSS_PREFIX}/latest.json" \

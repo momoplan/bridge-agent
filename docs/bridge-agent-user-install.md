@@ -33,7 +33,7 @@ https://baijimu.com/bridge-agent/download
 请使用 Codex 设备安装能力，给当前工作区的设备安装 Codex。
 ```
 
-后续按提示继续即可。你不需要手动安装技能，也不需要配置默认助理；平台 Agent 会自动查找并加载 Codex 设备安装能力。平台会先安装并打开 Codex App；如果你的账号或工作区需要 Codex 终端能力，平台会继续自动完成配置。你不需要自己下载 Codex，也不需要复制 API Key。
+后续按提示继续即可。你不需要手动安装技能，也不需要配置默认助理；平台 Agent 会自动查找并加载 Codex 设备安装能力。平台会先安装并打开 ChatGPT desktop app，并在其中使用 Codex；如果你的账号或工作区需要 Codex 终端能力，平台会继续自动完成配置。你不需要自己下载 ChatGPT/Codex，也不需要复制 API Key。
 
 ## 遇到问题
 

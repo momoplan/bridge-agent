@@ -4,7 +4,7 @@
 
 用户先安装百积木并完成设备授权，然后在百积木平台网页端的 Agent 对话里使用 Codex 设备安装能力，为当前工作区设备发起 Codex 安装。
 
-Codex App 和 Codex 终端能力都由平台 Agent 通过百积木的本机命令能力自动安装或配置。用户不需要自己下载 Codex App，不需要手工申请 API Key，也不需要配置 router。
+ChatGPT desktop app 和 Codex 终端能力都由平台 Agent 通过百积木的本机命令能力自动安装或配置。Codex 位于 ChatGPT desktop app 内；用户不需要自己下载 ChatGPT/Codex，不需要手工申请 API Key，也不需要配置 router。
 
 ## 1. 安装百积木
 
@@ -39,9 +39,9 @@ https://baijimu.com/bridge-agent/download
 
 用户不需要手动安装 Codex 设备安装技能，也不需要提前配置默认助理。平台 Agent 会自动查找并加载可用的 Codex 设备安装能力，再检查当前工作区已连接设备、命令执行权限和系统环境。
 
-如果提示开启本机命令执行权限，请确认用途是安装和验证 Codex 后再授权。平台会通过百积木在本机安装 Codex App；如果当前工作区还需要 Codex 终端能力，平台会继续自动配置终端凭证和工作区路由。
+如果提示开启本机命令执行权限，请确认用途是安装和验证 ChatGPT desktop app/Codex 后再授权。平台会通过百积木在本机安装 ChatGPT desktop app；如果当前工作区还需要 Codex 终端能力，平台会继续自动配置终端凭证和工作区路由。
 
-安装 Codex App 本身不需要用户处理 API Key。配置 Codex 终端能力时，平台会自动创建专用访问凭证，并把终端能力配置到百积木工作区路由。用户不需要查看、复制或保存任何 API Key。
+安装 ChatGPT desktop app 本身不需要用户处理 API Key。配置 Codex 终端能力时，平台会自动创建专用访问凭证，并把终端能力配置到百积木工作区路由。用户不需要查看、复制或保存任何 API Key。
 
 ## 4. 验证
 
@@ -51,7 +51,7 @@ https://baijimu.com/bridge-agent/download
 确认 Codex 是否安装成功
 ```
 
-如果回复 Codex App 已安装，或 Codex 终端能力已启用、健康检查通过，即可开始使用 Codex。
+如果回复 ChatGPT desktop app 已安装、可见窗口验证通过，且 Codex 终端能力已启用、健康检查通过，即可开始使用 Codex。
 
 ## 5. 使用建议
 
