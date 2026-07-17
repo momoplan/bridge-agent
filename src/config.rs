@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
 const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
+const DEFAULT_PLATFORM_BASE_URL: &str = "https://baijimu.com/lowcode3";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const LEGACY_DEFAULT_DEVICE_NAME: &str = "我的百积木";
@@ -232,6 +233,33 @@ pub struct ManifestPreview {
     pub services: Vec<ServiceDefinition>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserAuthManifestPreview {
+    pub device: DeviceConfig,
+    pub services: Vec<BrowserAuthServiceDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserAuthServiceDefinition {
+    pub name: String,
+    pub description: String,
+    pub methods: Vec<BrowserAuthMethodDefinition>,
+    #[serde(default)]
+    pub events: Vec<BrowserAuthEventDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserAuthMethodDefinition {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserAuthEventDefinition {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigRecovery {
     pub archived_path: Option<PathBuf>,
@@ -242,7 +270,7 @@ impl AgentConfig {
     pub fn example() -> Self {
         Self {
             platform: PlatformConfig {
-                base_url: "https://baijimu.com/lowcode3".to_string(),
+                base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
                 workspace_id: None,
             },
             upload: UploadConfig::default(),
@@ -281,6 +309,7 @@ impl AgentConfig {
         let mut changed = ensure_default_computer_methods(self);
         changed |= ensure_default_shell_services(self);
         changed |= ensure_service_registration_defaults(self);
+        changed |= ensure_default_platform_base_url(self);
         changed
     }
 
@@ -487,6 +516,40 @@ impl AgentConfig {
         ManifestPreview {
             device: self.device.clone(),
             services: self.service_definitions(),
+        }
+    }
+
+    pub fn browser_auth_manifest_preview(&self) -> BrowserAuthManifestPreview {
+        BrowserAuthManifestPreview {
+            device: self.device.clone(),
+            services: self
+                .services
+                .iter()
+                .filter(|service| service.enabled)
+                .map(|service| BrowserAuthServiceDefinition {
+                    name: service.name.clone(),
+                    description: service.description.clone(),
+                    methods: service
+                        .methods
+                        .iter()
+                        .filter(|method| method.enabled)
+                        .map(|method| BrowserAuthMethodDefinition {
+                            name: method.name.clone(),
+                            description: method.description.clone(),
+                        })
+                        .collect(),
+                    events: service
+                        .events
+                        .iter()
+                        .filter(|event| event.enabled)
+                        .map(|event| BrowserAuthEventDefinition {
+                            name: event.name.clone(),
+                            description: event.description.clone(),
+                        })
+                        .collect(),
+                })
+                .filter(|service| !service.methods.is_empty() || !service.events.is_empty())
+                .collect(),
         }
     }
 }
@@ -959,6 +1022,7 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
 
 fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
     let mut changed = false;
+    changed |= ensure_default_platform_base_url(config);
     if config.relay.url.trim() == LEGACY_DEFAULT_RELAY_URL {
         config.relay.url = DEFAULT_RELAY_URL.to_string();
         changed = true;
@@ -976,6 +1040,17 @@ fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
     }
     changed |= remove_legacy_default_local_java_service(config);
     changed
+}
+
+fn ensure_default_platform_base_url(config: &mut AgentConfig) -> bool {
+    let Some(base_url) = normalize_default_platform_base_url(&config.platform.base_url) else {
+        return false;
+    };
+    if base_url == config.platform.base_url {
+        return false;
+    }
+    config.platform.base_url = base_url;
+    true
 }
 
 fn remove_legacy_default_local_java_service(config: &mut AgentConfig) -> bool {
@@ -1028,6 +1103,12 @@ fn is_legacy_default_local_java_service(service: &ServiceConfig) -> bool {
 
 pub fn manifest_preview_json(config: &AgentConfig) -> Result<String> {
     Ok(serde_json::to_string_pretty(&config.manifest_preview())?)
+}
+
+pub fn browser_auth_manifest_json(config: &AgentConfig) -> Result<String> {
+    Ok(serde_json::to_string(
+        &config.browser_auth_manifest_preview(),
+    )?)
 }
 
 pub fn resolve_config_base_dir(path: &Path) -> PathBuf {
@@ -1641,8 +1722,36 @@ fn default_health_check_http_method() -> String {
 
 fn default_platform_config() -> PlatformConfig {
     PlatformConfig {
-        base_url: "https://baijimu.com/lowcode3".to_string(),
+        base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
         workspace_id: None,
+    }
+}
+
+fn normalize_default_platform_base_url(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let Ok(url) = Url::parse(trimmed) else {
+        return None;
+    };
+    let Some(host) = url.host_str() else {
+        return None;
+    };
+    let host = host.trim_start_matches("www.");
+    if host != "baijimu.com" {
+        return None;
+    }
+    if !matches!(url.scheme(), "https" | "http") {
+        return None;
+    }
+
+    let path = url.path().trim_end_matches('/');
+    match path {
+        "" | "/" | "/lowcode" | "/manager" => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
+        "/lowcode3" => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
+        _ => None,
     }
 }
 
@@ -1718,10 +1827,11 @@ fn project_config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_shell_exec_allow_commands, ensure_browser_auth_agent_id,
-        format_default_device_name, load_config, manifest_preview_json, reset_invalid_config,
-        save_config, AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig,
-        ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
+        browser_auth_manifest_json, default_shell_exec_allow_commands,
+        ensure_browser_auth_agent_id, format_default_device_name, load_config,
+        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, EventConfig,
+        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
+        ServiceRegistration, ServiceStartCommand,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -2027,6 +2137,70 @@ mod tests {
     }
 
     #[test]
+    fn browser_auth_manifest_omits_schemas() {
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "eventful".to_string(),
+            description: "Eventful service".to_string(),
+            enabled: true,
+            health_check: None,
+            start_command: None,
+            stop_command: None,
+            methods: vec![MethodConfig {
+                name: "doThing".to_string(),
+                description: "Does a thing".to_string(),
+                enabled: true,
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["large"],
+                    "properties": {
+                        "large": {
+                            "type": "string",
+                            "description": "schema-only text"
+                        }
+                    }
+                }),
+                binding: MethodBinding::Http(HttpBinding {
+                    url: "http://127.0.0.1:18000/do-thing".to_string(),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(20),
+                }),
+            }],
+            events: vec![EventConfig {
+                name: "thingDone".to_string(),
+                description: "Thing completed".to_string(),
+                enabled: true,
+                payload_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "result": {
+                            "type": "string",
+                            "description": "payload-only text"
+                        }
+                    }
+                }),
+            }],
+        });
+
+        let payload = browser_auth_manifest_json(&config).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let service = value["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|service| service["name"] == "eventful")
+            .unwrap();
+
+        assert_eq!(service["methods"][0]["name"], "doThing");
+        assert_eq!(service["events"][0]["name"], "thingDone");
+        assert!(service["methods"][0].get("input_schema").is_none());
+        assert!(service["events"][0].get("payload_schema").is_none());
+        assert!(!payload.contains("schema-only text"));
+        assert!(!payload.contains("payload-only text"));
+    }
+
+    #[test]
     fn shell_manifest_exposes_single_argv_command_schema() {
         let manifest = AgentConfig::example().manifest_preview();
         let shell_method = manifest
@@ -2237,6 +2411,44 @@ mod tests {
             .services
             .iter()
             .any(|service| service.name == "shellExec"));
+    }
+
+    #[test]
+    fn normalizes_common_baijimu_platform_entrypoints() {
+        for legacy_url in [
+            "https://baijimu.com",
+            "https://www.baijimu.com/",
+            "https://baijimu.com/lowcode",
+            "https://baijimu.com/manager",
+            "https://www.baijimu.com/lowcode3/",
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("agent-config.json");
+            let mut config = AgentConfig::example();
+            config.platform.base_url = legacy_url.to_string();
+            save_config(&path, &config).unwrap();
+
+            let loaded = load_config(&path).unwrap();
+            assert_eq!(
+                loaded.platform.base_url, "https://baijimu.com/lowcode3",
+                "legacy url {legacy_url} should normalize to the production API prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_custom_platform_base_url_unchanged() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.platform.base_url = "https://dev.baijimu.test/lowcode3".to_string();
+        save_config(&path, &config).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(
+            loaded.platform.base_url,
+            "https://dev.baijimu.test/lowcode3"
+        );
     }
 
     #[test]

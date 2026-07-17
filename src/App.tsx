@@ -5379,7 +5379,23 @@ function fromUiEvent(eventConfig: UiEventConfig): EventConfig {
 
 function normalizePlatformBaseUrl(value: string): string {
   const normalized = value.trim();
-  return normalized || DEFAULT_PLATFORM_BASE_URL;
+  if (!normalized) {
+    return DEFAULT_PLATFORM_BASE_URL;
+  }
+  try {
+    const url = new URL(normalized);
+    const host = url.hostname.replace(/^www\./, "");
+    const path = url.pathname.replace(/\/+$/, "");
+    if (
+      host === "baijimu.com" &&
+      (path === "" || path === "/lowcode" || path === "/manager" || path === "/lowcode3")
+    ) {
+      return DEFAULT_PLATFORM_BASE_URL;
+    }
+  } catch {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/, "");
 }
 
 function buildConsoleUrl(config: UiAgentConfig): string {

@@ -11,12 +11,12 @@ pub mod services;
 use anyhow::{anyhow, Result};
 
 pub use config::{
-    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists, load_config,
-    manifest_preview_json, reset_invalid_config, save_config, windows_service_config_path,
-    AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding,
-    MethodBinding, MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
-    RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
-    ServiceRegistration, ServiceStartCommand, UploadConfig,
+    browser_auth_manifest_json, default_config_path, ensure_browser_auth_agent_id,
+    ensure_config_exists, load_config, manifest_preview_json, reset_invalid_config, save_config,
+    windows_service_config_path, AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig,
+    EventConfig, HttpBinding, MethodBinding, MethodConfig, PlatformConfig, RegistrationHealthCheck,
+    RegistrationMethod, RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig,
+    ServiceHealthCheck, ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use connector::{
     connectors_dir, format_connector_sync_failures, install_connector_from_path,

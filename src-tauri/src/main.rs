@@ -5,7 +5,8 @@ use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
-    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
+    browser_auth_manifest_json, default_config_path, ensure_browser_auth_agent_id,
+    ensure_config_exists,
     format_connector_sync_failures, install_connector_from_path_with_source_reference,
     install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
     load_connector_manifest, manifest_preview_json, reset_invalid_config,
@@ -598,6 +599,73 @@ fn open_in_browser(url: String) -> Result<(), String> {
     open::that(url).map_err(|err| err.to_string())
 }
 
+fn describe_upstream_http_failure(
+    status: reqwest::StatusCode,
+    content_type: &str,
+    body: &str,
+) -> String {
+    let trimmed = body.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(message) = value.get("value").and_then(Value::as_str) {
+            return format!("HTTP {status}: {message}");
+        }
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            return format!("HTTP {status}: {message}");
+        }
+    }
+
+    let lower_content_type = content_type.to_ascii_lowercase();
+    let lower_body_start = trimmed
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if lower_content_type.contains("text/html")
+        || lower_body_start.starts_with("<!doctype html")
+        || lower_body_start.starts_with("<html")
+    {
+        return format!(
+            "HTTP {status}: 平台授权接口返回了 HTML 错误页，可能是网关路由、服务异常或请求体超过平台限制。请确认 Base URL 为 https://baijimu.com/lowcode3，并检查平台授权服务日志。"
+        );
+    }
+
+    if lower_content_type.contains("xml") || lower_body_start.starts_with("<?xml") {
+        if let (Some(code), Some(message)) = (
+            extract_xml_tag(trimmed, "Code"),
+            extract_xml_tag(trimmed, "Message"),
+        ) {
+            return format!("HTTP {status}: {code} - {message}");
+        }
+        return format!("HTTP {status}: 平台授权接口返回了 XML 错误，请检查 Baijimu Base URL 和网关路由。");
+    }
+
+    if trimmed.is_empty() {
+        return format!("HTTP {status}: 空响应");
+    }
+    format!("HTTP {status}: {}", truncate_for_error(trimmed, 240))
+}
+
+fn extract_xml_tag(body: &str, tag: &str) -> Option<String> {
+    let start = format!("<{tag}>");
+    let end = format!("</{tag}>");
+    let after_start = body.split_once(&start)?.1;
+    let value = after_start.split_once(&end)?.0.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn truncate_for_error(value: &str, limit: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= limit {
+        return compact;
+    }
+    let prefix = compact.chars().take(limit).collect::<String>();
+    format!("{prefix}...")
+}
+
 #[tauri::command]
 fn open_in_edge(url: String) -> Result<(), String> {
     open_url_in_edge(&url)
@@ -964,7 +1032,7 @@ async fn start_browser_auth(
         save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
     }
     let client = Client::new();
-    let manifest = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+    let manifest = browser_auth_manifest_json(&config).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
     let mut payload = serde_json::Map::new();
     if let Some(workspace_id) = config.platform.workspace_id {
@@ -993,8 +1061,18 @@ async fn start_browser_auth(
         .map_err(|err| err.to_string())?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let payload = response.text().await.unwrap_or_default();
-        return Err(format!("启动浏览器授权失败: {payload}"));
+        return Err(format!(
+            "启动浏览器授权失败: {}",
+            describe_upstream_http_failure(status, &content_type, &payload)
+        ));
     }
 
     let payload: BrowserAuthStartResponse = response.json().await.map_err(|err| err.to_string())?;
@@ -1022,9 +1100,17 @@ async fn poll_browser_auth(
         .map_err(|err| command_error_message(err.to_string()))?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let payload = response.text().await.unwrap_or_default();
         return Err(command_error_message(format!(
-            "轮询浏览器授权失败: {payload}"
+            "轮询浏览器授权失败: {}",
+            describe_upstream_http_failure(status, &content_type, &payload)
         )));
     }
 
@@ -1166,7 +1252,11 @@ fn write_shared_cli_auth(
 
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, serde_json::to_vec_pretty(&document)?)?;
+    #[cfg(unix)]
+    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
     fs::rename(&tmp_path, &path)?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     Ok(Some(SharedCliAuthWriteResult { path }))
 }
 
