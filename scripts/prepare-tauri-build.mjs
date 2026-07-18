@@ -22,7 +22,14 @@ function run(command, args, options = {}) {
   }
 }
 
-run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build:web"]);
+const npmCli = process.env.npm_execpath;
+if (!npmCli) {
+  throw new Error("npm_execpath is unavailable; run this script through npm");
+}
+
+// Invoke npm's JavaScript entry point with the current Node executable. Node's
+// child_process cannot reliably spawn npm.cmd with shell=false on Windows.
+run(process.execPath, [npmCli, "run", "build:web"]);
 
 if (process.platform === "win32") {
   const cargoTargetDir = path.join(repositoryRoot, "src-tauri", "target");
