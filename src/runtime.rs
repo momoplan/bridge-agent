@@ -1574,7 +1574,10 @@ fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<()> {
 
 #[cfg(unix)]
 fn process_is_running(pid: u32) -> bool {
-    if pid == 0 {
+    // Unix process APIs use a signed pid_t. Passing a larger u32 through the
+    // `kill` utility can wrap to a negative process-group selector (notably
+    // u32::MAX -> -1 on Linux) and incorrectly report an unrelated process.
+    if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
     std::process::Command::new("kill")
@@ -1699,6 +1702,13 @@ mod tests {
         let lock = RuntimeInstanceLock::acquire(&config_path, "dev_1").unwrap();
         let active = read_runtime_lock(&lock.path).unwrap();
         assert_eq!(active.pid, std::process::id());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_probe_rejects_pid_outside_signed_pid_range() {
+        assert!(!super::process_is_running(u32::MAX));
+        assert!(!super::process_is_running(i32::MAX as u32 + 1));
     }
 
     #[test]
