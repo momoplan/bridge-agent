@@ -30,22 +30,26 @@ test "$(node -p 'require("./src-tauri/tauri.conf.json").version')" = "$BRIDGE_VE
 case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 '''
-                withCredentials([usernamePassword(
-                    credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
-                    usernameVariable: 'GITEE_USER',
-                    passwordVariable: 'GITEE_TOKEN'
-                )]) {
-                    sh '''#!/bin/bash
+                dir('connector-src') {
+                    deleteDir()
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.CONNECTOR_REF}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [[$class: 'CloneOption', depth: 1, noTags: false, shallow: true]],
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[
+                            credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
+                            url: 'https://gitee.com/zxflimit_admin/baijimu-connector-codex.git'
+                        ]]
+                    ])
+                }
+                sh '''#!/bin/bash
 set -euo pipefail
-set +x
-authenticated="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/baijimu-connector-codex.git"
-git clone --depth 1 --branch "$CONNECTOR_REF" "$authenticated" connector-src
-set -x
 test "$(git -C connector-src rev-parse HEAD)" = "$CONNECTOR_COMMIT"
 test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' connector-src/Cargo.toml | head -1)" = "$CONNECTOR_VERSION"
 test "$(node -p 'require("./connector-src/connector.json").version')" = "$CONNECTOR_VERSION"
 '''
-                }
             }
         }
 
@@ -76,9 +80,21 @@ set -euo pipefail
 git config user.name "Baijimu Jenkins"
 git config user.email "jenkins@baijimu.com"
 set +x
-gitee_bridge="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/bridge-agent.git"
-gitee_connector="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/baijimu-connector-codex.git"
-github_bridge="https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/momoplan/bridge-agent.git"
+gitee_bridge="https://gitee.com/zxflimit_admin/bridge-agent.git"
+gitee_connector="https://gitee.com/zxflimit_admin/baijimu-connector-codex.git"
+github_bridge="https://github.com/momoplan/bridge-agent.git"
+askpass="$WORKSPACE/.release-git-askpass.sh"
+cat > "$askpass" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GIT_AUTH_USER" ;;
+  *Password*) printf '%s\n' "$GIT_AUTH_PASSWORD" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+chmod 700 "$askpass"
+export GIT_ASKPASS="$askpass"
+export GIT_TERMINAL_PROMPT=0
 
 publish_branch() {
   remote="$1"
@@ -106,6 +122,8 @@ publish_tag() {
 
 git -C connector-src config user.name "Baijimu Jenkins"
 git -C connector-src config user.email "jenkins@baijimu.com"
+export GIT_AUTH_USER="$GITEE_USER"
+export GIT_AUTH_PASSWORD="$GITEE_TOKEN"
 current="$(git ls-remote "$gitee_connector" "refs/tags/v${CONNECTOR_VERSION}" | awk 'NR == 1 {print $1}')"
 if [ -n "$current" ]; then
   test "$current" = "$CONNECTOR_COMMIT"
@@ -114,11 +132,15 @@ else
 fi
 
 publish_branch "$gitee_bridge" "$BRIDGE_COMMIT" main
-publish_branch "$github_bridge" "$BRIDGE_COMMIT" main
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
+
+export GIT_AUTH_USER="$GITHUB_USER"
+export GIT_AUTH_PASSWORD="$GITHUB_TOKEN"
+publish_branch "$github_bridge" "$BRIDGE_COMMIT" main
 publish_tag "$github_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
 publish_tag "$github_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
+rm -f "$askpass"
 set -x
 '''
                 }
