@@ -7,7 +7,7 @@
       <Component
         Id="BridgeAgentServiceComponent"
         Guid="4BC247D5-F406-40A6-AA1D-CD8A22CEF8A6"
-        Win64="$(var.Win64)">
+        Win64="yes">
         <File
           Id="BridgeAgentServiceExecutable"
           Source="..\..\bridge-agent-service.exe"
@@ -42,7 +42,7 @@
       <Component
         Id="BridgeAgentDesktopAutoStartComponent"
         Guid="83CC5A59-0715-4E19-B0BD-6875932AC48A"
-        Win64="$(var.Win64)">
+        Win64="yes">
         <RegistryValue
           Root="HKLM"
           Key="Software\Microsoft\Windows\CurrentVersion\Run"
@@ -61,7 +61,7 @@
           <Component
             Id="BridgeAgentDataDirectoryComponent"
             Guid="C2894A83-0BF7-5F35-B966-1E39A4E0A3C5"
-            Win64="$(var.Win64)">
+            Win64="yes">
             <CreateFolder>
               <util:PermissionEx
                 User="Users"

@@ -281,6 +281,34 @@ jobs:
           set -euo pipefail
           npm run tauri -- build ${{ matrix.tauri_args }}
 
+      - name: Diagnose Windows WiX fragment failure
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candle = Get-ChildItem `
+            -Path "src-tauri/target/release/wix" `
+            -Filter "candle.exe" `
+            -File `
+            -Recurse `
+            -ErrorAction Stop | Select-Object -First 1
+          $utilExtension = Get-ChildItem `
+            -Path $candle.Directory.FullName `
+            -Filter "WixUtilExtension.dll" `
+            -File `
+            -ErrorAction Stop | Select-Object -First 1
+          if (-not $candle -or -not $utilExtension) {
+            throw "WiX compiler or WixUtilExtension was not found after bundle failure"
+          }
+          & $candle.FullName `
+            -nologo `
+            -arch x64 `
+            -ext $utilExtension.FullName `
+            "src-tauri/wix/bridge-agent-service.wxs"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows WiX fragment diagnostic failed with exit code $LASTEXITCODE"
+          }
+
       - name: Verify macOS minimum system version
         if: runner.os == 'macOS'
         shell: bash
