@@ -466,11 +466,15 @@ type SettingsSection = "identity" | "connection" | "runtime";
 const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
 type AppPage = "overview" | "apps" | "diagnostics";
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
-type LocalAppKind = "connector" | "built_in" | "custom";
+type LocalAppKind = "connector" | "managed_tool" | "built_in" | "custom";
 type InstallSourceMode = "choose" | "market" | "custom";
 type LocalAppDetailTab = "overview" | "capabilities" | "config";
 type LocalAppLifecycleState =
   | "installed"
+  | "ready"
+  | "missing"
+  | "broken"
+  | "updating"
   | "starting"
   | "running"
   | "start_failed"
@@ -497,18 +501,36 @@ interface LocalAppItem {
   kind: LocalAppKind;
   serviceIndexes: number[];
   connector?: ConnectorSummary;
+  managedTool?: ManagedToolStatus;
 }
 
 interface MarketConnector {
   id: string;
   connectorId: string;
+  applicationType: string;
   name: string;
   description: string;
   source: string;
+  checksum?: string | null;
+  archivePath?: string | null;
   risk: string;
   riskLevel: string;
   capability: string;
   version: string;
+}
+
+interface ManagedToolStatus {
+  id: string;
+  name: string;
+  description: string;
+  state: "ready" | "missing" | "broken";
+  installedVersion?: string | null;
+  bundledVersion?: string | null;
+  previousVersion?: string | null;
+  activePath: string;
+  launcherPath: string;
+  canRollback: boolean;
+  detail: string;
 }
 
 const SHELL_SCHEMA = {
@@ -712,6 +734,7 @@ function App() {
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
+  const [baijimuCli, setBaijimuCli] = useState<ManagedToolStatus | null>(null);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
   const [appUpdateCheckState, setAppUpdateCheckState] = useState<AppUpdateCheckState>("checking");
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
@@ -723,6 +746,7 @@ function App() {
     Record<string, LocalAppLifecycleOverride>
   >({});
   const [connectorUpdateBusy, setConnectorUpdateBusy] = useState<string | null>(null);
+  const [managedToolBusy, setManagedToolBusy] = useState(false);
   const [serviceNotices, setServiceNotices] = useState<Record<number, string>>({});
   const [serviceJsonDrafts, setServiceJsonDrafts] = useState<Record<number, string>>({});
   const [serviceJsonErrors, setServiceJsonErrors] = useState<Record<number, string>>({});
@@ -837,14 +861,19 @@ function App() {
     }
   }, [config]);
 
+  const installableMarketConnectors = useMemo(
+    () => marketConnectors.filter((app) => app.applicationType !== "managed_tool"),
+    [marketConnectors]
+  );
+
   useEffect(() => {
     setSelectedMarketAppId((current) => {
-      if (current && marketConnectors.some((app) => app.id === current)) {
+      if (current && installableMarketConnectors.some((app) => app.id === current)) {
         return current;
       }
-      return marketConnectors[0]?.id ?? "";
+      return installableMarketConnectors[0]?.id ?? "";
     });
-  }, [marketConnectors]);
+  }, [installableMarketConnectors]);
 
   useEffect(() => {
     if (!config) {
@@ -963,6 +992,17 @@ function App() {
       };
     });
 
+    if (baijimuCli) {
+      apps.push({
+        id: `managed-tool:${baijimuCli.id}`,
+        name: baijimuCli.name,
+        description: baijimuCli.description,
+        kind: "managed_tool",
+        serviceIndexes: [],
+        managedTool: baijimuCli
+      });
+    }
+
     config.services.forEach((service, serviceIndex) => {
       if (connectorServiceNames.has(service.name)) {
         return;
@@ -996,11 +1036,13 @@ function App() {
       });
     });
     return apps;
-  }, [config, connectorApps]);
+  }, [config, connectorApps, baijimuCli]);
   const selectedLocalApp =
     selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
-  const enabledLocalAppCount = localApps.filter((app) =>
-    app.serviceIndexes.some((serviceIndex) => config?.services[serviceIndex]?.enabled)
+  const enabledLocalAppCount = localApps.filter(
+    (app) =>
+      app.managedTool?.state === "ready" ||
+      app.serviceIndexes.some((serviceIndex) => config?.services[serviceIndex]?.enabled)
   ).length;
 
   useEffect(() => {
@@ -1166,6 +1208,7 @@ function App() {
       setLogs(latestLogs);
       await refreshMarketConnectorApps();
       await refreshConnectorApps();
+      await refreshBaijimuCli();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
@@ -1209,6 +1252,15 @@ function App() {
       setConnectorApps(apps);
     } catch (err) {
       console.warn("读取本地应用列表失败", err);
+    }
+  }
+
+  async function refreshBaijimuCli() {
+    try {
+      setBaijimuCli(await invoke<ManagedToolStatus>("baijimu_cli_status"));
+    } catch (err) {
+      console.warn("读取 Baijimu CLI 托管状态失败", err);
+      setBaijimuCli(null);
     }
   }
 
@@ -1283,7 +1335,7 @@ function App() {
   }
 
   async function installLocalApp() {
-    const selectedMarket = marketConnectors.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
     const source =
       installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
     if (!source) {
@@ -1319,6 +1371,64 @@ function App() {
       return undefined;
     }
     return marketConnectors.find((marketApp) => marketApp.connectorId === app.connector?.id);
+  }
+
+  function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
+    if (app.kind !== "managed_tool" || !app.managedTool) {
+      return undefined;
+    }
+    return marketConnectors.find(
+      (marketApp) =>
+        marketApp.applicationType === "managed_tool" && marketApp.connectorId === app.managedTool?.id
+    );
+  }
+
+  async function upgradeManagedTool(app: LocalAppItem) {
+    const marketApp = marketManagedToolForLocalApp(app);
+    if (!app.managedTool || !marketApp) {
+      setError(`工具 ${app.name} 没有关联的官方更新源`);
+      return;
+    }
+    if (!marketApp.source || !marketApp.checksum) {
+      setError(`工具 ${app.name} 的市场版本缺少下载地址或 SHA-256 校验值`);
+      return;
+    }
+    try {
+      setManagedToolBusy(true);
+      setMessage("");
+      setError("");
+      const status = await invoke<ManagedToolStatus>("install_baijimu_cli_update", {
+        version: marketApp.version,
+        source: marketApp.source,
+        checksum: marketApp.checksum,
+        archivePath: marketApp.archivePath ?? null
+      });
+      setBaijimuCli(status);
+      setMessage(`${status.name} 已升级到 ${status.installedVersion}`);
+    } catch (err) {
+      handleCommandError(err);
+    } finally {
+      setManagedToolBusy(false);
+    }
+  }
+
+  async function rollbackManagedTool(app: LocalAppItem) {
+    if (!app.managedTool?.canRollback) {
+      setError(`工具 ${app.name} 没有可回滚的历史版本`);
+      return;
+    }
+    try {
+      setManagedToolBusy(true);
+      setMessage("");
+      setError("");
+      const status = await invoke<ManagedToolStatus>("rollback_baijimu_cli");
+      setBaijimuCli(status);
+      setMessage(`${status.name} 已回滚到 ${status.installedVersion}`);
+    } catch (err) {
+      handleCommandError(err);
+    } finally {
+      setManagedToolBusy(false);
+    }
   }
 
   function connectorSyncSource(app: LocalAppItem): string {
@@ -4293,7 +4403,7 @@ function App() {
     if (!installPanelOpen) {
       return null;
     }
-    const selectedMarket = marketConnectors.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
     const closeInstallPanel = () => {
       if (installBusy) {
         return;
@@ -4340,7 +4450,7 @@ function App() {
             </div>
           ) : installSourceMode === "market" ? (
             <div className="market-app-grid">
-              {marketConnectors.map((app) => (
+              {installableMarketConnectors.map((app) => (
                 <button
                   className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""}`}
                   key={app.id}
@@ -4351,7 +4461,7 @@ function App() {
                   <small>{app.capability} · {app.version}</small>
                 </button>
               ))}
-              {marketConnectors.length === 0 ? (
+              {installableMarketConnectors.length === 0 ? (
                 <div className="empty-state">暂时没有可安装的市场应用。</div>
               ) : null}
               {selectedMarket ? (
@@ -4399,6 +4509,7 @@ function App() {
       return <div />;
     }
     const groupedApps: Array<{ title: string; apps: LocalAppItem[] }> = [
+      { title: "官方工具", apps: localApps.filter((app) => app.kind === "managed_tool") },
       { title: "已安装应用", apps: localApps.filter((app) => app.kind === "connector") },
       { title: "内置应用", apps: localApps.filter((app) => app.kind === "built_in") },
       { title: "自定义应用", apps: localApps.filter((app) => app.kind === "custom") }
@@ -4410,7 +4521,7 @@ function App() {
           <div>
             <p className="eyebrow">本地应用</p>
             <h2>应用</h2>
-            <p>安装 connector，查看本机能力和授权状态。</p>
+            <p>管理官方工具和 connector，查看本机能力、版本和授权状态。</p>
           </div>
           <button
             className="primary"
@@ -4472,7 +4583,11 @@ function App() {
         <p>{app.description}</p>
         <div className="local-app-card-meta">
           <span>{formatLocalAppKind(app.kind)}</span>
-          <span>{countLocalAppCapabilities(app, config)} 项能力</span>
+          {app.managedTool ? (
+            <span>版本 {app.managedTool.installedVersion ?? "未安装"}</span>
+          ) : (
+            <span>{countLocalAppCapabilities(app, config)} 项能力</span>
+          )}
           {hasStartCommand ? <span>可启动</span> : null}
         </div>
       </button>
@@ -4493,6 +4608,8 @@ function App() {
     const canConfigureCapabilities = showAdvancedSettings || app.kind === "custom" || hasShellCapability;
     const canShowDeveloperConfig = showAdvancedSettings || app.kind === "custom";
     const marketApp = marketConnectorForLocalApp(app);
+    const marketTool = marketManagedToolForLocalApp(app);
+    const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);
     const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
     const updateBusy = connectorUpdateBusy === app.id;
     const lifecycle = localAppLifecycle(app);
@@ -4528,13 +4645,15 @@ function App() {
               >
                 概览
               </button>
-              <button
-                className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
-                onClick={() => setActiveLocalAppDetailTab("capabilities")}
-              >
-                能力
-              </button>
-              {canShowDeveloperConfig ? (
+              {!isManagedTool ? (
+                <button
+                  className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
+                  onClick={() => setActiveLocalAppDetailTab("capabilities")}
+                >
+                  能力
+                </button>
+              ) : null}
+              {canShowDeveloperConfig && !isManagedTool ? (
                 <button
                   className={`section-tab ${activeLocalAppDetailTab === "config" ? "active" : ""}`}
                   onClick={() => setActiveLocalAppDetailTab("config")}
@@ -4544,7 +4663,32 @@ function App() {
               ) : null}
             </div>
             <div className="service-actions">
-              {app.connector && marketApp ? (
+              {isManagedTool && app.managedTool ? (
+                <>
+                  <button
+                    className="primary accent"
+                    onClick={() => void upgradeManagedTool(app)}
+                    disabled={managedToolBusy || !marketTool}
+                  >
+                    {managedToolBusy
+                      ? "处理中"
+                      : app.managedTool.state === "ready"
+                        ? marketTool && compareVersions(marketTool.version, app.managedTool.installedVersion) > 0
+                          ? `升级到 ${marketTool.version}`
+                          : "校验并修复"
+                        : "安装工具"}
+                  </button>
+                  {app.managedTool.canRollback ? (
+                    <button
+                      className="secondary"
+                      onClick={() => void rollbackManagedTool(app)}
+                      disabled={managedToolBusy}
+                    >
+                      回滚到 {app.managedTool.previousVersion}
+                    </button>
+                  ) : null}
+                </>
+              ) : app.connector && marketApp ? (
                 updateStatus?.updateAvailable ? (
                   <button
                     className="primary accent"
@@ -4604,10 +4748,21 @@ function App() {
             <div className="app-detail-tab-panel">
               <div className="status-detail-grid">
                 <InfoRow label="类型" value={formatLocalAppKind(app.kind)} />
-                <InfoRow label="来源类型" value={app.connector ? connectorSourceKind(app, marketApp) : "内置"} />
-                <InfoRow label="安装来源" value={syncSource || "内置"} />
-                <InfoRow label="安装位置" value={app.connector?.packagePath ?? "随客户端发布"} />
-                <InfoRow label="版本" value={app.connector?.version ?? "随客户端发布"} />
+                <InfoRow
+                  label="来源类型"
+                  value={isManagedTool ? "官方独立发行" : app.connector ? connectorSourceKind(app, marketApp) : "内置"}
+                />
+                <InfoRow label="安装来源" value={isManagedTool ? marketTool?.source ?? "等待市场版本" : syncSource || "内置"} />
+                <InfoRow label="安装位置" value={app.managedTool?.activePath ?? app.connector?.packagePath ?? "随客户端发布"} />
+                <InfoRow label="版本" value={app.managedTool?.installedVersion ?? app.connector?.version ?? "随客户端发布"} />
+                {app.managedTool ? (
+                  <>
+                    <InfoRow label="稳定命令" value={app.managedTool.launcherPath} />
+                    <InfoRow label="随包基线" value={app.managedTool.bundledVersion ?? "无"} />
+                    <InfoRow label="上一版本" value={app.managedTool.previousVersion ?? "无"} />
+                    <InfoRow label="状态" value={app.managedTool.detail} />
+                  </>
+                ) : null}
                 {app.connector ? (
                   <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
                 ) : null}
@@ -4621,14 +4776,16 @@ function App() {
                     }
                   />
                 ) : null}
-                <InfoRow label="能力数" value={String(countLocalAppCapabilities(app, config))} />
+                {!isManagedTool ? (
+                  <InfoRow label="能力数" value={String(countLocalAppCapabilities(app, config))} />
+                ) : null}
               </div>
               {appComputerService ? renderComputerPermissionPanel(appComputerService) : null}
               {renderLocalAppRuntime(app)}
             </div>
           ) : null}
 
-          {activeLocalAppDetailTab === "capabilities" ? (
+          {activeLocalAppDetailTab === "capabilities" && !isManagedTool ? (
             <div className="app-detail-tab-panel">
               <div className="method-advanced-head">
                 <strong>能力</strong>
@@ -4689,6 +4846,10 @@ function App() {
       return formatLocalAppLifecycle("unknown", "等待配置加载");
     }
 
+    if (app.managedTool) {
+      return formatLocalAppLifecycle(app.managedTool.state, app.managedTool.detail);
+    }
+
     const override = localAppLifecycleOverrides[app.id];
     if (override && ["starting", "stopping", "start_failed", "stopped"].includes(override.state)) {
       return formatLocalAppLifecycle(override.state, override.detail);
@@ -4736,10 +4897,32 @@ function App() {
   function formatLocalAppKind(kind: LocalAppKind) {
     const labels: Record<LocalAppKind, string> = {
       connector: "已安装应用",
+      managed_tool: "官方工具",
       built_in: "内置应用",
       custom: "自定义应用"
     };
     return labels[kind];
+  }
+
+  function compareVersions(left: string, right?: string | null): number {
+    if (!right) {
+      return 1;
+    }
+    const normalize = (value: string) =>
+      value
+        .replace(/^v/i, "")
+        .split(/[.-]/)
+        .map((part) => Number.parseInt(part, 10))
+        .map((part) => (Number.isFinite(part) ? part : 0));
+    const leftParts = normalize(left);
+    const rightParts = normalize(right);
+    for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+      const delta = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+      if (delta !== 0) {
+        return delta;
+      }
+    }
+    return 0;
   }
 
   function renderLogMetadata(entry: LogEntry) {
@@ -5741,6 +5924,10 @@ function formatLocalAppLifecycle(
 ): LocalAppLifecycle {
   const labels: Record<LocalAppLifecycleState, string> = {
     installed: "已安装",
+    ready: "可用",
+    missing: "未安装",
+    broken: "需修复",
+    updating: "更新中",
     starting: "启动中",
     running: "运行中",
     start_failed: "启动失败",
@@ -5750,6 +5937,10 @@ function formatLocalAppLifecycle(
   };
   const details: Record<LocalAppLifecycleState, string> = {
     installed: "已安装，等待手动启动",
+    ready: "工具已安装并通过校验",
+    missing: "工具尚未安装",
+    broken: "工具安装损坏或校验失败",
+    updating: "正在安装或切换版本",
     starting: "正在执行应用启动命令",
     running: "应用正在运行",
     start_failed: "应用启动失败",
@@ -5759,6 +5950,10 @@ function formatLocalAppLifecycle(
   };
   const statusClasses: Record<LocalAppLifecycleState, string> = {
     installed: "installed",
+    ready: "running",
+    missing: "stopped",
+    broken: "start_failed",
+    updating: "starting",
     starting: "starting",
     running: "running",
     start_failed: "start_failed",
