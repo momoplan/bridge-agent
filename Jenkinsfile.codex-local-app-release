@@ -113,8 +113,21 @@ publish_tag() {
   tag="$3"
   current="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
   if [ -n "$current" ]; then
-    test "$current" = "$commit"
-    return
+    if [ "$current" = "$commit" ]; then
+      return
+    fi
+    github_status="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "https://api.github.com/repos/momoplan/bridge-agent/git/ref/tags/${tag}")"
+    if git merge-base --is-ancestor "$current" "$commit" && [ "$github_status" = 404 ]; then
+      echo "repairing partial Gitee tag $tag from $current to $commit"
+      git push --force "$remote" "$commit:refs/tags/$tag"
+      return
+    fi
+    echo "tag $tag already points to $current, expected $commit" >&2
+    exit 1
   fi
   git push "$remote" "$commit:refs/tags/$tag"
 }
