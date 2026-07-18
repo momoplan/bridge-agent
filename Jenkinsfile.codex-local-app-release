@@ -24,9 +24,10 @@ pipeline {
 set -euo pipefail
 test -n "$BRIDGE_COMMIT"
 test -n "$CONNECTOR_COMMIT"
-test "$(git rev-parse HEAD)" = "$BRIDGE_COMMIT"
-test "$(node -p 'require("./package.json").version')" = "$BRIDGE_VERSION"
-test "$(node -p 'require("./src-tauri/tauri.conf.json").version')" = "$BRIDGE_VERSION"
+test "$(git rev-parse "${BRIDGE_COMMIT}^{commit}")" = "$BRIDGE_COMMIT"
+git merge-base --is-ancestor "$BRIDGE_COMMIT" HEAD
+test "$(git show "${BRIDGE_COMMIT}:package.json" | jq -r '.version')" = "$BRIDGE_VERSION"
+test "$(git show "${BRIDGE_COMMIT}:src-tauri/tauri.conf.json" | jq -r '.version')" = "$BRIDGE_VERSION"
 case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 '''
@@ -57,10 +58,22 @@ test "$(node -p 'require("./connector-src/connector.json").version')" = "$CONNEC
             steps {
                 sh '''#!/bin/bash
 set -euo pipefail
+git worktree remove --force release-src >/dev/null 2>&1 || true
+git worktree prune
+git worktree add --detach release-src "$BRIDGE_COMMIT"
+'''
+                dir('release-src') {
+                    sh '''#!/bin/bash
+set -euo pipefail
 if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
 cargo test --workspace
 npm ci
 npm run build
+'''
+                }
+                sh '''#!/bin/bash
+set -euo pipefail
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
 cargo test --manifest-path connector-src/Cargo.toml
 '''
             }
@@ -181,7 +194,13 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
                 expression { return !params.DRY_RUN }
             }
             steps {
-                sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION"'
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION"'
+                }
             }
         }
 
@@ -214,6 +233,7 @@ curl -fsS "https://www.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
 
     post {
         always {
+            sh 'git worktree remove --force release-src >/dev/null 2>&1 || true; git worktree prune'
             archiveArtifacts artifacts: 'codex-market-before-*.tsv', allowEmptyArchive: true
         }
     }

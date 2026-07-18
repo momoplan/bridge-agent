@@ -14,13 +14,7 @@ fi
 
 release_tag="codex-local-app-v${version}"
 release_base="https://github.com/momoplan/bridge-agent/releases/download/${release_tag}"
-work_dir="$(mktemp -d)"
-cleanup() {
-  case "$work_dir" in
-    /tmp/*|/private/tmp/*) rm -rf "$work_dir" ;;
-  esac
-}
-trap cleanup EXIT
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 
 declare -A assets=(
   [macos]="baijimu-codex-local-app-${version}-macos-universal.zip"
@@ -29,17 +23,34 @@ declare -A assets=(
 )
 declare -A checksums
 
+release_json="$(curl -fsS \
+  --retry 3 \
+  --retry-delay 2 \
+  --connect-timeout 10 \
+  --max-time 30 \
+  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/${release_tag}")"
+printf '%s' "$release_json" | jq -e \
+  --arg tag "$release_tag" \
+  '.tag_name == $tag and .draft == false and .prerelease == false' \
+  >/dev/null
+
 for platform in macos windows linux; do
   asset="${assets[$platform]}"
-  curl -fsSL "${release_base}/${asset}" -o "${work_dir}/${asset}"
-  curl -fsSL "${release_base}/${asset}.sha256" -o "${work_dir}/${asset}.sha256"
-  expected="$(awk 'NR == 1 { print tolower($1) }' "${work_dir}/${asset}.sha256")"
-  actual="$(sha256sum "${work_dir}/${asset}" | awk '{ print tolower($1) }')"
-  if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || [ "$actual" != "$expected" ]; then
-    echo "checksum verification failed for ${asset}" >&2
+  digest="$(printf '%s' "$release_json" | jq -er \
+    --arg name "$asset" \
+    '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .digest')"
+  if ! [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    echo "GitHub did not return a valid server-computed digest for ${asset}" >&2
     exit 1
   fi
-  checksums[$platform]="$actual"
+  printf '%s' "$release_json" | jq -e \
+    --arg name "${asset}.sha256" \
+    'any(.assets[]; .name == $name and .state == "uploaded" and .size > 0)' \
+    >/dev/null
+  checksums[$platform]="$(printf '%s' "${digest#sha256:}" | tr '[:upper:]' '[:lower:]')"
 done
 
 manifest="$(jq -nc \
@@ -69,7 +80,7 @@ for document in "$manifest" "$capabilities"; do
   printf '%s' "$document" | jq -e . >/dev/null
 done
 
-nacos_content="$(aliyun mse GetNacosConfig \
+nacos_content="$(timeout 30s aliyun mse GetNacosConfig \
   --profile baijimu \
   --RegionId cn-beijing \
   --InstanceId mse_regserverless_cn-cy74qcvrg01 \
@@ -88,6 +99,7 @@ mysql_args=(
   --host=rm-2zen9i892pqpan6at.mysql.rds.aliyuncs.com
   --user=baijimu
   --database=local_app_market
+  --connect-timeout=10
   --default-character-set=utf8mb4
   --batch
   --raw
@@ -153,7 +165,8 @@ SQL
 for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
   verified=false
   for attempt in $(seq 1 20); do
-    payload="$(curl -fsS "https://www.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}")"
+    payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
+      "https://www.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}")"
     if printf '%s' "$payload" | jq -e --arg version "$version" \
       '(.data // .) | any(.connectorId == "com.baijimu.connector.codex" and .latestVersion.version == $version)' \
       >/dev/null; then
