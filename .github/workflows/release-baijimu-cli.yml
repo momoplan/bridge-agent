@@ -242,10 +242,11 @@ jobs:
           cd "$RUNNER_TEMP/baijimu-cli-package"
           if [ "$RUNNER_OS" = "Windows" ]; then
             powershell -NoProfile -Command "Compress-Archive -Force -Path 'bin' -DestinationPath '$output'"
+            checksum="$(powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '$output').Hash.ToLowerInvariant()")"
           else
             zip -r "$output" bin
+            checksum="$(shasum -a 256 "$output" | awk '{print $1}')"
           fi
-          checksum="$(shasum -a 256 "$output" | awk '{print $1}')"
           printf '%s  %s\n' "$checksum" "$(basename "$output")" > "$output.sha256"
           echo "RELEASE_ASSET=$output" >> "$GITHUB_ENV"
 
