@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.1.97"
+version = "0.1.98"
 dependencies = [
  "anyhow",
  "axum",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.1.97"
+version = "0.1.98"
 dependencies = [
  "anyhow",
  "bridge-agent",
@@ -445,7 +445,6 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
- "toml 0.8.2",
  "zip",
 ]
 

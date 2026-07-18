@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +19,8 @@ const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
 const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
 const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
+const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
+const CONNECTOR_MANAGEMENT_TOKEN_FILE: &str = "management-token";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +37,8 @@ pub struct ConnectorManifest {
     pub source: Option<ConnectorSource>,
     #[serde(default)]
     pub runtime: Option<ConnectorRuntime>,
+    #[serde(default)]
+    pub management: Option<ConnectorManagement>,
     #[serde(default)]
     pub config_schema: Option<Value>,
     #[serde(default)]
@@ -77,6 +83,29 @@ pub struct ConnectorRuntime {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub health_check: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorManagement {
+    #[serde(rename = "type")]
+    pub management_type: String,
+    pub base_url: String,
+    pub auth: ConnectorManagementAuth,
+    #[serde(default)]
+    pub operations: BTreeMap<String, ConnectorManagementOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorManagementAuth {
+    #[serde(rename = "type")]
+    pub auth_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorManagementOperation {
+    pub method: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +197,21 @@ pub fn connectors_dir() -> Result<PathBuf> {
     bail!("failed to resolve BridgeAgent config directory")
 }
 
+pub fn connector_data_dir(connector_id: &str) -> Result<PathBuf> {
+    validate_connector_id(connector_id)?;
+    if let Some(path) = std::env::var_os("BRIDGE_AGENT_CONNECTOR_DATA_DIR") {
+        return Ok(PathBuf::from(path).join(connector_id));
+    }
+    if let Some(dirs) = ProjectDirs::from("com", "baijimu", "bridge-agent") {
+        return Ok(dirs.config_dir().join("connector-data").join(connector_id));
+    }
+    bail!("failed to resolve BridgeAgent connector data directory")
+}
+
+pub fn connector_management_token_path(connector_id: &str) -> Result<PathBuf> {
+    Ok(connector_data_dir(connector_id)?.join(CONNECTOR_MANAGEMENT_TOKEN_FILE))
+}
+
 pub fn load_connector_manifest(source: &Path) -> Result<ConnectorManifest> {
     let manifest_path = connector_manifest_path(source);
     let content = fs::read_to_string(&manifest_path).with_context(|| {
@@ -225,7 +269,7 @@ pub fn install_connector_from_path_with_source_reference(
         prepare_connector_package_destination(&package_path, replace)?;
     }
     copy_connector_package(&source, &package_path)?;
-    resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
+    resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest.id)?;
     cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
     for service in &services {
@@ -401,7 +445,12 @@ fn sync_installed_connector_record(
         .into_iter()
         .map(ServiceRegistration::into_service_config)
         .collect::<Result<Vec<_>>>()?;
-    resolve_installed_start_commands(&mut services, &package_path, &config.runtime)?;
+    resolve_installed_start_commands(
+        &mut services,
+        &package_path,
+        &config.runtime,
+        &record.manifest.id,
+    )?;
 
     for service in services {
         upsert_synced_service(&mut config.services, service);
@@ -484,6 +533,74 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     }
     if manifest.services.is_empty() && manifest.service_registration_files.is_empty() {
         bail!("connector must declare services or serviceRegistrationFiles");
+    }
+    validate_connector_id(&manifest.id)?;
+    if let Some(management) = manifest.management.as_ref() {
+        validate_management(management)?;
+    }
+    Ok(())
+}
+
+fn validate_connector_id(connector_id: &str) -> Result<()> {
+    let connector_id = connector_id.trim();
+    if connector_id.is_empty()
+        || connector_id == "."
+        || connector_id == ".."
+        || sanitize_path_component(connector_id) != connector_id
+    {
+        bail!("connector id contains unsupported characters")
+    }
+    Ok(())
+}
+
+fn validate_management(management: &ConnectorManagement) -> Result<()> {
+    if !management.management_type.eq_ignore_ascii_case("http") {
+        bail!("connector management.type must be http");
+    }
+    if management.auth.auth_type != "connector_token" {
+        bail!("connector management.auth.type must be connector_token");
+    }
+    let url = url::Url::parse(&management.base_url)
+        .with_context(|| "connector management.baseUrl must be a valid URL")?;
+    if url.scheme() != "http" || !url.has_host() {
+        bail!("connector management.baseUrl must use local HTTP");
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        bail!("connector management.baseUrl must be an origin-only URL");
+    }
+    let host = url.host_str().unwrap_or_default();
+    if host != "localhost"
+        && host != "127.0.0.1"
+        && host != "::1"
+        && url.host().is_none_or(|host| match host {
+            url::Host::Ipv4(address) => !address.is_loopback(),
+            url::Host::Ipv6(address) => !address.is_loopback(),
+            url::Host::Domain(_) => true,
+        })
+    {
+        bail!("connector management.baseUrl must be loopback-only");
+    }
+    if management.operations.is_empty() {
+        bail!("connector management.operations cannot be empty");
+    }
+    for (name, operation) in &management.operations {
+        if name.trim().is_empty() || sanitize_path_component(name) != *name {
+            bail!("connector management operation name is invalid");
+        }
+        if !matches!(operation.method.as_str(), "GET" | "POST") {
+            bail!("connector management operation `{name}` method must be GET or POST");
+        }
+        if !operation.path.starts_with("/management/")
+            || operation.path.contains('?')
+            || operation.path.contains('#')
+        {
+            bail!("connector management operation `{name}` path is invalid");
+        }
     }
     Ok(())
 }
@@ -695,7 +812,17 @@ fn resolve_installed_start_commands(
     services: &mut [ServiceConfig],
     package_path: &Path,
     runtime_config: &RuntimeConfig,
+    connector_id: &str,
 ) -> Result<()> {
+    let data_dir = connector_data_dir(connector_id)?;
+    fs::create_dir_all(&data_dir).with_context(|| {
+        format!(
+            "failed to create connector data directory {}",
+            data_dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
     let python_env = ensure_python_project_environment(package_path, &python_scripts)?;
@@ -712,6 +839,10 @@ fn resolve_installed_start_commands(
             else {
                 continue;
             };
+            env.insert(
+                CONNECTOR_DATA_DIR_ENV.to_string(),
+                data_dir.display().to_string(),
+            );
             resolve_installed_shell_command(
                 command,
                 cwd,
@@ -809,19 +940,31 @@ fn resolve_installed_shell_command(
 }
 
 fn native_command_path(package_path: &Path, executable: &str) -> Option<PathBuf> {
+    let executable_names = if cfg!(windows) && !executable.to_ascii_lowercase().ends_with(".exe") {
+        vec![format!("{executable}.exe"), executable.to_string()]
+    } else {
+        vec![executable.to_string()]
+    };
     for platform_dir in native_platform_bin_dirs() {
-        let candidate = package_path.join("bin").join(platform_dir).join(executable);
-        if candidate.exists() {
-            return Some(candidate);
+        for executable_name in &executable_names {
+            let candidate = package_path
+                .join("bin")
+                .join(&platform_dir)
+                .join(executable_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
-    let direct_path = package_path.join(executable);
-    if direct_path.exists() {
-        return Some(direct_path);
-    }
-    let bin_path = package_path.join("bin").join(executable);
-    if bin_path.exists() {
-        return Some(bin_path);
+    for executable_name in executable_names {
+        let direct_path = package_path.join(&executable_name);
+        if direct_path.exists() {
+            return Some(direct_path);
+        }
+        let bin_path = package_path.join("bin").join(executable_name);
+        if bin_path.exists() {
+            return Some(bin_path);
+        }
     }
     None
 }
@@ -1609,6 +1752,7 @@ mod tests {
     struct ConnectorTestEnvGuard {
         _lock: MutexGuard<'static, ()>,
         previous: Option<OsString>,
+        previous_data: Option<OsString>,
     }
 
     impl Drop for ConnectorTestEnvGuard {
@@ -1618,16 +1762,27 @@ mod tests {
             } else {
                 std::env::remove_var("BRIDGE_AGENT_CONNECTORS_DIR");
             }
+            if let Some(previous) = self.previous_data.as_ref() {
+                std::env::set_var("BRIDGE_AGENT_CONNECTOR_DATA_DIR", previous);
+            } else {
+                std::env::remove_var("BRIDGE_AGENT_CONNECTOR_DATA_DIR");
+            }
         }
     }
 
     fn connector_test_env(path: impl AsRef<Path>) -> ConnectorTestEnvGuard {
         let lock = CONNECTOR_ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("BRIDGE_AGENT_CONNECTORS_DIR");
+        let previous_data = std::env::var_os("BRIDGE_AGENT_CONNECTOR_DATA_DIR");
         std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", path.as_ref());
+        std::env::set_var(
+            "BRIDGE_AGENT_CONNECTOR_DATA_DIR",
+            path.as_ref().join("data"),
+        );
         ConnectorTestEnvGuard {
             _lock: lock,
             previous,
+            previous_data,
         }
     }
 
@@ -1681,6 +1836,95 @@ mod tests {
             }
             other => panic!("unexpected binding: {other:?}"),
         }
+    }
+
+    #[test]
+    fn connector_manifest_accepts_loopback_management_operations() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.managed",
+                "name": "Managed Connector",
+                "version": "0.1.0",
+                "management": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18110",
+                    "auth": { "type": "connector_token" },
+                    "operations": {
+                        "state": { "method": "GET", "path": "/management/v1/state" }
+                    }
+                },
+                "services": [{
+                    "name": "managedService",
+                    "description": "Managed service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = load_connector_manifest(dir.path()).unwrap();
+        let management = manifest.management.unwrap();
+        assert_eq!(management.auth.auth_type, "connector_token");
+        assert_eq!(management.operations["state"].path, "/management/v1/state");
+    }
+
+    #[test]
+    fn connector_manifest_rejects_remote_management_url() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.unsafe",
+                "name": "Unsafe Connector",
+                "version": "0.1.0",
+                "management": {
+                    "type": "http",
+                    "baseUrl": "https://example.com",
+                    "auth": { "type": "connector_token" },
+                    "operations": {
+                        "state": { "method": "GET", "path": "/management/v1/state" }
+                    }
+                },
+                "services": [{
+                    "name": "unsafeService",
+                    "description": "Unsafe service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = load_connector_manifest(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("management.baseUrl"));
+    }
+
+    #[test]
+    fn connector_manifest_rejects_management_base_url_with_path() {
+        let management = ConnectorManagement {
+            management_type: "http".to_string(),
+            base_url: "http://127.0.0.1:18110/untrusted".to_string(),
+            auth: ConnectorManagementAuth {
+                auth_type: "connector_token".to_string(),
+            },
+            operations: BTreeMap::from([(
+                "state".to_string(),
+                ConnectorManagementOperation {
+                    method: "GET".to_string(),
+                    path: "/management/v1/state".to_string(),
+                },
+            )]),
+        };
+
+        let error = validate_management(&management).unwrap_err();
+        assert!(error.to_string().contains("origin-only"));
     }
 
     #[test]
@@ -1865,6 +2109,15 @@ mod tests {
         );
         assert_eq!(command[2], "--port");
         assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
+        assert_eq!(
+            env.get(CONNECTOR_DATA_DIR_ENV).map(String::as_str),
+            Some(
+                connector_data_dir("com.baijimu.connector.bin")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
         if let Some(node_dir) = Path::new(&expected_node)
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
@@ -2377,6 +2630,7 @@ bad-python-connector = "bad_python_connector.app:main"
             publisher: None,
             source: None,
             runtime: None,
+            management: None,
             config_schema: None,
             remote_capabilities: Vec::new(),
             services: Vec::new(),

@@ -1,0 +1,253 @@
+name: release-codex-local-app
+
+on:
+  push:
+    tags:
+      - "codex-local-app-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub release tag, for example codex-local-app-v0.4.0
+        required: true
+        type: string
+      connector_ref:
+        description: baijimu-connector-codex tag, for example v0.4.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            codex-local-app-v*) ;;
+            *) echo "Invalid Codex local app release tag: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "Baijimu Codex Local App ${RELEASE_TAG#codex-local-app-v}"
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --draft --title "Baijimu Codex Local App ${RELEASE_TAG#codex-local-app-v}" \
+              --notes "Signed Baijimu Codex local application release."
+          fi
+
+  build:
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            runner: macos-15-intel
+            platform_dir: macos
+          - name: windows-x64
+            runner: windows-latest
+            platform_dir: windows-x86_64
+          - name: linux-x64
+            runner: ubuntu-22.04
+            platform_dir: linux-x86_64
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      CONNECTOR_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.connector_ref || github.ref_name }}
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+
+      - name: Resolve connector ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "CONNECTOR_REF=v${RELEASE_TAG#codex-local-app-v}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup set profile minimal
+          rustup toolchain install stable --no-self-update
+          rustup default stable
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          fi
+
+      - name: Checkout Codex local app source
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${GITEE_TOKEN:?BAIJIMU_CLI_RS_GIT_TOKEN is required}"
+          git clone --depth 1 --branch "$CONNECTOR_REF" \
+            "https://oauth2:${GITEE_TOKEN}@gitee.com/zxflimit_admin/baijimu-connector-codex.git" \
+            "$RUNNER_TEMP/baijimu-connector-codex"
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$RUNNER_TEMP/baijimu-connector-codex/Cargo.toml" | head -1)"
+          if [ "codex-local-app-v${version}" != "$RELEASE_TAG" ]; then
+            echo "Release tag $RELEASE_TAG does not match connector version $version" >&2
+            exit 1
+          fi
+          if [ "v${version}" != "$CONNECTOR_REF" ]; then
+            echo "Connector ref $CONNECTOR_REF does not match connector version $version" >&2
+            exit 1
+          fi
+          echo "CONNECTOR_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build macOS universal binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/baijimu-connector-codex"
+          cargo test --manifest-path "$source_dir/Cargo.toml"
+          MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --target aarch64-apple-darwin --manifest-path "$source_dir/Cargo.toml"
+          cargo build --release --target x86_64-apple-darwin --manifest-path "$source_dir/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}"
+          lipo -create \
+            "$source_dir/target/aarch64-apple-darwin/release/baijimu-connector-codex" \
+            "$source_dir/target/x86_64-apple-darwin/release/baijimu-connector-codex" \
+            -output "$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}/baijimu-connector-codex"
+          chmod 755 "$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}/baijimu-connector-codex"
+
+      - name: Sign macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)"
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            [ -n "${!name}" ] || { echo "Missing $name" >&2; exit 1; }
+          done
+          certificate_path="$RUNNER_TEMP/codex-local-app-certificate.p12"
+          keychain_path="$RUNNER_TEMP/codex-local-app-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          binary="$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}/baijimu-connector-codex"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+          lipo -info "$binary"
+
+      - name: Build Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sourceDir = Join-Path $env:RUNNER_TEMP "baijimu-connector-codex"
+          cargo test --manifest-path (Join-Path $sourceDir "Cargo.toml")
+          cargo build --release --manifest-path (Join-Path $sourceDir "Cargo.toml")
+          $binDir = Join-Path $env:RUNNER_TEMP "codex-local-app\bin\${{ matrix.platform_dir }}"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Copy-Item -Force (Join-Path $sourceDir "target\release\baijimu-connector-codex.exe") (Join-Path $binDir "baijimu-connector-codex.exe")
+
+      - name: Prepare and run Windows signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
+          WINDOWS_SIGNING_ENABLED: "true"
+          WINDOWS_SIGNING_DESCRIPTION: "Baijimu Codex Local App"
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("SSL_COM_USERNAME", "SSL_COM_PASSWORD", "SSL_COM_CREDENTIAL_ID", "SSL_COM_TOTP_SECRET")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "Missing $name" }
+          }
+          $zipPath = Join-Path $env:RUNNER_TEMP "CodeSignTool.zip"
+          $extractPath = Join-Path $env:RUNNER_TEMP "CodeSignTool"
+          Invoke-WebRequest -Uri "https://ssl.com/wp-content/uploads/2024/10/CodeSignTool-v1.3.1-windows.zip" -OutFile $zipPath
+          $expected = "e45a9e6c2aac4cae16c114eb590a2196406681357eb587507c65cd3646b5330d"
+          if ((Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant() -ne $expected) { throw "CodeSignTool checksum mismatch" }
+          Expand-Archive -Force -Path $zipPath -DestinationPath $extractPath
+          $tool = Get-ChildItem -Path $extractPath -Filter "CodeSignTool.bat" -Recurse -File | Select-Object -First 1
+          if (-not $tool) { throw "Unable to locate CodeSignTool.bat" }
+          $env:CODESIGN_TOOL_PATH = $tool.FullName
+          $binary = Join-Path $env:RUNNER_TEMP "codex-local-app\bin\${{ matrix.platform_dir }}\baijimu-connector-codex.exe"
+          & "src-tauri/scripts/sign-windows-artifact.ps1" -FilePath $binary
+          if ((Get-AuthenticodeSignature -LiteralPath $binary).Status -ne "Valid") { throw "Invalid Windows signature" }
+
+      - name: Build Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/baijimu-connector-codex"
+          cargo test --manifest-path "$source_dir/Cargo.toml"
+          cargo build --release --manifest-path "$source_dir/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}"
+          install -m 755 "$source_dir/target/release/baijimu-connector-codex" \
+            "$RUNNER_TEMP/codex-local-app/bin/${{ matrix.platform_dir }}/baijimu-connector-codex"
+
+      - name: Assemble and verify package
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/baijimu-connector-codex"
+          package_dir="$RUNNER_TEMP/codex-local-app"
+          cp "$source_dir/connector.json" "$source_dir/service-registration.json" \
+            "$source_dir/README.md" "$source_dir/LICENSE" "$package_dir/"
+          binary_name="baijimu-connector-codex"
+          [ "$RUNNER_OS" != "Windows" ] || binary_name="baijimu-connector-codex.exe"
+          binary="$package_dir/bin/${{ matrix.platform_dir }}/$binary_name"
+          "$binary" --version | grep -Fx "$CONNECTOR_VERSION"
+          output="$RUNNER_TEMP/baijimu-codex-local-app-${CONNECTOR_VERSION}-${{ matrix.name }}.zip"
+          cd "$package_dir"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Force -Path '*' -DestinationPath '$output'"
+            checksum="$(powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '$output').Hash.ToLowerInvariant()")"
+          else
+            zip -r "$output" .
+            checksum="$(shasum -a 256 "$output" | awk '{print $1}')"
+          fi
+          printf '%s  %s\n' "$checksum" "$(basename "$output")" > "$output.sha256"
+          echo "RELEASE_ASSET=$output" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" "$RELEASE_ASSET" "$RELEASE_ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

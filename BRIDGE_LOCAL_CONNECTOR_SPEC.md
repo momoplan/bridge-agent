@@ -34,18 +34,25 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 
 ## 市场应用的宿主管理面板
 
-一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或宿主配置文件的第一方应用，`bridge-agent` 可以按稳定 `connectorId` 在同一个应用详情中挂载宿主管理面板，但不能为这部分功能再创建第二张内置应用卡片。
+一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或应用私有配置文件的第一方应用，Connector 可以声明受本机 token 保护的管理接口；`bridge-agent` 按稳定 `connectorId` 在同一个应用详情中挂载管理面板，但不能为这部分功能再创建第二张内置应用卡片。
 
 宿主管理面板遵循以下边界：
 
-- Connector 负责声明和运行可授权的服务、方法、事件以及健康检查。
-- 宿主管理面板只负责必须由本机可信宿主完成的管理操作，例如系统授权、凭证签发、密钥存储、配置文件原子更新和本机进程重启。
+- Connector 负责声明和运行可授权的服务、方法、事件、健康检查及其应用管理接口。
+- 应用自身负责凭证签发、密钥存储、配置文件原子更新和应用进程重启；`bridge-agent` 只负责安装、启停、健康检查、升级、回滚和经过清单校验的本机管理请求代理。
 - 宿主管理操作不得注册成 Connector 的远程方法，不得经过 relay，也不得出现在工作区可授权能力列表中。
-- 原始 token、LLM key 等密钥不得传入 Connector 进程或前端状态；前端只接收脱敏后的归属、有效性和更新时间。
+- LLM key 不得进入 `bridge-agent`、前端状态或 relay，只能由对应本地应用进程签发、校验和写入。设备授权产生的本机工作区 token 仍由 Bridge Agent 写入共享 CLI 授权文件，应用只从该私有文件读取；两类密钥都不得返回前端，前端只接收脱敏后的归属、有效性和更新时间。
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 是这一模式的首个实现：市场 Connector `com.baijimu.connector.codex` 负责 `codex app-server` 的 session、thread、turn 和 event 能力；同一个 Codex 应用的“账户与工作区”面板由宿主签发限定到 `workspaceId + projectId` 的 LLM credential，并安全更新本机 Codex 配置。凭证切换不是 `codexSession` 的远程能力。
+Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责 `codex app-server` 的 session、thread、turn 和 event 能力，以及限定到 `workspaceId + projectId` 的 LLM credential 签发和本机 Codex 配置更新。Bridge Agent 只代理它声明的 `credentialState`、`listWorkspaceProjects` 和 `switchCredential` 管理操作；凭证切换不是 `codexSession` 的远程能力。
+
+管理接口必须满足：
+
+- `management.type` 当前只能为 `http`，且 `baseUrl` 必须是 loopback HTTP 地址。
+- `management.auth.type` 必须为 `connector_token`；token 由应用首次启动时写入宿主为该 Connector 分配的私有数据目录，文件权限在 Unix 上必须为 `0600`。
+- `operations` 只能声明 `GET` 或 `POST`，路径必须位于 `/management/` 下；宿主不得接受前端传入任意 URL、方法或路径。
+- 宿主启动应用时通过 `BAIJIMU_CONNECTOR_DATA_DIR` 传入独立数据目录。应用包升级不得覆盖该目录，卸载是否清理业务配置必须由用户确认。
 
 ## Connector 包结构
 

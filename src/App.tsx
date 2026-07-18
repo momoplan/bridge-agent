@@ -1320,7 +1320,11 @@ function App() {
   async function refreshCodexCredentialManager() {
     try {
       setCodexCredentialError("");
-      const state = await invoke<CodexCredentialManagerState>("codex_credential_manager_state");
+      const state = await invoke<CodexCredentialManagerState>("invoke_connector_management", {
+        id: CODEX_CONNECTOR_ID,
+        operation: "credentialState",
+        payload: null
+      });
       setCodexCredentialManager(state);
       const preferredWorkspaceId =
         Number(codexWorkspaceId) || state.activeProfile?.workspaceId || state.workspaces[0]?.workspaceId || 0;
@@ -1352,8 +1356,10 @@ function App() {
     try {
       setCodexProjectsBusy(true);
       setCodexProjectsError("");
-      const projects = await invoke<CodexProjectOption[]>("list_codex_workspace_projects", {
-        workspaceId
+      const projects = await invoke<CodexProjectOption[]>("invoke_connector_management", {
+        id: CODEX_CONNECTOR_ID,
+        operation: "listWorkspaceProjects",
+        payload: { workspaceId }
       });
       setCodexProjects(projects);
     } catch (err) {
@@ -1389,12 +1395,16 @@ function App() {
       setCodexCredentialBusy(true);
       setCodexCredentialError("");
       setMessage("");
-      const result = await invoke<CodexCredentialSwitchResult>("switch_codex_credential", {
-        workspaceId,
-        workspaceName,
-        projectId,
-        projectName,
-        model: profile?.model ?? "gpt-5.6-sol"
+      const result = await invoke<CodexCredentialSwitchResult>("invoke_connector_management", {
+        id: CODEX_CONNECTOR_ID,
+        operation: "switchCredential",
+        payload: {
+          workspaceId,
+          workspaceName,
+          projectId,
+          projectName,
+          model: profile?.model ?? "gpt-5.6-sol"
+        }
       });
       setCodexCredentialManager(result.state);
       selectCodexWorkspace(result.state, workspaceId);
@@ -1491,6 +1501,7 @@ function App() {
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source,
         replace: true,
+        checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
         allowGit: installSourceMode === "custom"
       });
       applyConfigDocument(document.config);
@@ -1613,6 +1624,7 @@ function App() {
       const status = await invoke<ConnectorAppUpdateStatus>("check_connector_app_update", {
         id: app.connector.id,
         source: marketApp.source,
+        checksum: marketApp.checksum ?? null,
         allowGit: false
       });
       setConnectorUpdateStatuses((current) => ({
@@ -1649,6 +1661,7 @@ function App() {
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source: marketApp.source,
         replace: true,
+        checksum: marketApp.checksum ?? null,
         allowGit: false
       });
       applyConfigDocument(document.config);
@@ -1692,6 +1705,7 @@ function App() {
       const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
         source,
         replace: true,
+        checksum: null,
         allowGit: true
       });
       applyConfigDocument(document.config);
