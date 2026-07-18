@@ -307,7 +307,7 @@ impl AgentConfig {
 
     pub fn normalize(&mut self) -> bool {
         let mut changed = ensure_default_computer_methods(self);
-        changed |= ensure_default_shell_services(self);
+        changed |= ensure_default_shell_service(self);
         changed |= ensure_service_registration_defaults(self);
         changed |= ensure_default_platform_base_url(self);
         changed
@@ -1487,13 +1487,6 @@ fn ensure_default_computer_methods(config: &mut AgentConfig) -> bool {
     true
 }
 
-fn ensure_default_shell_services(config: &mut AgentConfig) -> bool {
-    let mut changed = false;
-    changed |= ensure_default_shell_service(config);
-    changed |= remove_shell_exec_alias_service(config);
-    changed
-}
-
 fn ensure_default_shell_service(config: &mut AgentConfig) -> bool {
     if config
         .services
@@ -1503,22 +1496,15 @@ fn ensure_default_shell_service(config: &mut AgentConfig) -> bool {
         return ensure_shell_service_methods(config, "shell", default_shell_service());
     }
 
-    let mut service = config
-        .services
-        .iter()
-        .find(|service| service.name == "shellExec")
-        .map(migrate_legacy_shell_exec_service)
-        .unwrap_or_else(default_shell_service);
-    ensure_preferred_shell_method_names(&mut service);
-    ensure_shell_service_runtime_allowlist(&mut service);
-
     let insert_index = config
         .services
         .iter()
         .position(|service| service.name == "computer")
         .map(|index| index + 1)
         .unwrap_or(0);
-    config.services.insert(insert_index, service);
+    config
+        .services
+        .insert(insert_index, default_shell_service());
     true
 }
 
@@ -1551,87 +1537,10 @@ fn ensure_shell_service_methods(
             }
         }
 
-        for method in &mut service.methods {
-            if let MethodBinding::ShellCommand(binding) = &mut method.binding {
-                changed |= ensure_default_shell_exec_runtime_allowlist(binding);
-            }
-        }
-
         return changed;
     }
 
     false
-}
-
-fn remove_shell_exec_alias_service(config: &mut AgentConfig) -> bool {
-    let before = config.services.len();
-    config
-        .services
-        .retain(|service| service.name != "shellExec");
-    config.services.len() != before
-}
-
-fn migrate_legacy_shell_exec_service(service: &ServiceConfig) -> ServiceConfig {
-    let mut migrated = service.clone();
-    migrated.name = "shell".to_string();
-    migrated.description = default_shell_service().description;
-    ensure_preferred_shell_method_names(&mut migrated);
-    migrated
-}
-
-fn ensure_preferred_shell_method_names(service: &mut ServiceConfig) {
-    for method in &mut service.methods {
-        if method.name == "shellExec" {
-            method.name = "exec".to_string();
-            method.description = default_shell_exec_method("exec").description;
-        } else if method.name == "getExecution" {
-            method.name = "queryExecution".to_string();
-            method.description = default_shell_query_execution_method("queryExecution").description;
-        }
-    }
-}
-
-fn ensure_shell_service_runtime_allowlist(service: &mut ServiceConfig) -> bool {
-    let mut changed = false;
-    for method in &mut service.methods {
-        if let MethodBinding::ShellCommand(binding) = &mut method.binding {
-            changed |= ensure_default_shell_exec_runtime_allowlist(binding);
-        }
-    }
-    changed
-}
-
-fn ensure_default_shell_exec_runtime_allowlist(binding: &mut ShellCommandBinding) -> bool {
-    if binding
-        .allow_commands
-        .iter()
-        .any(|command| command.trim() == "*")
-    {
-        return false;
-    }
-
-    let existing = binding
-        .allow_commands
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let has_legacy_default = default_shell_exec_core_commands()
-        .into_iter()
-        .all(|command| existing.contains(command));
-    let already_allows_shell = existing.contains("sh") || existing.contains("bash");
-
-    if !has_legacy_default && !already_allows_shell {
-        return false;
-    }
-
-    let mut changed = false;
-    for command in default_shell_exec_runtime_commands() {
-        if !existing.contains(command) {
-            binding.allow_commands.push(command.to_string());
-            changed = true;
-        }
-    }
-    changed
 }
 
 fn ensure_service_registration_defaults(config: &mut AgentConfig) -> bool {
@@ -1898,10 +1807,6 @@ mod tests {
         ] {
             assert!(shell_methods.contains(&method));
         }
-        assert!(!loaded
-            .services
-            .iter()
-            .any(|service| service.name == "shellExec"));
     }
 
     #[test]
@@ -2054,70 +1959,6 @@ mod tests {
     }
 
     #[test]
-    fn load_config_migrates_legacy_shell_exec_runtime_allowlist() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("agent-config.json");
-        let mut config = AgentConfig::example();
-        let shell_service = config
-            .services
-            .iter_mut()
-            .find(|service| service.name == "shell")
-            .unwrap();
-        shell_service.name = "shellExec".to_string();
-        for method in &mut shell_service.methods {
-            if method.name == "exec" {
-                method.name = "shellExec".to_string();
-            } else if method.name == "queryExecution" {
-                method.name = "getExecution".to_string();
-            }
-        }
-        let shell_method = config
-            .services
-            .iter_mut()
-            .find(|service| service.name == "shellExec")
-            .and_then(|service| {
-                service
-                    .methods
-                    .iter_mut()
-                    .find(|method| method.name == "shellExec")
-            })
-            .unwrap();
-
-        if let MethodBinding::ShellCommand(binding) = &mut shell_method.binding {
-            binding.allow_commands = vec![
-                "cmd".to_string(),
-                "powershell".to_string(),
-                "pwsh".to_string(),
-                "sh".to_string(),
-                "bash".to_string(),
-                "echo".to_string(),
-                "pwd".to_string(),
-                "ls".to_string(),
-                "git".to_string(),
-            ];
-        }
-
-        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
-        let loaded = load_config(&path).unwrap();
-        let preferred_allowlist = loaded
-            .services
-            .iter()
-            .find(|service| service.name == "shell")
-            .and_then(|service| service.methods.iter().find(|method| method.name == "exec"))
-            .and_then(|method| match &method.binding {
-                MethodBinding::ShellCommand(binding) => Some(&binding.allow_commands),
-                _ => None,
-            })
-            .unwrap();
-        assert!(preferred_allowlist.contains(&"node".to_string()));
-        assert!(preferred_allowlist.contains(&"python3".to_string()));
-        assert!(!loaded
-            .services
-            .iter()
-            .any(|service| service.name == "shellExec"));
-    }
-
-    #[test]
     fn upload_prepare_url_prefers_explicit_value() {
         let mut config = AgentConfig::example();
         config.upload.prepare_url = Some("https://uploads.example.com/prepare".to_string());
@@ -2132,7 +1973,6 @@ mod tests {
         let payload = manifest_preview_json(&AgentConfig::example()).unwrap();
         assert!(payload.contains("\"computer\""));
         assert!(payload.contains("\"shell\""));
-        assert!(!payload.contains("\"shellExec\""));
         assert!(!payload.contains("\"local-java-service\""));
     }
 
@@ -2407,10 +2247,6 @@ mod tests {
             .services
             .iter()
             .any(|service| service.name == "shell"));
-        assert!(!loaded
-            .services
-            .iter()
-            .any(|service| service.name == "shellExec"));
     }
 
     #[test]

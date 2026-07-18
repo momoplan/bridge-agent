@@ -1069,7 +1069,7 @@ function App() {
         });
         return;
       }
-      if (isShellExecService(service)) {
+      if (isShellService(service)) {
         apps.push({
           id: "built-in:shell",
           name: "Shell",
@@ -4135,7 +4135,7 @@ function App() {
     }
     const configuresShellExecution =
       method.binding.type === "shell_command" &&
-      ["exec", "startExecution", "shellExec"].includes(method.name);
+      ["exec", "startExecution"].includes(method.name);
 
     return (
       <div className="method-advanced capability-config-panel">
@@ -4905,7 +4905,7 @@ function App() {
       .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)));
     const hasShellCapability = app.serviceIndexes.some((serviceIndex) => {
       const service = config.services[serviceIndex];
-      return service ? isShellExecService(service) : false;
+      return service ? isShellService(service) : false;
     });
     const hasCodexAccountManagement = app.codexAccountManagement === true;
     const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);
@@ -6067,12 +6067,12 @@ function isComputerService(service: Pick<UiServiceConfig, "name">): boolean {
   return service.name.trim().toLowerCase() === "computer";
 }
 
-function isShellExecService(service: Pick<UiServiceConfig, "name">): boolean {
+function isShellService(service: Pick<UiServiceConfig, "name">): boolean {
   return service.name.trim().toLowerCase() === "shell";
 }
 
 function isSystemService(service: Pick<UiServiceConfig, "name">): boolean {
-  return isComputerService(service) || isShellExecService(service);
+  return isComputerService(service) || isShellService(service);
 }
 
 function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {

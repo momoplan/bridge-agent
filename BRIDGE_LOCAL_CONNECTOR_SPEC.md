@@ -9,7 +9,7 @@
 - Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、服务注册信息和能力。
 - 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
 - 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
-- 服务：百积木协议内部的能力组，例如 `wechatLocal`、`computer`、`shellExec`。
+- 服务：百积木协议内部的能力组，例如 `wechatLocal`、`computer`、`shell`。
 - 方法：服务下的可调用动作，例如 `wechatLocal.searchMessages`。
 - 事件：服务上报给外部订阅方的消息，例如 `wechatLocal.messageReceived`。
 
