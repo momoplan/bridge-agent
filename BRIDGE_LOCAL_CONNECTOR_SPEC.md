@@ -32,6 +32,21 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 - 自定义应用不能伪装成市场应用；除非被市场收录并按本规范提供 Connector 包。
 - 内置应用由 `bridge-agent` 客户端维护，不允许普通卸载，也不通过 Connector 安装目录管理。
 
+## 市场应用的宿主管理面板
+
+一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或宿主配置文件的第一方应用，`bridge-agent` 可以按稳定 `connectorId` 在同一个应用详情中挂载宿主管理面板，但不能为这部分功能再创建第二张内置应用卡片。
+
+宿主管理面板遵循以下边界：
+
+- Connector 负责声明和运行可授权的服务、方法、事件以及健康检查。
+- 宿主管理面板只负责必须由本机可信宿主完成的管理操作，例如系统授权、凭证签发、密钥存储、配置文件原子更新和本机进程重启。
+- 宿主管理操作不得注册成 Connector 的远程方法，不得经过 relay，也不得出现在工作区可授权能力列表中。
+- 原始 token、LLM key 等密钥不得传入 Connector 进程或前端状态；前端只接收脱敏后的归属、有效性和更新时间。
+- 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
+- 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
+
+Codex 是这一模式的首个实现：市场 Connector `com.baijimu.connector.codex` 负责 `codex app-server` 的 session、thread、turn 和 event 能力；同一个 Codex 应用的“账户与工作区”面板由宿主签发限定到 `workspaceId + projectId` 的 LLM credential，并安全更新本机 Codex 配置。凭证切换不是 `codexSession` 的远程能力。
+
 ## Connector 包结构
 
 一个 Connector 包必须至少包含：

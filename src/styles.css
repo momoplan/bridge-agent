@@ -664,6 +664,86 @@ select:focus {
   line-height: 1.55;
 }
 
+.codex-credential-manager,
+.codex-overview-panel,
+.codex-switch-panel,
+.codex-profile-panel,
+.codex-profile-list {
+  display: grid;
+  gap: 16px;
+}
+
+.codex-overview-panel,
+.codex-switch-panel,
+.codex-profile-panel {
+  padding: 16px;
+  border: 1px solid rgba(30, 42, 68, 0.09);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.codex-switch-actions,
+.codex-profile-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.codex-switch-actions span,
+.codex-profile-row span,
+.field-error {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.codex-profile-row {
+  padding: 13px 14px;
+  border: 1px solid rgba(30, 42, 68, 0.09);
+  border-radius: 8px;
+  background: rgba(246, 247, 249, 0.84);
+}
+
+.codex-profile-row.active {
+  border-color: rgba(22, 163, 167, 0.32);
+  background: rgba(22, 163, 167, 0.08);
+}
+
+.codex-profile-row > div {
+  display: grid;
+  gap: 5px;
+}
+
+.codex-path-grid {
+  margin-top: 2px;
+}
+
+.error-banner,
+.notice-banner {
+  padding: 12px 14px;
+  border-radius: 8px;
+  line-height: 1.55;
+}
+
+.error-banner {
+  color: var(--danger);
+  background: rgba(181, 45, 57, 0.08);
+  border: 1px solid rgba(181, 45, 57, 0.18);
+}
+
+.notice-banner.warning {
+  color: var(--warn);
+  background: rgba(155, 103, 0, 0.08);
+  border: 1px solid rgba(155, 103, 0, 0.16);
+}
+
+.field-error {
+  margin: -4px 0 0;
+  color: var(--warn);
+}
+
 .app-detail-toolbar {
   display: flex;
   flex-wrap: wrap;

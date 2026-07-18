@@ -2,21 +2,21 @@
 
 mod managed_tool;
 
+use anyhow::Context;
 use bridge_agent::config::resolve_config_base_dir;
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, default_config_path, ensure_browser_auth_agent_id,
-    ensure_config_exists,
-    format_connector_sync_failures, install_connector_from_path_with_source_reference,
-    install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
-    load_connector_manifest, manifest_preview_json, reset_invalid_config,
-    save_config as save_agent_config, show_connector, start_connector, stop_connector,
-    sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
-    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    ensure_config_exists, format_connector_sync_failures,
+    install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
+    list_connectors, load_config as load_agent_config, load_connector_manifest,
+    manifest_preview_json, reset_invalid_config, save_config as save_agent_config, show_connector,
+    start_connector, stop_connector, sync_installed_connectors_report,
+    terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
+    RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -61,6 +61,12 @@ const UPDATE_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 60;
 const UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 30 * 60;
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
+const CODEX_CREDENTIAL_METADATA_VERSION: u32 = 1;
+const CODEX_CREDENTIAL_METADATA_FILE: &str = "codex-credentials.json";
+const CODEX_ROUTER_BASE_URL: &str = "https://router.baijimu.com/api/claudecode/v1";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+const CODEX_MANAGED_BLOCK_START: &str = "# >>> baijimu managed codex router";
+const CODEX_MANAGED_BLOCK_END: &str = "# <<< baijimu managed codex router";
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
@@ -259,6 +265,86 @@ struct ConnectorAppUpdateStatus {
     latest_version: String,
     update_available: bool,
     source: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CodexCredentialProfile {
+    workspace_id: u64,
+    workspace_name: String,
+    project_id: u64,
+    project_name: Option<String>,
+    model: String,
+    activated_at_epoch_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexWorkspaceOption {
+    workspace_id: u64,
+    name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexProjectOption {
+    project_id: u64,
+    name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCredentialManagerState {
+    codex_configured: bool,
+    credential_status: String,
+    active_profile: Option<CodexCredentialProfile>,
+    profiles: Vec<CodexCredentialProfile>,
+    workspaces: Vec<CodexWorkspaceOption>,
+    discovery_warning: Option<String>,
+    shared_auth_path: String,
+    codex_auth_path: String,
+    codex_config_path: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCredentialSwitchResult {
+    state: CodexCredentialManagerState,
+    codex_restarted: bool,
+    restart_message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCredentialMetadata {
+    version: u32,
+    #[serde(default)]
+    profiles: Vec<CodexCredentialProfile>,
+    active_workspace_id: Option<u64>,
+    active_project_id: Option<u64>,
+}
+
+impl Default for CodexCredentialMetadata {
+    fn default() -> Self {
+        Self {
+            version: CODEX_CREDENTIAL_METADATA_VERSION,
+            profiles: Vec::new(),
+            active_workspace_id: None,
+            active_project_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LocalMachineCredential {
+    workspace_id: u64,
+    token: String,
+}
+
+#[derive(Clone, Debug)]
+struct SharedCredentialStore {
+    base_url: String,
+    credentials: Vec<LocalMachineCredential>,
 }
 
 #[derive(Debug, Serialize)]
@@ -671,7 +757,9 @@ fn describe_upstream_http_failure(
         ) {
             return format!("HTTP {status}: {code} - {message}");
         }
-        return format!("HTTP {status}: 平台授权接口返回了 XML 错误，请检查 Baijimu Base URL 和网关路由。");
+        return format!(
+            "HTTP {status}: 平台授权接口返回了 XML 错误，请检查 Baijimu Base URL 和网关路由。"
+        );
     }
 
     if trimmed.is_empty() {
@@ -1046,7 +1134,7 @@ fn open_desktop_permission_settings(permission: String) -> Result<(), String> {
             .or_else(|_| open::that("x-apple.systempreferences:"))
             .or_else(|_| open::that("System Settings"))
             .map_err(|err| err.to_string())?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1323,6 +1411,827 @@ fn now_epoch_seconds() -> u64 {
         .unwrap_or_default()
 }
 
+#[tauri::command]
+async fn codex_credential_manager_state() -> Result<CodexCredentialManagerState, String> {
+    load_codex_credential_manager_state()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_codex_workspace_projects(
+    workspace_id: u64,
+) -> Result<Vec<CodexProjectOption>, String> {
+    if workspace_id == 0 {
+        return Err("工作区 ID 必须大于 0".to_string());
+    }
+    let store = load_shared_credential_store().map_err(|err| err.to_string())?;
+    let token = select_local_machine_token(&store, workspace_id)
+        .ok_or_else(|| "本机没有可用于查询项目的百积木工作区授权，请先重新授权设备".to_string())?;
+    let response = post_baijimu_json(
+        &store.base_url,
+        "/lowcode3/api/project/summary/list",
+        token,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "pageNum": 1,
+            "pageSize": 200,
+        }),
+    )
+    .await?;
+    let data = unwrap_baijimu_data(&response)?;
+    let items = data
+        .get("list")
+        .or_else(|| data.get("records"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut projects = items
+        .iter()
+        .filter_map(|item| {
+            let project_id = item.get("id").and_then(Value::as_u64)?;
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("未命名项目")
+                .trim()
+                .to_string();
+            Some(CodexProjectOption { project_id, name })
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(projects)
+}
+
+#[tauri::command]
+async fn switch_codex_credential(
+    workspace_id: u64,
+    workspace_name: String,
+    project_id: u64,
+    project_name: Option<String>,
+    model: Option<String>,
+) -> Result<CodexCredentialSwitchResult, String> {
+    if workspace_id == 0 {
+        return Err("工作区 ID 必须大于 0".to_string());
+    }
+    if project_id == 0 {
+        return Err("项目 ID 必须大于 0；模型调用会按项目归属和计量".to_string());
+    }
+    let model = normalize_codex_model(model.as_deref())?;
+    let store = load_shared_credential_store().map_err(|err| err.to_string())?;
+    let token = select_local_machine_token(&store, workspace_id).ok_or_else(|| {
+        "本机没有百积木工作区授权，无法签发 Codex LLM credential，请先重新授权设备".to_string()
+    })?;
+
+    let response = post_baijimu_json(
+        &store.base_url,
+        &format!("/llm-credential/partner/v1/workspaces/{workspace_id}/llm-credentials/create"),
+        token,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "projectId": project_id,
+        }),
+    )
+    .await?;
+    let data = unwrap_baijimu_data(&response)?;
+    let credential = ["llmCredential", "credential", "apiKey"]
+        .iter()
+        .find_map(|field| data.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "平台已响应，但没有返回 LLM credential".to_string())?
+        .to_string();
+
+    let validated = validate_codex_credential(&store.base_url, &credential)
+        .await?
+        .ok_or_else(|| "新签发的 LLM credential 未通过平台校验，未修改 Codex 配置".to_string())?;
+    let validated_workspace_id = validated
+        .get("workspaceId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "凭证校验结果缺少 workspaceId，未修改 Codex 配置".to_string())?;
+    let validated_project_id = validated.get("projectId").and_then(Value::as_u64);
+    if validated_workspace_id != workspace_id || validated_project_id != Some(project_id) {
+        return Err(format!(
+            "凭证归属校验不一致：期望工作区 {workspace_id} / 项目 {project_id}，实际工作区 {validated_workspace_id} / 项目 {}，未修改 Codex 配置",
+            validated_project_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "未绑定".to_string())
+        ));
+    }
+
+    let mut metadata = load_codex_credential_metadata().map_err(|err| err.to_string())?;
+    let normalized_workspace_name = if workspace_name.trim().is_empty() {
+        format!("工作区 {workspace_id}")
+    } else {
+        workspace_name.trim().to_string()
+    };
+    let normalized_project_name = project_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let profile = CodexCredentialProfile {
+        workspace_id,
+        workspace_name: normalized_workspace_name,
+        project_id,
+        project_name: normalized_project_name,
+        model,
+        activated_at_epoch_seconds: now_epoch_seconds(),
+    };
+    metadata.profiles.retain(|candidate| {
+        candidate.workspace_id != workspace_id || candidate.project_id != project_id
+    });
+    metadata.profiles.push(profile);
+    metadata.profiles.sort_by(|left, right| {
+        left.workspace_name
+            .cmp(&right.workspace_name)
+            .then(left.project_id.cmp(&right.project_id))
+    });
+    metadata.active_workspace_id = Some(workspace_id);
+    metadata.active_project_id = Some(project_id);
+
+    apply_codex_credential_switch(&credential, &metadata).map_err(|err| err.to_string())?;
+    drop(credential);
+
+    let (codex_restarted, restart_message) = restart_codex_desktop_app().await;
+    let state = load_codex_credential_manager_state()
+        .await
+        .map_err(|err| format!("Codex 已切换，但重新读取状态失败: {err}"))?;
+    if state
+        .active_profile
+        .as_ref()
+        .is_none_or(|active| active.workspace_id != workspace_id || active.project_id != project_id)
+    {
+        return Err(
+            "Codex 配置已写入，但生效回查与目标工作区不一致，请停止使用并重新切换".to_string(),
+        );
+    }
+    Ok(CodexCredentialSwitchResult {
+        state,
+        codex_restarted,
+        restart_message,
+    })
+}
+
+async fn load_codex_credential_manager_state() -> anyhow::Result<CodexCredentialManagerState> {
+    let store = load_shared_credential_store()?;
+    let mut metadata = load_codex_credential_metadata()?;
+    let (mut workspaces, discovery_warning) = discover_codex_workspaces(&store).await;
+    if workspaces.is_empty() {
+        workspaces = store
+            .credentials
+            .iter()
+            .map(|credential| CodexWorkspaceOption {
+                workspace_id: credential.workspace_id,
+                name: format!("工作区 {}", credential.workspace_id),
+            })
+            .collect();
+    }
+    workspaces.sort_by(|left, right| left.name.cmp(&right.name));
+    workspaces.dedup_by_key(|item| item.workspace_id);
+
+    for profile in &mut metadata.profiles {
+        if let Some(workspace) = workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == profile.workspace_id)
+        {
+            profile.workspace_name = workspace.name.clone();
+        }
+    }
+
+    let codex_auth_path = codex_auth_path();
+    let codex_config_path = codex_config_path();
+    let current_key = read_codex_api_key(&codex_auth_path)?;
+    let managed_config = fs::read_to_string(&codex_config_path)
+        .map(|content| content.contains(CODEX_MANAGED_BLOCK_START))
+        .unwrap_or(false);
+
+    let mut credential_status = if current_key.is_some() {
+        "unverified".to_string()
+    } else {
+        "not_configured".to_string()
+    };
+    let mut active_profile = metadata
+        .active_workspace_id
+        .zip(metadata.active_project_id)
+        .and_then(|(workspace_id, project_id)| {
+            metadata
+                .profiles
+                .iter()
+                .find(|profile| {
+                    profile.workspace_id == workspace_id && profile.project_id == project_id
+                })
+                .cloned()
+        });
+
+    if let Some(key) = current_key.as_deref() {
+        match validate_codex_credential(&store.base_url, key).await {
+            Ok(Some(validated)) => {
+                let workspace_id = validated.get("workspaceId").and_then(Value::as_u64);
+                let project_id = validated.get("projectId").and_then(Value::as_u64);
+                if let (Some(workspace_id), Some(project_id)) = (workspace_id, project_id) {
+                    let matches_metadata = active_profile.as_ref().is_some_and(|profile| {
+                        profile.workspace_id == workspace_id && profile.project_id == project_id
+                    });
+                    if !matches_metadata {
+                        let workspace_name = workspaces
+                            .iter()
+                            .find(|workspace| workspace.workspace_id == workspace_id)
+                            .map(|workspace| workspace.name.clone())
+                            .unwrap_or_else(|| format!("工作区 {workspace_id}"));
+                        active_profile = Some(CodexCredentialProfile {
+                            workspace_id,
+                            workspace_name,
+                            project_id,
+                            project_name: None,
+                            model: DEFAULT_CODEX_MODEL.to_string(),
+                            activated_at_epoch_seconds: 0,
+                        });
+                    }
+                    credential_status = "verified".to_string();
+                } else {
+                    credential_status = "invalid_context".to_string();
+                }
+            }
+            Ok(None) => credential_status = "invalid".to_string(),
+            Err(_) => credential_status = "unverified".to_string(),
+        }
+    }
+
+    Ok(CodexCredentialManagerState {
+        codex_configured: current_key.is_some() && managed_config,
+        credential_status,
+        active_profile,
+        profiles: metadata.profiles,
+        workspaces,
+        discovery_warning,
+        shared_auth_path: shared_cli_auth_path().display().to_string(),
+        codex_auth_path: codex_auth_path.display().to_string(),
+        codex_config_path: codex_config_path.display().to_string(),
+    })
+}
+
+fn load_shared_credential_store() -> anyhow::Result<SharedCredentialStore> {
+    let path = shared_cli_auth_path();
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("读取百积木本机授权失败: {}", path.display()))?;
+    let document: Value = serde_json::from_str(&content)
+        .with_context(|| format!("解析百积木本机授权失败: {}", path.display()))?;
+    let current_environment = document
+        .get("currentEnvironment")
+        .and_then(Value::as_str)
+        .unwrap_or("prod");
+    let configured_base_url = document
+        .get("environments")
+        .and_then(|value| value.get(current_environment))
+        .and_then(|value| value.get("baseUrl"))
+        .and_then(Value::as_str)
+        .unwrap_or("https://www.baijimu.com");
+    let base_url = normalize_baijimu_root_url(configured_base_url);
+    let credentials = document
+        .get("machineCredentials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let workspace_id = value.get("workspaceId").and_then(Value::as_u64)?;
+            let token = value.get("token").and_then(Value::as_str)?.trim();
+            if token.is_empty() {
+                return None;
+            }
+            Some(LocalMachineCredential {
+                workspace_id,
+                token: token.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if credentials.is_empty() {
+        anyhow::bail!("本机还没有工作区授权，请先在百积木中完成设备授权");
+    }
+    Ok(SharedCredentialStore {
+        base_url,
+        credentials,
+    })
+}
+
+fn normalize_baijimu_root_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/lowcode3")
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn select_local_machine_token(store: &SharedCredentialStore, workspace_id: u64) -> Option<&str> {
+    store
+        .credentials
+        .iter()
+        .find(|credential| credential.workspace_id == workspace_id)
+        .or_else(|| store.credentials.first())
+        .map(|credential| credential.token.as_str())
+}
+
+async fn discover_codex_workspaces(
+    store: &SharedCredentialStore,
+) -> (Vec<CodexWorkspaceOption>, Option<String>) {
+    let Some(token) = store
+        .credentials
+        .first()
+        .map(|credential| credential.token.as_str())
+    else {
+        return (Vec::new(), Some("本机没有工作区授权".to_string()));
+    };
+    match post_baijimu_json(
+        &store.base_url,
+        "/lowcode3/partner/v1/workspaces/list",
+        token,
+        serde_json::json!({ "pageNum": 1, "pageSize": 200 }),
+    )
+    .await
+    {
+        Ok(response) => match unwrap_baijimu_data(&response) {
+            Ok(data) => {
+                let workspaces = data
+                    .get("list")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        let workspace_id = item.get("id").and_then(Value::as_u64)?;
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("未命名工作区")
+                            .trim()
+                            .to_string();
+                        Some(CodexWorkspaceOption { workspace_id, name })
+                    })
+                    .collect();
+                (workspaces, None)
+            }
+            Err(err) => (Vec::new(), Some(err)),
+        },
+        Err(err) => (Vec::new(), Some(format!("暂时无法读取工作区名称：{err}"))),
+    }
+}
+
+async fn post_baijimu_json(
+    base_url: &str,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> Result<Value, String> {
+    let url = format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+    let response = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|err| format!("创建平台请求失败: {err}"))?
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| format!("请求百积木平台失败: {err}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let payload = response
+        .text()
+        .await
+        .map_err(|err| format!("读取百积木平台响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(describe_upstream_http_failure(
+            status,
+            &content_type,
+            &payload,
+        ));
+    }
+    serde_json::from_str(&payload).map_err(|err| format!("百积木平台返回了无效 JSON: {err}"))
+}
+
+fn unwrap_baijimu_data(response: &Value) -> Result<&Value, String> {
+    if let Some(error_code) = response
+        .get("errorCode")
+        .or_else(|| response.get("error_code"))
+        .and_then(Value::as_str)
+    {
+        if error_code != "0" {
+            let message = response
+                .get("value")
+                .or_else(|| response.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("平台操作失败");
+            return Err(format!("{message}（{error_code}）"));
+        }
+        return Ok(response.get("data").unwrap_or(&Value::Null));
+    }
+    Ok(response.get("data").unwrap_or(response))
+}
+
+async fn validate_codex_credential(
+    base_url: &str,
+    credential: &str,
+) -> Result<Option<Value>, String> {
+    let url = format!(
+        "{}/llm-credential/validateCredential",
+        base_url.trim_end_matches('/')
+    );
+    let response = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|err| format!("创建凭证校验请求失败: {err}"))?
+        .post(url)
+        .bearer_auth(credential)
+        .json(&serde_json::json!({ "key": credential }))
+        .send()
+        .await
+        .map_err(|err| format!("请求凭证校验服务失败: {err}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let payload = response
+        .text()
+        .await
+        .map_err(|err| format!("读取凭证校验响应失败: {err}"))?;
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(describe_upstream_http_failure(
+            status,
+            &content_type,
+            &payload,
+        ));
+    }
+    let response: Value = serde_json::from_str(&payload)
+        .map_err(|err| format!("凭证校验服务返回了无效 JSON: {err}"))?;
+    let data = unwrap_baijimu_data(&response)?;
+    let valid = data.get("valid").and_then(Value::as_bool).unwrap_or(false);
+    let allowed = data
+        .get("allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(valid);
+    Ok((valid && allowed).then(|| data.clone()))
+}
+
+fn normalize_codex_model(model: Option<&str>) -> Result<String, String> {
+    let model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_CODEX_MODEL);
+    if model
+        .chars()
+        .any(|character| !(character.is_ascii_alphanumeric() || "._-".contains(character)))
+    {
+        return Err("模型名称只能包含字母、数字、点、下划线和短横线".to_string());
+    }
+    Ok(model.to_string())
+}
+
+fn codex_home_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("CODEX_HOME") {
+        return PathBuf::from(path);
+    }
+    shared_cli_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+}
+
+fn codex_auth_path() -> PathBuf {
+    codex_home_dir().join("auth.json")
+}
+
+fn codex_config_path() -> PathBuf {
+    codex_home_dir().join("config.toml")
+}
+
+fn codex_credential_metadata_path() -> PathBuf {
+    shared_cli_auth_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(CODEX_CREDENTIAL_METADATA_FILE)
+}
+
+fn load_codex_credential_metadata() -> anyhow::Result<CodexCredentialMetadata> {
+    let path = codex_credential_metadata_path();
+    if !path.exists() {
+        return Ok(CodexCredentialMetadata::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("读取 Codex 凭证元数据失败: {}", path.display()))?;
+    let mut metadata: CodexCredentialMetadata = serde_json::from_str(&content)
+        .with_context(|| format!("解析 Codex 凭证元数据失败: {}", path.display()))?;
+    metadata.version = CODEX_CREDENTIAL_METADATA_VERSION;
+    Ok(metadata)
+}
+
+fn read_codex_api_key(path: &Path) -> anyhow::Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("读取 Codex 认证文件失败: {}", path.display()))?;
+    let value: Value = serde_json::from_str(&content)
+        .with_context(|| format!("解析 Codex 认证文件失败: {}", path.display()))?;
+    Ok(value
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn apply_codex_credential_switch(
+    credential: &str,
+    metadata: &CodexCredentialMetadata,
+) -> anyhow::Result<()> {
+    let auth_path = codex_auth_path();
+    let config_path = codex_config_path();
+    let metadata_path = codex_credential_metadata_path();
+    let old_auth = fs::read(&auth_path).ok();
+    let old_config = fs::read(&config_path).ok();
+    let old_metadata = fs::read(&metadata_path).ok();
+
+    let mut auth_document = old_auth
+        .as_deref()
+        .and_then(|content| serde_json::from_slice::<Value>(content).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    auth_document["OPENAI_API_KEY"] = Value::String(credential.to_string());
+    auth_document["auth_mode"] = Value::String("apikey".to_string());
+    let auth_bytes = serde_json::to_vec_pretty(&auth_document)?;
+
+    let existing_config = old_config
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
+    let active_profile = metadata
+        .active_workspace_id
+        .zip(metadata.active_project_id)
+        .and_then(|(workspace_id, project_id)| {
+            metadata.profiles.iter().find(|profile| {
+                profile.workspace_id == workspace_id && profile.project_id == project_id
+            })
+        })
+        .context("Codex 凭证元数据缺少当前配置")?;
+    let config_content = render_managed_codex_config(&existing_config, &active_profile.model);
+    toml::from_str::<toml::Value>(&config_content)
+        .context("生成的 Codex config.toml 无法通过 TOML 校验")?;
+    let metadata_bytes = serde_json::to_vec_pretty(metadata)?;
+
+    let result = (|| -> anyhow::Result<()> {
+        atomic_write_private(&auth_path, &auth_bytes)?;
+        atomic_write_private(&config_path, config_content.as_bytes())?;
+        atomic_write_private(&metadata_path, &metadata_bytes)?;
+        verify_private_file(&auth_path)?;
+        verify_private_file(&config_path)?;
+        verify_private_file(&metadata_path)?;
+        let verified_auth = read_codex_api_key(&auth_path)?;
+        if verified_auth.as_deref() != Some(credential) {
+            anyhow::bail!("Codex 认证文件写入后回读不一致");
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = result {
+        restore_optional_file(&auth_path, old_auth.as_deref());
+        restore_optional_file(&config_path, old_config.as_deref());
+        restore_optional_file(&metadata_path, old_metadata.as_deref());
+        return Err(err.context("切换失败，已恢复切换前的 Codex 配置"));
+    }
+    Ok(())
+}
+
+fn render_managed_codex_config(existing: &str, model: &str) -> String {
+    let mut preserved = Vec::new();
+    let mut in_managed_block = false;
+    let mut in_router_table = false;
+    let mut seen_table = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == CODEX_MANAGED_BLOCK_START {
+            in_managed_block = true;
+            continue;
+        }
+        if in_managed_block {
+            if trimmed == CODEX_MANAGED_BLOCK_END {
+                in_managed_block = false;
+            }
+            continue;
+        }
+        if trimmed == "[model_providers.baijimu-router]" {
+            in_router_table = true;
+            seen_table = true;
+            continue;
+        }
+        if in_router_table {
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                in_router_table = false;
+                preserved.push(line.to_string());
+            }
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            seen_table = true;
+        }
+        let is_managed_root_key = !seen_table
+            && [
+                "model_provider",
+                "model",
+                "sandbox_mode",
+                "approval_policy",
+                "cli_auth_credentials_store",
+                "forced_login_method",
+            ]
+            .iter()
+            .any(|key| {
+                trimmed
+                    .strip_prefix(key)
+                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+            });
+        if !is_managed_root_key {
+            preserved.push(line.to_string());
+        }
+    }
+    while preserved.first().is_some_and(|line| line.trim().is_empty()) {
+        preserved.remove(0);
+    }
+    while preserved.last().is_some_and(|line| line.trim().is_empty()) {
+        preserved.pop();
+    }
+
+    let first_table_index = preserved
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with('[') && trimmed.ends_with(']')
+        })
+        .unwrap_or(preserved.len());
+    let (preserved_root, preserved_tables) = preserved.split_at(first_table_index);
+
+    let escaped_model = model.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut output = format!(
+        "{CODEX_MANAGED_BLOCK_START}\n\
+model_provider = \"baijimu-router\"\n\
+model = \"{escaped_model}\"\n\
+sandbox_mode = \"danger-full-access\"\n\
+approval_policy = \"on-request\"\n\
+cli_auth_credentials_store = \"file\"\n\
+forced_login_method = \"api\"\n\
+{CODEX_MANAGED_BLOCK_END}\n"
+    );
+    if !preserved_root.is_empty() {
+        output.push('\n');
+        output.push_str(&preserved_root.join("\n"));
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "\n\
+[model_providers.baijimu-router]\n\
+name = \"baijimu-router\"\n\
+base_url = \"{CODEX_ROUTER_BASE_URL}\"\n\
+wire_api = \"responses\"\n\
+requires_openai_auth = true\n"
+    ));
+    if !preserved_tables.is_empty() {
+        output.push('\n');
+        output.push_str(&preserved_tables.join("\n"));
+        output.push('\n');
+    }
+    output
+}
+
+fn atomic_write_private(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let temp_path = path.with_extension(format!("tmp-{}", now_epoch_seconds()));
+    fs::write(&temp_path, content)
+        .with_context(|| format!("写入临时文件失败: {}", temp_path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(&temp_path, path).with_context(|| format!("替换文件失败: {}", path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn verify_private_file(path: &Path) -> anyhow::Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("回读文件失败: {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        anyhow::bail!("文件为空或不是普通文件: {}", path.display());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!("文件权限不是 600: {}", path.display());
+    }
+    Ok(())
+}
+
+fn restore_optional_file(path: &Path, content: Option<&[u8]>) {
+    match content {
+        Some(content) => {
+            let _ = atomic_write_private(path, content);
+        }
+        None => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+async fn restart_codex_desktop_app() -> (bool, String) {
+    #[cfg(target_os = "macos")]
+    {
+        let app_path = ["/Applications/Codex.app", "/Applications/ChatGPT.app"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists());
+        let Some(app_path) = app_path else {
+            return (
+                false,
+                "未找到 Codex/ChatGPT 桌面应用；终端配置已经生效".to_string(),
+            );
+        };
+        let pattern = format!("{}/Contents", app_path.display());
+        let _ = AsyncCommand::new("pkill")
+            .args(["-f", &pattern])
+            .status()
+            .await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        match AsyncCommand::new("open").arg(&app_path).status().await {
+            Ok(status) if status.success() => (true, "Codex 已按新工作区重新启动".to_string()),
+            Ok(status) => (
+                false,
+                format!("Codex 配置已切换，但重新启动返回状态 {status}"),
+            ),
+            Err(err) => (
+                false,
+                format!("Codex 配置已切换，但自动重新启动失败: {err}"),
+            ),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let script = r#"Get-Process Codex,ChatGPT -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 900; $app = Get-StartApps | Where-Object { $_.Name -match 'Codex|ChatGPT' } | Select-Object -First 1; if (-not $app) { exit 3 }; Start-Process (\"shell:AppsFolder\\\" + $app.AppID)"#;
+        let status = AsyncCommand::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .creation_flags(WINDOWS_CREATE_NO_WINDOW)
+            .status()
+            .await;
+        return match status {
+            Ok(status) if status.success() => (true, "Codex 已按新工作区重新启动".to_string()),
+            Ok(status) => (
+                false,
+                format!("Codex 配置已切换，但没有找到可重新启动的 Codex 应用（{status}）"),
+            ),
+            Err(err) => (
+                false,
+                format!("Codex 配置已切换，但自动重新启动失败: {err}"),
+            ),
+        };
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        (
+            false,
+            "Codex 终端配置已切换；当前系统不支持自动重启桌面应用".to_string(),
+        )
+    }
+}
+
 async fn restart_agent_from_saved_config(
     state: &tauri::State<'_, DesktopState>,
 ) -> anyhow::Result<RuntimeSnapshot> {
@@ -1548,13 +2457,13 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             },
         );
 
-        return Ok(AppUpdateInstallResult {
+        Ok(AppUpdateInstallResult {
             status: "downloaded".to_string(),
             version: latest_version.to_string(),
             asset_name: Some(asset.name.clone()),
             downloaded_path: Some(download_path.display().to_string()),
             release_url,
-        });
+        })
     }
 
     #[cfg(target_os = "windows")]
@@ -1579,13 +2488,13 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             },
         );
 
-        return Ok(AppUpdateInstallResult {
+        Ok(AppUpdateInstallResult {
             status: "downloaded".to_string(),
             version: latest_version.to_string(),
             asset_name: Some(asset.name.clone()),
             downloaded_path: Some(download_path.display().to_string()),
             release_url,
-        });
+        })
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -2235,16 +3144,22 @@ impl ResolvedConnectorSource {
     }
 }
 
-async fn resolve_connector_source(source: &str, allow_git: bool) -> Result<ResolvedConnectorSource, String> {
+async fn resolve_connector_source(
+    source: &str,
+    allow_git: bool,
+) -> Result<ResolvedConnectorSource, String> {
     let (source, git_revision) = split_source_revision(source);
-    if let Some(archive_url) = connector_archive_download_url(&source, git_revision.as_deref(), allow_git)? {
+    if let Some(archive_url) =
+        connector_archive_download_url(&source, git_revision.as_deref(), allow_git)?
+    {
         return resolve_connector_archive_source(&archive_url).await;
     }
 
     if is_git_connector_source(&source) {
         if !allow_git {
             return Err(
-                "市场本地应用不能依赖本机 git，请将安装源发布为 .zip 或 .tar.gz 下载包。".to_string(),
+                "市场本地应用不能依赖本机 git，请将安装源发布为 .zip 或 .tar.gz 下载包。"
+                    .to_string(),
             );
         }
         let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
@@ -2418,7 +3333,9 @@ enum ConnectorArchiveKind {
     TarGz,
 }
 
-async fn resolve_connector_archive_source(archive_url: &str) -> Result<ResolvedConnectorSource, String> {
+async fn resolve_connector_archive_source(
+    archive_url: &str,
+) -> Result<ResolvedConnectorSource, String> {
     let kind = connector_archive_kind(archive_url)
         .ok_or_else(|| "本地应用下载源必须是 .zip、.tar.gz 或 .tgz 文件。".to_string())?;
     let response = Client::new()
@@ -2528,7 +3445,11 @@ fn parse_https_git_repo(source: &str, host: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-fn extract_connector_archive(bytes: &[u8], kind: ConnectorArchiveKind, destination: &Path) -> Result<(), String> {
+fn extract_connector_archive(
+    bytes: &[u8],
+    kind: ConnectorArchiveKind,
+    destination: &Path,
+) -> Result<(), String> {
     match kind {
         ConnectorArchiveKind::Zip => extract_connector_zip(bytes, destination),
         ConnectorArchiveKind::TarGz => extract_connector_tar_gz(bytes, destination),
@@ -2537,12 +3458,13 @@ fn extract_connector_archive(bytes: &[u8], kind: ConnectorArchiveKind, destinati
 
 fn extract_connector_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
     let cursor = Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|err| format!("解析本地应用 zip 失败: {err}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|err| format!("解析本地应用 zip 失败: {err}"))?;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
             .map_err(|err| format!("读取本地应用 zip 条目失败: {err}"))?;
-        let Some(relative_path) = entry.enclosed_name().map(PathBuf::from) else {
+        let Some(relative_path) = entry.enclosed_name() else {
             return Err("本地应用 zip 包含不安全路径。".to_string());
         };
         let target = destination.join(relative_path);
@@ -2553,7 +3475,8 @@ fn extract_connector_zip(bytes: &[u8], destination: &Path) -> Result<(), String>
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| format!("创建解压目录失败: {err}"))?;
         }
-        let mut file = fs::File::create(&target).map_err(|err| format!("写入解压文件失败: {err}"))?;
+        let mut file =
+            fs::File::create(&target).map_err(|err| format!("写入解压文件失败: {err}"))?;
         std::io::copy(&mut entry, &mut file).map_err(|err| format!("写入解压文件失败: {err}"))?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
@@ -2562,7 +3485,8 @@ fn extract_connector_zip(bytes: &[u8], destination: &Path) -> Result<(), String>
                 .map_err(|err| format!("读取解压文件权限失败: {err}"))?
                 .permissions();
             permissions.set_mode(mode);
-            fs::set_permissions(&target, permissions).map_err(|err| format!("设置解压文件权限失败: {err}"))?;
+            fs::set_permissions(&target, permissions)
+                .map_err(|err| format!("设置解压文件权限失败: {err}"))?;
         }
     }
     Ok(())
@@ -2580,7 +3504,11 @@ fn extract_connector_tar_gz(bytes: &[u8], destination: &Path) -> Result<(), Stri
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             return Err("本地应用 tar.gz 包含不支持的链接文件。".to_string());
         }
-        let relative_path = sanitize_archive_path(&entry.path().map_err(|err| format!("读取 tar.gz 路径失败: {err}"))?)?;
+        let relative_path = sanitize_archive_path(
+            &entry
+                .path()
+                .map_err(|err| format!("读取 tar.gz 路径失败: {err}"))?,
+        )?;
         let target = destination.join(relative_path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| format!("创建解压目录失败: {err}"))?;
@@ -2895,9 +3823,12 @@ fn show_main_window_deferred(
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow, diagnostics: Option<&StartupDiagnostics>) {
-    run_window_action(diagnostics, "show main window", "main window show completed", || {
-        window.show()
-    });
+    run_window_action(
+        diagnostics,
+        "show main window",
+        "main window show completed",
+        || window.show(),
+    );
     run_window_action(
         diagnostics,
         "unminimize main window",
@@ -3203,6 +4134,9 @@ fn main() {
             open_desktop_permission_settings,
             start_browser_auth,
             poll_browser_auth,
+            codex_credential_manager_state,
+            list_codex_workspace_projects,
+            switch_codex_credential,
             app_version,
             check_app_update,
             install_app_update,
@@ -3349,5 +4283,81 @@ mod tests {
             archive.as_deref(),
             Some("https://download.baijimu.com/connectors/wechat.zip")
         );
+    }
+
+    #[test]
+    fn managed_codex_config_preserves_unrelated_root_keys_and_tables() {
+        let existing = r#"disable_response_storage = true
+model = "old-model"
+
+[desktop]
+check_for_updates = false
+
+[projects."/tmp/demo"]
+trust_level = "trusted"
+"#;
+
+        let rendered = render_managed_codex_config(existing, "gpt-5.6-sol");
+        let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(parsed["model_provider"].as_str(), Some("baijimu-router"));
+        assert_eq!(parsed["disable_response_storage"].as_bool(), Some(true));
+        assert_eq!(
+            parsed["model_providers"]["baijimu-router"]["base_url"].as_str(),
+            Some(CODEX_ROUTER_BASE_URL)
+        );
+        assert_eq!(
+            parsed["desktop"]["check_for_updates"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            parsed["projects"]["/tmp/demo"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
+    #[test]
+    fn managed_codex_config_is_idempotent() {
+        let first =
+            render_managed_codex_config("[desktop]\ncheck_for_updates = true\n", "gpt-5.6-sol");
+        let second = render_managed_codex_config(&first, "gpt-5.6-sol");
+
+        assert_eq!(first, second);
+        assert_eq!(second.matches(CODEX_MANAGED_BLOCK_START).count(), 1);
+        assert_eq!(
+            second.matches("[model_providers.baijimu-router]").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_model_name_rejects_toml_injection() {
+        assert_eq!(
+            normalize_codex_model(Some("gpt-5.6-sol")).unwrap(),
+            "gpt-5.6-sol"
+        );
+        assert!(normalize_codex_model(Some("gpt\"\n[evil]")).is_err());
+    }
+
+    #[test]
+    fn codex_metadata_never_serializes_a_credential_field() {
+        let metadata = CodexCredentialMetadata {
+            version: CODEX_CREDENTIAL_METADATA_VERSION,
+            profiles: vec![CodexCredentialProfile {
+                workspace_id: 642,
+                workspace_name: "示例工作区".to_string(),
+                project_id: 7405,
+                project_name: Some("示例项目".to_string()),
+                model: DEFAULT_CODEX_MODEL.to_string(),
+                activated_at_epoch_seconds: 123,
+            }],
+            active_workspace_id: Some(642),
+            active_project_id: Some(7405),
+        };
+
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(!serialized.to_ascii_lowercase().contains("credential"));
+        assert!(!serialized.contains("OPENAI_API_KEY"));
     }
 }
