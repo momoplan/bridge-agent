@@ -505,6 +505,101 @@ jobs:
             }
           }
 
+      - name: Smoke test Windows MSI install lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi = Get-ChildItem `
+            -Path "src-tauri/target/release/bundle/msi" `
+            -Filter "*.msi" `
+            -File `
+            -ErrorAction Stop | Select-Object -First 1
+          if (-not $msi) {
+            throw "Windows MSI artifact was not found for install smoke test"
+          }
+
+          $installLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-install.log"
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-uninstall.log"
+          $installSucceeded = $false
+          try {
+            $install = Start-Process `
+              -FilePath "msiexec.exe" `
+              -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "/L*v", "`"$installLog`"") `
+              -Wait `
+              -PassThru
+            if ($install.ExitCode -notin @(0, 3010)) {
+              if (Test-Path -LiteralPath $installLog) {
+                Get-Content -LiteralPath $installLog -Tail 180 | Write-Host
+              }
+              throw "Windows MSI install smoke test failed with exit code $($install.ExitCode)"
+            }
+            $installSucceeded = $true
+
+            $deadline = (Get-Date).AddSeconds(15)
+            do {
+              $service = Get-CimInstance Win32_Service -Filter "Name='BridgeAgent'" -ErrorAction SilentlyContinue
+              if ($service -and $service.State -eq "Running") {
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+
+            if (-not $service) {
+              throw "BridgeAgent service was not installed"
+            }
+            if ($service.State -ne "Running") {
+              throw "BridgeAgent service is not running: $($service.State)"
+            }
+            if ($service.StartMode -ne "Auto") {
+              throw "BridgeAgent service is not automatic: $($service.StartMode)"
+            }
+            if ($service.StartName -ne "LocalSystem") {
+              throw "BridgeAgent service account is not LocalSystem: $($service.StartName)"
+            }
+            if ($service.PathName -notlike "*ProgramData*Baijimu*BridgeAgent*agent-config.json*") {
+              throw "BridgeAgent service does not use the shared config path: $($service.PathName)"
+            }
+
+            $configPath = "C:\ProgramData\Baijimu\BridgeAgent\agent-config.json"
+            if (-not (Test-Path -LiteralPath $configPath)) {
+              throw "BridgeAgent service did not initialize the shared config"
+            }
+            Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json | Out-Null
+
+            $runValue = Get-ItemPropertyValue `
+              -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" `
+              -Name "BaijimuBridgeAgent" `
+              -ErrorAction Stop
+            if ($runValue -notlike "*bridge-agent-desktop.exe*") {
+              throw "Baijimu desktop logon startup entry is invalid: $runValue"
+            }
+
+            Write-Host "Verified Windows MSI install lifecycle: service running with shared config"
+          } finally {
+            if ($installSucceeded) {
+              $uninstall = Start-Process `
+                -FilePath "msiexec.exe" `
+                -ArgumentList @("/x", "`"$($msi.FullName)`"", "/qn", "/norestart", "/L*v", "`"$uninstallLog`"") `
+                -Wait `
+                -PassThru
+              if ($uninstall.ExitCode -notin @(0, 1605, 3010)) {
+                if (Test-Path -LiteralPath $uninstallLog) {
+                  Get-Content -LiteralPath $uninstallLog -Tail 120 | Write-Host
+                }
+                throw "Windows MSI uninstall smoke test failed with exit code $($uninstall.ExitCode)"
+              }
+            }
+          }
+
+          if (Get-Service -Name "BridgeAgent" -ErrorAction SilentlyContinue) {
+            throw "BridgeAgent service remained after MSI uninstall"
+          }
+          if (Test-Path -LiteralPath "C:\Program Files\Baijimu\bridge-agent-service.exe") {
+            throw "BridgeAgent service executable remained after MSI uninstall"
+          }
+          Write-Host "Verified Windows MSI uninstall lifecycle"
+
       - name: Upload bundles to GitHub release
         shell: bash
         env:

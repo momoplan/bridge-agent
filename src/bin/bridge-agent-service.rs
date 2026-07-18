@@ -22,7 +22,10 @@ use std::fs;
 use std::path::PathBuf;
 
 #[cfg(windows)]
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::{
+    mpsc::{self, TryRecvError},
+    OnceLock,
+};
 
 #[cfg(windows)]
 use std::time::Duration;
@@ -73,14 +76,11 @@ struct ConsoleArgs {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Parser)]
-struct ServiceLaunchArgs {
-    #[arg(long, env = "WS_BRIDGE_CONFIG")]
-    config: Option<PathBuf>,
-}
-
 #[cfg(windows)]
 define_windows_service!(ffi_service_main, service_main);
+
+#[cfg(windows)]
+static SERVICE_CONFIG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 #[cfg(windows)]
 fn main() -> Result<()> {
@@ -91,6 +91,10 @@ fn main() -> Result<()> {
     if args.console {
         return run_console(args.config);
     }
+
+    SERVICE_CONFIG_PATH
+        .set(args.config)
+        .map_err(|_| anyhow::anyhow!("Windows service config was already initialized"))?;
 
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .context("failed to start Windows service dispatcher")?;
@@ -103,19 +107,16 @@ fn main() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn service_main(arguments: Vec<OsString>) {
-    if let Err(err) = run_service(arguments) {
+fn service_main(_arguments: Vec<OsString>) {
+    let config = SERVICE_CONFIG_PATH.get().cloned().flatten();
+    if let Err(err) = run_service(config) {
         eprintln!("bridge-agent-service failed: {err:#}");
     }
 }
 
 #[cfg(windows)]
-fn run_service(arguments: Vec<OsString>) -> Result<()> {
-    let service_args = ServiceLaunchArgs::try_parse_from(
-        std::iter::once(OsString::from("bridge-agent-service")).chain(arguments),
-    )
-    .context("failed to parse Windows service launch arguments")?;
-    let config_path = resolve_service_config_path(service_args.config)?;
+fn run_service(config: Option<PathBuf>) -> Result<()> {
+    let config_path = resolve_service_config_path(config)?;
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let status_handle =
