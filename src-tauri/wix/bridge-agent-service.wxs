@@ -55,31 +55,33 @@
   </Fragment>
 
   <Fragment>
-    <DirectoryRef Id="CommonAppDataFolder">
-      <Directory Id="BaijimuProgramDataDir" Name="Baijimu">
-        <Directory Id="BridgeAgentDataDir" Name="BridgeAgent">
-          <Component
-            Id="BridgeAgentDataDirectoryComponent"
-            Guid="C2894A83-0BF7-5F35-B966-1E39A4E0A3C5"
-            Win64="yes">
-            <CreateFolder>
-              <util:PermissionEx
-                User="Users"
-                Domain="BUILTIN"
-                GenericRead="yes"
-                GenericWrite="yes"
-                Delete="yes"
-                DeleteChild="yes"
-                Traverse="yes" />
-            </CreateFolder>
-            <RegistryValue
-              Root="HKLM"
-              Key="Software\Baijimu\BridgeAgent"
-              Name="SharedDataDirectory"
-              Type="string"
-              Value="[BridgeAgentDataDir]"
-              KeyPath="yes" />
-          </Component>
+    <DirectoryRef Id="TARGETDIR">
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="BaijimuProgramDataDir" Name="Baijimu">
+          <Directory Id="BridgeAgentDataDir" Name="BridgeAgent">
+            <Component
+              Id="BridgeAgentDataDirectoryComponent"
+              Guid="C2894A83-0BF7-5F35-B966-1E39A4E0A3C5"
+              Win64="yes">
+              <CreateFolder>
+                <util:PermissionEx
+                  User="Users"
+                  Domain="BUILTIN"
+                  GenericRead="yes"
+                  GenericWrite="yes"
+                  Delete="yes"
+                  DeleteChild="yes"
+                  Traverse="yes" />
+              </CreateFolder>
+              <RegistryValue
+                Root="HKLM"
+                Key="Software\Baijimu\BridgeAgent"
+                Name="SharedDataDirectory"
+                Type="string"
+                Value="[BridgeAgentDataDir]"
+                KeyPath="yes" />
+            </Component>
+          </Directory>
         </Directory>
       </Directory>
     </DirectoryRef>
