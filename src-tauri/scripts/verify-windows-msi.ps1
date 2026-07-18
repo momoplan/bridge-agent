@@ -54,7 +54,9 @@ function Read-MsiRows {
                     @($index)
                 )
             }
-            $rows += ,$row
+            $rows += [pscustomobject]@{
+                Values = $row
+            }
         }
         return $rows
     } finally {
@@ -83,7 +85,7 @@ $fileRows = Read-MsiRows `
     -Query 'SELECT `FileName` FROM `File`' `
     -ColumnCount 1
 $serviceFile = $fileRows |
-    ForEach-Object { ($_[0] -split '\|')[-1] } |
+    ForEach-Object { ($_.Values[0] -split '\|')[-1] } |
     Where-Object { $_ -ieq "bridge-agent-service.exe" } |
     Select-Object -First 1
 if (-not $serviceFile) {
@@ -94,12 +96,13 @@ $serviceInstallRows = Read-MsiRows `
     -Database $database `
     -Query 'SELECT `Name`, `ServiceType`, `StartType`, `ErrorControl`, `Arguments` FROM `ServiceInstall`' `
     -ColumnCount 5
-$bridgeService = $serviceInstallRows |
-    Where-Object { $_[0] -ieq "BridgeAgent" } |
+$bridgeServiceRow = $serviceInstallRows |
+    Where-Object { $_.Values[0] -ieq "BridgeAgent" } |
     Select-Object -First 1
-if (-not $bridgeService) {
+if (-not $bridgeServiceRow) {
     throw "MSI ServiceInstall table does not register BridgeAgent"
 }
+$bridgeService = $bridgeServiceRow.Values
 if ([int]$bridgeService[1] -ne 16) {
     throw "BridgeAgent ServiceType must be own-process (16), got $($bridgeService[1])"
 }
@@ -114,12 +117,13 @@ $serviceControlRows = Read-MsiRows `
     -Database $database `
     -Query 'SELECT `Name`, `Event`, `Wait` FROM `ServiceControl`' `
     -ColumnCount 3
-$bridgeControl = $serviceControlRows |
-    Where-Object { $_[0] -ieq "BridgeAgent" } |
+$bridgeControlRow = $serviceControlRows |
+    Where-Object { $_.Values[0] -ieq "BridgeAgent" } |
     Select-Object -First 1
-if (-not $bridgeControl) {
+if (-not $bridgeControlRow) {
     throw "MSI ServiceControl table does not manage BridgeAgent"
 }
+$bridgeControl = $bridgeControlRow.Values
 $requiredEvents = 1 + 2 + 32 + 128
 if (([int]$bridgeControl[1] -band $requiredEvents) -ne $requiredEvents) {
     throw "BridgeAgent ServiceControl must start on install and stop/remove during servicing"
@@ -134,8 +138,8 @@ $registryRows = Read-MsiRows `
     -ColumnCount 2
 $autoStart = $registryRows |
     Where-Object {
-        $_[0] -ieq "BaijimuBridgeAgent" -and
-        $_[1] -like "*bridge-agent-desktop.exe*"
+        $_.Values[0] -ieq "BaijimuBridgeAgent" -and
+        $_.Values[1] -like "*bridge-agent-desktop.exe*"
     } |
     Select-Object -First 1
 if (-not $autoStart) {
