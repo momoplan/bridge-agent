@@ -124,8 +124,13 @@ jobs:
           $extractPath = Join-Path $env:RUNNER_TEMP "CodeSignTool"
 
           Invoke-WebRequest `
-            -Uri "https://www.ssl.com/download/codesigntool-for-windows/" `
+            -Uri "https://ssl.com/wp-content/uploads/2024/10/CodeSignTool-v1.3.1-windows.zip" `
             -OutFile $zipPath
+          $expectedSha256 = "e45a9e6c2aac4cae16c114eb590a2196406681357eb587507c65cd3646b5330d"
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "CodeSignTool archive checksum mismatch: $actualSha256"
+          }
           Expand-Archive -Force -Path $zipPath -DestinationPath $extractPath
 
           $codeSignTool = Get-ChildItem `
