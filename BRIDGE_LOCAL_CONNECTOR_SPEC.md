@@ -4,7 +4,8 @@
 
 ## 术语
 
-- 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。它可以是内置应用、市场 Connector，也可以是用户手动注册的自定义应用。
+- 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。它可以是官方托管工具、内置应用、市场 Connector，也可以是用户手动注册的自定义应用。
+- 官方托管工具：由百积木维护、在应用页独立显示并按版本安装、升级和回滚的本机工具。它不必注册远程服务，例如 Baijimu CLI。
 - Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、服务注册信息和能力。
 - 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
 - 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
@@ -14,10 +15,11 @@
 
 ## 分类
 
-本地应用分为三类：
+本地应用分为四类：
 
 | 类型 | 来源 | 是否可市场更新 | 典型例子 |
 | --- | --- | --- | --- |
+| 官方托管工具 | 客户端基线版本 + `local-app-market` 独立版本 | 是 | Baijimu CLI |
 | 内置应用 | 随 `bridge-agent` 客户端发布 | 否，跟随客户端版本 | Desktop Control |
 | 市场 Connector | `local-app-market` 返回的 Git / 包版本 | 是 | Codex Connector、WeChat Connector |
 | 自定义应用 | 本机配置、注册 API、CLI | 否 | 本地报表工具、开发中的 HTTP 服务 |
@@ -25,6 +27,8 @@
 UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 
 - 市场 Connector 必须有稳定 `connectorId`，并能从市场记录找到更新源。
+- 官方托管工具必须有稳定应用 ID、SemVer 版本、按平台/架构区分的发布包、SHA-256 和平台签名。
+- 官方托管工具由本地应用管理器维护版本目录和稳定命令入口；客户端内置副本只负责首次安装和离线修复，不能覆盖或降级已经托管的更高版本。
 - 自定义应用不能伪装成市场应用；除非被市场收录并按本规范提供 Connector 包。
 - 内置应用由 `bridge-agent` 客户端维护，不允许普通卸载，也不通过 Connector 安装目录管理。
 
@@ -55,6 +59,35 @@ connector-root/
 - 包内路径必须使用相对路径，不依赖安装前的源码绝对路径。
 - 安装后，百积木会把包复制到本机 connectors 目录；运行命令应以安装后的包路径为准。
 - 不要把用户 token、cookie、数据库副本或机器私有配置提交进 Connector 包。
+
+## 官方托管工具
+
+官方托管工具不要求 `connector.json`、`service-registration.json` 或 `service.method`。市场版本通过 `latestVersion.manifest` 声明：
+
+```json
+{
+  "applicationType": "managed_tool",
+  "artifacts": [
+    {
+      "platform": "macos",
+      "arch": "universal",
+      "source": "https://example.invalid/baijimu-cli-0.1.1-macos-universal.zip",
+      "checksum": "sha256:...",
+      "archivePath": "bin/baijimu"
+    }
+  ]
+}
+```
+
+管理规则：
+
+- 下载必须使用 HTTPS，并在解包前验证市场记录中的 SHA-256。
+- macOS 和 Windows 正式产物必须通过系统代码签名验证；Linux 至少验证 SHA-256。
+- 安装包中的 CLI 必须能通过 `baijimu --version --json` 返回与市场一致的版本和实现身份。
+- 每个版本写入独立目录，稳定命令入口只指向当前激活版本。
+- 更新采用同目录临时文件和原子切换；保留上一个有效版本用于回滚。
+- Bridge Agent 启动时先读取托管状态；只有没有有效托管版本时才导入旧命令入口或客户端基线版本。
+- 官方托管工具默认不经过 relay，也不对外暴露能力。需要远程调用时必须另行设计最小权限的 Connector 接口。
 
 ## connector.json
 

@@ -101,7 +101,9 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 - WeChat Connector：连接本机微信采集器，注册 `wechatLocal` 查询方法和消息事件。
 - Desktop Control：提供截图、点击、键盘、滚动等桌面能力，当前作为内置应用随客户端分发。
 
-本地应用和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
+Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端内置一个首次安装基线版本，后续版本由本地应用管理器独立升级和回滚，不跟随客户端覆盖或降级。CLI 不注册远程能力，也不经过 relay。
+
+本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
 ## 对外暴露的模型
 

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod managed_tool;
+
 use bridge_agent::config::resolve_config_base_dir;
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
@@ -264,9 +266,12 @@ struct ConnectorAppUpdateStatus {
 struct MarketConnectorApp {
     id: String,
     connector_id: String,
+    application_type: String,
     name: String,
     description: String,
     source: String,
+    checksum: Option<String>,
+    archive_path: Option<String>,
     risk: String,
     risk_level: String,
     capability: String,
@@ -301,6 +306,9 @@ struct RawMarketConnectorVersion {
     source: String,
     source_type: Option<String>,
     revision: Option<String>,
+    checksum: Option<String>,
+    #[serde(default)]
+    manifest: Value,
 }
 
 #[derive(Serialize)]
@@ -308,6 +316,33 @@ struct RawMarketConnectorVersion {
 struct ConnectorAppInstallDocument {
     install: ConnectorInstallResult,
     config: ConfigDocument,
+}
+
+#[tauri::command]
+async fn baijimu_cli_status() -> Result<managed_tool::ManagedToolStatus, String> {
+    let source = bundled_baijimu_cli_path();
+    managed_tool::inspect(source.as_deref()).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn install_baijimu_cli_update(
+    version: String,
+    source: String,
+    checksum: String,
+    archive_path: Option<String>,
+) -> Result<managed_tool::ManagedToolStatus, String> {
+    managed_tool::install_update(&source, &version, &checksum, archive_path.as_deref())
+        .await
+        .map_err(|err| err.to_string())?;
+    let bundled = bundled_baijimu_cli_path();
+    managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn rollback_baijimu_cli() -> Result<managed_tool::ManagedToolStatus, String> {
+    managed_tool::rollback().map_err(|err| err.to_string())?;
+    let bundled = bundled_baijimu_cli_path();
+    managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -807,7 +842,8 @@ async fn list_market_connector_apps(
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
     let platform = normalized_platform();
-    let url = format!("{base_url}/api/local-app-market/apps?platform={platform}");
+    let arch = std::env::consts::ARCH;
+    let url = format!("{base_url}/api/local-app-market/apps?platform={platform}&arch={arch}");
     let response = Client::new()
         .get(url)
         .send()
@@ -2244,19 +2280,81 @@ async fn resolve_connector_source(source: &str, allow_git: bool) -> Result<Resol
 
 impl From<RawMarketConnectorApp> for MarketConnectorApp {
     fn from(value: RawMarketConnectorApp) -> Self {
-        let source = market_connector_source(&value.latest_version);
+        let application_type = value
+            .latest_version
+            .manifest
+            .get("applicationType")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("connector")
+            .to_string();
+        let artifact = select_market_tool_artifact(&value.latest_version.manifest);
+        let source = artifact
+            .as_ref()
+            .and_then(|artifact| artifact.get("source"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| market_connector_source(&value.latest_version));
+        let checksum = artifact
+            .as_ref()
+            .and_then(|artifact| artifact.get("checksum"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or(value.latest_version.checksum.clone());
+        let archive_path = artifact
+            .as_ref()
+            .and_then(|artifact| artifact.get("archivePath"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         Self {
             id: value.id,
             connector_id: value.connector_id,
+            application_type,
             name: value.name,
             description: value.description,
             source,
+            checksum,
+            archive_path,
             risk: value.risk,
             risk_level: value.risk_level.unwrap_or_else(|| "medium".to_string()),
             capability: value.capability,
             version: value.latest_version.version,
         }
     }
+}
+
+fn select_market_tool_artifact(manifest: &Value) -> Option<Value> {
+    let platform = normalized_platform();
+    let arch = std::env::consts::ARCH;
+    manifest
+        .get("artifacts")?
+        .as_array()?
+        .iter()
+        .find(|artifact| {
+            let artifact_platform = artifact
+                .get("platform")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let artifact_arch = artifact
+                .get("arch")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("universal");
+            artifact_platform.eq_ignore_ascii_case(platform)
+                && (artifact_arch.eq_ignore_ascii_case(arch)
+                    || artifact_arch.eq_ignore_ascii_case("universal")
+                    || (arch == "x86_64" && artifact_arch.eq_ignore_ascii_case("x64"))
+                    || (arch == "aarch64" && artifact_arch.eq_ignore_ascii_case("arm64")))
+        })
+        .cloned()
 }
 
 fn market_connector_source(version: &RawMarketConnectorVersion) -> String {
@@ -2951,37 +3049,14 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
 }
 
 fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
-    let Some(source) = bundled_baijimu_cli_path() else {
-        diagnostics.info("bundled baijimu CLI resource not found; skipping CLI install");
-        return Ok(());
-    };
-    let target = user_baijimu_cli_path();
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let should_copy = match (fs::read(&source), fs::read(&target)) {
-        (Ok(source_bytes), Ok(target_bytes)) => source_bytes != target_bytes,
-        (Ok(_), Err(_)) => true,
-        (Err(err), _) => return Err(err.into()),
-    };
-    if should_copy {
-        fs::copy(&source, &target)?;
-        #[cfg(unix)]
-        {
-            let mut permissions = fs::metadata(&target)?.permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&target, permissions)?;
-        }
-        diagnostics.info(format!(
-            "installed bundled baijimu CLI to {}",
-            target.display()
-        ));
-    } else {
-        diagnostics.info(format!(
-            "bundled baijimu CLI already up to date at {}",
-            target.display()
-        ));
-    }
+    let source = bundled_baijimu_cli_path();
+    let status = managed_tool::bootstrap_bundled(source.as_deref())?;
+    diagnostics.info(format!(
+        "managed baijimu CLI bootstrap completed: state={} version={} launcher={}",
+        status.state,
+        status.installed_version.as_deref().unwrap_or("unknown"),
+        status.launcher_path
+    ));
     Ok(())
 }
 
@@ -3017,23 +3092,6 @@ fn bundled_baijimu_cli_path() -> Option<PathBuf> {
         candidates.push(cwd.join("resources").join("bin").join(binary_name));
     }
     candidates.into_iter().find(|candidate| candidate.is_file())
-}
-
-fn user_baijimu_cli_path() -> PathBuf {
-    let binary_name = baijimu_cli_binary_name();
-    #[cfg(windows)]
-    {
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(local_app_data)
-                .join("Baijimu")
-                .join("bin")
-                .join(binary_name);
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("bin").join(binary_name)
 }
 
 fn baijimu_cli_binary_name() -> &'static str {
@@ -3147,7 +3205,10 @@ fn main() {
             poll_browser_auth,
             app_version,
             check_app_update,
-            install_app_update
+            install_app_update,
+            baijimu_cli_status,
+            install_baijimu_cli_update,
+            rollback_baijimu_cli
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {

@@ -1,0 +1,271 @@
+name: release-baijimu-cli
+
+on:
+  push:
+    tags:
+      - "baijimu-cli-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub release tag, for example baijimu-cli-v0.1.1
+        required: true
+        type: string
+      cli_ref:
+        description: baijimu-cli-rs tag or branch, for example v0.1.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            baijimu-cli-v*) ;;
+            *)
+              echo "Invalid Baijimu CLI release tag: $RELEASE_TAG" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Baijimu CLI ${RELEASE_TAG#baijimu-cli-v}"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --draft \
+              --title "Baijimu CLI ${RELEASE_TAG#baijimu-cli-v}" \
+              --notes "Baijimu CLI official managed-tool release."
+          fi
+
+  build:
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            runner: macos-15-intel
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+          - name: windows-x64
+            runner: windows-latest
+            rust_targets: ""
+          - name: linux-x64
+            runner: ubuntu-22.04
+            rust_targets: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      CLI_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_ref || github.ref_name }}
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+
+      - name: Resolve CLI ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "CLI_REF=${RELEASE_TAG#baijimu-cli-}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup set profile minimal
+          rustup toolchain install stable --no-self-update
+          rustup default stable
+          if [ -n "${{ matrix.rust_targets }}" ]; then
+            rustup target add ${{ matrix.rust_targets }}
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Checkout Baijimu CLI source
+        shell: bash
+        env:
+          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BAIJIMU_CLI_RS_GIT_TOKEN" ]; then
+            echo "Missing BAIJIMU_CLI_RS_GIT_TOKEN" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "$CLI_REF" \
+            "https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@gitee.com/zxflimit_admin/baijimu-cli-rs.git" \
+            "$RUNNER_TEMP/baijimu-cli-rs"
+          cli_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$RUNNER_TEMP/baijimu-cli-rs/Cargo.toml" | head -1)"
+          if [ "baijimu-cli-v${cli_version}" != "$RELEASE_TAG" ]; then
+            echo "Release tag $RELEASE_TAG does not match CLI version $cli_version" >&2
+            exit 1
+          fi
+          echo "CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
+
+      - name: Build macOS universal CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_dir="$RUNNER_TEMP/baijimu-cli-rs"
+          cargo build --release --target x86_64-apple-darwin --manifest-path "$cli_dir/Cargo.toml"
+          MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --target aarch64-apple-darwin --manifest-path "$cli_dir/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/baijimu-cli-package/bin"
+          lipo -create \
+            "$cli_dir/target/x86_64-apple-darwin/release/baijimu" \
+            "$cli_dir/target/aarch64-apple-darwin/release/baijimu" \
+            -output "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+          chmod 755 "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+
+      - name: Sign macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)"
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+          certificate_path="$RUNNER_TEMP/baijimu-cli-certificate.p12"
+          keychain_path="$RUNNER_TEMP/baijimu-cli-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+
+      - name: Build Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cliDir = Join-Path $env:RUNNER_TEMP "baijimu-cli-rs"
+          cargo build --release --manifest-path (Join-Path $cliDir "Cargo.toml")
+          $packageBin = Join-Path $env:RUNNER_TEMP "baijimu-cli-package\bin"
+          New-Item -ItemType Directory -Force -Path $packageBin | Out-Null
+          Copy-Item -Force (Join-Path $cliDir "target\release\baijimu.exe") (Join-Path $packageBin "baijimu.exe")
+
+      - name: Prepare Windows signing tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("SSL_COM_USERNAME", "SSL_COM_PASSWORD", "SSL_COM_CREDENTIAL_ID", "SSL_COM_TOTP_SECRET")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing required Windows signing secret: $name"
+            }
+          }
+          $zipPath = Join-Path $env:RUNNER_TEMP "CodeSignTool.zip"
+          $extractPath = Join-Path $env:RUNNER_TEMP "CodeSignTool"
+          Invoke-WebRequest -Uri "https://www.ssl.com/download/codesigntool-for-windows/" -OutFile $zipPath
+          Expand-Archive -Force -Path $zipPath -DestinationPath $extractPath
+          $codeSignTool = Get-ChildItem -Path $extractPath -Filter "CodeSignTool.bat" -Recurse -File | Select-Object -First 1
+          if (-not $codeSignTool) { throw "Unable to locate CodeSignTool.bat" }
+          "CODESIGN_TOOL_PATH=$($codeSignTool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Sign Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
+          WINDOWS_SIGNING_ENABLED: "true"
+          WINDOWS_SIGNING_DESCRIPTION: "Baijimu CLI"
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "src-tauri/scripts/sign-windows-artifact.ps1" -FilePath (Join-Path $env:RUNNER_TEMP "baijimu-cli-package\bin\baijimu.exe")
+          $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $env:RUNNER_TEMP "baijimu-cli-package\bin\baijimu.exe")
+          if ($signature.Status -ne "Valid") { throw "CLI signature status is $($signature.Status)" }
+
+      - name: Build Linux CLI
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_dir="$RUNNER_TEMP/baijimu-cli-rs"
+          cargo build --release --manifest-path "$cli_dir/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/baijimu-cli-package/bin"
+          install -m 755 "$cli_dir/target/release/baijimu" "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+
+      - name: Verify and package CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_name="baijimu"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            binary_name="baijimu.exe"
+          fi
+          binary="$RUNNER_TEMP/baijimu-cli-package/bin/$binary_name"
+          "$binary" --version --json
+          output="$RUNNER_TEMP/baijimu-cli-${CLI_VERSION}-${{ matrix.name }}.zip"
+          cd "$RUNNER_TEMP/baijimu-cli-package"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Force -Path 'bin' -DestinationPath '$output'"
+          else
+            zip -r "$output" bin
+          fi
+          checksum="$(shasum -a 256 "$output" | awk '{print $1}')"
+          printf '%s  %s\n' "$checksum" "$(basename "$output")" > "$output.sha256"
+          echo "RELEASE_ASSET=$output" >> "$GITHUB_ENV"
+
+      - name: Upload CLI release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" "$RELEASE_ASSET" "$RELEASE_ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
