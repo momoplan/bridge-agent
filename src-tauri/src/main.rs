@@ -66,6 +66,10 @@ const TRAY_MENU_QUIT: &str = "quit";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const WINDOWS_SERVICE_HANDOFF_RETRIES: usize = 40;
+#[cfg(windows)]
+const WINDOWS_SERVICE_HANDOFF_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 struct DesktopState {
     runtime: AgentRuntimeManager,
@@ -1431,7 +1435,63 @@ async fn restart_agent_from_saved_config(
     state: &tauri::State<'_, DesktopState>,
 ) -> anyhow::Result<RuntimeSnapshot> {
     state.runtime.stop().await?;
-    state.runtime.start_from_path(&state.config_path).await
+    start_runtime_after_windows_service_handoff(&state.runtime, &state.config_path).await
+}
+
+async fn start_runtime_after_windows_service_handoff(
+    runtime: &AgentRuntimeManager,
+    config_path: &Path,
+) -> anyhow::Result<RuntimeSnapshot> {
+    #[cfg(windows)]
+    {
+        for attempt in 0..=WINDOWS_SERVICE_HANDOFF_RETRIES {
+            match runtime.start_from_path(config_path).await {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(err)
+                    if attempt < WINDOWS_SERVICE_HANDOFF_RETRIES
+                        && runtime_lock_is_owned_by_windows_service(&err) =>
+                {
+                    tokio::time::sleep(WINDOWS_SERVICE_HANDOFF_RETRY_DELAY).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("Windows service handoff loop must return")
+    }
+
+    #[cfg(not(windows))]
+    {
+        runtime.start_from_path(config_path).await
+    }
+}
+
+#[cfg(windows)]
+fn runtime_lock_is_owned_by_windows_service(err: &anyhow::Error) -> bool {
+    let Some(conflict) = err.downcast_ref::<RuntimeLockConflict>() else {
+        return false;
+    };
+
+    [
+        conflict.process.name.as_deref(),
+        conflict.process.executable_path.as_deref(),
+        conflict.process.command_line.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(process_value_is_windows_service)
+}
+
+#[cfg(any(windows, test))]
+fn process_value_is_windows_service(value: &str) -> bool {
+    value
+        .trim()
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("bridge-agent-service.exe"))
+        || value
+            .to_ascii_lowercase()
+            .contains("bridge-agent-service.exe")
 }
 
 #[tauri::command]
@@ -3189,7 +3249,7 @@ fn auto_start_agent(
                 return;
             }
         }
-        if let Err(err) = runtime.start_from_path(&config_path).await {
+        if let Err(err) = start_runtime_after_windows_service_handoff(&runtime, &config_path).await {
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
             ));
@@ -3458,6 +3518,19 @@ mod tests {
             preferred_update_asset_suffixes("windows", "aarch64"),
             vec!["_arm64_en-US.msi", "_arm64-setup.exe", ".msi"]
         );
+    }
+
+    #[test]
+    fn windows_service_handoff_recognizes_process_probe_values() {
+        assert!(process_value_is_windows_service(
+            "bridge-agent-service.exe"
+        ));
+        assert!(process_value_is_windows_service(
+            r#"C:\Program Files\Baijimu\bridge-agent-service.exe" --config agent-config.json"#
+        ));
+        assert!(!process_value_is_windows_service(
+            "bridge-agent-desktop.exe"
+        ));
     }
 
     #[test]

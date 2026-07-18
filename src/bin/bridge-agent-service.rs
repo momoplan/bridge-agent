@@ -16,10 +16,13 @@ use clap::Parser;
 use std::ffi::OsString;
 
 #[cfg(windows)]
+use std::fs;
+
+#[cfg(windows)]
 use std::path::PathBuf;
 
 #[cfg(windows)]
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TryRecvError};
 
 #[cfg(windows)]
 use std::time::Duration;
@@ -39,10 +42,24 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_dispatcher;
 
 #[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+
+#[cfg(windows)]
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+
+#[cfg(windows)]
 const SERVICE_NAME: &str = "BridgeAgent";
 
 #[cfg(windows)]
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+#[cfg(windows)]
+const DESKTOP_PROCESS_NAME: &str = "bridge-agent-desktop.exe";
+
+#[cfg(windows)]
+const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(windows)]
 #[derive(Debug, Parser)]
@@ -149,15 +166,11 @@ fn run_service_loop(
         .context("failed to build Tokio runtime for Windows service")?;
     let manager = AgentRuntimeManager::new();
 
-    runtime
-        .block_on(manager.start_from_path(config_path))
-        .with_context(|| format!("failed to start runtime from {}", config_path.display()))?;
-
     status_handle
         .set_service_status(running_status())
         .context("failed to mark service as running")?;
 
-    shutdown_rx.recv().ok();
+    runtime.block_on(run_runtime_supervisor(&manager, config_path, &shutdown_rx))?;
 
     status_handle
         .set_service_status(stop_pending_status())
@@ -168,6 +181,129 @@ fn run_service_loop(
         .context("failed to stop runtime during service shutdown")?;
 
     Ok(())
+}
+
+#[cfg(windows)]
+async fn run_runtime_supervisor(
+    manager: &AgentRuntimeManager,
+    config_path: &PathBuf,
+    shutdown_rx: &mpsc::Receiver<()>,
+) -> Result<()> {
+    let mut applied_config: Option<Vec<u8>> = None;
+    let mut desktop_handoff_active = false;
+
+    loop {
+        match shutdown_rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        if desktop_process_running() {
+            if !desktop_handoff_active {
+                manager
+                    .stop()
+                    .await
+                    .context("failed to stop service runtime for desktop handoff")?;
+                applied_config = None;
+                desktop_handoff_active = true;
+                tracing::info!("bridge-agent runtime handed off to the desktop client");
+            }
+            tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
+            continue;
+        }
+        desktop_handoff_active = false;
+
+        match fs::read(config_path) {
+            Ok(contents) if applied_config.as_deref() != Some(contents.as_slice()) => {
+                let config = match bridge_agent::load_config(config_path) {
+                    Ok(config) => config,
+                    Err(err) => {
+                        tracing::warn!(
+                            "waiting for a valid bridge-agent config at {}: {err:#}",
+                            config_path.display()
+                        );
+                        tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
+                        continue;
+                    }
+                };
+
+                manager
+                    .stop()
+                    .await
+                    .context("failed to stop runtime before applying service config")?;
+
+                if config_is_authorized(&config) {
+                    match manager.start(config, config_path).await {
+                        Ok(_) => applied_config = Some(contents),
+                        Err(err) => {
+                            tracing::warn!(
+                                "service runtime start deferred for {}: {err:#}",
+                                config_path.display()
+                            );
+                        }
+                    }
+                } else {
+                    applied_config = Some(contents);
+                    tracing::info!(
+                        "bridge-agent service is waiting for desktop device authorization"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read bridge-agent config {}: {err}",
+                    config_path.display()
+                );
+            }
+        }
+
+        tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn config_is_authorized(config: &bridge_agent::AgentConfig) -> bool {
+    config.platform.workspace_id.is_some() && !config.relay.token.trim().is_empty()
+}
+
+#[cfg(windows)]
+fn desktop_process_running() -> bool {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        tracing::warn!(
+            "failed to enumerate Windows processes: {}",
+            std::io::Error::last_os_error()
+        );
+        return false;
+    }
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    let mut found = false;
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let process_name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+        if process_name.eq_ignore_ascii_case(DESKTOP_PROCESS_NAME) {
+            found = true;
+            break;
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    found
 }
 
 #[cfg(windows)]
@@ -273,4 +409,22 @@ fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_is_authorized;
+    use bridge_agent::AgentConfig;
+
+    #[test]
+    fn service_waits_until_device_authorization_is_complete() {
+        let mut config = AgentConfig::example();
+        assert!(!config_is_authorized(&config));
+
+        config.platform.workspace_id = Some(1390);
+        assert!(!config_is_authorized(&config));
+
+        config.relay.token = "device-token".to_string();
+        assert!(config_is_authorized(&config));
+    }
 }
