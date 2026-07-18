@@ -1,0 +1,188 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 100, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'BRIDGE_REF', defaultValue: 'codex/codex-management-app', description: 'Bridge Agent branch containing the release')
+        string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.98', description: 'Bridge Agent version')
+        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
+        string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '0.4.0', description: 'Codex local app version')
+        booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
+    }
+
+    stages {
+        stage('Validate release input') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+test -n "$BRIDGE_COMMIT"
+test -n "$CONNECTOR_COMMIT"
+test "$(git rev-parse HEAD)" = "$BRIDGE_COMMIT"
+test "$(node -p 'require("./package.json").version')" = "$BRIDGE_VERSION"
+test "$(node -p 'require("./src-tauri/tauri.conf.json").version')" = "$BRIDGE_VERSION"
+case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+'''
+                withCredentials([usernamePassword(
+                    credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
+                    usernameVariable: 'GITEE_USER',
+                    passwordVariable: 'GITEE_TOKEN'
+                )]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+set +x
+authenticated="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/baijimu-connector-codex.git"
+git clone --depth 1 --branch "$CONNECTOR_REF" "$authenticated" connector-src
+set -x
+test "$(git -C connector-src rev-parse HEAD)" = "$CONNECTOR_COMMIT"
+test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' connector-src/Cargo.toml | head -1)" = "$CONNECTOR_VERSION"
+test "$(node -p 'require("./connector-src/connector.json").version')" = "$CONNECTOR_VERSION"
+'''
+                }
+            }
+        }
+
+        stage('Test release source') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+cargo test --workspace
+npm ci
+npm run build
+cargo test --manifest-path connector-src/Cargo.toml
+'''
+            }
+        }
+
+        stage('Publish source refs') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
+                    usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+git config user.name "Baijimu Jenkins"
+git config user.email "jenkins@baijimu.com"
+set +x
+gitee_bridge="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/bridge-agent.git"
+gitee_connector="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/zxflimit_admin/baijimu-connector-codex.git"
+github_bridge="https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/momoplan/bridge-agent.git"
+
+publish_branch() {
+  remote="$1"
+  commit="$2"
+  branch="$3"
+  current="$(git ls-remote "$remote" "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+  if [ -n "$current" ] && ! git merge-base --is-ancestor "$current" "$commit"; then
+    echo "refusing non-fast-forward publish to $branch" >&2
+    exit 1
+  fi
+  git push "$remote" "$commit:refs/heads/$branch"
+}
+
+publish_tag() {
+  remote="$1"
+  commit="$2"
+  tag="$3"
+  current="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
+  if [ -n "$current" ]; then
+    test "$current" = "$commit"
+    return
+  fi
+  git push "$remote" "$commit:refs/tags/$tag"
+}
+
+git -C connector-src config user.name "Baijimu Jenkins"
+git -C connector-src config user.email "jenkins@baijimu.com"
+current="$(git ls-remote "$gitee_connector" "refs/tags/v${CONNECTOR_VERSION}" | awk 'NR == 1 {print $1}')"
+if [ -n "$current" ]; then
+  test "$current" = "$CONNECTOR_COMMIT"
+else
+  git -C connector-src push "$gitee_connector" "$CONNECTOR_COMMIT:refs/tags/v${CONNECTOR_VERSION}"
+fi
+
+publish_branch "$gitee_bridge" "$BRIDGE_COMMIT" main
+publish_branch "$github_bridge" "$BRIDGE_COMMIT" main
+publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
+publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
+publish_tag "$github_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
+publish_tag "$github_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
+set -x
+'''
+                }
+            }
+        }
+
+        stage('Wait for signed releases') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
+tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-app.yml "codex-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
+'''
+                }
+            }
+        }
+
+        stage('Publish local app market') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION"'
+            }
+        }
+
+        stage('Verify published releases') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/bridge-agent-v${BRIDGE_VERSION}" \
+  | jq -e --arg version "$BRIDGE_VERSION" '
+      .draft == false and
+      ([.assets[].name] | index("Baijimu_" + $version + "_universal.dmg") != null) and
+      ([.assets[].name] | index("Baijimu_" + $version + "_x64_en-US.msi") != null) and
+      ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage") != null) and
+      ([.assets[].name] | index("Baijimu_" + $version + "_amd64.deb") != null)'
+curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/codex-local-app-v${CONNECTOR_VERSION}" \
+  | jq -e --arg version "$CONNECTOR_VERSION" '
+      .draft == false and
+      ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-macos-universal.zip") != null) and
+      ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-windows-x64.zip") != null) and
+      ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-linux-x64.zip") != null)'
+curl -fsS "https://www.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=macos&arch=aarch64" \
+  | jq -e --arg version "$CONNECTOR_VERSION" '(.data // .).latestVersion.version == $version'
+'''
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'codex-market-before-*.tsv', allowEmptyArchive: true
+        }
+    }
+}
