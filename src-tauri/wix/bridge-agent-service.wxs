@@ -70,8 +70,7 @@
                 GenericWrite="yes"
                 Delete="yes"
                 DeleteChild="yes"
-                Traverse="yes"
-                Inheritable="yes" />
+                Traverse="yes" />
             </CreateFolder>
             <RegistryValue
               Root="HKLM"
