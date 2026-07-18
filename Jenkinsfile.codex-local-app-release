@@ -82,7 +82,6 @@ git config user.email "jenkins@baijimu.com"
 set +x
 gitee_bridge="https://gitee.com/zxflimit_admin/bridge-agent.git"
 gitee_connector="https://gitee.com/zxflimit_admin/baijimu-connector-codex.git"
-github_bridge="https://github.com/momoplan/bridge-agent.git"
 askpass="$WORKSPACE/.release-git-askpass.sh"
 cat > "$askpass" <<'ASKPASS'
 #!/bin/sh
@@ -135,12 +134,10 @@ publish_branch "$gitee_bridge" "$BRIDGE_COMMIT" main
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
 
-export GIT_AUTH_USER="$GITHUB_USER"
-export GIT_AUTH_PASSWORD="$GITHUB_TOKEN"
-publish_branch "$github_bridge" "$BRIDGE_COMMIT" main
-publish_tag "$github_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
-publish_tag "$github_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
 rm -f "$askpass"
+tools/release/publish-github-ref.sh momoplan/bridge-agent branch main "$BRIDGE_COMMIT"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "codex-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
 set -x
 '''
                 }
