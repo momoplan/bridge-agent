@@ -123,6 +123,141 @@ select:focus {
   line-height: 1.6;
 }
 
+.startup-recovery-shell {
+  padding: 24px;
+}
+
+.startup-recovery-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.56);
+  backdrop-filter: blur(10px);
+}
+
+.startup-recovery-panel {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid rgba(217, 119, 6, 0.22);
+  border-radius: 22px;
+  background: var(--panel-strong);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.28);
+}
+
+.startup-recovery-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.startup-recovery-heading h1 {
+  margin: 4px 0 10px;
+  font-size: 30px;
+  line-height: 1.2;
+}
+
+.startup-recovery-heading p,
+.startup-update-card p,
+.startup-component p,
+.startup-log-path {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.startup-recovery-reason {
+  margin-top: 18px;
+}
+
+.startup-component-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.startup-component {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.startup-component p {
+  margin-top: 5px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.startup-component-status {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.startup-component-status.status-ready {
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
+}
+
+.startup-component-status.status-degraded {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
+.startup-component-status.status-starting {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+}
+
+.startup-update-card {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid rgba(22, 163, 167, 0.2);
+  border-radius: 16px;
+  background: rgba(240, 253, 252, 0.7);
+}
+
+.startup-update-actions,
+.startup-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.startup-recovery-actions {
+  margin-top: 20px;
+}
+
+.startup-log-path {
+  margin-top: 12px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.startup-health-alert {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
 .sidebar {
   padding: 22px;
   display: grid;

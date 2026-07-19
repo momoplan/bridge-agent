@@ -264,7 +264,7 @@ interface AppVersionInfo {
 type AppUpdateCheckState = "checking" | "ready" | "error";
 
 interface AppUpdateInstallResult {
-  status: "up_to_date" | "downloaded";
+  status: "up_to_date" | "installed";
   version: string;
   assetName: string | null;
   downloadedPath: string | null;
@@ -274,6 +274,7 @@ interface AppUpdateInstallResult {
 type AppUpdateProgressPhase =
   | "checking"
   | "downloading"
+  | "installing"
   | "verifying"
   | "saving"
   | "scheduling"
@@ -287,6 +288,22 @@ interface AppUpdateProgress {
   downloadedBytes: number | null;
   totalBytes: number | null;
   downloadedPath: string | null;
+}
+
+interface StartupComponentHealth {
+  id: string;
+  label: string;
+  status: "starting" | "ready" | "degraded" | "skipped" | string;
+  detail: string | null;
+}
+
+interface StartupHealthSnapshot {
+  safeMode: boolean;
+  forcedSafeMode: boolean;
+  consecutiveFailures: number;
+  frontendReady: boolean;
+  startupLogPath: string;
+  components: StartupComponentHealth[];
 }
 
 interface DesktopPermissionStatus {
@@ -757,6 +774,8 @@ function App() {
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [startupHealth, setStartupHealth] = useState<StartupHealthSnapshot | null>(null);
+  const [startupRecoveryBusy, setStartupRecoveryBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
   const [localAppLifecycleOverrides, setLocalAppLifecycleOverrides] = useState<
@@ -790,6 +809,32 @@ function App() {
 
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void invoke<StartupHealthSnapshot>("mark_frontend_ready")
+      .then((snapshot) => {
+        if (active) {
+          setStartupHealth(snapshot);
+        }
+      })
+      .catch((err) => {
+        console.warn("桌面基础壳启动握手失败", err);
+      });
+    const timer = window.setInterval(() => {
+      void invoke<StartupHealthSnapshot>("get_startup_health")
+        .then((snapshot) => {
+          if (active) {
+            setStartupHealth(snapshot);
+          }
+        })
+        .catch((err) => console.warn("读取启动健康状态失败", err));
+    }, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1842,7 +1887,7 @@ function App() {
             ? `当前版本 ${status.currentVersion} 已停止支持，需要升级到 ${status.latestVersion ?? status.minimumSupportedVersion ?? "最新版本"} 后继续使用。`
             : status.updateAvailable
             ? status.autoDownloadAvailable
-              ? `发现新版本 ${status.latestVersion}，可以下载后自动退出、替换并重启。`
+              ? `发现新版本 ${status.latestVersion}，可以通过官方签名更新器安装并重启。`
               : `发现新版本 ${status.latestVersion}，但当前平台需要跳转发布页手工下载。`
             : `当前已经是最新版本 ${status.currentVersion}`
         );
@@ -1915,15 +1960,32 @@ function App() {
         return;
       }
       setMessage(
-        result.downloadedPath
-          ? `更新包 ${result.assetName ?? ""} 已下载到 ${result.downloadedPath}，应用即将退出并自动完成替换。`
-          : `更新包 ${result.assetName ?? ""} 已下载，应用即将退出并自动完成替换。`
+        `签名更新 ${result.version} 已安装，应用即将重启。`
       );
     } catch (err) {
       setAppUpdateProgress(null);
       handleCommandError(err);
     } finally {
       setUpdateBusy(false);
+    }
+  }
+
+  async function restartInNormalMode() {
+    try {
+      setStartupRecoveryBusy(true);
+      setError("");
+      await invoke("restart_in_normal_mode");
+    } catch (err) {
+      handleCommandError(err);
+      setStartupRecoveryBusy(false);
+    }
+  }
+
+  async function openStartupLog() {
+    try {
+      await invoke("open_startup_log");
+    } catch (err) {
+      handleCommandError(err);
     }
   }
 
@@ -5265,7 +5327,112 @@ function App() {
     return () => window.clearInterval(timer);
   }, [browserAuth, config]);
 
+  const degradedStartupComponents =
+    startupHealth?.components.filter((component) => component.status === "degraded") ?? [];
+
+  function renderStartupRecoveryPanel() {
+    if (!startupHealth?.safeMode) {
+      return null;
+    }
+    const targetVersion = appUpdate?.latestVersion ?? null;
+    return (
+      <section className="startup-recovery-panel" aria-labelledby="startup-recovery-title">
+        <div className="startup-recovery-heading">
+          <div>
+            <p className="eyebrow">安全模式</p>
+            <h1 id="startup-recovery-title">桌面基础壳已启动</h1>
+            <p>
+              业务组件本次未自动启动，你仍然可以检查并安装签名更新、查看启动日志，或修复配置后重启。
+            </p>
+          </div>
+          <span className="status-pill status-backoff">受限运行</span>
+        </div>
+
+        <div className="startup-recovery-reason alert warning">
+          {startupHealth.forcedSafeMode
+            ? "当前进程通过 --safe-mode 明确启动。移除该启动参数后，才能恢复普通模式。"
+            : startupHealth.consecutiveFailures > 0
+              ? `检测到连续 ${startupHealth.consecutiveFailures} 次启动未完成，已停止自动拉起业务组件。`
+              : "启动前置条件异常，已停止自动拉起业务组件，避免客户端反复退出。"}
+        </div>
+
+        <div className="startup-component-list">
+          {startupHealth.components.map((component) => (
+            <div className="startup-component" key={component.id}>
+              <div>
+                <strong>{component.label}</strong>
+                {component.detail ? <p>{component.detail}</p> : null}
+              </div>
+              <span className={`startup-component-status status-${component.status}`}>
+                {formatStartupComponentStatus(component.status)}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="startup-update-card">
+          <div>
+            <strong>客户端更新</strong>
+            <p>
+              {appUpdateCheckState === "checking"
+                ? "正在检查更新…"
+                : appUpdateError
+                  ? `检查失败：${appUpdateError}`
+                  : appUpdate?.updateAvailable
+                    ? `发现 ${targetVersion ?? "新版本"}，可在安全模式直接安装。`
+                    : `当前版本 ${appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-"}。`}
+            </p>
+          </div>
+          <div className="startup-update-actions">
+            {(appUpdate?.updateAvailable && appUpdate.autoDownloadAvailable) || appUpdateError ? (
+              <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
+                {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "通过官方更新器检查并安装"}
+              </button>
+            ) : appUpdate?.updateAvailable ? (
+              <button className="primary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+                打开下载页
+              </button>
+            ) : null}
+            <button
+              className="secondary"
+              onClick={() => void checkAppUpdate(true)}
+              disabled={updateBusy || appUpdateCheckState === "checking"}
+            >
+              {appUpdateCheckState === "checking" ? "检查中" : "重新检查"}
+            </button>
+          </div>
+          {renderAppUpdateProgress()}
+        </div>
+
+        <div className="startup-recovery-actions">
+          <button
+            className="primary"
+            onClick={() => void restartInNormalMode()}
+            disabled={startupRecoveryBusy || startupHealth.forcedSafeMode}
+          >
+            {startupRecoveryBusy ? "正在重启" : "退出安全模式并重启"}
+          </button>
+          <button className="secondary" onClick={() => void openStartupLog()}>
+            打开启动日志
+          </button>
+          <button className="secondary" onClick={() => void recoverInvalidConfig()} disabled={busy}>
+            {busy ? "恢复中" : "归档并恢复默认配置"}
+          </button>
+        </div>
+        <p className="startup-log-path">启动日志：{startupHealth.startupLogPath}</p>
+      </section>
+    );
+  }
+
   if (!config) {
+    if (startupHealth?.safeMode) {
+      return (
+        <main className="app-shell app-loading startup-recovery-shell">
+          {renderStartupRecoveryPanel()}
+          {renderToastStack()}
+        </main>
+      );
+    }
     return (
       <main className="app-shell app-loading">
         <section className="loading-panel">
@@ -5413,6 +5580,17 @@ function App() {
           ) : null}
 
           {renderRuntimeConflictPanel()}
+          {degradedStartupComponents.length > 0 && !startupHealth?.safeMode ? (
+            <div className="alert warning startup-health-alert">
+              <span>
+                部分启动组件处于降级状态：
+                {degradedStartupComponents.map((component) => component.label).join("、")}。桌面客户端仍可使用。
+              </span>
+              <button className="ghost" onClick={() => void openStartupLog()}>
+                查看启动日志
+              </button>
+            </div>
+          ) : null}
           {runtime?.last_error && !needsAuthorization && activePage !== "diagnostics" ? (
             <div className="alert warning">{runtime.last_error}</div>
           ) : null}
@@ -5428,6 +5606,11 @@ function App() {
       {renderToastStack()}
       {renderInstallLocalAppPanel()}
       {renderForceUpdateOverlay()}
+      {startupHealth?.safeMode ? (
+        <div className="startup-recovery-overlay" role="dialog" aria-modal="true">
+          {renderStartupRecoveryPanel()}
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -6322,6 +6505,8 @@ function formatAppUpdateProgressButton(progress: AppUpdateProgress | null): stri
       return "检查中";
     case "verifying":
       return "校验中";
+    case "installing":
+      return "安装中";
     case "saving":
       return "保存中";
     case "scheduling":
@@ -6346,6 +6531,16 @@ function formatAppUpdateProgressDetail(progress: AppUpdateProgress): string {
     progress.downloadedPath && progress.phase !== "downloading" ? `保存到 ${progress.downloadedPath}` : null
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join("，") : "正在连接更新服务，请稍候。";
+}
+
+function formatStartupComponentStatus(status: string): string {
+  const labels: Record<string, string> = {
+    starting: "启动中",
+    ready: "正常",
+    degraded: "异常",
+    skipped: "已跳过"
+  };
+  return labels[status] ?? status;
 }
 
 function formatByteSize(bytes: number): string {

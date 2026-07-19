@@ -329,8 +329,16 @@ jobs:
           SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
           WINDOWS_SIGNING_ENABLED: ${{ env.WINDOWS_SIGNING_ENABLED }}
           WINDOWS_SIGNING_DESCRIPTION: "百积木"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required updater signing secret: $name" >&2
+              exit 1
+            fi
+          done
           npm run tauri -- build ${{ matrix.tauri_args }}
 
       - name: Diagnose Windows WiX fragment failure
@@ -475,7 +483,11 @@ jobs:
               exit 1
             fi
             if [ "${bundle_files[0]}" != "$expected_path" ]; then
+              source_signature="${bundle_files[0]}.sig"
               mv "${bundle_files[0]}" "$expected_path"
+              if [ -f "$source_signature" ]; then
+                mv "$source_signature" "${expected_path}.sig"
+              fi
             fi
             test -f "$expected_path"
           }
@@ -487,12 +499,18 @@ jobs:
               normalize_one "macOS dmg" \
                 "$bundle_dir/Baijimu_${version}_universal.dmg" \
                 "$bundle_dir"/*.dmg
+              updater_dir="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+              normalize_one "macOS updater" \
+                "$updater_dir/Baijimu_${version}_universal.app.tar.gz" \
+                "$updater_dir"/*.app.tar.gz
+              test -s "$updater_dir/Baijimu_${version}_universal.app.tar.gz.sig"
               ;;
             Windows)
               bundle_dir="src-tauri/target/release/bundle/msi"
               normalize_one "Windows msi" \
                 "$bundle_dir/Baijimu_${version}_x64_en-US.msi" \
                 "$bundle_dir"/*.msi
+              test -s "$bundle_dir/Baijimu_${version}_x64_en-US.msi.sig"
               ;;
             Linux)
               appimage_dir="src-tauri/target/release/bundle/appimage"
@@ -500,6 +518,7 @@ jobs:
               normalize_one "Linux AppImage" \
                 "$appimage_dir/Baijimu_${version}_amd64.AppImage" \
                 "$appimage_dir"/*.AppImage
+              test -s "$appimage_dir/Baijimu_${version}_amd64.AppImage.sig"
               normalize_one "Linux deb" \
                 "$deb_dir/Baijimu_${version}_amd64.deb" \
                 "$deb_dir"/*.deb
@@ -722,14 +741,22 @@ jobs:
           shopt -s nullglob
           case "$RELEASE_TARGET" in
             "macOS Universal")
-              bundle_files=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+              bundle_files=(
+                src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+                src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+                src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+              )
               ;;
             "Windows x64")
-              bundle_files=(src-tauri/target/release/bundle/msi/*.msi)
+              bundle_files=(
+                src-tauri/target/release/bundle/msi/*.msi
+                src-tauri/target/release/bundle/msi/*.msi.sig
+              )
               ;;
             "Linux x64")
               bundle_files=(
                 src-tauri/target/release/bundle/appimage/*.AppImage
+                src-tauri/target/release/bundle/appimage/*.AppImage.sig
                 src-tauri/target/release/bundle/deb/*.deb
               )
               ;;
@@ -760,13 +787,14 @@ jobs:
             http://*) api="https://${api#http://}" ;;
           esac
           version="${RELEASE_TAG#bridge-agent-v}"
-          asset_dir="$RUNNER_TEMP/bridge-agent-release-assets"
-          mkdir -p "$asset_dir"
 
           shopt -s nullglob
           case "$RELEASE_TARGET" in
             "macOS Universal")
-              bundle_files=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+              bundle_files=(
+                src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+                src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+              )
               ;;
             "Windows x64")
               bundle_files=(src-tauri/target/release/bundle/msi/*.msi)
@@ -783,23 +811,23 @@ jobs:
               ;;
           esac
 
-          for file in "${bundle_files[@]}"; do
-            cp "$file" "$asset_dir/"
-          done
-
-          asset_count="$(find "$asset_dir" -type f | wc -l | tr -d ' ')"
-          if [ "$asset_count" = "0" ]; then
+          if [ "${#bundle_files[@]}" -eq 0 ]; then
             echo "No release bundles found for $RELEASE_TARGET" >&2
             exit 1
           fi
 
-          find "$asset_dir" -type f -print0 | while IFS= read -r -d '' asset; do
+          for asset in "${bundle_files[@]}"; do
+            signature_args=()
+            if [ -s "${asset}.sig" ]; then
+              signature_args=("${asset}.sig")
+            fi
             node .github/scripts/upload-release-asset.mjs \
               "$api" \
               "$RELEASE_TAG" \
               "$version" \
               "$RELEASE_TARGET" \
-              "$asset"
+              "$asset" \
+              "${signature_args[@]}"
           done
 
   publish-update-service:

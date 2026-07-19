@@ -4,11 +4,11 @@ import http from "node:http";
 import https from "node:https";
 import { basename } from "node:path";
 
-const [apiBaseArg, tagName, version, target, filePath] = process.argv.slice(2);
+const [apiBaseArg, tagName, version, target, filePath, signaturePath] = process.argv.slice(2);
 
 if (!apiBaseArg || !tagName || !version || !target || !filePath) {
   console.error(
-    "Usage: upload-release-asset.mjs <apiBase> <tagName> <version> <target> <filePath>",
+    "Usage: upload-release-asset.mjs <apiBase> <tagName> <version> <target> <filePath> [signaturePath]",
   );
   process.exit(2);
 }
@@ -28,6 +28,10 @@ const bytes = await readFile(filePath);
 const { size } = await stat(filePath);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 const contentType = contentTypeFor(assetName);
+const signature = signaturePath ? (await readFile(signaturePath, "utf8")).trim() : undefined;
+if (signaturePath && !signature) {
+  throw new Error(`Updater signature is empty: ${signaturePath}`);
+}
 
 const prepare = await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/prepare`, {
   tagName,
@@ -37,6 +41,7 @@ const prepare = await postJson(`${apiBase}/releases/${encodeURIComponent(tagName
   sha256,
   contentType,
   sizeBytes: size,
+  signature,
 });
 
 const uploadUrl = prepare.uploadUrl ?? prepare.upload_url;
@@ -68,6 +73,7 @@ await postJson(`${apiBase}/releases/${encodeURIComponent(tagName)}/assets/comple
   sizeBytes: size,
   objectKey: prepare.objectKey ?? prepare.object_key,
   downloadUrl: prepare.resourceUrl ?? prepare.resource_url ?? prepare.downloadUrl ?? prepare.download_url,
+  signature,
 });
 
 console.log(`Uploaded ${assetName} (${size} bytes, sha256:${sha256})`);
@@ -199,6 +205,9 @@ function contentTypeFor(name) {
   if (name.endsWith(".dmg")) {
     return "application/x-apple-diskimage";
   }
+  if (name.endsWith(".app.tar.gz")) {
+    return "application/gzip";
+  }
   if (name.endsWith(".msi")) {
     return "application/x-msi";
   }
@@ -219,7 +228,7 @@ function isAllowedReleaseAsset(name, target) {
     return false;
   }
   if (target === "macOS Universal") {
-    return name.endsWith(".dmg");
+    return name.endsWith(".dmg") || name.endsWith(".app.tar.gz");
   }
   if (target === "Windows x64") {
     return name.endsWith(".msi");

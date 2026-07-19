@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex, RwLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
@@ -48,6 +48,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
+use tauri_plugin_updater::UpdaterExt;
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
 
@@ -64,9 +65,6 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
-const UPDATE_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 20;
-const UPDATE_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 60;
-const UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 30 * 60;
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
@@ -76,6 +74,8 @@ const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
+const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-state.json";
+const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(windows)]
@@ -87,14 +87,220 @@ struct DesktopState {
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
-    local_app_ui_port: u16,
-    local_app_ui_token: String,
+    local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+    startup_health: StartupHealthManager,
 }
 
-struct PreparedLocalAppUiServer {
-    listener: std::net::TcpListener,
+#[derive(Debug, Clone)]
+struct LocalAppUiEndpoint {
     port: u16,
     token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupComponentHealth {
+    id: String,
+    label: String,
+    status: String,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupHealthSnapshot {
+    safe_mode: bool,
+    forced_safe_mode: bool,
+    consecutive_failures: u32,
+    frontend_ready: bool,
+    startup_log_path: String,
+    components: Vec<StartupComponentHealth>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistentStartupState {
+    pending: bool,
+    consecutive_failures: u32,
+    version: Option<String>,
+    started_at_ms: Option<u64>,
+    ready_at_ms: Option<u64>,
+}
+
+#[derive(Clone)]
+struct StartupHealthManager {
+    inner: Arc<Mutex<StartupHealthSnapshot>>,
+    state_path: PathBuf,
+    diagnostics: StartupDiagnostics,
+}
+
+impl StartupHealthManager {
+    fn begin(
+        config_path: &Path,
+        diagnostics: StartupDiagnostics,
+        forced_safe_mode: bool,
+        bootstrap_failure: Option<String>,
+    ) -> Self {
+        let base_dir = resolve_config_base_dir(config_path);
+        let state_path = base_dir.join(STARTUP_STATE_FILE_NAME);
+        let previous = fs::read(&state_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistentStartupState>(&bytes).ok())
+            .unwrap_or_default();
+        let consecutive_failures = if previous.pending {
+            previous.consecutive_failures.saturating_add(1)
+        } else {
+            0
+        };
+        let safe_mode = forced_safe_mode
+            || bootstrap_failure.is_some()
+            || consecutive_failures >= SAFE_MODE_FAILURE_THRESHOLD;
+        let startup_log_path = diagnostics.primary_path.display().to_string();
+        let manager = Self {
+            inner: Arc::new(Mutex::new(StartupHealthSnapshot {
+                safe_mode,
+                forced_safe_mode,
+                consecutive_failures,
+                frontend_ready: false,
+                startup_log_path,
+                components: Vec::new(),
+            })),
+            state_path,
+            diagnostics,
+        };
+        manager.set_component("desktop_shell", "桌面基础壳", "starting", None);
+        if let Some(detail) = bootstrap_failure {
+            manager.set_component("configuration_path", "配置目录", "degraded", Some(detail));
+        } else {
+            manager.set_component("configuration_path", "配置目录", "ready", None);
+        }
+        if safe_mode {
+            manager.diagnostics.warn(format!(
+                "safe mode enabled: forced={forced_safe_mode} consecutive_failures={consecutive_failures}"
+            ));
+        }
+        manager.write_pending_state();
+        manager
+    }
+
+    fn snapshot(&self) -> StartupHealthSnapshot {
+        match self.inner.lock() {
+            Ok(health) => health.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn safe_mode(&self) -> bool {
+        match self.inner.lock() {
+            Ok(health) => health.safe_mode,
+            Err(poisoned) => poisoned.into_inner().safe_mode,
+        }
+    }
+
+    fn set_component(&self, id: &str, label: &str, status: &str, detail: Option<String>) {
+        let mut health = match self.inner.lock() {
+            Ok(health) => health,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(component) = health.components.iter_mut().find(|item| item.id == id) {
+            component.label = label.to_string();
+            component.status = status.to_string();
+            component.detail = detail;
+        } else {
+            health.components.push(StartupComponentHealth {
+                id: id.to_string(),
+                label: label.to_string(),
+                status: status.to_string(),
+                detail,
+            });
+        }
+    }
+
+    fn mark_frontend_ready(&self) -> Result<StartupHealthSnapshot, String> {
+        {
+            let mut health = self
+                .inner
+                .lock()
+                .map_err(|_| "启动状态锁已损坏".to_string())?;
+            health.frontend_ready = true;
+            if let Some(component) = health
+                .components
+                .iter_mut()
+                .find(|item| item.id == "desktop_shell")
+            {
+                component.status = "ready".to_string();
+                component.detail = None;
+            }
+        }
+        self.write_ready_state()?;
+        self.diagnostics
+            .info("frontend readiness handshake completed");
+        Ok(self.snapshot())
+    }
+
+    fn reset_for_normal_restart(&self) -> Result<(), String> {
+        write_startup_state(
+            &self.state_path,
+            &PersistentStartupState {
+                pending: false,
+                consecutive_failures: 0,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                started_at_ms: None,
+                ready_at_ms: Some(now_ms()),
+            },
+        )
+    }
+
+    fn write_pending_state(&self) {
+        let snapshot = self.snapshot();
+        if let Err(err) = write_startup_state(
+            &self.state_path,
+            &PersistentStartupState {
+                pending: true,
+                consecutive_failures: snapshot.consecutive_failures,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                started_at_ms: Some(now_ms()),
+                ready_at_ms: None,
+            },
+        ) {
+            self.diagnostics
+                .warn(format!("failed to persist startup pending state: {err}"));
+        }
+    }
+
+    fn write_ready_state(&self) -> Result<(), String> {
+        write_startup_state(
+            &self.state_path,
+            &PersistentStartupState {
+                pending: false,
+                consecutive_failures: 0,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                started_at_ms: None,
+                ready_at_ms: Some(now_ms()),
+            },
+        )
+    }
+}
+
+fn write_startup_state(path: &Path, state: &PersistentStartupState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建启动状态目录失败: {err}"))?;
+    }
+    let temporary_path = path.with_extension("json.tmp");
+    let bytes =
+        serde_json::to_vec_pretty(state).map_err(|err| format!("序列化启动状态失败: {err}"))?;
+    fs::write(&temporary_path, bytes).map_err(|err| format!("写入启动状态失败: {err}"))?;
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(first_err) if path.exists() => {
+            fs::remove_file(path).map_err(|err| {
+                format!("替换启动状态失败（rename: {first_err}; remove: {err}）")
+            })?;
+            fs::rename(&temporary_path, path)
+                .map_err(|err| format!("提交启动状态失败: {err}"))
+        }
+        Err(err) => Err(format!("提交启动状态失败: {err}")),
+    }
 }
 
 #[derive(Clone)]
@@ -459,10 +665,8 @@ struct UpdateReleaseResponse {
 #[serde(rename_all = "camelCase")]
 struct UpdateReleaseAsset {
     name: String,
-    #[serde(alias = "download_url", alias = "browser_download_url")]
-    download_url: String,
-    digest: Option<String>,
-    sha256: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -899,40 +1103,90 @@ async fn stop_registered_service(
     run_start_command(service_config.name, stop_command).await
 }
 
-fn prepare_local_app_ui_server() -> anyhow::Result<PreparedLocalAppUiServer> {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-    listener.set_nonblocking(true)?;
-    let address = listener.local_addr()?;
-    Ok(PreparedLocalAppUiServer {
-        listener,
-        port: address.port(),
-        token: uuid::Uuid::new_v4().simple().to_string(),
-    })
-}
-
 fn start_local_app_ui_server(
-    prepared: PreparedLocalAppUiServer,
+    endpoint: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+    startup_health: StartupHealthManager,
     diagnostics: StartupDiagnostics,
-) -> anyhow::Result<()> {
-    let listener = tauri::async_runtime::block_on(async move {
-        tokio::net::TcpListener::from_std(prepared.listener)
-    })?;
-    let state = LocalAppUiHttpState {
-        token: prepared.token,
-    };
-    let router = Router::new()
-        .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
-        .route(
-            "/{token}/{connector_id}/{*asset_path}",
-            get(local_app_ui_asset_handler),
-        )
-        .with_state(state);
+) {
+    startup_health.set_component("local_app_ui_server", "本地应用界面服务", "starting", None);
     tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await
+        {
+            Ok(listener) => listener,
+            Err(err) => {
+                let detail = format!("无法监听本机端口: {err}");
+                diagnostics.error(format!("failed to start local app UI server: {detail}"));
+                startup_health.set_component(
+                    "local_app_ui_server",
+                    "本地应用界面服务",
+                    "degraded",
+                    Some(detail),
+                );
+                return;
+            }
+        };
+        let port = match listener.local_addr() {
+            Ok(address) => address.port(),
+            Err(err) => {
+                let detail = format!("无法读取监听地址: {err}");
+                diagnostics.error(format!("failed to start local app UI server: {detail}"));
+                startup_health.set_component(
+                    "local_app_ui_server",
+                    "本地应用界面服务",
+                    "degraded",
+                    Some(detail),
+                );
+                return;
+            }
+        };
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        match endpoint.write() {
+            Ok(mut value) => {
+                *value = Some(LocalAppUiEndpoint {
+                    port,
+                    token: token.clone(),
+                });
+            }
+            Err(_) => {
+                let detail = "本地应用界面状态锁已损坏".to_string();
+                diagnostics.error(&detail);
+                startup_health.set_component(
+                    "local_app_ui_server",
+                    "本地应用界面服务",
+                    "degraded",
+                    Some(detail),
+                );
+                return;
+            }
+        }
+        startup_health.set_component(
+            "local_app_ui_server",
+            "本地应用界面服务",
+            "ready",
+            Some(format!("127.0.0.1:{port}")),
+        );
+        diagnostics.info(format!("local app UI server listening on 127.0.0.1:{port}"));
+        let state = LocalAppUiHttpState { token };
+        let router = Router::new()
+            .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
+            .route(
+                "/{token}/{connector_id}/{*asset_path}",
+                get(local_app_ui_asset_handler),
+            )
+            .with_state(state);
         if let Err(err) = axum::serve(listener, router).await {
             diagnostics.error(format!("local app UI server stopped: {err:#}"));
+            if let Ok(mut value) = endpoint.write() {
+                *value = None;
+            }
+            startup_health.set_component(
+                "local_app_ui_server",
+                "本地应用界面服务",
+                "degraded",
+                Some(format!("服务已停止: {err}")),
+            );
         }
     });
-    Ok(())
 }
 
 async fn local_app_ui_entry_handler(
@@ -1094,11 +1348,17 @@ fn connector_app_ui_url(
         .ok_or_else(|| format!("应用 {} 没有声明内嵌界面", record.manifest.name))?;
     resolve_connector_ui_entry(Path::new(&record.package_path), ui)
         .map_err(|err| err.to_string())?;
+    let endpoint = state
+        .local_app_ui
+        .read()
+        .map_err(|_| "本地应用界面状态锁已损坏".to_string())?
+        .clone()
+        .ok_or_else(|| "本地应用界面服务当前不可用，请在诊断页查看启动状态".to_string())?;
     Ok(format!(
         "http://{}:{}/{}/{}/",
-        local_app_ui_host(&state.local_app_ui_token, &record.manifest.id),
-        state.local_app_ui_port,
-        state.local_app_ui_token,
+        local_app_ui_host(&endpoint.token, &record.manifest.id),
+        endpoint.port,
+        endpoint.token,
         record.manifest.id
     ))
 }
@@ -1815,12 +2075,54 @@ fn app_version() -> AppVersionInfo {
 }
 
 #[tauri::command]
+fn get_startup_health(state: tauri::State<'_, DesktopState>) -> StartupHealthSnapshot {
+    state.startup_health.snapshot()
+}
+
+#[tauri::command]
+fn mark_frontend_ready(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<StartupHealthSnapshot, String> {
+    state.startup_health.mark_frontend_ready()
+}
+
+#[tauri::command]
+fn restart_in_normal_mode(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    if state.startup_health.snapshot().forced_safe_mode {
+        return Err("当前进程由 --safe-mode 参数启动，请移除该参数后重新启动应用".to_string());
+    }
+    state.startup_health.reset_for_normal_restart()?;
+    state
+        .startup_health
+        .diagnostics
+        .info("normal mode restart requested from recovery UI");
+    app.restart();
+}
+
+#[tauri::command]
+fn open_startup_log(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    let path = state.startup_health.snapshot().startup_log_path;
+    open::that(path).map_err(|err| format!("打开启动日志失败: {err}"))
+}
+
+#[tauri::command]
+fn report_frontend_bootstrap_event(state: tauri::State<'_, DesktopState>, message: String) {
+    state
+        .startup_health
+        .diagnostics
+        .info(format!("frontend bootstrap: {message}"));
+}
+
+#[tauri::command]
 async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
     let release = fetch_latest_release().await?;
     let latest_version = release_version(&release)?;
-    let preferred_asset = select_release_asset(&release);
+    let preferred_asset = select_tauri_updater_asset(&release);
     let release_url = release_page_url(&release);
     let release_name = release.release_name.clone();
     let published_at = release.published_at.clone();
@@ -1863,232 +2165,119 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         },
     );
 
-    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|err| format!("当前版本号无效: {err}"))?;
-    let release = fetch_latest_release().await?;
-    let latest_version = release_version(&release)?;
-    let release_url = release_page_url(&release);
-
-    let force_update_required = release_force_update_required(&release, &current_version);
-    let update_available = force_update_required
-        || release
-            .update_available
-            .unwrap_or(latest_version > current_version);
-    if (!update_available || latest_version <= current_version) && !force_update_required {
+    let release_url = configured_release_page_url().unwrap_or_default();
+    let updater = app
+        .updater()
+        .map_err(|err| format!("初始化官方更新器失败: {err}"))?;
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|err| format!("检查官方更新失败: {err}"))?
+    else {
         return Ok(AppUpdateInstallResult {
             status: "up_to_date".to_string(),
-            version: current_version.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             asset_name: None,
             downloaded_path: None,
             release_url,
         });
-    }
-
-    let asset = select_release_asset(&release).ok_or_else(|| {
-        format!(
-            "当前平台 {} 暂不支持自动下载更新，请打开发布页手工下载。",
-            current_update_target()
-        )
-    })?;
+    };
+    let update_version = update.version.to_string();
+    let asset_name = update
+        .download_url
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned);
 
     emit_app_update_progress(
         &app,
         AppUpdateProgress {
             phase: "downloading".to_string(),
             message: "正在下载更新包".to_string(),
-            version: Some(latest_version.to_string()),
-            asset_name: Some(asset.name.clone()),
+            version: Some(update_version.clone()),
+            asset_name: asset_name.clone(),
             downloaded_bytes: Some(0),
             total_bytes: None,
             downloaded_path: None,
         },
     );
 
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(UPDATE_DOWNLOAD_CONNECT_TIMEOUT_SECS))
-        .read_timeout(Duration::from_secs(UPDATE_DOWNLOAD_READ_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS))
-        .build()
-        .map_err(|err| format!("创建更新下载客户端失败: {err}"))?;
-    let mut response = client
-        .get(&asset.download_url)
-        .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
-        .send()
-        .await
-        .map_err(|err| format!("下载更新失败: {err}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let payload = response.text().await.unwrap_or_default();
-        return Err(format!("下载更新失败 ({status}): {payload}"));
-    }
-
-    let total_bytes = response.content_length();
-    let mut bytes = Vec::new();
+    let progress_app = app.clone();
+    let progress_version = update_version.clone();
+    let progress_asset_name = asset_name.clone();
     let mut downloaded_bytes = 0_u64;
-    let mut last_progress_at = Instant::now();
-
-    while let Some(chunk) = response
-        .chunk()
+    let mut last_progress_at = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    let install_app = app.clone();
+    let install_version = update_version.clone();
+    let install_asset_name = asset_name.clone();
+    update
+        .download_and_install(
+            move |chunk_length, total_bytes| {
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk_length as u64);
+                if last_progress_at.elapsed() >= Duration::from_millis(250)
+                    || total_bytes.is_some_and(|total| downloaded_bytes >= total)
+                {
+                    emit_app_update_progress(
+                        &progress_app,
+                        AppUpdateProgress {
+                            phase: "downloading".to_string(),
+                            message: "正在下载更新包".to_string(),
+                            version: Some(progress_version.clone()),
+                            asset_name: progress_asset_name.clone(),
+                            downloaded_bytes: Some(downloaded_bytes),
+                            total_bytes,
+                            downloaded_path: None,
+                        },
+                    );
+                    last_progress_at = Instant::now();
+                }
+            },
+            move || {
+                emit_app_update_progress(
+                    &install_app,
+                    AppUpdateProgress {
+                        phase: "installing".to_string(),
+                        message: "更新包签名校验通过，正在安装".to_string(),
+                        version: Some(install_version),
+                        asset_name: install_asset_name,
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        downloaded_path: None,
+                    },
+                );
+            },
+        )
         .await
-        .map_err(|err| format!("读取更新文件失败: {err}"))?
-    {
-        downloaded_bytes += chunk.len() as u64;
-        bytes.extend_from_slice(chunk.as_ref());
-
-        if last_progress_at.elapsed() >= Duration::from_millis(250)
-            || total_bytes.is_some_and(|total| downloaded_bytes >= total)
-        {
-            emit_app_update_progress(
-                &app,
-                AppUpdateProgress {
-                    phase: "downloading".to_string(),
-                    message: "正在下载更新包".to_string(),
-                    version: Some(latest_version.to_string()),
-                    asset_name: Some(asset.name.clone()),
-                    downloaded_bytes: Some(downloaded_bytes),
-                    total_bytes,
-                    downloaded_path: None,
-                },
-            );
-            last_progress_at = Instant::now();
-        }
-    }
+        .map_err(|err| format!("下载或安装官方更新失败: {err}"))?;
 
     emit_app_update_progress(
         &app,
         AppUpdateProgress {
-            phase: "verifying".to_string(),
-            message: "正在校验更新包".to_string(),
-            version: Some(latest_version.to_string()),
-            asset_name: Some(asset.name.clone()),
-            downloaded_bytes: Some(downloaded_bytes),
-            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+            phase: "ready_to_install".to_string(),
+            message: "更新已安装，应用即将重启".to_string(),
+            version: Some(update_version.clone()),
+            asset_name: asset_name.clone(),
+            downloaded_bytes: None,
+            total_bytes: None,
             downloaded_path: None,
         },
     );
-    verify_asset_digest(asset, bytes.as_ref())?;
+    let app_to_restart = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        app_to_restart.restart();
+    });
 
-    let download_path = resolve_update_download_path(&asset.name)?;
-    if let Some(parent) = download_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("创建更新目录失败: {err}"))?;
-    }
-    emit_app_update_progress(
-        &app,
-        AppUpdateProgress {
-            phase: "saving".to_string(),
-            message: "正在保存更新包".to_string(),
-            version: Some(latest_version.to_string()),
-            asset_name: Some(asset.name.clone()),
-            downloaded_bytes: Some(downloaded_bytes),
-            total_bytes: total_bytes.or(Some(downloaded_bytes)),
-            downloaded_path: Some(download_path.display().to_string()),
-        },
-    );
-    std::fs::write(&download_path, bytes.as_slice())
-        .map_err(|err| format!("写入更新文件失败: {err}"))?;
-    make_asset_ready_to_open(&download_path)?;
-
-    emit_app_update_progress(
-        &app,
-        AppUpdateProgress {
-            phase: "scheduling".to_string(),
-            message: "正在准备安装并重启".to_string(),
-            version: Some(latest_version.to_string()),
-            asset_name: Some(asset.name.clone()),
-            downloaded_bytes: Some(downloaded_bytes),
-            total_bytes: total_bytes.or(Some(downloaded_bytes)),
-            downloaded_path: Some(download_path.display().to_string()),
-        },
-    );
-
-    #[cfg(target_os = "macos")]
-    {
-        schedule_macos_app_update(&app, &download_path)?;
-        let app_to_exit = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1200));
-            app_to_exit.exit(0);
-        });
-
-        emit_app_update_progress(
-            &app,
-            AppUpdateProgress {
-                phase: "ready_to_install".to_string(),
-                message: "更新包已就绪，应用即将退出安装".to_string(),
-                version: Some(latest_version.to_string()),
-                asset_name: Some(asset.name.clone()),
-                downloaded_bytes: Some(downloaded_bytes),
-                total_bytes: total_bytes.or(Some(downloaded_bytes)),
-                downloaded_path: Some(download_path.display().to_string()),
-            },
-        );
-
-        Ok(AppUpdateInstallResult {
-            status: "downloaded".to_string(),
-            version: latest_version.to_string(),
-            asset_name: Some(asset.name.clone()),
-            downloaded_path: Some(download_path.display().to_string()),
-            release_url,
-        })
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        schedule_windows_app_update(&app, &download_path)?;
-        let app_to_exit = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(800));
-            quit_app(&app_to_exit);
-        });
-
-        emit_app_update_progress(
-            &app,
-            AppUpdateProgress {
-                phase: "ready_to_install".to_string(),
-                message: "更新包已就绪，应用即将退出安装".to_string(),
-                version: Some(latest_version.to_string()),
-                asset_name: Some(asset.name.clone()),
-                downloaded_bytes: Some(downloaded_bytes),
-                total_bytes: total_bytes.or(Some(downloaded_bytes)),
-                downloaded_path: Some(download_path.display().to_string()),
-            },
-        );
-
-        Ok(AppUpdateInstallResult {
-            status: "downloaded".to_string(),
-            version: latest_version.to_string(),
-            asset_name: Some(asset.name.clone()),
-            downloaded_path: Some(download_path.display().to_string()),
-            release_url,
-        })
-    }
-
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        open::that(&download_path).map_err(|err| format!("打开安装包失败: {err}"))?;
-
-        emit_app_update_progress(
-            &app,
-            AppUpdateProgress {
-                phase: "ready_to_install".to_string(),
-                message: "更新包已打开，请按系统提示完成安装".to_string(),
-                version: Some(latest_version.to_string()),
-                asset_name: Some(asset.name.clone()),
-                downloaded_bytes: Some(downloaded_bytes),
-                total_bytes: total_bytes.or(Some(downloaded_bytes)),
-                downloaded_path: Some(download_path.display().to_string()),
-            },
-        );
-
-        Ok(AppUpdateInstallResult {
-            status: "downloaded".to_string(),
-            version: latest_version.to_string(),
-            asset_name: Some(asset.name.clone()),
-            downloaded_path: Some(download_path.display().to_string()),
-            release_url,
-        })
-    }
+    Ok(AppUpdateInstallResult {
+        status: "installed".to_string(),
+        version: update_version,
+        asset_name,
+        downloaded_path: None,
+        release_url,
+    })
 }
 
 fn emit_app_update_progress(app: &tauri::AppHandle, progress: AppUpdateProgress) {
@@ -2187,305 +2376,23 @@ fn current_update_target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn select_release_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleaseAsset> {
-    let preferred_names =
-        preferred_update_asset_suffixes(std::env::consts::OS, std::env::consts::ARCH);
-
-    for suffix in preferred_names {
-        if let Some(asset) = release
-            .assets
-            .iter()
-            .find(|asset| asset.name.ends_with(suffix))
-        {
-            return Some(asset);
-        }
-    }
-
-    None
-}
-
-fn preferred_update_asset_suffixes(os: &str, arch: &str) -> Vec<&'static str> {
-    match (os, arch) {
-        ("macos", _) => vec!["_universal.dmg", ".dmg"],
-        ("windows", "x86_64") => vec!["_x64_en-US.msi", ".msi", "_x64-setup.exe"],
-        ("windows", "aarch64") => vec!["_arm64_en-US.msi", "_arm64-setup.exe", ".msi"],
-        ("linux", "x86_64") => vec!["_amd64.AppImage", ".AppImage", "_amd64.deb", ".deb"],
-        _ => Vec::new(),
-    }
-}
-
-fn verify_asset_digest(asset: &UpdateReleaseAsset, bytes: &[u8]) -> Result<(), String> {
-    let Some(expected_hash) = expected_asset_sha256(asset) else {
-        return Ok(());
+fn select_tauri_updater_asset(release: &UpdateReleaseResponse) -> Option<&UpdateReleaseAsset> {
+    let suffixes: &[&str] = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) => &[".app.tar.gz"],
+        ("windows", "x86_64") => &["_x64_en-US.msi", ".msi"],
+        ("windows", "aarch64") => &["_arm64_en-US.msi", ".msi"],
+        ("linux", "x86_64") => &["_amd64.AppImage", ".AppImage"],
+        _ => &[],
     };
-    let actual_hash = format!("{:x}", Sha256::digest(bytes));
-    if actual_hash != expected_hash.to_ascii_lowercase() {
-        return Err(format!("更新文件校验失败: {}", asset.name));
-    }
-    Ok(())
-}
-
-fn expected_asset_sha256(asset: &UpdateReleaseAsset) -> Option<&str> {
-    if let Some(sha256) = asset.sha256.as_deref() {
-        let sha256 = sha256.trim();
-        if !sha256.is_empty() {
-            return Some(sha256);
-        }
-    }
-    asset
-        .digest
-        .as_deref()
-        .and_then(|digest| digest.trim().strip_prefix("sha256:"))
-        .map(str::trim)
-        .filter(|sha256| !sha256.is_empty())
-}
-
-fn resolve_update_download_path(asset_name: &str) -> Result<PathBuf, String> {
-    let base_dir =
-        dirs::download_dir().unwrap_or_else(|| std::env::temp_dir().join("bridge-agent-downloads"));
-    let path = base_dir.join("百积木更新").join(asset_name);
-    if path.as_os_str().is_empty() {
-        return Err("无法确定更新文件保存路径".to_string());
-    }
-    Ok(path)
-}
-
-fn make_asset_ready_to_open(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("AppImage"))
-    {
-        let mut permissions = std::fs::metadata(path)
-            .map_err(|err| format!("读取更新文件权限失败: {err}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions)
-            .map_err(|err| format!("设置更新文件权限失败: {err}"))?;
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn schedule_macos_app_update(app: &tauri::AppHandle, dmg_path: &Path) -> Result<(), String> {
-    let current_bundle = current_macos_app_bundle()
-        .ok_or_else(|| "无法确定当前 macOS 应用包路径，不能自动替换更新。".to_string())?;
-    let target_bundle = if current_bundle.starts_with("/Volumes") {
-        PathBuf::from("/Applications").join(
-            current_bundle
-                .file_name()
-                .ok_or_else(|| "无法确定当前 macOS 应用包名称。".to_string())?,
-        )
-    } else {
-        current_bundle
-    };
-    let app_name = target_bundle
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("百积木")
-        .to_string();
-    let bundle_identifier = app.config().identifier.clone();
-    let process_id = std::process::id().to_string();
-
-    let script_path = std::env::temp_dir().join(format!(
-        "bridge-agent-update-{}-{}.sh",
-        process_id,
-        env!("CARGO_PKG_VERSION")
-    ));
-    std::fs::write(&script_path, macos_update_script())
-        .map_err(|err| format!("写入 macOS 更新脚本失败: {err}"))?;
-    let mut permissions = std::fs::metadata(&script_path)
-        .map_err(|err| format!("读取 macOS 更新脚本权限失败: {err}"))?
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&script_path, permissions)
-        .map_err(|err| format!("设置 macOS 更新脚本权限失败: {err}"))?;
-
-    Command::new("/bin/sh")
-        .arg(&script_path)
-        .arg(dmg_path)
-        .arg(&target_bundle)
-        .arg(app_name)
-        .arg(process_id)
-        .arg(bundle_identifier)
-        .spawn()
-        .map_err(|err| format!("启动 macOS 更新安装器失败: {err}"))?;
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn current_macos_app_bundle() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    for ancestor in exe.ancestors() {
-        if ancestor
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-        {
-            return Some(ancestor.to_path_buf());
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn macos_update_script() -> &'static str {
-    r#"#!/bin/sh
-set -u
-
-DMG_PATH="$1"
-TARGET_APP="$2"
-APP_NAME="$3"
-APP_PID="$4"
-BUNDLE_IDENTIFIER="$5"
-LOG_DIR="$HOME/Library/Logs"
-LOG_FILE="$LOG_DIR/百积木更新器.log"
-
-mkdir -p "$LOG_DIR"
-exec >> "$LOG_FILE" 2>&1
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting update from $DMG_PATH to $TARGET_APP"
-
-for _ in $(seq 1 60); do
-  if ! kill -0 "$APP_PID" 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-
-if kill -0 "$APP_PID" 2>/dev/null; then
-  /usr/bin/osascript -e "tell application id \"$BUNDLE_IDENTIFIER\" to quit" >/dev/null 2>&1 || true
-  for _ in $(seq 1 20); do
-    if ! kill -0 "$APP_PID" 2>/dev/null; then
-      break
-    fi
-    sleep 1
-  done
-fi
-
-if kill -0 "$APP_PID" 2>/dev/null; then
-  echo "application is still running; aborting update"
-  exit 1
-fi
-
-ATTACH_OUTPUT="$(/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly)"
-VOLUME="$(printf '%s\n' "$ATTACH_OUTPUT" | /usr/bin/awk '/\/Volumes\// {print substr($0, index($0, "/Volumes/")); exit}')"
-
-cleanup() {
-  if [ -n "${VOLUME:-}" ]; then
-    /usr/bin/hdiutil detach "$VOLUME" -quiet >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT
-
-if [ -z "${VOLUME:-}" ] || [ ! -d "$VOLUME" ]; then
-  echo "failed to mount update dmg"
-  exit 1
-fi
-
-SOURCE_APP="$(/usr/bin/find "$VOLUME" -maxdepth 1 -name "*.app" -type d | /usr/bin/head -n 1)"
-if [ -z "$SOURCE_APP" ] || [ ! -d "$SOURCE_APP" ]; then
-  echo "no .app bundle found in update dmg"
-  exit 1
-fi
-
-install_without_privilege() {
-  /bin/mkdir -p "$(/usr/bin/dirname "$TARGET_APP")" &&
-  /bin/rm -rf "$TARGET_APP" &&
-  /usr/bin/ditto "$SOURCE_APP" "$TARGET_APP"
-}
-
-install_with_privilege() {
-  /usr/bin/osascript - "$SOURCE_APP" "$TARGET_APP" <<'OSA'
-on run argv
-  set sourceApp to item 1 of argv
-  set targetApp to item 2 of argv
-  do shell script "/bin/rm -rf " & quoted form of targetApp & " && /usr/bin/ditto " & quoted form of sourceApp & " " & quoted form of targetApp with administrator privileges
-end run
-OSA
-}
-
-if ! install_without_privilege; then
-  echo "normal install failed; requesting administrator privilege"
-  install_with_privilege
-fi
-
-/usr/bin/xattr -dr com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1 || true
-/usr/bin/open "$TARGET_APP"
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] update installed and relaunched $APP_NAME"
-"#
-}
-
-#[cfg(target_os = "windows")]
-fn schedule_windows_app_update(
-    _app: &tauri::AppHandle,
-    installer_path: &Path,
-) -> Result<(), String> {
-    let process_id = std::process::id().to_string();
-    let script_path = std::env::temp_dir().join(format!(
-        "bridge-agent-update-{}-{}.ps1",
-        process_id,
-        now_ms()
-    ));
-    std::fs::write(&script_path, windows_update_script())
-        .map_err(|err| format!("写入 Windows 更新启动脚本失败: {err}"))?;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-        ])
-        .arg(&script_path)
-        .arg("-ParentPid")
-        .arg(&process_id)
-        .arg("-InstallerPath")
-        .arg(installer_path);
-    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
-    command
-        .spawn()
-        .map_err(|err| format!("启动 Windows 更新安装器失败: {err}"))?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn windows_update_script() -> &'static str {
-    r#"
-param(
-  [Parameter(Mandatory = $true)]
-  [int]$ParentPid,
-  [Parameter(Mandatory = $true)]
-  [string]$InstallerPath
-)
-
-$ErrorActionPreference = 'Stop'
-
-try {
-  Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-} catch {
-}
-
-Start-Sleep -Milliseconds 300
-
-if ([System.IO.Path]::GetExtension($InstallerPath) -ieq '.msi') {
-  Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $InstallerPath)
-} else {
-  Start-Process -FilePath $InstallerPath
-}
-
-try {
-  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-} catch {
-}
-"#
+    suffixes.iter().find_map(|suffix| {
+        release.assets.iter().find(|asset| {
+            asset.name.ends_with(suffix)
+                && asset
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| !signature.trim().is_empty())
+        })
+    })
 }
 
 fn read_desktop_permission_status() -> DesktopPermissionStatus {
@@ -3536,8 +3443,10 @@ fn quit_app(app: &tauri::AppHandle) {
 fn auto_start_agent(
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
+    startup_health: StartupHealthManager,
     diagnostics: StartupDiagnostics,
 ) {
+    startup_health.set_component("agent_runtime", "Agent 运行时", "starting", None);
     tauri::async_runtime::spawn(async move {
         diagnostics.info(format!(
             "auto start preparing config at {}",
@@ -3548,12 +3457,24 @@ fn auto_start_agent(
                 "failed to prepare bridge-agent config at {}: {err:#}",
                 config_path.display()
             ));
+            startup_health.set_component(
+                "agent_runtime",
+                "Agent 运行时",
+                "degraded",
+                Some(format!("配置初始化失败: {err}")),
+            );
             return;
         }
         match load_agent_config(&config_path) {
             Ok(config) if !config_is_authorized(&config) => {
                 diagnostics
                     .info("bridge-agent runtime auto start skipped: device is not authorized yet");
+                startup_health.set_component(
+                    "agent_runtime",
+                    "Agent 运行时",
+                    "ready",
+                    Some("设备尚未授权，未自动连接".to_string()),
+                );
                 return;
             }
             Ok(_) => diagnostics.info("bridge-agent config loaded for auto start"),
@@ -3562,6 +3483,12 @@ fn auto_start_agent(
                     "failed to load bridge-agent config before auto start from {}: {err:#}",
                     config_path.display()
                 ));
+                startup_health.set_component(
+                    "agent_runtime",
+                    "Agent 运行时",
+                    "degraded",
+                    Some(format!("配置加载失败: {err}")),
+                );
                 return;
             }
         }
@@ -3570,8 +3497,15 @@ fn auto_start_agent(
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
             ));
+            startup_health.set_component(
+                "agent_runtime",
+                "Agent 运行时",
+                "degraded",
+                Some(err.to_string()),
+            );
         } else {
             diagnostics.info("bridge-agent runtime auto start completed");
+            startup_health.set_component("agent_runtime", "Agent 运行时", "ready", None);
         }
     });
 }
@@ -3590,6 +3524,27 @@ fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Resu
         status.launcher_path
     ));
     Ok(())
+}
+
+fn bootstrap_bundled_baijimu_cli(
+    startup_health: StartupHealthManager,
+    diagnostics: StartupDiagnostics,
+) {
+    startup_health.set_component("managed_cli", "Baijimu CLI", "starting", None);
+    tauri::async_runtime::spawn_blocking(move || match install_bundled_baijimu_cli(&diagnostics) {
+        Ok(()) => startup_health.set_component("managed_cli", "Baijimu CLI", "ready", None),
+        Err(err) => {
+            diagnostics.warn(format!(
+                "failed to install bundled baijimu CLI; continuing without CLI install: {err:#}"
+            ));
+            startup_health.set_component(
+                "managed_cli",
+                "Baijimu CLI",
+                "degraded",
+                Some(err.to_string()),
+            );
+        }
+    });
 }
 
 fn bundled_baijimu_cli_path() -> Option<PathBuf> {
@@ -3638,37 +3593,50 @@ fn main() {
     let bootstrap_diagnostics = StartupDiagnostics::bootstrap();
     install_panic_diagnostics(bootstrap_diagnostics.clone());
 
-    if let Err(err) = install_rustls_crypto_provider() {
-        bootstrap_diagnostics.error(format!("failed to install rustls provider: {err:#}"));
-        std::process::exit(1);
-    }
-
-    let config_path = match default_config_path() {
-        Ok(path) => path,
+    let crypto_provider_failure = install_rustls_crypto_provider().err().map(|err| {
+        let detail = format!("failed to install rustls provider: {err:#}");
+        bootstrap_diagnostics.error(&detail);
+        detail
+    });
+    let (config_path, config_path_failure) = match default_config_path() {
+        Ok(path) => (path, None),
         Err(err) => {
-            bootstrap_diagnostics
-                .error(format!("failed to determine default config path: {err:#}"));
-            std::process::exit(1);
+            let detail = format!("failed to determine default config path: {err:#}");
+            bootstrap_diagnostics.error(&detail);
+            (
+                std::env::temp_dir()
+                    .join("baijimu-recovery")
+                    .join("agent-config.json"),
+                Some(detail),
+            )
         }
     };
     let diagnostics = StartupDiagnostics::for_config_path(&config_path);
     install_panic_diagnostics(diagnostics.clone());
     log_startup_environment(&diagnostics, &config_path);
-    let local_app_ui_server = match prepare_local_app_ui_server() {
-        Ok(server) => server,
-        Err(err) => {
-            diagnostics.error(format!("failed to prepare local app UI server: {err:#}"));
-            std::process::exit(1);
-        }
-    };
-    let local_app_ui_port = local_app_ui_server.port;
-    let local_app_ui_token = local_app_ui_server.token.clone();
+    let forced_safe_mode = std::env::args().any(|arg| arg == "--safe-mode");
+    let startup_health = StartupHealthManager::begin(
+        &config_path,
+        diagnostics.clone(),
+        forced_safe_mode,
+        config_path_failure,
+    );
+    if let Some(detail) = crypto_provider_failure {
+        startup_health.set_component("crypto_provider", "网络加密组件", "degraded", Some(detail));
+    } else {
+        startup_health.set_component("crypto_provider", "网络加密组件", "ready", None);
+    }
 
     let runtime = AgentRuntimeManager::new();
     let quitting = Arc::new(AtomicBool::new(false));
+    let local_app_ui = Arc::new(RwLock::new(None));
     let single_instance_diagnostics = diagnostics.clone();
     let setup_diagnostics = diagnostics.clone();
+    let page_load_diagnostics = diagnostics.clone();
+    let setup_health = startup_health.clone();
+    let setup_local_app_ui = Arc::clone(&local_app_ui);
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(
             move |app, _argv, _cwd| {
                 let diagnostics = single_instance_diagnostics.clone();
@@ -3681,31 +3649,61 @@ fn main() {
             runtime: runtime.clone(),
             config_path: config_path.clone(),
             quitting: Arc::clone(&quitting),
-            local_app_ui_port,
-            local_app_ui_token,
+            local_app_ui,
+            startup_health: startup_health.clone(),
+        })
+        .on_page_load(move |webview, payload| {
+            page_load_diagnostics.info(format!(
+                "webview page load {:?}: label={} url={}",
+                payload.event(),
+                webview.label(),
+                payload.url()
+            ));
         })
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
-            if let Err(err) =
-                start_local_app_ui_server(local_app_ui_server, setup_diagnostics.clone())
-            {
-                return Err(err.into());
+            #[cfg(debug_assertions)]
+            if std::env::var_os("BRIDGE_AGENT_OPEN_DEVTOOLS").is_some() {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
             }
+            setup_health.set_component("updater", "官方更新器", "ready", None);
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"
                 ));
+                setup_health.set_component("tray", "系统托盘", "degraded", Some(err.to_string()));
+            } else {
+                setup_health.set_component("tray", "系统托盘", "ready", None);
             }
-            if let Err(err) = install_bundled_baijimu_cli(&setup_diagnostics) {
-                setup_diagnostics.warn(format!(
-                    "failed to install bundled baijimu CLI; continuing without CLI install: {err:#}"
-                ));
+            if setup_health.safe_mode() {
+                for (id, label) in [
+                    ("local_app_ui_server", "本地应用界面服务"),
+                    ("managed_cli", "Baijimu CLI"),
+                    ("agent_runtime", "Agent 运行时"),
+                ] {
+                    setup_health.set_component(
+                        id,
+                        label,
+                        "skipped",
+                        Some("安全模式下未自动启动".to_string()),
+                    );
+                }
+            } else {
+                start_local_app_ui_server(
+                    Arc::clone(&setup_local_app_ui),
+                    setup_health.clone(),
+                    setup_diagnostics.clone(),
+                );
+                bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
+                auto_start_agent(
+                    runtime.clone(),
+                    config_path.clone(),
+                    setup_health.clone(),
+                    setup_diagnostics.clone(),
+                );
             }
-            auto_start_agent(
-                runtime.clone(),
-                config_path.clone(),
-                setup_diagnostics.clone(),
-            );
             setup_diagnostics.info("tauri setup completed");
             Ok(())
         })
@@ -3754,6 +3752,11 @@ fn main() {
             start_browser_auth,
             poll_browser_auth,
             app_version,
+            get_startup_health,
+            mark_frontend_ready,
+            restart_in_normal_mode,
+            open_startup_log,
+            report_frontend_bootstrap_event,
             check_app_update,
             install_app_update,
             baijimu_cli_status,
@@ -3768,6 +3771,12 @@ fn main() {
         .run(move |app, event| match event {
             tauri::RunEvent::Ready => {
                 diagnostics.info("tauri runtime ready");
+                startup_health.set_component(
+                    "desktop_shell",
+                    "桌面基础壳",
+                    "starting",
+                    Some("等待前端就绪确认".to_string()),
+                );
                 show_main_window_deferred(
                     app.clone(),
                     diagnostics.clone(),
@@ -3843,15 +3852,31 @@ mod tests {
     }
 
     #[test]
-    fn windows_update_assets_prefer_msi_then_nsis_setup() {
-        assert_eq!(
-            preferred_update_asset_suffixes("windows", "x86_64"),
-            vec!["_x64_en-US.msi", ".msi", "_x64-setup.exe"]
-        );
-        assert_eq!(
-            preferred_update_asset_suffixes("windows", "aarch64"),
-            vec!["_arm64_en-US.msi", "_arm64-setup.exe", ".msi"]
-        );
+    fn updater_asset_selection_requires_a_signature() {
+        if matches!(std::env::consts::OS, "windows" | "linux") && std::env::consts::ARCH != "x86_64"
+        {
+            return;
+        }
+        let suffix = match std::env::consts::OS {
+            "macos" => ".app.tar.gz",
+            "windows" => ".msi",
+            "linux" => ".AppImage",
+            _ => return,
+        };
+        let mut release = update_release_response(None, None);
+        release.assets = vec![
+            UpdateReleaseAsset {
+                name: format!("unsigned{suffix}"),
+                signature: None,
+            },
+            UpdateReleaseAsset {
+                name: format!("signed{suffix}"),
+                signature: Some("minisign-signature".to_string()),
+            },
+        ];
+
+        let selected = select_tauri_updater_asset(&release).expect("signed updater asset");
+        assert_eq!(selected.name, format!("signed{suffix}"));
     }
 
     #[test]
@@ -3981,8 +4006,33 @@ mod tests {
     }
 
     #[test]
-    fn local_app_ui_server_can_start_without_a_caller_tokio_context() {
-        let prepared = prepare_local_app_ui_server().unwrap();
-        start_local_app_ui_server(prepared, StartupDiagnostics::bootstrap()).unwrap();
+    fn repeated_incomplete_startups_enable_safe_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        let state_path = directory.path().join(STARTUP_STATE_FILE_NAME);
+        write_startup_state(
+            &state_path,
+            &PersistentStartupState {
+                pending: true,
+                consecutive_failures: SAFE_MODE_FAILURE_THRESHOLD - 1,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                started_at_ms: Some(now_ms()),
+                ready_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        let health = StartupHealthManager::begin(
+            &config_path,
+            StartupDiagnostics::for_config_path(&config_path),
+            false,
+            None,
+        );
+
+        assert!(health.safe_mode());
+        assert_eq!(
+            health.snapshot().consecutive_failures,
+            SAFE_MODE_FAILURE_THRESHOLD
+        );
     }
 }

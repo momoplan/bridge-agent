@@ -10,7 +10,7 @@ pipeline {
     parameters {
         string(name: 'BRIDGE_REF', defaultValue: 'main', description: 'Bridge Agent branch containing the release commit')
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
-        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.101', description: 'Bridge Agent version')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.102', description: 'Bridge Agent version')
         string(name: 'CLI_VERSION', defaultValue: '0.1.7', description: 'Pinned Baijimu native CLI version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs')
     }
@@ -46,6 +46,7 @@ if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
 npm ci
 npm run build
 cargo test --workspace
+cargo test --manifest-path src-tauri/Cargo.toml
 '''
             }
         }
@@ -133,13 +134,24 @@ release="$(curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/release
 printf '%s' "$release" | jq -e --arg version "$BRIDGE_VERSION" '
   .draft == false and
   ([.assets[].name] | index("Baijimu_" + $version + "_universal.dmg") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_universal.app.tar.gz") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_universal.app.tar.gz.sig") != null) and
   ([.assets[].name] | index("Baijimu_" + $version + "_x64_en-US.msi") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_x64_en-US.msi.sig") != null) and
   ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage.sig") != null) and
   ([.assets[].name] | index("Baijimu_" + $version + "_amd64.deb") != null)'
 
 latest="$(curl -fsS 'https://updates.baijimu.com/api/bridge-agent/releases/latest')"
 printf '%s' "$latest" | jq -e --arg version "$BRIDGE_VERSION" '
-  ((.data // .).version // (.data // .).latestVersion // "") == $version'
+  ((.data // .).version // (.data // .).latestVersion // "") == $version and
+  any((.data // .).assets[]; (.name | endswith(".app.tar.gz")) and (((.signature // "") | length) > 0))'
+
+tauri_update="$(curl -fsS "https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=darwin&arch=aarch64&currentVersion=0.0.0")"
+printf '%s' "$tauri_update" | jq -e --arg version "$BRIDGE_VERSION" '
+  .version == $version and
+  (.url | endswith(".app.tar.gz")) and
+  (.signature | length) > 0'
 '''
             }
         }
