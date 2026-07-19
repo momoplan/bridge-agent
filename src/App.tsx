@@ -5321,27 +5321,6 @@ function App() {
     return labels[kind];
   }
 
-  function compareVersions(left: string, right?: string | null): number {
-    if (!right) {
-      return 1;
-    }
-    const normalize = (value: string) =>
-      value
-        .replace(/^v/i, "")
-        .split(/[.-]/)
-        .map((part) => Number.parseInt(part, 10))
-        .map((part) => (Number.isFinite(part) ? part : 0));
-    const leftParts = normalize(left);
-    const rightParts = normalize(right);
-    for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
-      const delta = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-      if (delta !== 0) {
-        return delta;
-      }
-    }
-    return 0;
-  }
-
   function renderLogMetadata(entry: LogEntry) {
     const items = [
       entry.category,
