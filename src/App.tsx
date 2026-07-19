@@ -450,6 +450,15 @@ interface ConnectorAppUpdateStatus {
   source: string;
 }
 
+interface LocalAppUpdateStatus {
+  appId: string;
+  name: string;
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  source: string;
+}
+
 interface UiAgentConfig {
   platform: {
     base_url: string;
@@ -1047,6 +1056,12 @@ function App() {
   }, [config, connectorApps, baijimuCli]);
   const selectedLocalApp =
     selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
+  const availableLocalAppUpdates = localApps
+    .map((app) => ({ app, status: localAppUpdateStatus(app) }))
+    .filter(
+      (item): item is { app: LocalAppItem; status: LocalAppUpdateStatus } =>
+        item.status?.updateAvailable === true
+    );
   const enabledLocalAppCount = localApps.filter(
     (app) =>
       app.managedTool?.state === "ready" ||
@@ -1392,6 +1407,45 @@ function App() {
       (marketApp) =>
         marketApp.applicationType === "managed_tool" && marketApp.connectorId === app.managedTool?.id
     );
+  }
+
+  function marketAppForLocalApp(app: LocalAppItem): MarketConnector | undefined {
+    return app.kind === "managed_tool"
+      ? marketManagedToolForLocalApp(app)
+      : marketConnectorForLocalApp(app);
+  }
+
+  function localAppUpdateStatus(app: LocalAppItem): LocalAppUpdateStatus | undefined {
+    const marketApp = marketAppForLocalApp(app);
+    const currentVersion = app.managedTool?.installedVersion ?? app.connector?.version ?? null;
+    if (!marketApp || !currentVersion) {
+      return undefined;
+    }
+    return {
+      appId: app.id,
+      name: app.name,
+      currentVersion,
+      latestVersion: marketApp.version,
+      updateAvailable: compareVersions(marketApp.version, currentVersion) > 0,
+      source: marketApp.source
+    };
+  }
+
+  async function upgradeLocalAppVersion(app: LocalAppItem) {
+    if (app.kind === "managed_tool") {
+      await upgradeManagedTool(app);
+      return;
+    }
+    await upgradeLocalApp(app);
+  }
+
+  async function checkLocalAppVersion(app: LocalAppItem) {
+    await refreshMarketConnectorApps();
+    if (app.connector) {
+      await checkLocalAppUpdate(app);
+      return;
+    }
+    setMessage(`${app.name} 的市场版本信息已刷新`);
   }
 
   async function upgradeManagedTool(app: LocalAppItem) {
@@ -4547,6 +4601,24 @@ function App() {
             安装应用
           </button>
         </div>
+        {availableLocalAppUpdates.length > 0 ? (
+          <div className="notice-banner warning" role="status">
+            <div>
+              <strong>{availableLocalAppUpdates.length} 个应用有可用更新</strong>
+              <span>
+                {availableLocalAppUpdates
+                  .map(({ app, status }) => `${app.name} ${status.currentVersion} → ${status.latestVersion}`)
+                  .join("；")}
+              </span>
+            </div>
+            <button
+              className="secondary"
+              onClick={() => setSelectedLocalAppId(availableLocalAppUpdates[0].app.id)}
+            >
+              查看更新
+            </button>
+          </div>
+        ) : null}
         {groupedApps.length > 0 ? (
           <div className="local-app-groups">
             {groupedApps.map((group) => (
@@ -4576,6 +4648,7 @@ function App() {
     }
     const hasStartCommand = hasLocalAppStartCommand(app);
     const lifecycle = localAppLifecycle(app);
+    const updateStatus = localAppUpdateStatus(app);
     return (
       <button
         className="local-app-card"
@@ -4603,6 +4676,9 @@ function App() {
             <span>{countLocalAppCapabilities(app, config)} 项能力</span>
           )}
           {hasStartCommand ? <span>可启动</span> : null}
+          {updateStatus?.updateAvailable ? (
+            <span className="status-pill status-warning">可更新到 {updateStatus.latestVersion}</span>
+          ) : null}
         </div>
       </button>
     );
@@ -4624,10 +4700,9 @@ function App() {
     const canConfigureCapabilities =
       !isManagedTool && (showAdvancedSettings || app.kind === "custom" || hasShellCapability);
     const canShowDeveloperConfig = !isManagedTool && (showAdvancedSettings || app.kind === "custom");
-    const marketApp = marketConnectorForLocalApp(app);
-    const marketTool = marketManagedToolForLocalApp(app);
-    const updateStatus = app.connector ? connectorUpdateStatuses[app.connector.id] : undefined;
-    const updateBusy = connectorUpdateBusy === app.id;
+    const marketApp = marketAppForLocalApp(app);
+    const updateStatus = localAppUpdateStatus(app);
+    const updateBusy = connectorUpdateBusy === app.id || (isManagedTool && managedToolBusy);
     const lifecycle = localAppLifecycle(app);
     const appIsRunning = lifecycle.state === "running";
     const appCanStop = hasLocalAppStopCommand(app);
@@ -4687,45 +4762,30 @@ function App() {
               ) : null}
             </div>
             <div className="service-actions">
-              {isManagedTool && app.managedTool ? (
+              {isManagedTool && app.managedTool?.state !== "ready" ? (
                 <>
                   <button
                     className="primary accent"
                     onClick={() => void upgradeManagedTool(app)}
-                    disabled={managedToolBusy || !marketTool}
+                    disabled={managedToolBusy || !marketApp}
                   >
-                    {managedToolBusy
-                      ? "处理中"
-                      : app.managedTool.state === "ready"
-                        ? marketTool && compareVersions(marketTool.version, app.managedTool.installedVersion) > 0
-                          ? `升级到 ${marketTool.version}`
-                          : "校验并修复"
-                        : "安装工具"}
+                    {managedToolBusy ? "处理中" : "安装应用"}
                   </button>
-                  {app.managedTool.canRollback ? (
-                    <button
-                      className="secondary"
-                      onClick={() => void rollbackManagedTool(app)}
-                      disabled={managedToolBusy}
-                    >
-                      回滚到 {app.managedTool.previousVersion}
-                    </button>
-                  ) : null}
                 </>
-              ) : app.connector && marketApp ? (
+              ) : marketApp ? (
                 updateStatus?.updateAvailable ? (
                   <button
                     className="primary accent"
-                    onClick={() => void upgradeLocalApp(app)}
-                    disabled={connectorBusy != null || connectorUpdateBusy != null}
+                    onClick={() => void upgradeLocalAppVersion(app)}
+                    disabled={connectorBusy != null || connectorUpdateBusy != null || managedToolBusy}
                   >
                     {updateBusy ? "升级中" : `升级到 ${updateStatus.latestVersion}`}
                   </button>
                 ) : (
                   <button
                     className="secondary"
-                    onClick={() => void checkLocalAppUpdate(app)}
-                    disabled={connectorBusy != null || connectorUpdateBusy != null}
+                    onClick={() => void checkLocalAppVersion(app)}
+                    disabled={connectorBusy != null || connectorUpdateBusy != null || managedToolBusy}
                   >
                     {updateBusy ? "检查中" : "检查更新"}
                   </button>
@@ -4737,6 +4797,15 @@ function App() {
                   disabled={connectorBusy != null || connectorUpdateBusy != null || !syncSource}
                 >
                   {updateBusy ? "同步中" : "拉取最新"}
+                </button>
+              ) : null}
+              {app.managedTool?.canRollback ? (
+                <button
+                  className="secondary"
+                  onClick={() => void rollbackManagedTool(app)}
+                  disabled={managedToolBusy}
+                >
+                  回滚到 {app.managedTool.previousVersion}
                 </button>
               ) : null}
               {appIsRunning && appCanStop ? (
@@ -4785,7 +4854,7 @@ function App() {
                   label="来源类型"
                   value={isManagedTool ? "官方独立发行" : app.connector ? connectorSourceKind(app, marketApp) : "内置"}
                 />
-                <InfoRow label="安装来源" value={isManagedTool ? marketTool?.source ?? "等待市场版本" : syncSource || "内置"} />
+                <InfoRow label="安装来源" value={isManagedTool ? marketApp?.source ?? "等待市场版本" : syncSource || "内置"} />
                 <InfoRow label="安装位置" value={app.managedTool?.activePath ?? app.connector?.packagePath ?? "随客户端发布"} />
                 <InfoRow label="版本" value={app.managedTool?.installedVersion ?? app.connector?.version ?? "随客户端发布"} />
                 {app.managedTool ? (
@@ -4935,27 +5004,6 @@ function App() {
       custom: "自定义应用"
     };
     return labels[kind];
-  }
-
-  function compareVersions(left: string, right?: string | null): number {
-    if (!right) {
-      return 1;
-    }
-    const normalize = (value: string) =>
-      value
-        .replace(/^v/i, "")
-        .split(/[.-]/)
-        .map((part) => Number.parseInt(part, 10))
-        .map((part) => (Number.isFinite(part) ? part : 0));
-    const leftParts = normalize(left);
-    const rightParts = normalize(right);
-    for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
-      const delta = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-      if (delta !== 0) {
-        return delta;
-      }
-    }
-    return 0;
   }
 
   function renderLogMetadata(entry: LogEntry) {

@@ -1,0 +1,146 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 90, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.99', description: 'Bridge Agent version')
+        string(name: 'CLI_VERSION', defaultValue: '0.1.7', description: 'Pinned Baijimu native CLI version')
+        booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs')
+    }
+
+    stages {
+        stage('Validate release input') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+test -n "$BRIDGE_COMMIT"
+test "$(git rev-parse HEAD)" = "$BRIDGE_COMMIT"
+test "$(node -p 'require("./package.json").version')" = "$BRIDGE_VERSION"
+test "$(node -p 'require("./src-tauri/tauri.conf.json").version')" = "$BRIDGE_VERSION"
+test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' Cargo.toml | head -1)" = "$BRIDGE_VERSION"
+test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' src-tauri/Cargo.toml | head -1)" = "$BRIDGE_VERSION"
+test "$(tr -d '[:space:]' < tools/baijimu-cli/VERSION)" = "$CLI_VERSION"
+case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+case "$CLI_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+cli_tag_commit="$(git ls-remote https://gitee.com/zxflimit_admin/baijimu-cli-rs.git "refs/tags/v${CLI_VERSION}^{}" | awk 'NR == 1 {print $1}')"
+if [ -z "$cli_tag_commit" ]; then
+  cli_tag_commit="$(git ls-remote https://gitee.com/zxflimit_admin/baijimu-cli-rs.git "refs/tags/v${CLI_VERSION}" | awk 'NR == 1 {print $1}')"
+fi
+test -n "$cli_tag_commit"
+'''
+            }
+        }
+
+        stage('Test release source') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+npm ci
+npm run build
+cargo test --workspace
+'''
+            }
+        }
+
+        stage('Publish immutable refs') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
+                    usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+git config user.name "Baijimu Jenkins"
+git config user.email "jenkins@baijimu.com"
+set +x
+remote="https://gitee.com/zxflimit_admin/bridge-agent.git"
+askpass="$WORKSPACE/.bridge-release-git-askpass.sh"
+cat > "$askpass" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GIT_AUTH_USER" ;;
+  *Password*) printf '%s\n' "$GIT_AUTH_PASSWORD" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+chmod 700 "$askpass"
+export GIT_ASKPASS="$askpass"
+export GIT_TERMINAL_PROMPT=0
+export GIT_AUTH_USER="$GITEE_USER"
+export GIT_AUTH_PASSWORD="$GITEE_TOKEN"
+
+current_main="$(git ls-remote "$remote" refs/heads/main | awk 'NR == 1 {print $1}')"
+if [ -n "$current_main" ] && ! git merge-base --is-ancestor "$current_main" "$BRIDGE_COMMIT"; then
+  echo "refusing non-fast-forward publish to Gitee main" >&2
+  exit 1
+fi
+git push "$remote" "$BRIDGE_COMMIT:refs/heads/main"
+
+tag="bridge-agent-v${BRIDGE_VERSION}"
+current_tag="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
+if [ -n "$current_tag" ]; then
+  test "$current_tag" = "$BRIDGE_COMMIT"
+else
+  git push "$remote" "$BRIDGE_COMMIT:refs/tags/$tag"
+fi
+rm -f "$askpass"
+
+tools/release/publish-github-ref.sh momoplan/bridge-agent branch main "$BRIDGE_COMMIT"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$BRIDGE_COMMIT"
+set -x
+'''
+                }
+            }
+        }
+
+        stage('Wait for signed desktop release') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
+'''
+                }
+            }
+        }
+
+        stage('Verify published desktop and updater') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+release="$(curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/bridge-agent-v${BRIDGE_VERSION}")"
+printf '%s' "$release" | jq -e --arg version "$BRIDGE_VERSION" '
+  .draft == false and
+  ([.assets[].name] | index("Baijimu_" + $version + "_universal.dmg") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_x64_en-US.msi") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage") != null) and
+  ([.assets[].name] | index("Baijimu_" + $version + "_amd64.deb") != null)'
+
+latest="$(curl -fsS 'https://updates.baijimu.com/api/bridge-agent/releases/latest')"
+printf '%s' "$latest" | jq -e --arg version "$BRIDGE_VERSION" '
+  ((.data // .).version // (.data // .).latestVersion // "") == $version'
+'''
+            }
+        }
+    }
+}

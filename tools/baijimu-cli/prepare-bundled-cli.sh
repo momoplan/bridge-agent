@@ -3,6 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 default_cli_git_url="${BAIJIMU_CLI_RS_GIT_URL:-https://gitee.com/zxflimit_admin/baijimu-cli-rs.git}"
+cli_version_file="${repo_root}/tools/baijimu-cli/VERSION"
+if [ ! -f "${cli_version_file}" ]; then
+  echo "Missing pinned Baijimu CLI version: ${cli_version_file}" >&2
+  exit 1
+fi
+pinned_cli_version="$(tr -d '[:space:]' < "${cli_version_file}")"
+cli_git_ref="${BAIJIMU_CLI_RS_GIT_REF:-v${pinned_cli_version}}"
 if [ -n "${BAIJIMU_CLI_RS_DIR:-}" ]; then
   cli_dir="${BAIJIMU_CLI_RS_DIR}"
 elif [ -f "${repo_root}/../baijimu-cli-rs/Cargo.toml" ]; then
@@ -19,8 +26,14 @@ if [ ! -f "${cli_dir}/Cargo.toml" ]; then
   if [ -n "${BAIJIMU_CLI_RS_GIT_TOKEN:-}" ] && [[ "${clone_url}" == https://gitee.com/* ]]; then
     clone_url="https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
   fi
-  git clone --depth 1 "${clone_url}" "${clone_dir}"
+  git clone --depth 1 --branch "${cli_git_ref}" "${clone_url}" "${clone_dir}"
   cli_dir="${clone_dir}"
+fi
+
+actual_cli_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${cli_dir}/Cargo.toml" | head -1)"
+if [ "${actual_cli_version}" != "${pinned_cli_version}" ]; then
+  echo "Baijimu CLI version mismatch: expected ${pinned_cli_version}, got ${actual_cli_version}" >&2
+  exit 1
 fi
 
 case "$(uname -s)" in
