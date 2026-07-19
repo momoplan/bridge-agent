@@ -2142,6 +2142,10 @@ mod tests {
 
         install_connector_from_path(&source, &config_path, false).unwrap();
         let summary = list_connectors().unwrap().remove(0);
+        let serialized = serde_json::to_value(&summary).unwrap();
+        assert_eq!(serialized["ui"]["type"], "embedded");
+        assert!(serialized["ui"].get("uiType").is_none());
+        assert_eq!(serialized["ui"]["defaultView"], true);
         let ui = summary.ui.expect("installed UI metadata");
         assert_eq!(ui.ui_type, "embedded");
         assert_eq!(ui.entry, "ui/index.html");

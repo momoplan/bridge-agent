@@ -8,7 +8,7 @@
       <parameterDefinitions>
         <hudson.model.StringParameterDefinition><name>BRIDGE_REF</name><defaultValue>codex/codex-management-app</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>BRIDGE_COMMIT</name><defaultValue></defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
-        <hudson.model.StringParameterDefinition><name>BRIDGE_VERSION</name><defaultValue>0.1.102</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition><name>BRIDGE_VERSION</name><defaultValue>0.1.103</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>CONNECTOR_REF</name><defaultValue>codex/local-app-embedded-ui</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>CONNECTOR_COMMIT</name><defaultValue></defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>CONNECTOR_VERSION</name><defaultValue>0.5.0</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>

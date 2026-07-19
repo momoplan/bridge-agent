@@ -426,7 +426,7 @@ interface ConnectorSummary {
 }
 
 interface ConnectorUi {
-  uiType: "embedded";
+  type: "embedded";
   entry: string;
   title?: string | null;
   defaultView: boolean;
@@ -4757,7 +4757,7 @@ function App() {
       const service = config.services[serviceIndex];
       return service ? isShellService(service) : false;
     });
-    const embeddedUi = app.connector?.ui?.uiType === "embedded" ? app.connector.ui : null;
+    const embeddedUi = app.connector?.ui?.type === "embedded" ? app.connector.ui : null;
     const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);
     const canConfigureCapabilities =
       !isManagedTool && (showAdvancedSettings || app.kind === "custom" || hasShellCapability);
@@ -5736,7 +5736,7 @@ function isLocalAppBridgeMessage(value: unknown): value is LocalAppBridgeMessage
 }
 
 function defaultLocalAppDetailTab(app: LocalAppItem): LocalAppDetailTab {
-  return app.connector?.ui?.uiType === "embedded" && app.connector.ui.defaultView
+  return app.connector?.ui?.type === "embedded" && app.connector.ui.defaultView
     ? "app"
     : "overview";
 }
