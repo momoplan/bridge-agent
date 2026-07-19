@@ -293,11 +293,9 @@ fn write_startup_state(path: &Path, state: &PersistentStartupState) -> Result<()
     match fs::rename(&temporary_path, path) {
         Ok(()) => Ok(()),
         Err(first_err) if path.exists() => {
-            fs::remove_file(path).map_err(|err| {
-                format!("替换启动状态失败（rename: {first_err}; remove: {err}）")
-            })?;
-            fs::rename(&temporary_path, path)
-                .map_err(|err| format!("提交启动状态失败: {err}"))
+            fs::remove_file(path)
+                .map_err(|err| format!("替换启动状态失败（rename: {first_err}; remove: {err}）"))?;
+            fs::rename(&temporary_path, path).map_err(|err| format!("提交启动状态失败: {err}"))
         }
         Err(err) => Err(format!("提交启动状态失败: {err}")),
     }
