@@ -12,6 +12,7 @@ pipeline {
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
         string(name: 'BRIDGE_VERSION', defaultValue: '0.1.102', description: 'Bridge Agent version')
         string(name: 'CLI_VERSION', defaultValue: '0.1.7', description: 'Pinned Baijimu native CLI version')
+        booleanParam(name: 'REPAIR_RELEASE', defaultValue: false, description: 'Repair an existing immutable release tag by dispatching the fixed workflow from main')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs')
     }
 
@@ -27,13 +28,23 @@ test "$(node -p 'require("./src-tauri/tauri.conf.json").version')" = "$BRIDGE_VE
 test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' Cargo.toml | head -1)" = "$BRIDGE_VERSION"
 test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' src-tauri/Cargo.toml | head -1)" = "$BRIDGE_VERSION"
 test "$(tr -d '[:space:]' < tools/baijimu-cli/VERSION)" = "$CLI_VERSION"
+grep -Fq 'tauri_args: --target universal-apple-darwin --bundles app,dmg' .github/workflows/release-bridge-agent.yml
 case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 case "$CLI_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+case "$REPAIR_RELEASE" in true|false) ;; *) exit 1 ;; esac
 cli_tag_commit="$(git ls-remote https://gitee.com/zxflimit_admin/baijimu-cli-rs.git "refs/tags/v${CLI_VERSION}^{}" | awk 'NR == 1 {print $1}')"
 if [ -z "$cli_tag_commit" ]; then
   cli_tag_commit="$(git ls-remote https://gitee.com/zxflimit_admin/baijimu-cli-rs.git "refs/tags/v${CLI_VERSION}" | awk 'NR == 1 {print $1}')"
 fi
 test -n "$cli_tag_commit"
+if [ "$REPAIR_RELEASE" = true ]; then
+  release_tag="bridge-agent-v${BRIDGE_VERSION}"
+  release_commit="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}")"
+  test -n "$release_commit"
+  test "$release_commit" != "$BRIDGE_COMMIT"
+  git merge-base --is-ancestor "$release_commit" "$BRIDGE_COMMIT"
+  test "$(git show "${release_commit}:package.json" | node -e 'let data=""; process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(data).version))')" = "$BRIDGE_VERSION"
+fi
 '''
             }
         }
@@ -117,15 +128,35 @@ git push "$remote" "$BRIDGE_COMMIT:refs/heads/main"
 
 tag="bridge-agent-v${BRIDGE_VERSION}"
 current_tag="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
-if [ -n "$current_tag" ]; then
-  test "$current_tag" = "$BRIDGE_COMMIT"
+if [ "$REPAIR_RELEASE" = true ]; then
+  test -n "$current_tag"
+  test "$current_tag" != "$BRIDGE_COMMIT"
+  git merge-base --is-ancestor "$current_tag" "$BRIDGE_COMMIT"
+  release_commit="$current_tag"
 else
-  git push "$remote" "$BRIDGE_COMMIT:refs/tags/$tag"
+  release_commit="$BRIDGE_COMMIT"
+  if [ -n "$current_tag" ]; then
+    test "$current_tag" = "$release_commit"
+  else
+    git push "$remote" "$release_commit:refs/tags/$tag"
+  fi
 fi
 rm -f "$askpass"
 
 tools/release/publish-github-ref.sh momoplan/bridge-agent branch main "$BRIDGE_COMMIT"
-tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$BRIDGE_COMMIT"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$release_commit"
+if [ "$REPAIR_RELEASE" = true ]; then
+  dispatch_payload="$(jq -nc --arg ref main --arg tag "$tag" '{ref: $ref, inputs: {release_tag: $tag}}')"
+  dispatch_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -X POST \
+    -d "$dispatch_payload" \
+    'https://api.github.com/repos/momoplan/bridge-agent/actions/workflows/release-bridge-agent.yml/dispatches')"
+  test "$dispatch_status" = 204
+  echo "dispatched repair workflow for $tag from main at $BRIDGE_COMMIT"
+fi
 set -x
 '''
                 }
@@ -144,7 +175,11 @@ set -x
                 )]) {
                     sh '''#!/bin/bash
 set -euo pipefail
-tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
+if [ "$REPAIR_RELEASE" = true ]; then
+  tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT" workflow_dispatch main
+else
+  tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
+fi
 '''
                 }
             }
