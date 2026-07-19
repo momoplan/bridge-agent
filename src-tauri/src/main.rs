@@ -914,7 +914,9 @@ fn start_local_app_ui_server(
     prepared: PreparedLocalAppUiServer,
     diagnostics: StartupDiagnostics,
 ) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::from_std(prepared.listener)?;
+    let listener = tauri::async_runtime::block_on(async move {
+        tokio::net::TcpListener::from_std(prepared.listener)
+    })?;
     let state = LocalAppUiHttpState {
         token: prepared.token,
     };
@@ -3976,5 +3978,11 @@ mod tests {
             token,
             "com.baijimu.connector.second"
         ));
+    }
+
+    #[test]
+    fn local_app_ui_server_can_start_without_a_caller_tokio_context() {
+        let prepared = prepare_local_app_ui_server().unwrap();
+        start_local_app_ui_server(prepared, StartupDiagnostics::bootstrap()).unwrap();
     }
 }
