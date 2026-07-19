@@ -9,7 +9,7 @@ pipeline {
 
     parameters {
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
-        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.99', description: 'Bridge Agent version')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.100', description: 'Bridge Agent version')
         string(name: 'CLI_VERSION', defaultValue: '0.1.7', description: 'Pinned Baijimu native CLI version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs')
     }
