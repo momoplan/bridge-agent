@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import bjmLogoLight from "./assets/brand/bjm-logo-light.svg";
 
 type RuntimeStatus =
@@ -402,9 +402,17 @@ interface ConnectorSummary {
   packagePath: string;
   sourcePath: string;
   sourceReference?: string | null;
+  ui?: ConnectorUi | null;
   serviceNames: string[];
   installedAtEpochMs: number;
   lastSyncedAtEpochMs: number;
+}
+
+interface ConnectorUi {
+  uiType: "embedded";
+  entry: string;
+  title?: string | null;
+  defaultView: boolean;
 }
 
 interface ConnectorInstallResult {
@@ -464,12 +472,11 @@ interface UiAgentConfig {
 
 type SettingsSection = "identity" | "connection" | "runtime";
 const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
-const CODEX_CONNECTOR_ID = "com.baijimu.connector.codex";
 type AppPage = "overview" | "apps" | "diagnostics";
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
 type LocalAppKind = "connector" | "managed_tool" | "built_in" | "custom";
 type InstallSourceMode = "choose" | "market" | "custom";
-type LocalAppDetailTab = "overview" | "account" | "capabilities" | "config";
+type LocalAppDetailTab = "app" | "overview" | "capabilities" | "config";
 type LocalAppLifecycleState =
   | "installed"
   | "ready"
@@ -503,7 +510,6 @@ interface LocalAppItem {
   serviceIndexes: number[];
   connector?: ConnectorSummary;
   managedTool?: ManagedToolStatus;
-  codexAccountManagement?: boolean;
 }
 
 interface MarketConnector {
@@ -535,42 +541,6 @@ interface ManagedToolStatus {
   detail: string;
 }
 
-interface CodexCredentialProfile {
-  workspaceId: number;
-  workspaceName: string;
-  projectId: number;
-  projectName: string | null;
-  model: string;
-  activatedAtEpochSeconds: number;
-}
-
-interface CodexWorkspaceOption {
-  workspaceId: number;
-  name: string;
-}
-
-interface CodexProjectOption {
-  projectId: number;
-  name: string;
-}
-
-interface CodexCredentialManagerState {
-  codexConfigured: boolean;
-  credentialStatus: "verified" | "unverified" | "not_configured" | "invalid" | "invalid_context";
-  activeProfile: CodexCredentialProfile | null;
-  profiles: CodexCredentialProfile[];
-  workspaces: CodexWorkspaceOption[];
-  discoveryWarning: string | null;
-  sharedAuthPath: string;
-  codexAuthPath: string;
-  codexConfigPath: string;
-}
-
-interface CodexCredentialSwitchResult {
-  state: CodexCredentialManagerState;
-  codexRestarted: boolean;
-  restartMessage: string;
-}
 const SHELL_SCHEMA = {
   type: "object",
   required: ["command"],
@@ -773,15 +743,6 @@ function App() {
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [baijimuCli, setBaijimuCli] = useState<ManagedToolStatus | null>(null);
-  const [codexCredentialManager, setCodexCredentialManager] = useState<CodexCredentialManagerState | null>(null);
-  const [codexCredentialError, setCodexCredentialError] = useState("");
-  const [codexCredentialBusy, setCodexCredentialBusy] = useState(false);
-  const [codexWorkspaceId, setCodexWorkspaceId] = useState("");
-  const [codexProjectId, setCodexProjectId] = useState("");
-  const [codexProjectName, setCodexProjectName] = useState("");
-  const [codexProjects, setCodexProjects] = useState<CodexProjectOption[]>([]);
-  const [codexProjectsBusy, setCodexProjectsBusy] = useState(false);
-  const [codexProjectsError, setCodexProjectsError] = useState("");
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
   const [appUpdateCheckState, setAppUpdateCheckState] = useState<AppUpdateCheckState>("checking");
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
@@ -837,10 +798,6 @@ function App() {
 
   useEffect(() => {
     void refreshConnectorApps();
-  }, []);
-
-  useEffect(() => {
-    void refreshCodexCredentialManager();
   }, []);
 
   useEffect(() => {
@@ -1039,8 +996,7 @@ function App() {
         description: `版本 ${connector.version} · ${connector.serviceNames.length} 项能力组`,
         kind: "connector",
         serviceIndexes,
-        connector,
-        codexAccountManagement: connector.id === CODEX_CONNECTOR_ID
+        connector
       };
     });
 
@@ -1107,7 +1063,9 @@ function App() {
     if (selectedLocalApp?.serviceIndexes.length) {
       setExpandedServiceIndex(selectedLocalApp.serviceIndexes[0]);
     }
-    setActiveLocalAppDetailTab("overview");
+    setActiveLocalAppDetailTab(
+      selectedLocalApp ? defaultLocalAppDetailTab(selectedLocalApp) : "overview"
+    );
   }, [selectedLocalApp?.id]);
   const appVersionLabel =
     appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "检查中";
@@ -1261,7 +1219,6 @@ function App() {
       await refreshMarketConnectorApps();
       await refreshConnectorApps();
       await refreshBaijimuCli();
-      await refreshCodexCredentialManager();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
@@ -1317,104 +1274,6 @@ function App() {
     }
   }
 
-  async function refreshCodexCredentialManager() {
-    try {
-      setCodexCredentialError("");
-      const state = await invoke<CodexCredentialManagerState>("invoke_connector_management", {
-        id: CODEX_CONNECTOR_ID,
-        operation: "credentialState",
-        payload: null
-      });
-      setCodexCredentialManager(state);
-      const preferredWorkspaceId =
-        Number(codexWorkspaceId) || state.activeProfile?.workspaceId || state.workspaces[0]?.workspaceId || 0;
-      if (preferredWorkspaceId > 0) {
-        selectCodexWorkspace(state, preferredWorkspaceId);
-      }
-    } catch (err) {
-      setCodexCredentialManager(null);
-      setCodexCredentialError(readError(err));
-    }
-  }
-
-  function selectCodexWorkspace(state: CodexCredentialManagerState | null, workspaceId: number) {
-    setCodexWorkspaceId(workspaceId > 0 ? String(workspaceId) : "");
-    const profile =
-      state?.activeProfile?.workspaceId === workspaceId
-        ? state.activeProfile
-        : state?.profiles.find((item) => item.workspaceId === workspaceId);
-    setCodexProjectId(profile ? String(profile.projectId) : "");
-    setCodexProjectName(profile?.projectName ?? "");
-    void refreshCodexProjects(workspaceId);
-  }
-
-  async function refreshCodexProjects(workspaceId: number) {
-    if (!workspaceId) {
-      setCodexProjects([]);
-      return;
-    }
-    try {
-      setCodexProjectsBusy(true);
-      setCodexProjectsError("");
-      const projects = await invoke<CodexProjectOption[]>("invoke_connector_management", {
-        id: CODEX_CONNECTOR_ID,
-        operation: "listWorkspaceProjects",
-        payload: { workspaceId }
-      });
-      setCodexProjects(projects);
-    } catch (err) {
-      setCodexProjects([]);
-      setCodexProjectsError(`${readError(err)}；仍可直接填写项目 ID。`);
-    } finally {
-      setCodexProjectsBusy(false);
-    }
-  }
-
-  async function switchCodexCredential(profile?: CodexCredentialProfile) {
-    const workspaceId = profile?.workspaceId ?? Number(codexWorkspaceId);
-    const projectId = profile?.projectId ?? Number(codexProjectId);
-    const workspace = codexCredentialManager?.workspaces.find((item) => item.workspaceId === workspaceId);
-    const selectedProject = codexProjects.find((item) => item.projectId === projectId);
-    const workspaceName = profile?.workspaceName ?? workspace?.name ?? `工作区 ${workspaceId}`;
-    const projectName = profile?.projectName ?? selectedProject?.name ?? (codexProjectName.trim() || null);
-    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
-      setCodexCredentialError("请选择要切换的工作区。");
-      return;
-    }
-    if (!Number.isInteger(projectId) || projectId <= 0) {
-      setCodexCredentialError("请输入有效的项目 ID；Codex 调用必须有明确的项目归属。");
-      return;
-    }
-    const confirmed = window.confirm(
-      `将为“${workspaceName}”的项目 ${projectName || projectId} 重新签发 LLM credential，并重启 Codex。继续吗？`
-    );
-    if (!confirmed) {
-      return;
-    }
-    try {
-      setCodexCredentialBusy(true);
-      setCodexCredentialError("");
-      setMessage("");
-      const result = await invoke<CodexCredentialSwitchResult>("invoke_connector_management", {
-        id: CODEX_CONNECTOR_ID,
-        operation: "switchCredential",
-        payload: {
-          workspaceId,
-          workspaceName,
-          projectId,
-          projectName,
-          model: profile?.model ?? "gpt-5.6-sol"
-        }
-      });
-      setCodexCredentialManager(result.state);
-      selectCodexWorkspace(result.state, workspaceId);
-      setMessage(`Codex 已切换到 ${workspaceName} / ${projectName || `项目 ${projectId}`}。${result.restartMessage}`);
-    } catch (err) {
-      setCodexCredentialError(readError(err));
-    } finally {
-      setCodexCredentialBusy(false);
-    }
-  }
   async function refreshMarketConnectorApps() {
     try {
       const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
@@ -4723,7 +4582,7 @@ function App() {
         key={app.id}
         onClick={() => {
           setSelectedLocalAppId(app.id);
-          setActiveLocalAppDetailTab("overview");
+          setActiveLocalAppDetailTab(defaultLocalAppDetailTab(app));
           if (app.serviceIndexes.length > 0) {
             setExpandedServiceIndex(app.serviceIndexes[0]);
           }
@@ -4743,156 +4602,9 @@ function App() {
           ) : (
             <span>{countLocalAppCapabilities(app, config)} 项能力</span>
           )}
-          {app.codexAccountManagement ? (
-            <span>{codexCredentialManager?.activeProfile?.workspaceName ?? "未配置工作区"}</span>
-          ) : null}
           {hasStartCommand ? <span>可启动</span> : null}
         </div>
       </button>
-    );
-  }
-
-  function renderCodexCredentialManager() {
-    const state = codexCredentialManager;
-    const active = state?.activeProfile;
-    const credentialStatus = formatCodexCredentialStatus(state?.credentialStatus);
-    return (
-      <div className="codex-credential-manager">
-        <div className="status-detail-grid">
-          <InfoRow label="当前工作区" value={active ? `${active.workspaceName}（${active.workspaceId}）` : "尚未识别"} />
-          <InfoRow
-            label="当前项目"
-            value={active ? `${active.projectName || "项目"}（${active.projectId}）` : "尚未识别"}
-          />
-          <InfoRow label="模型" value={active?.model ?? "gpt-5.6-sol"} />
-          <InfoRow
-            label="凭证状态"
-            value={credentialStatus.label}
-            tone={credentialStatus.tone}
-          />
-        </div>
-
-        {codexCredentialError ? <div className="error-banner">{codexCredentialError}</div> : null}
-        {state?.discoveryWarning ? <div className="notice-banner warning">{state.discoveryWarning}</div> : null}
-
-        <section className="codex-switch-panel">
-          <div className="method-advanced-head">
-            <div>
-              <strong>切换工作区</strong>
-              <small>切换时重新签发凭证，不在本地保存多份明文 LLM key。</small>
-            </div>
-            <button
-              className="secondary"
-              onClick={() => void refreshCodexCredentialManager()}
-              disabled={codexCredentialBusy}
-            >
-              刷新状态
-            </button>
-          </div>
-          <div className="form-grid">
-            <Field label="工作区" wide>
-              <select
-                value={codexWorkspaceId}
-                onChange={(event) => selectCodexWorkspace(state, Number(event.target.value))}
-                disabled={codexCredentialBusy || !state}
-              >
-                <option value="">选择工作区</option>
-                {state?.workspaces.map((workspace) => (
-                  <option value={workspace.workspaceId} key={workspace.workspaceId}>
-                    {workspace.name}（{workspace.workspaceId}）
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field
-              label="项目 ID"
-              hint={codexProjectsBusy ? "正在读取项目列表…" : "必填，用于模型调用归属、计量和审计。"}
-            >
-              <>
-                <input
-                  type="number"
-                  min="1"
-                  list="codex-project-options"
-                  value={codexProjectId}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setCodexProjectId(value);
-                    const project = codexProjects.find((item) => item.projectId === Number(value));
-                    if (project) {
-                      setCodexProjectName(project.name);
-                    }
-                  }}
-                  placeholder="例如 7405"
-                  disabled={codexCredentialBusy}
-                />
-                <datalist id="codex-project-options">
-                  {codexProjects.map((project) => (
-                    <option value={project.projectId} key={project.projectId}>{project.name}</option>
-                  ))}
-                </datalist>
-              </>
-            </Field>
-            <Field label="项目名称" hint="可选，仅用于本机显示。">
-              <input
-                value={codexProjectName}
-                onChange={(event) => setCodexProjectName(event.target.value)}
-                placeholder="项目名称"
-                disabled={codexCredentialBusy}
-              />
-            </Field>
-          </div>
-          {codexProjectsError ? <p className="field-error">{codexProjectsError}</p> : null}
-          <div className="codex-switch-actions">
-            <span>应用会先校验凭证归属，再更新配置并重启 Codex。</span>
-            <button
-              className="primary"
-              onClick={() => void switchCodexCredential()}
-              disabled={codexCredentialBusy || !state}
-            >
-              {codexCredentialBusy ? "正在切换" : "签发并切换"}
-            </button>
-          </div>
-        </section>
-
-        <section className="codex-profile-panel">
-          <div className="method-advanced-head">
-            <strong>最近使用</strong>
-            <small>{state?.profiles.length ?? 0} 个工作区 / 项目配置</small>
-          </div>
-          {state?.profiles.length ? (
-            <div className="codex-profile-list">
-              {state.profiles.map((profile) => {
-                const isActive = active?.workspaceId === profile.workspaceId && active?.projectId === profile.projectId;
-                return (
-                  <div className={`codex-profile-row ${isActive ? "active" : ""}`} key={`${profile.workspaceId}:${profile.projectId}`}>
-                    <div>
-                      <strong>{profile.workspaceName}</strong>
-                      <span>{profile.projectName || `项目 ${profile.projectId}`} · {profile.model}</span>
-                    </div>
-                    <button
-                      className={isActive ? "secondary" : "primary"}
-                      onClick={() => void switchCodexCredential(profile)}
-                      disabled={codexCredentialBusy || isActive}
-                    >
-                      {isActive ? "当前使用" : "切换"}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty-state">还没有由本地应用管理的工作区配置。</div>
-          )}
-        </section>
-
-        {showAdvancedSettings && state ? (
-          <div className="status-detail-grid codex-path-grid">
-            <InfoRow label="Codex auth" value={state.codexAuthPath} />
-            <InfoRow label="Codex config" value={state.codexConfigPath} />
-            <InfoRow label="百积木授权" value={state.sharedAuthPath} />
-          </div>
-        ) : null}
-      </div>
     );
   }
 
@@ -4907,7 +4619,7 @@ function App() {
       const service = config.services[serviceIndex];
       return service ? isShellService(service) : false;
     });
-    const hasCodexAccountManagement = app.codexAccountManagement === true;
+    const embeddedUi = app.connector?.ui?.uiType === "embedded" ? app.connector.ui : null;
     const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);
     const canConfigureCapabilities =
       !isManagedTool && (showAdvancedSettings || app.kind === "custom" || hasShellCapability);
@@ -4943,20 +4655,20 @@ function App() {
 
           <div className="app-detail-toolbar">
             <div className="section-tabs">
+              {embeddedUi && app.connector ? (
+                <button
+                  className={`section-tab ${activeLocalAppDetailTab === "app" ? "active" : ""}`}
+                  onClick={() => setActiveLocalAppDetailTab("app")}
+                >
+                  {embeddedUi.title?.trim() || "应用"}
+                </button>
+              ) : null}
               <button
                 className={`section-tab ${activeLocalAppDetailTab === "overview" ? "active" : ""}`}
                 onClick={() => setActiveLocalAppDetailTab("overview")}
               >
                 概览
               </button>
-              {hasCodexAccountManagement ? (
-                <button
-                  className={`section-tab ${activeLocalAppDetailTab === "account" ? "active" : ""}`}
-                  onClick={() => setActiveLocalAppDetailTab("account")}
-                >
-                  账户与工作区
-                </button>
-              ) : null}
               {!isManagedTool ? (
                 <button
                   className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
@@ -5056,6 +4768,15 @@ function App() {
             </div>
           </div>
 
+          {activeLocalAppDetailTab === "app" && embeddedUi && app.connector ? (
+            <div className="app-detail-tab-panel embedded-local-app-panel">
+              <LocalAppEmbeddedUi
+                connectorId={app.connector.id}
+                title={embeddedUi.title?.trim() || app.name}
+              />
+            </div>
+          ) : null}
+
           {activeLocalAppDetailTab === "overview" ? (
             <div className="app-detail-tab-panel">
               <div className="status-detail-grid">
@@ -5094,43 +4815,7 @@ function App() {
               </div>
               {appComputerService ? renderComputerPermissionPanel(appComputerService) : null}
               {renderLocalAppRuntime(app)}
-              {hasCodexAccountManagement ? (
-                <section className="codex-overview-panel">
-                  <div className="method-advanced-head">
-                    <div>
-                      <strong>账户与工作区</strong>
-                      <small>本机凭证由 Bridge Agent 管理，不会作为 Connector 能力对外开放。</small>
-                    </div>
-                    <button className="secondary" onClick={() => setActiveLocalAppDetailTab("account")}>
-                      管理
-                    </button>
-                  </div>
-                  <div className="status-detail-grid">
-                    <InfoRow
-                      label="当前工作区"
-                      value={codexCredentialManager?.activeProfile?.workspaceName ?? "尚未配置"}
-                    />
-                    <InfoRow
-                      label="当前项目"
-                      value={codexCredentialManager?.activeProfile?.projectName ||
-                        (codexCredentialManager?.activeProfile
-                          ? `项目 ${codexCredentialManager.activeProfile.projectId}`
-                          : "尚未配置")}
-                    />
-                    <InfoRow
-                      label="凭证状态"
-                      value={formatCodexCredentialStatus(codexCredentialManager?.credentialStatus).label}
-                      tone={formatCodexCredentialStatus(codexCredentialManager?.credentialStatus).tone}
-                    />
-                  </div>
-                  {codexCredentialError ? <div className="error-banner">{codexCredentialError}</div> : null}
-                </section>
-              ) : null}
             </div>
-          ) : null}
-
-          {activeLocalAppDetailTab === "account" && hasCodexAccountManagement ? (
-            <div className="app-detail-tab-panel">{renderCodexCredentialManager()}</div>
           ) : null}
 
           {activeLocalAppDetailTab === "capabilities" && !isManagedTool ? (
@@ -5699,6 +5384,132 @@ function App() {
   );
 }
 
+function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [uiUrl, setUiUrl] = useState("");
+  const [uiOrigin, setUiOrigin] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setUiUrl("");
+    setUiOrigin("");
+    setLoadError("");
+    setReady(false);
+    void invoke<string>("connector_app_ui_url", { id: props.connectorId })
+      .then((url) => {
+        if (!active) return;
+        const parsed = new URL(url);
+        setUiOrigin(parsed.origin);
+        setUiUrl(parsed.toString());
+      })
+      .catch((error) => {
+        if (active) setLoadError(readError(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [props.connectorId]);
+
+  useEffect(() => {
+    if (!uiOrigin) return;
+    const handleMessage = (event: MessageEvent<unknown>) => {
+      const target = iframeRef.current?.contentWindow;
+      if (!target || event.source !== target || event.origin !== uiOrigin) return;
+      if (!isLocalAppBridgeMessage(event.data)) return;
+      if (event.data.type === "baijimu:local-app:ready") {
+        setReady(true);
+        return;
+      }
+      const request = event.data;
+      void invoke<unknown>("invoke_connector_management", {
+        id: props.connectorId,
+        operation: request.operation,
+        payload: request.payload ?? null
+      })
+        .then((data) => {
+          target.postMessage(
+            {
+              type: "baijimu:local-app:response",
+              version: 1,
+              requestId: request.requestId,
+              ok: true,
+              data
+            },
+            uiOrigin
+          );
+        })
+        .catch((error) => {
+          target.postMessage(
+            {
+              type: "baijimu:local-app:response",
+              version: 1,
+              requestId: request.requestId,
+              ok: false,
+              error: readError(error)
+            },
+            uiOrigin
+          );
+        });
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [props.connectorId, uiOrigin]);
+
+  if (loadError) {
+    return <div className="error-banner">加载应用界面失败：{loadError}</div>;
+  }
+  if (!uiUrl) {
+    return <div className="empty-state">正在加载应用界面…</div>;
+  }
+  return (
+    <div className="embedded-local-app-frame-shell">
+      {!ready ? <div className="embedded-local-app-loading">正在启动 {props.title}…</div> : null}
+      <iframe
+        ref={iframeRef}
+        className="embedded-local-app-frame"
+        src={uiUrl}
+        title={props.title}
+        sandbox="allow-forms allow-same-origin allow-scripts"
+        referrerPolicy="no-referrer"
+        onLoad={() => setLoadError("")}
+      />
+    </div>
+  );
+}
+
+type LocalAppBridgeMessage =
+  | { type: "baijimu:local-app:ready"; version: 1 }
+  | {
+      type: "baijimu:local-app:invoke";
+      version: 1;
+      requestId: string;
+      operation: string;
+      payload?: unknown;
+    };
+
+function isLocalAppBridgeMessage(value: unknown): value is LocalAppBridgeMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<LocalAppBridgeMessage> & Record<string, unknown>;
+  if (message.version !== 1) return false;
+  if (message.type === "baijimu:local-app:ready") return true;
+  return (
+    message.type === "baijimu:local-app:invoke" &&
+    typeof message.requestId === "string" &&
+    message.requestId.length > 0 &&
+    message.requestId.length <= 128 &&
+    typeof message.operation === "string" &&
+    /^[A-Za-z0-9._-]{1,128}$/.test(message.operation)
+  );
+}
+
+function defaultLocalAppDetailTab(app: LocalAppItem): LocalAppDetailTab {
+  return app.connector?.ui?.uiType === "embedded" && app.connector.ui.defaultView
+    ? "app"
+    : "overview";
+}
+
 function Field(props: {
   label: string;
   children: JSX.Element;
@@ -6264,23 +6075,6 @@ function formatRegisteredServiceStatus(status: RegisteredServiceState): string {
     unknown: "未知"
   };
   return labels[status];
-}
-
-function formatCodexCredentialStatus(
-  status: CodexCredentialManagerState["credentialStatus"] | undefined
-): { label: string; tone: "normal" | "warning" | "danger" } {
-  switch (status) {
-    case "verified":
-      return { label: "已验证", tone: "normal" };
-    case "invalid":
-      return { label: "凭证无效或已过期", tone: "danger" };
-    case "invalid_context":
-      return { label: "凭证归属不完整", tone: "danger" };
-    case "unverified":
-      return { label: "暂时无法在线校验", tone: "warning" };
-    default:
-      return { label: "尚未配置", tone: "warning" };
-  }
 }
 
 function formatLocalAppLifecycle(

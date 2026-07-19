@@ -10,10 +10,10 @@ pipeline {
     parameters {
         string(name: 'BRIDGE_REF', defaultValue: 'codex/codex-management-app', description: 'Bridge Agent branch containing the release')
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
-        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.98', description: 'Bridge Agent version')
-        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.99', description: 'Bridge Agent version')
+        string(name: 'CONNECTOR_REF', defaultValue: 'codex/local-app-embedded-ui', description: 'Codex local app source branch')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
-        string(name: 'CONNECTOR_VERSION', defaultValue: '0.4.0', description: 'Codex local app version')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '0.5.0', description: 'Codex local app version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
     }
 
@@ -157,12 +157,10 @@ else
 fi
 
 publish_branch "$gitee_bridge" "$BRIDGE_COMMIT" main
-publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "bridge-agent-v${BRIDGE_VERSION}"
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
 
 rm -f "$askpass"
 tools/release/publish-github-ref.sh momoplan/bridge-agent branch main "$BRIDGE_COMMIT"
-tools/release/publish-github-ref.sh momoplan/bridge-agent tag "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
 tools/release/publish-github-ref.sh momoplan/bridge-agent tag "codex-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
 set -x
 '''
@@ -170,7 +168,7 @@ set -x
             }
         }
 
-        stage('Wait for signed releases') {
+        stage('Wait for signed Codex local app release') {
             when {
                 expression { return !params.DRY_RUN }
             }
@@ -182,7 +180,6 @@ set -x
                 )]) {
                     sh '''#!/bin/bash
 set -euo pipefail
-tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"
 tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-app.yml "codex-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
 '''
                 }
@@ -200,6 +197,61 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
                     passwordVariable: 'GITHUB_TOKEN'
                 )]) {
                     sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION"'
+                }
+            }
+        }
+
+        stage('Publish Bridge Agent release ref') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
+                    usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+set +x
+remote="https://gitee.com/zxflimit_admin/bridge-agent.git"
+askpass="$WORKSPACE/.bridge-release-git-askpass.sh"
+cat > "$askpass" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GITEE_USER" ;;
+  *Password*) printf '%s\n' "$GITEE_TOKEN" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+chmod 700 "$askpass"
+export GIT_ASKPASS="$askpass"
+export GIT_TERMINAL_PROMPT=0
+tag="bridge-agent-v${BRIDGE_VERSION}"
+current="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
+if [ -n "$current" ]; then
+  test "$current" = "$BRIDGE_COMMIT"
+else
+  git push "$remote" "$BRIDGE_COMMIT:refs/tags/$tag"
+fi
+rm -f "$askpass"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$BRIDGE_COMMIT"
+set -x
+'''
+                }
+            }
+        }
+
+        stage('Wait for signed Bridge Agent release') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh 'tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"'
                 }
             }
         }

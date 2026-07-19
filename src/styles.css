@@ -664,60 +664,10 @@ select:focus {
   line-height: 1.55;
 }
 
-.codex-credential-manager,
-.codex-overview-panel,
-.codex-switch-panel,
-.codex-profile-panel,
-.codex-profile-list {
-  display: grid;
-  gap: 16px;
-}
-
-.codex-overview-panel,
-.codex-switch-panel,
-.codex-profile-panel {
-  padding: 16px;
-  border: 1px solid rgba(30, 42, 68, 0.09);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.58);
-}
-
-.codex-switch-actions,
-.codex-profile-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-}
-
-.codex-switch-actions span,
-.codex-profile-row span,
 .field-error {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.55;
-}
-
-.codex-profile-row {
-  padding: 13px 14px;
-  border: 1px solid rgba(30, 42, 68, 0.09);
-  border-radius: 8px;
-  background: rgba(246, 247, 249, 0.84);
-}
-
-.codex-profile-row.active {
-  border-color: rgba(22, 163, 167, 0.32);
-  background: rgba(22, 163, 167, 0.08);
-}
-
-.codex-profile-row > div {
-  display: grid;
-  gap: 5px;
-}
-
-.codex-path-grid {
-  margin-top: 2px;
 }
 
 .error-banner,
@@ -761,6 +711,38 @@ select:focus {
 .app-detail-tab-panel {
   display: grid;
   gap: 16px;
+}
+
+.embedded-local-app-panel {
+  min-height: min(620px, calc(100vh - 260px));
+}
+
+.embedded-local-app-frame-shell {
+  position: relative;
+  min-height: min(620px, calc(100vh - 260px));
+  overflow: hidden;
+  border: 1px solid rgba(30, 42, 68, 0.1);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.embedded-local-app-frame {
+  display: block;
+  width: 100%;
+  min-height: min(620px, calc(100vh - 260px));
+  border: 0;
+  background: #fff;
+}
+
+.embedded-local-app-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.92);
+  pointer-events: none;
 }
 
 .compact-method-list {

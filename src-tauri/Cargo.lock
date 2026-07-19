@@ -429,6 +429,7 @@ name = "bridge-agent-desktop"
 version = "0.1.99"
 dependencies = [
  "anyhow",
+ "axum",
  "bridge-agent",
  "core-foundation",
  "dirs",
@@ -445,6 +446,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
+ "uuid",
  "zip",
 ]
 

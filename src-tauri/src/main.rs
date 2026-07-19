@@ -2,6 +2,14 @@
 
 mod managed_tool;
 
+use axum::{
+    body::Body,
+    extract::{Path as AxumPath, State as AxumState},
+    http::{header, HeaderMap, Response as HttpResponse, StatusCode},
+    response::Response as AxumResponse,
+    routing::get,
+    Router,
+};
 use bridge_agent::config::resolve_config_base_dir;
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
@@ -11,11 +19,12 @@ use bridge_agent::{
     ensure_browser_auth_agent_id, ensure_config_exists, format_connector_sync_failures,
     install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
     list_connectors, load_config as load_agent_config, load_connector_manifest,
-    manifest_preview_json, reset_invalid_config, save_config as save_agent_config, show_connector,
-    start_connector, stop_connector, sync_installed_connectors_report,
-    terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
-    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
-    RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    manifest_preview_json, reset_invalid_config, resolve_connector_ui_asset,
+    resolve_connector_ui_entry, save_config as save_agent_config, show_connector, start_connector,
+    stop_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
+    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
+    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -60,6 +69,9 @@ const UPDATE_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 60;
 const UPDATE_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 30 * 60;
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
+const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
+const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+const LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
@@ -75,7 +87,73 @@ struct DesktopState {
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
+    local_app_ui_port: u16,
+    local_app_ui_token: String,
 }
+
+struct PreparedLocalAppUiServer {
+    listener: std::net::TcpListener,
+    port: u16,
+    token: String,
+}
+
+#[derive(Clone)]
+struct LocalAppUiHttpState {
+    token: String,
+}
+
+const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
+  const REQUEST_TYPE = "baijimu:local-app:invoke";
+  const RESPONSE_TYPE = "baijimu:local-app:response";
+  const READY_TYPE = "baijimu:local-app:ready";
+  const pending = new Map();
+  let sequence = 0;
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.type !== RESPONSE_TYPE || message.version !== 1) return;
+    const request = pending.get(message.requestId);
+    if (!request) return;
+    pending.delete(message.requestId);
+    clearTimeout(request.timeout);
+    if (message.ok) request.resolve(message.data);
+    else request.reject(new Error(message.error || "本地应用管理操作失败"));
+  });
+
+  const api = Object.freeze({
+    version: 1,
+    invoke(operation, payload = null) {
+      if (typeof operation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(operation)) {
+        return Promise.reject(new Error("management operation 名称无效"));
+      }
+      const requestId = `${Date.now().toString(36)}-${(++sequence).toString(36)}`;
+      return new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          pending.delete(requestId);
+          reject(new Error("本地应用管理操作超时"));
+        }, 65000);
+        pending.set(requestId, { resolve, reject, timeout });
+        window.parent.postMessage({
+          type: REQUEST_TYPE,
+          version: 1,
+          requestId,
+          operation,
+          payload
+        }, "*");
+      });
+    }
+  });
+
+  Object.defineProperty(window, "baijimuLocalApp", {
+    value: api,
+    configurable: false,
+    enumerable: true,
+    writable: false
+  });
+  window.parent.postMessage({ type: READY_TYPE, version: 1 }, "*");
+})();
+"#;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -821,6 +899,208 @@ async fn stop_registered_service(
     run_start_command(service_config.name, stop_command).await
 }
 
+fn prepare_local_app_ui_server() -> anyhow::Result<PreparedLocalAppUiServer> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    Ok(PreparedLocalAppUiServer {
+        listener,
+        port: address.port(),
+        token: uuid::Uuid::new_v4().simple().to_string(),
+    })
+}
+
+fn start_local_app_ui_server(
+    prepared: PreparedLocalAppUiServer,
+    diagnostics: StartupDiagnostics,
+) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::from_std(prepared.listener)?;
+    let state = LocalAppUiHttpState {
+        token: prepared.token,
+    };
+    let router = Router::new()
+        .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
+        .route(
+            "/{token}/{connector_id}/{*asset_path}",
+            get(local_app_ui_asset_handler),
+        )
+        .with_state(state);
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = axum::serve(listener, router).await {
+            diagnostics.error(format!("local app UI server stopped: {err:#}"));
+        }
+    });
+    Ok(())
+}
+
+async fn local_app_ui_entry_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath((token, connector_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    serve_local_app_ui_asset(&state, &token, &connector_id, None, &headers).await
+}
+
+async fn local_app_ui_asset_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath((token, connector_id, asset_path)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    serve_local_app_ui_asset(&state, &token, &connector_id, Some(&asset_path), &headers).await
+}
+
+async fn serve_local_app_ui_asset(
+    state: &LocalAppUiHttpState,
+    token: &str,
+    connector_id: &str,
+    asset_path: Option<&str>,
+    headers: &HeaderMap,
+) -> AxumResponse {
+    if token != state.token || !local_app_ui_request_host_matches(headers, token, connector_id) {
+        return local_app_ui_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if asset_path == Some(LOCAL_APP_UI_BRIDGE_ASSET) {
+        return local_app_ui_response(
+            StatusCode::OK,
+            "application/javascript; charset=utf-8",
+            LOCAL_APP_UI_BRIDGE_SCRIPT.as_bytes().to_vec(),
+        );
+    }
+
+    let record = match show_connector(connector_id) {
+        Ok(record) => record,
+        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "application not found"),
+    };
+    let Some(ui) = record.manifest.ui.as_ref() else {
+        return local_app_ui_error(StatusCode::NOT_FOUND, "application UI not found");
+    };
+    let package_path = Path::new(&record.package_path);
+    let resolved = match resolve_connector_ui_asset(package_path, ui, asset_path) {
+        Ok(path) => path,
+        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found"),
+    };
+    let mut body = match tokio::fs::read(&resolved).await {
+        Ok(body) => body,
+        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found"),
+    };
+    if asset_path.is_none() {
+        body = match inject_local_app_ui_bridge(body) {
+            Ok(body) => body,
+            Err(message) => return local_app_ui_error(StatusCode::UNPROCESSABLE_ENTITY, &message),
+        };
+    }
+    local_app_ui_response(StatusCode::OK, local_app_ui_content_type(&resolved), body)
+}
+
+fn local_app_ui_host(token: &str, connector_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher.update([0]);
+    hasher.update(connector_id.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("app-{}.localhost", &digest[..20])
+}
+
+fn local_app_ui_request_host_matches(headers: &HeaderMap, token: &str, connector_id: &str) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let host_without_port = host.split_once(':').map_or(host, |(host, _)| host);
+    host_without_port.eq_ignore_ascii_case(&local_app_ui_host(token, connector_id))
+}
+
+fn inject_local_app_ui_bridge(body: Vec<u8>) -> Result<Vec<u8>, String> {
+    let html = String::from_utf8(body)
+        .map_err(|_| "application UI entry must be UTF-8 HTML".to_string())?;
+    let script = format!(r#"<script src="./{LOCAL_APP_UI_BRIDGE_ASSET}"></script>"#);
+    let lower = html.to_ascii_lowercase();
+    let injected = if let Some(index) = lower.find("</head>") {
+        format!("{}{}{}", &html[..index], script, &html[index..])
+    } else {
+        format!("{script}{html}")
+    };
+    Ok(injected.into_bytes())
+}
+
+fn local_app_ui_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
+fn local_app_ui_error(status: StatusCode, message: &str) -> AxumResponse {
+    local_app_ui_response(
+        status,
+        "text/plain; charset=utf-8",
+        message.as_bytes().to_vec(),
+    )
+}
+
+fn local_app_ui_response(
+    status: StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) -> AxumResponse {
+    HttpResponse::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; frame-ancestors tauri://localhost http://tauri.localhost http://localhost:1420",
+        )
+        .body(Body::from(body))
+        .unwrap_or_else(|_| HttpResponse::new(Body::empty()))
+}
+
+#[tauri::command]
+fn connector_app_ui_url(
+    id: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<String, String> {
+    let id = id.trim();
+    let record = show_connector(id).map_err(|err| err.to_string())?;
+    let ui = record
+        .manifest
+        .ui
+        .as_ref()
+        .ok_or_else(|| format!("应用 {} 没有声明内嵌界面", record.manifest.name))?;
+    resolve_connector_ui_entry(Path::new(&record.package_path), ui)
+        .map_err(|err| err.to_string())?;
+    Ok(format!(
+        "http://{}:{}/{}/{}/",
+        local_app_ui_host(&state.local_app_ui_token, &record.manifest.id),
+        state.local_app_ui_port,
+        state.local_app_ui_token,
+        record.manifest.id
+    ))
+}
+
 #[tauri::command]
 async fn list_connector_apps(
     state: tauri::State<'_, DesktopState>,
@@ -908,6 +1188,17 @@ async fn invoke_connector_management(
         .operations
         .get(operation)
         .ok_or_else(|| format!("应用 {} 没有声明管理操作 {operation}", record.manifest.name))?;
+    if let Some(payload) = payload.as_ref() {
+        let payload_size = serde_json::to_vec(payload)
+            .map_err(|err| format!("序列化应用管理参数失败: {err}"))?
+            .len();
+        if payload_size > LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES {
+            return Err(format!(
+                "应用管理参数超过 {} 字节限制",
+                LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES
+            ));
+        }
+    }
     let management_url = reqwest::Url::parse(&management.base_url)
         .map_err(|err| format!("应用本机管理地址无效: {err}"))?;
     let management_host = management_url.host_str().unwrap_or_default();
@@ -944,7 +1235,10 @@ async fn invoke_connector_management(
     {
         let metadata = fs::metadata(&token_path).map_err(|err| err.to_string())?;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(format!("应用本机管理凭证权限不安全: {}", token_path.display()));
+            return Err(format!(
+                "应用本机管理凭证权限不安全: {}",
+                token_path.display()
+            ));
         }
     }
 
@@ -957,7 +1251,9 @@ async fn invoke_connector_management(
         .map_err(|err| format!("创建本机应用管理请求失败: {err}"))?;
     let request = match operation_config.method.as_str() {
         "GET" => client.get(&url),
-        "POST" => client.post(&url).json(&payload.unwrap_or_else(|| serde_json::json!({}))),
+        "POST" => client
+            .post(&url)
+            .json(&payload.unwrap_or_else(|| serde_json::json!({}))),
         method => return Err(format!("不支持的本机应用管理方法: {method}")),
     };
     let response = request
@@ -966,11 +1262,26 @@ async fn invoke_connector_management(
         .await
         .map_err(|err| format!("调用本机应用管理接口失败: {err}"))?;
     let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|size| size > LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "本机应用管理响应超过 {} 字节限制",
+            LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES
+        ));
+    }
     let body = response
-        .text()
+        .bytes()
         .await
         .map_err(|err| format!("读取本机应用管理响应失败: {err}"))?;
-    let document: Value = serde_json::from_str(&body)
+    if body.len() > LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES {
+        return Err(format!(
+            "本机应用管理响应超过 {} 字节限制",
+            LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES
+        ));
+    }
+    let document: Value = serde_json::from_slice(&body)
         .map_err(|err| format!("本机应用管理接口返回了无效 JSON: {err}"))?;
     if !status.is_success() || document.get("ok").and_then(Value::as_bool) != Some(true) {
         let message = document
@@ -999,12 +1310,8 @@ async fn check_connector_app_update(
     }
 
     let installed = show_connector(connector_id).map_err(|err| err.to_string())?;
-    let resolved_source = resolve_connector_source(
-        source,
-        allow_git.unwrap_or(true),
-        checksum.as_deref(),
-    )
-    .await?;
+    let resolved_source =
+        resolve_connector_source(source, allow_git.unwrap_or(true), checksum.as_deref()).await?;
     let latest_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
     if latest_manifest.id != installed.manifest.id {
@@ -1042,7 +1349,10 @@ async fn install_connector_app(
     }
 
     let allow_git = allow_git.unwrap_or(true);
-    if !allow_git && connector_archive_kind(source).is_some() && checksum.as_deref().is_none_or(str::is_empty) {
+    if !allow_git
+        && connector_archive_kind(source).is_some()
+        && checksum.as_deref().is_none_or(str::is_empty)
+    {
         return Err("市场本地应用发布包必须提供 SHA-256 checksum".to_string());
     }
     let resolved_source = resolve_connector_source(source, allow_git, checksum.as_deref()).await?;
@@ -2636,7 +2946,11 @@ fn verify_connector_archive_checksum(
         .strip_prefix("sha256:")
         .unwrap_or(expected)
         .to_ascii_lowercase();
-    if expected.len() != 64 || !expected.chars().all(|character| character.is_ascii_hexdigit()) {
+    if expected.len() != 64
+        || !expected
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
         return Err("本地应用 SHA-256 checksum 格式无效".to_string());
     }
     let actual = format!("{:x}", Sha256::digest(bytes));
@@ -3249,7 +3563,8 @@ fn auto_start_agent(
                 return;
             }
         }
-        if let Err(err) = start_runtime_after_windows_service_handoff(&runtime, &config_path).await {
+        if let Err(err) = start_runtime_after_windows_service_handoff(&runtime, &config_path).await
+        {
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
             ));
@@ -3337,6 +3652,15 @@ fn main() {
     let diagnostics = StartupDiagnostics::for_config_path(&config_path);
     install_panic_diagnostics(diagnostics.clone());
     log_startup_environment(&diagnostics, &config_path);
+    let local_app_ui_server = match prepare_local_app_ui_server() {
+        Ok(server) => server,
+        Err(err) => {
+            diagnostics.error(format!("failed to prepare local app UI server: {err:#}"));
+            std::process::exit(1);
+        }
+    };
+    let local_app_ui_port = local_app_ui_server.port;
+    let local_app_ui_token = local_app_ui_server.token.clone();
 
     let runtime = AgentRuntimeManager::new();
     let quitting = Arc::new(AtomicBool::new(false));
@@ -3355,9 +3679,16 @@ fn main() {
             runtime: runtime.clone(),
             config_path: config_path.clone(),
             quitting: Arc::clone(&quitting),
+            local_app_ui_port,
+            local_app_ui_token,
         })
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
+            if let Err(err) =
+                start_local_app_ui_server(local_app_ui_server, setup_diagnostics.clone())
+            {
+                return Err(err.into());
+            }
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"
@@ -3407,6 +3738,7 @@ fn main() {
             start_registered_service,
             stop_registered_service,
             list_connector_apps,
+            connector_app_ui_url,
             list_market_connector_apps,
             show_connector_app,
             invoke_connector_management,
@@ -3522,9 +3854,7 @@ mod tests {
 
     #[test]
     fn windows_service_handoff_recognizes_process_probe_values() {
-        assert!(process_value_is_windows_service(
-            "bridge-agent-service.exe"
-        ));
+        assert!(process_value_is_windows_service("bridge-agent-service.exe"));
         assert!(process_value_is_windows_service(
             r#"C:\Program Files\Baijimu\bridge-agent-service.exe" --config agent-config.json"#
         ));
@@ -3586,5 +3916,65 @@ mod tests {
         assert!(verify_connector_archive_checksum(b"hello", Some(checksum)).is_ok());
         assert!(verify_connector_archive_checksum(b"changed", Some(checksum)).is_err());
         assert!(verify_connector_archive_checksum(b"hello", Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn local_app_ui_bridge_is_injected_before_head_closes() {
+        let html = b"<!doctype html><html><head><title>Settings</title></head><body></body></html>"
+            .to_vec();
+
+        let injected = String::from_utf8(inject_local_app_ui_bridge(html).unwrap()).unwrap();
+
+        let bridge_index = injected.find(LOCAL_APP_UI_BRIDGE_ASSET).unwrap();
+        let head_end_index = injected.to_ascii_lowercase().find("</head>").unwrap();
+        assert!(bridge_index < head_end_index);
+        assert_eq!(injected.matches(LOCAL_APP_UI_BRIDGE_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn local_app_ui_response_disables_direct_network_access() {
+        let response = local_app_ui_response(
+            StatusCode::OK,
+            "text/html; charset=utf-8",
+            b"<html></html>".to_vec(),
+        );
+
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("connect-src 'none'"));
+        assert!(csp.contains("frame-ancestors tauri://localhost http://tauri.localhost"));
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+    }
+
+    #[test]
+    fn local_app_ui_hosts_are_isolated_per_connector() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let first = local_app_ui_host(token, "com.baijimu.connector.first");
+        let second = local_app_ui_host(token, "com.baijimu.connector.second");
+        assert_ne!(first, second);
+        assert!(first.ends_with(".localhost"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, format!("{first}:32123").parse().unwrap());
+        assert!(local_app_ui_request_host_matches(
+            &headers,
+            token,
+            "com.baijimu.connector.first"
+        ));
+        assert!(!local_app_ui_request_host_matches(
+            &headers,
+            token,
+            "com.baijimu.connector.second"
+        ));
     }
 }

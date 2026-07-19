@@ -32,20 +32,21 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 - 自定义应用不能伪装成市场应用；除非被市场收录并按本规范提供 Connector 包。
 - 内置应用由 `bridge-agent` 客户端维护，不允许普通卸载，也不通过 Connector 安装目录管理。
 
-## 市场应用的宿主管理面板
+## 市场应用的本机管理界面
 
-一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或应用私有配置文件的第一方应用，Connector 可以声明受本机 token 保护的管理接口；`bridge-agent` 按稳定 `connectorId` 在同一个应用详情中挂载管理面板，但不能为这部分功能再创建第二张内置应用卡片。
+一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或应用私有配置文件的应用，Connector 可以同时声明受本机 token 保护的管理接口和随包发布的内嵌界面；`bridge-agent` 按稳定 `connectorId` 在同一个应用详情中加载该界面，但不能实现应用专用设置页，也不能为这部分功能再创建第二张内置应用卡片。
 
 宿主管理面板遵循以下边界：
 
-- Connector 负责声明和运行可授权的服务、方法、事件、健康检查及其应用管理接口。
+- Connector 负责声明和运行可授权的服务、方法、事件、健康检查、应用管理接口及应用专用界面。
 - 应用自身负责凭证签发、密钥存储、配置文件原子更新和应用进程重启；`bridge-agent` 只负责安装、启停、健康检查、升级、回滚和经过清单校验的本机管理请求代理。
+- 应用专用界面必须随 Connector 包发布和版本化。Bridge Agent 只提供隔离的 HTML 容器与受清单约束的调用桥，不得按应用 ID 写业务界面或业务状态。
 - 宿主管理操作不得注册成 Connector 的远程方法，不得经过 relay，也不得出现在工作区可授权能力列表中。
 - LLM key 不得进入 `bridge-agent`、前端状态或 relay，只能由对应本地应用进程签发、校验和写入。设备授权产生的本机工作区 token 仍由 Bridge Agent 写入共享 CLI 授权文件，应用只从该私有文件读取；两类密钥都不得返回前端，前端只接收脱敏后的归属、有效性和更新时间。
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责 `codex app-server` 的 session、thread、turn 和 event 能力，以及限定到 `workspaceId + projectId` 的 LLM credential 签发和本机 Codex 配置更新。Bridge Agent 只代理它声明的 `credentialState`、`listWorkspaceProjects` 和 `switchCredential` 管理操作；凭证切换不是 `codexSession` 的远程能力。
+Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责 `codex app-server` 的 session、thread、turn 和 event 能力，以及限定到 `workspaceId + projectId` 的 LLM credential 签发、本机 Codex 配置更新和“账户与工作区”界面。Bridge Agent 只加载其 `ui/` 静态资源并代理它声明的 `credentialState`、`listWorkspaceProjects` 和 `switchCredential` 管理操作；凭证切换不是 `codexSession` 的远程能力。
 
 管理接口必须满足：
 
@@ -71,6 +72,9 @@ connector-root/
   package.json
   bin/
   dist/
+  ui/
+    index.html
+    assets/
   README.md
   LICENSE
 ```
@@ -113,7 +117,7 @@ connector-root/
 
 ## connector.json
 
-`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.0`。
+`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.1`；未声明 `ui` 的 `1.0` 清单继续兼容。
 
 必填字段：
 
@@ -129,6 +133,7 @@ connector-root/
 - `publisher`
 - `source`
 - `runtime`
+- `ui`
 - `configSchema`
 - `remoteCapabilities`
 - `hooks`
@@ -137,7 +142,7 @@ connector-root/
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "id": "com.baijimu.connector.wechat",
   "name": "WeChat Connector",
   "version": "0.2.3",
@@ -156,6 +161,12 @@ connector-root/
     "command": "wechat-bridge-collector",
     "args": ["start"]
   },
+  "ui": {
+    "type": "embedded",
+    "entry": "ui/index.html",
+    "title": "个性化设置",
+    "defaultView": true
+  },
   "serviceRegistrationFiles": [
     "service-registration.json"
   ],
@@ -168,6 +179,46 @@ connector-root/
   ]
 }
 ```
+
+## 内嵌应用界面
+
+Connector 可以随应用包发布构建后的 Web 前端。Bridge Agent 只支持 `ui.type = embedded`，并把该页面作为应用详情中的独立 tab 加载：
+
+```json
+{
+  "schemaVersion": "1.1",
+  "ui": {
+    "type": "embedded",
+    "entry": "ui/index.html",
+    "title": "个性化设置",
+    "defaultView": true
+  }
+}
+```
+
+字段规则：
+
+- `entry` 必须是应用包专用 UI 子目录内、使用 `/` 的相对 `.html` 路径，不能直接放在包根目录，也不能包含 `..`、绝对路径或符号链接逃逸。
+- `entry` 所在目录是 UI 静态资源根目录；HTML 中应使用相对路径引用 JS、CSS、图片和字体。
+- `title` 是宿主 tab 名称，长度为 1 到 64 个字符；省略时显示“应用”。
+- `defaultView = true` 时，用户点击应用默认进入自定义界面；否则仍默认进入“概览”。
+- 前端可以使用 React、Vue、Svelte 等框架，但必须先构建为静态文件。客户端路由应使用 hash 路由。
+- 页面 CSP 禁止内联脚本和直接网络请求；JavaScript 必须放在 UI 目录下并通过相对 `src` 引用。
+- UI 文件随 Connector 安装、升级和回滚；运行期配置不得写回安装目录。
+
+Bridge Agent 会给入口 HTML 自动注入 `window.baijimuLocalApp`：
+
+```js
+const settings = await window.baijimuLocalApp.invoke("getSettings");
+await window.baijimuLocalApp.invoke("saveSettings", {
+  theme: "dark",
+  syncIntervalMinutes: 15
+});
+```
+
+`invoke` 只能调用同一 Connector 在 `management.operations` 中声明的操作。应用页面不能直接获得 Tauri IPC、文件系统、relay 或任意本机 HTTP 权限。Bridge Agent 对页面消息来源、操作名、请求大小和响应大小进行校验，再使用 Connector 私有 token 调用应用后端。
+
+应用后端负责校验并原子写入 `BAIJIMU_CONNECTOR_DATA_DIR` 下的配置。安装目录视为只读；升级必须保留数据目录，卸载时是否清理数据必须由用户单独确认。
 
 命名要求：
 

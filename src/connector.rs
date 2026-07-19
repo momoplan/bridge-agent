@@ -40,6 +40,8 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub management: Option<ConnectorManagement>,
     #[serde(default)]
+    pub ui: Option<ConnectorUi>,
+    #[serde(default)]
     pub config_schema: Option<Value>,
     #[serde(default)]
     pub remote_capabilities: Vec<ConnectorRemoteCapability>,
@@ -49,6 +51,18 @@ pub struct ConnectorManifest {
     pub service_registration_files: Vec<String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorUi {
+    #[serde(rename = "type")]
+    pub ui_type: String,
+    pub entry: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub default_view: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +164,7 @@ pub struct ConnectorSummary {
     pub package_path: String,
     pub source_path: String,
     pub source_reference: Option<String>,
+    pub ui: Option<ConnectorUi>,
     pub service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
     pub last_synced_at_epoch_ms: u64,
@@ -227,7 +242,58 @@ pub fn load_connector_manifest(source: &Path) -> Result<ConnectorManifest> {
         )
     })?;
     validate_manifest(&manifest)?;
+    if let Some(ui) = manifest.ui.as_ref() {
+        resolve_connector_ui_entry(source, ui)?;
+    }
     Ok(manifest)
+}
+
+pub fn resolve_connector_ui_entry(package_path: &Path, ui: &ConnectorUi) -> Result<PathBuf> {
+    resolve_connector_ui_asset(package_path, ui, None)
+}
+
+pub fn resolve_connector_ui_asset(
+    package_path: &Path,
+    ui: &ConnectorUi,
+    asset_path: Option<&str>,
+) -> Result<PathBuf> {
+    let package_root = package_path.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve connector package {}",
+            package_path.display()
+        )
+    })?;
+    if !package_root.is_dir() {
+        bail!("connector UI requires a package directory");
+    }
+
+    let entry_relative = validated_connector_ui_relative_path(&ui.entry, "entry")?;
+    let entry = package_root.join(&entry_relative);
+    let ui_root = entry
+        .parent()
+        .with_context(|| "connector UI entry must have a parent directory")?
+        .canonicalize()
+        .with_context(|| format!("failed to resolve connector UI root {}", entry.display()))?;
+    if !ui_root.starts_with(&package_root) {
+        bail!("connector UI root escapes the connector package");
+    }
+
+    let candidate = match asset_path {
+        Some(path) if !path.trim().is_empty() => {
+            ui_root.join(validated_connector_ui_relative_path(path, "asset path")?)
+        }
+        _ => entry,
+    };
+    let resolved = candidate.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve connector UI asset {}",
+            candidate.display()
+        )
+    })?;
+    if !resolved.starts_with(&ui_root) || !resolved.is_file() {
+        bail!("connector UI asset is outside the declared UI directory");
+    }
+    Ok(resolved)
 }
 
 pub fn install_connector_from_path(
@@ -519,8 +585,11 @@ pub fn stop_connector(connector_id: &str, config_path: &Path) -> Result<Connecto
 }
 
 fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
-    if manifest.schema_version.trim().is_empty() {
-        bail!("connector schemaVersion cannot be empty");
+    if !matches!(manifest.schema_version.as_str(), "1.0" | "1.1") {
+        bail!(
+            "connector schemaVersion `{}` is not supported; expected 1.0 or 1.1",
+            manifest.schema_version
+        );
     }
     if manifest.id.trim().is_empty() {
         bail!("connector id cannot be empty");
@@ -538,7 +607,53 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     if let Some(management) = manifest.management.as_ref() {
         validate_management(management)?;
     }
+    if let Some(ui) = manifest.ui.as_ref() {
+        if manifest.schema_version != "1.1" {
+            bail!("connector ui requires schemaVersion 1.1");
+        }
+        validate_connector_ui(ui)?;
+    }
     Ok(())
+}
+
+fn validate_connector_ui(ui: &ConnectorUi) -> Result<()> {
+    if ui.ui_type != "embedded" {
+        bail!("connector ui.type must be embedded");
+    }
+    let entry = validated_connector_ui_relative_path(&ui.entry, "entry")?;
+    if entry
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+    {
+        bail!("connector ui.entry must be inside a dedicated UI directory");
+    }
+    if entry.extension().and_then(|value| value.to_str()) != Some("html") {
+        bail!("connector ui.entry must point to an .html file");
+    }
+    if ui
+        .title
+        .as_deref()
+        .is_some_and(|title| title.trim().is_empty() || title.chars().count() > 64)
+    {
+        bail!("connector ui.title must contain 1 to 64 characters");
+    }
+    Ok(())
+}
+
+fn validated_connector_ui_relative_path(value: &str, field: &str) -> Result<PathBuf> {
+    let normalized = value.trim();
+    if normalized.is_empty() || normalized.contains('\\') {
+        bail!("connector UI {field} must be a non-empty forward-slash relative path");
+    }
+    let path = Path::new(normalized);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("connector UI {field} must stay inside the UI directory");
+    }
+    Ok(path.to_path_buf())
 }
 
 fn validate_connector_id(connector_id: &str) -> Result<()> {
@@ -1715,6 +1830,7 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         package_path: record.package_path,
         source_path: record.source_path,
         source_reference: record.source_reference,
+        ui: record.manifest.ui,
         service_names: record.service_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
         last_synced_at_epoch_ms,
@@ -1871,6 +1987,166 @@ mod tests {
         let management = manifest.management.unwrap();
         assert_eq!(management.auth.auth_type, "connector_token");
         assert_eq!(management.operations["state"].path, "/management/v1/state");
+    }
+
+    #[test]
+    fn connector_manifest_accepts_embedded_ui_and_resolves_only_ui_assets() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("ui/assets")).unwrap();
+        fs::write(dir.path().join("ui/index.html"), "<main>settings</main>").unwrap();
+        fs::write(dir.path().join("ui/assets/app.js"), "window.loaded = true;").unwrap();
+        fs::write(dir.path().join("private.txt"), "not a UI asset").unwrap();
+        fs::write(
+            dir.path().join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.1",
+                "id": "com.baijimu.connector.with-ui",
+                "name": "Connector With UI",
+                "version": "0.1.0",
+                "ui": {
+                    "type": "embedded",
+                    "entry": "ui/index.html",
+                    "title": "个性化设置",
+                    "defaultView": true
+                },
+                "services": [{
+                    "name": "withUiService",
+                    "description": "UI test service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = load_connector_manifest(dir.path()).unwrap();
+        let ui = manifest.ui.unwrap();
+        assert!(ui.default_view);
+        assert_eq!(ui.title.as_deref(), Some("个性化设置"));
+        assert_eq!(
+            resolve_connector_ui_entry(dir.path(), &ui).unwrap(),
+            dir.path().join("ui/index.html").canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_connector_ui_asset(dir.path(), &ui, Some("assets/app.js")).unwrap(),
+            dir.path().join("ui/assets/app.js").canonicalize().unwrap()
+        );
+        assert!(resolve_connector_ui_asset(dir.path(), &ui, Some("../private.txt")).is_err());
+    }
+
+    #[test]
+    fn connector_manifest_rejects_missing_or_escaping_ui_entry() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join(CONNECTOR_MANIFEST_FILE);
+        let base = json!({
+            "schemaVersion": "1.1",
+            "id": "com.baijimu.connector.bad-ui",
+            "name": "Bad UI Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badUiService",
+                "description": "Bad UI service.",
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }]
+        });
+
+        let mut missing = base.clone();
+        missing["ui"] = json!({ "type": "embedded", "entry": "ui/missing.html" });
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&missing).unwrap(),
+        )
+        .unwrap();
+        assert!(load_connector_manifest(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("failed to resolve connector UI root"));
+
+        let mut escaping = base.clone();
+        escaping["ui"] = json!({ "type": "embedded", "entry": "../outside.html" });
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&escaping).unwrap(),
+        )
+        .unwrap();
+        assert!(load_connector_manifest(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("must stay inside"));
+
+        fs::write(dir.path().join("index.html"), "<main>root UI</main>").unwrap();
+        let mut root_entry = base.clone();
+        root_entry["ui"] = json!({ "type": "embedded", "entry": "index.html" });
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&root_entry).unwrap(),
+        )
+        .unwrap();
+        assert!(load_connector_manifest(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("dedicated UI directory"));
+
+        let mut legacy_schema = base;
+        legacy_schema["schemaVersion"] = json!("1.0");
+        legacy_schema["ui"] = json!({ "type": "embedded", "entry": "ui/index.html" });
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&legacy_schema).unwrap(),
+        )
+        .unwrap();
+        assert!(load_connector_manifest(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("requires schemaVersion 1.1"));
+    }
+
+    #[test]
+    fn installed_connector_summary_exposes_embedded_ui_metadata() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("installed-connectors"));
+        let source = dir.path().join("source");
+        fs::create_dir_all(source.join("ui")).unwrap();
+        fs::write(
+            source.join("ui/index.html"),
+            "<!doctype html><title>UI</title>",
+        )
+        .unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.1",
+                "id": "com.baijimu.connector.installed-ui",
+                "name": "Installed UI Connector",
+                "version": "0.1.0",
+                "ui": {
+                    "type": "embedded",
+                    "entry": "ui/index.html",
+                    "title": "设置",
+                    "defaultView": true
+                },
+                "services": [{
+                    "name": "installedUiService",
+                    "description": "Installed UI service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let summary = list_connectors().unwrap().remove(0);
+        let ui = summary.ui.expect("installed UI metadata");
+        assert_eq!(ui.ui_type, "embedded");
+        assert_eq!(ui.entry, "ui/index.html");
+        assert_eq!(ui.title.as_deref(), Some("设置"));
+        assert!(ui.default_view);
     }
 
     #[test]
@@ -2631,6 +2907,7 @@ bad-python-connector = "bad_python_connector.app:main"
             source: None,
             runtime: None,
             management: None,
+            ui: None,
             config_schema: None,
             remote_capabilities: Vec::new(),
             services: Vec::new(),

@@ -215,6 +215,25 @@ jobs:
           package_dir="$RUNNER_TEMP/codex-local-app"
           cp "$source_dir/connector.json" "$source_dir/service-registration.json" \
             "$source_dir/README.md" "$source_dir/LICENSE" "$package_dir/"
+          cp -R "$source_dir/ui" "$package_dir/ui"
+          node - "$package_dir" "$CONNECTOR_VERSION" <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+          const [packageDir, expectedVersion] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "connector.json"), "utf8"));
+          if (manifest.version !== expectedVersion) throw new Error("connector package version mismatch");
+          if (manifest.schemaVersion !== "1.1" || manifest.ui?.type !== "embedded") {
+            throw new Error("connector package must declare an embedded schema 1.1 UI");
+          }
+          const entry = path.resolve(packageDir, manifest.ui.entry);
+          const uiRoot = path.resolve(packageDir, "ui");
+          if (!entry.startsWith(uiRoot + path.sep) || !fs.statSync(entry).isFile()) {
+            throw new Error("connector UI entry is missing from the release package");
+          }
+          for (const asset of ["app.js", "state.mjs", "styles.css"]) {
+            if (!fs.statSync(path.join(uiRoot, asset)).isFile()) throw new Error(`missing UI asset: ${asset}`);
+          }
+          NODE
           binary_name="baijimu-connector-codex"
           [ "$RUNNER_OS" != "Windows" ] || binary_name="baijimu-connector-codex.exe"
           binary="$package_dir/bin/${{ matrix.platform_dir }}/$binary_name"
