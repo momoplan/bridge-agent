@@ -819,17 +819,22 @@ jobs:
           fi
 
           for asset in "${bundle_files[@]}"; do
-            signature_args=()
             if [ -s "${asset}.sig" ]; then
-              signature_args=("${asset}.sig")
+              node .github/scripts/upload-release-asset.mjs \
+                "$api" \
+                "$RELEASE_TAG" \
+                "$version" \
+                "$RELEASE_TARGET" \
+                "$asset" \
+                "${asset}.sig"
+            else
+              node .github/scripts/upload-release-asset.mjs \
+                "$api" \
+                "$RELEASE_TAG" \
+                "$version" \
+                "$RELEASE_TARGET" \
+                "$asset"
             fi
-            node .github/scripts/upload-release-asset.mjs \
-              "$api" \
-              "$RELEASE_TAG" \
-              "$version" \
-              "$RELEASE_TARGET" \
-              "$asset" \
-              "${signature_args[@]}"
           done
 
   publish-update-service:
