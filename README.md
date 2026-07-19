@@ -585,6 +585,8 @@ baijimu-jenkins build bridge-agent-desktop-release \
 
 干跑成功后以相同参数执行 `DRY_RUN=false`。GitHub 的 tag push 和
 `workflow_dispatch` 是 Jenkins 后面的构建机制，不是日常人工发布入口。
+失败的下游签名构建可以从修复后的工作流分支以原 `release_tag` 重跑；工作流会
+checkout 该不可变标签，避免把工作流修复提交误装进既有版本。
 
 Jenkins Linux 构建节点必须由节点管理员一次性安装与 GitHub Linux runner
 相同的 Tauri 系统依赖；发布任务会在下载 Rust 依赖前检查这些包，缺失时立即失败：

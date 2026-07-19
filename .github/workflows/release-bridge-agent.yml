@@ -76,7 +76,7 @@ jobs:
         include:
           - name: macOS Universal
             runner: macos-15-intel
-            tauri_args: --target universal-apple-darwin --bundles dmg
+            tauri_args: --target universal-apple-darwin --bundles app,dmg
             rust_targets: aarch64-apple-darwin x86_64-apple-darwin
           - name: Windows x64
             runner: windows-latest
@@ -93,6 +93,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
