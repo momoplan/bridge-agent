@@ -586,6 +586,18 @@ baijimu-jenkins build bridge-agent-desktop-release \
 干跑成功后以相同参数执行 `DRY_RUN=false`。GitHub 的 tag push 和
 `workflow_dispatch` 是 Jenkins 后面的构建机制，不是日常人工发布入口。
 
+Jenkins Linux 构建节点必须由节点管理员一次性安装与 GitHub Linux runner
+相同的 Tauri 系统依赖；发布任务会在下载 Rust 依赖前检查这些包，缺失时立即失败：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  libwebkit2gtk-4.1-dev \
+  libappindicator3-dev \
+  librsvg2-dev \
+  patchelf
+```
+
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
 
 - `BRIDGE_AGENT_UPDATE_API_URL`

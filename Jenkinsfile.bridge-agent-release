@@ -43,6 +43,27 @@ test -n "$cli_tag_commit"
                 sh '''#!/bin/bash
 set -euo pipefail
 if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+required_linux_packages=(
+  libwebkit2gtk-4.1-dev
+  libappindicator3-dev
+  librsvg2-dev
+  patchelf
+)
+missing_linux_packages=()
+for package in "${required_linux_packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fxq 'install ok installed'; then
+    missing_linux_packages+=("$package")
+  fi
+done
+if [ "${#missing_linux_packages[@]}" -ne 0 ]; then
+  printf 'Jenkins node is missing Tauri Linux build dependencies: %s\n' "${missing_linux_packages[*]}" >&2
+  printf 'Install the packages as the node administrator before releasing.\n' >&2
+  exit 1
+fi
+export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+export CARGO_HTTP_TIMEOUT=600
+export CARGO_NET_RETRY=10
+export CARGO_HTTP_MULTIPLEXING=false
 npm ci
 npm run build
 cargo test --workspace
