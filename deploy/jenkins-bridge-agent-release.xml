@@ -26,7 +26,7 @@
           <credentialsId>bd5fa0ff-2186-41e4-a7aa-97937ef32c02</credentialsId>
         </hudson.plugins.git.UserRemoteConfig>
       </userRemoteConfigs>
-      <branches><hudson.plugins.git.BranchSpec><name>*/codex/unified-app-updates</name></hudson.plugins.git.BranchSpec></branches>
+      <branches><hudson.plugins.git.BranchSpec><name>*/main</name></hudson.plugins.git.BranchSpec></branches>
       <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
       <submoduleCfg class="empty-list"/>
       <extensions/>
