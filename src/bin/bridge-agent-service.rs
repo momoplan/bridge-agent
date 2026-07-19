@@ -13,7 +13,7 @@ use bridge_agent::{
 use clap::Parser;
 
 #[cfg(windows)]
-use std::ffi::OsString;
+use std::ffi::{c_void, OsString};
 
 #[cfg(windows)]
 use std::fs;
@@ -22,13 +22,19 @@ use std::fs;
 use std::path::PathBuf;
 
 #[cfg(windows)]
+use std::ptr::{null, null_mut};
+
+#[cfg(windows)]
 use std::sync::{
     mpsc::{self, TryRecvError},
     OnceLock,
 };
 
 #[cfg(windows)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::{env, os::windows::ffi::OsStrExt, slice};
 
 #[cfg(windows)]
 use windows_service::define_windows_service;
@@ -45,11 +51,25 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_dispatcher;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+
+#[cfg(windows)]
+use windows_sys::Win32::System::RemoteDesktop::{
+    WTSActive, WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE,
+    WTS_SESSION_INFOW,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 #[cfg(windows)]
@@ -65,6 +85,9 @@ const DESKTOP_PROCESS_NAME: &str = "bridge-agent-desktop.exe";
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(windows)]
+const DESKTOP_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
 #[derive(Debug, Parser)]
 #[command(name = "bridge-agent-service")]
 #[command(about = "Windows service host for bridge-agent")]
@@ -75,7 +98,6 @@ struct ConsoleArgs {
     console: bool,
 }
 
-#[cfg(windows)]
 #[cfg(windows)]
 define_windows_service!(ffi_service_main, service_main);
 
@@ -192,6 +214,7 @@ async fn run_runtime_supervisor(
 ) -> Result<()> {
     let mut applied_config: Option<Vec<u8>> = None;
     let mut desktop_handoff_active = false;
+    let mut next_desktop_launch_attempt = Instant::now();
 
     loop {
         match shutdown_rx.try_recv() {
@@ -213,6 +236,28 @@ async fn run_runtime_supervisor(
             continue;
         }
         desktop_handoff_active = false;
+
+        if Instant::now() >= next_desktop_launch_attempt {
+            match launch_desktop_in_active_session() {
+                Ok(Some(session_id)) => {
+                    tracing::info!(
+                        session_id,
+                        "started bridge-agent desktop client in the active Windows session"
+                    );
+                    next_desktop_launch_attempt = Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
+                    tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to start bridge-agent desktop client in the active Windows session"
+                    );
+                }
+            }
+            next_desktop_launch_attempt = Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
+        }
 
         match fs::read(config_path) {
             Ok(contents) if applied_config.as_deref() != Some(contents.as_slice()) => {
@@ -305,6 +350,153 @@ fn desktop_process_running() -> bool {
         CloseHandle(snapshot);
     }
     found
+}
+
+#[cfg(windows)]
+fn launch_desktop_in_active_session() -> Result<Option<u32>> {
+    let Some(session_id) = active_user_session_id()? else {
+        return Ok(None);
+    };
+
+    let service_executable = env::current_exe().context("resolve Windows service executable")?;
+    let install_dir = service_executable
+        .parent()
+        .context("resolve Windows service install directory")?;
+    let desktop_executable = install_dir.join(DESKTOP_PROCESS_NAME);
+    if !desktop_executable.is_file() {
+        anyhow::bail!(
+            "desktop executable does not exist at {}",
+            desktop_executable.display()
+        );
+    }
+
+    let mut user_token: HANDLE = null_mut();
+    if unsafe { WTSQueryUserToken(session_id, &mut user_token) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("query user token for Windows session {session_id}"));
+    }
+    let user_token = OwnedHandle(user_token);
+
+    let mut environment: *mut c_void = null_mut();
+    if unsafe { CreateEnvironmentBlock(&mut environment, user_token.0, 0) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("create user environment for Windows session {session_id}"));
+    }
+    let environment = OwnedEnvironmentBlock(environment);
+
+    let application = wide_null(desktop_executable.as_os_str());
+    let current_directory = wide_null(install_dir.as_os_str());
+    let mut desktop_name = wide_null(std::ffi::OsStr::new("winsta0\\default"));
+    let mut startup_info = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        lpDesktop: desktop_name.as_mut_ptr(),
+        ..Default::default()
+    };
+    let mut process_info = PROCESS_INFORMATION::default();
+
+    let created = unsafe {
+        CreateProcessAsUserW(
+            user_token.0,
+            application.as_ptr(),
+            null_mut(),
+            null(),
+            null(),
+            0,
+            CREATE_UNICODE_ENVIRONMENT,
+            environment.0,
+            current_directory.as_ptr(),
+            &mut startup_info,
+            &mut process_info,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "start {} in Windows session {session_id}",
+                desktop_executable.display()
+            )
+        });
+    }
+
+    unsafe {
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+    }
+    Ok(Some(session_id))
+}
+
+#[cfg(windows)]
+fn active_user_session_id() -> Result<Option<u32>> {
+    let mut sessions: *mut WTS_SESSION_INFOW = null_mut();
+    let mut count = 0u32;
+    if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count) }
+        == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("enumerate active Windows sessions");
+    }
+    let sessions_guard = OwnedWtsMemory(sessions.cast());
+    let result = select_active_user_session_id(
+        unsafe { slice::from_raw_parts(sessions, count as usize) }
+            .iter()
+            .map(|session| (session.SessionId, session.State == WTSActive)),
+    );
+    drop(sessions_guard);
+    Ok(result)
+}
+
+#[cfg(any(windows, test))]
+fn select_active_user_session_id(sessions: impl IntoIterator<Item = (u32, bool)>) -> Option<u32> {
+    sessions
+        .into_iter()
+        .find(|(session_id, active)| *session_id != 0 && *active)
+        .map(|(session_id, _)| session_id)
+}
+
+#[cfg(windows)]
+fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+struct OwnedHandle(HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct OwnedEnvironmentBlock(*mut c_void);
+
+#[cfg(windows)]
+impl Drop for OwnedEnvironmentBlock {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                DestroyEnvironmentBlock(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct OwnedWtsMemory(*mut c_void);
+
+#[cfg(windows)]
+impl Drop for OwnedWtsMemory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                WTSFreeMemory(self.0);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -414,7 +606,7 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::config_is_authorized;
+    use super::{config_is_authorized, select_active_user_session_id};
     use bridge_agent::AgentConfig;
 
     #[test]
@@ -427,5 +619,14 @@ mod tests {
 
         config.relay.token = "device-token".to_string();
         assert!(config_is_authorized(&config));
+    }
+
+    #[test]
+    fn desktop_launch_targets_the_first_active_non_system_session() {
+        assert_eq!(
+            select_active_user_session_id([(0, true), (2, false), (3, true), (4, true)]),
+            Some(3)
+        );
+        assert_eq!(select_active_user_session_id([(0, true), (2, false)]), None);
     }
 }
