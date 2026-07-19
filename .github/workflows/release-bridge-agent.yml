@@ -15,8 +15,60 @@ permissions:
   contents: write
 
 jobs:
+  prepare-domestic-release:
+    name: Prepare domestic release
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          case "$RELEASE_TAG" in
+            bridge-agent-v*) ;;
+            *)
+              echo "Invalid release tag: $RELEASE_TAG" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Upsert domestic release
+        shell: bash
+        env:
+          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
+          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
+          case "$api" in
+            http://*) api="https://${api#http://}" ;;
+          esac
+          case "$api" in
+            *://relay.baijimu.com/*)
+              echo "BRIDGE_AGENT_RELEASE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
+              exit 1
+              ;;
+          esac
+          version="${RELEASE_TAG#bridge-agent-v}"
+
+          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"百积木 $RELEASE_TAG\",\"source\":\"github-actions\"}" \
+            "$api/releases/$RELEASE_TAG"
+
   release:
     name: ${{ matrix.name }}
+    needs: prepare-domestic-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -710,13 +762,6 @@ jobs:
           version="${RELEASE_TAG#bridge-agent-v}"
           asset_dir="$RUNNER_TEMP/bridge-agent-release-assets"
           mkdir -p "$asset_dir"
-
-          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
-            -X POST \
-            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"百积木 $RELEASE_TAG\",\"source\":\"github-actions\"}" \
-            "$api/releases/$RELEASE_TAG"
 
           shopt -s nullglob
           case "$RELEASE_TARGET" in
