@@ -14,6 +14,10 @@ on:
         description: baijimu-cli-rs tag or branch, for example v0.1.1
         required: true
         type: string
+      cli_commit:
+        description: Exact baijimu-cli-rs commit to build
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -75,6 +79,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       CLI_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_ref || github.ref_name }}
+      CLI_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_commit || '' }}
       MACOSX_DEPLOYMENT_TARGET: "10.13"
     steps:
       - name: Checkout release tooling
@@ -114,6 +119,10 @@ jobs:
           git clone --depth 1 --branch "$CLI_REF" \
             "https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@gitee.com/zxflimit_admin/baijimu-cli-rs.git" \
             "$RUNNER_TEMP/baijimu-cli-rs"
+          if [ -n "$CLI_COMMIT" ] && [ "$(git -C "$RUNNER_TEMP/baijimu-cli-rs" rev-parse HEAD)" != "$CLI_COMMIT" ]; then
+            echo "CLI ref $CLI_REF does not point to expected commit $CLI_COMMIT" >&2
+            exit 1
+          fi
           cli_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$RUNNER_TEMP/baijimu-cli-rs/Cargo.toml" | head -1)"
           if [ "baijimu-cli-v${cli_version}" != "$RELEASE_TAG" ]; then
             echo "Release tag $RELEASE_TAG does not match CLI version $cli_version" >&2
@@ -273,3 +282,122 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+
+  publish-npm:
+    needs: publish-release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      CLI_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_ref || github.ref_name }}
+      CLI_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_commit || '' }}
+    steps:
+      - name: Resolve CLI ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "CLI_REF=${RELEASE_TAG#baijimu-cli-}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Node for npm trusted publishing
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Checkout Baijimu CLI source
+        shell: bash
+        env:
+          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BAIJIMU_CLI_RS_GIT_TOKEN" ]; then
+            echo "Missing BAIJIMU_CLI_RS_GIT_TOKEN" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "$CLI_REF" \
+            "https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@gitee.com/zxflimit_admin/baijimu-cli-rs.git" \
+            "$RUNNER_TEMP/baijimu-cli-rs"
+          if [ -n "$CLI_COMMIT" ] && [ "$(git -C "$RUNNER_TEMP/baijimu-cli-rs" rev-parse HEAD)" != "$CLI_COMMIT" ]; then
+            echo "CLI ref $CLI_REF does not point to expected commit $CLI_COMMIT" >&2
+            exit 1
+          fi
+          cli_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$RUNNER_TEMP/baijimu-cli-rs/Cargo.toml" | head -1)"
+          if [ "baijimu-cli-v${cli_version}" != "$RELEASE_TAG" ]; then
+            echo "Release tag $RELEASE_TAG does not match CLI version $cli_version" >&2
+            exit 1
+          fi
+          npm_native_version="$(node -p 'require(process.argv[1]).baijimu.nativeVersion' "$RUNNER_TEMP/baijimu-cli-rs/npm/package.json")"
+          if [ "$npm_native_version" != "$cli_version" ]; then
+            echo "npm nativeVersion $npm_native_version does not match CLI version $cli_version" >&2
+            exit 1
+          fi
+          echo "CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
+
+      - name: Download and verify signed native assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/baijimu-cli-release-assets"
+          mkdir -p "$assets"
+          for platform in macos-universal windows-x64 linux-x64; do
+            asset="baijimu-cli-${CLI_VERSION}-${platform}.zip"
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$assets" \
+              --pattern "$asset" \
+              --pattern "$asset.sha256"
+          done
+          cd "$assets"
+          sha256sum --check ./*.sha256
+
+      - name: Assemble native npm launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_dir="$RUNNER_TEMP/baijimu-cli-rs"
+          assets="$RUNNER_TEMP/baijimu-cli-release-assets"
+          native="$cli_dir/npm/native"
+          mkdir -p \
+            "$native/darwin-arm64" \
+            "$native/darwin-x64" \
+            "$native/win32-x64" \
+            "$native/linux-x64"
+
+          mac="baijimu-cli-${CLI_VERSION}-macos-universal.zip"
+          win="baijimu-cli-${CLI_VERSION}-windows-x64.zip"
+          linux="baijimu-cli-${CLI_VERSION}-linux-x64.zip"
+          unzip -p "$assets/$mac" bin/baijimu > "$native/darwin-arm64/baijimu"
+          cp "$native/darwin-arm64/baijimu" "$native/darwin-x64/baijimu"
+
+          windows_unzip_status=0
+          unzip -q "$assets/$win" -d "$assets/windows-unpacked" || windows_unzip_status=$?
+          test "$windows_unzip_status" -le 1
+          cp "$assets/windows-unpacked/bin/baijimu.exe" "$native/win32-x64/baijimu.exe"
+
+          unzip -p "$assets/$linux" bin/baijimu > "$native/linux-x64/baijimu"
+          chmod 755 \
+            "$native/darwin-arm64/baijimu" \
+            "$native/darwin-x64/baijimu" \
+            "$native/linux-x64/baijimu"
+          test -s "$native/win32-x64/baijimu.exe"
+          test "$("$native/linux-x64/baijimu" --version)" = "$CLI_VERSION"
+          "$native/linux-x64/baijimu" --version --json
+
+      - name: Test and publish npm launcher with OIDC
+        shell: bash
+        working-directory: ${{ runner.temp }}/baijimu-cli-rs/npm
+        run: |
+          set -euo pipefail
+          npm install --global npm@latest
+          npm --version
+          npm ci
+          npm test
+          npm run pack:check
+          npm publish --access public --registry https://registry.npmjs.org/
