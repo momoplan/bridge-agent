@@ -64,6 +64,12 @@ export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 export CARGO_HTTP_TIMEOUT=600
 export CARGO_NET_RETRY=10
 export CARGO_HTTP_MULTIPLEXING=false
+export CARGO_TARGET_DIR="$WORKSPACE/.jenkins-cargo-target"
+case "$CARGO_TARGET_DIR" in
+  "$WORKSPACE"/*) ;;
+  *) printf 'Refusing unsafe Cargo target cleanup path: %s\n' "$CARGO_TARGET_DIR" >&2; exit 1 ;;
+esac
+trap 'rm -rf -- "$CARGO_TARGET_DIR"' EXIT
 npm ci
 npm run build
 cargo test --workspace

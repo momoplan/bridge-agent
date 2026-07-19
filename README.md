@@ -598,6 +598,9 @@ sudo apt-get install -y \
   patchelf
 ```
 
+流水线使用工作区内独立的临时 Cargo target 目录，并在测试成功或失败后自动清理，
+避免 Tauri 与主程序的编译缓存长期挤满 Jenkins 节点磁盘。
+
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
 
 - `BRIDGE_AGENT_UPDATE_API_URL`
