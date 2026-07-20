@@ -310,12 +310,21 @@ const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
   const REQUEST_TYPE = "baijimu:local-app:invoke";
   const RESPONSE_TYPE = "baijimu:local-app:response";
   const READY_TYPE = "baijimu:local-app:ready";
+  const HELLO_TYPE = "baijimu:local-app:hello";
   const pending = new Map();
   let sequence = 0;
+
+  const announceReady = () => {
+    window.parent.postMessage({ type: READY_TYPE, version: 1 }, "*");
+  };
 
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent) return;
     const message = event.data;
+    if (message && message.type === HELLO_TYPE && message.version === 1) {
+      announceReady();
+      return;
+    }
     if (!message || message.type !== RESPONSE_TYPE || message.version !== 1) return;
     const request = pending.get(message.requestId);
     if (!request) return;
@@ -355,7 +364,8 @@ const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
     enumerable: true,
     writable: false
   });
-  window.parent.postMessage({ type: READY_TYPE, version: 1 }, "*");
+  announceReady();
+  window.addEventListener("pageshow", announceReady);
 })();
 "#;
 
@@ -3954,6 +3964,14 @@ mod tests {
         let head_end_index = injected.to_ascii_lowercase().find("</head>").unwrap();
         assert!(bridge_index < head_end_index);
         assert_eq!(injected.matches(LOCAL_APP_UI_BRIDGE_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn local_app_ui_bridge_reannounces_ready_after_host_hello() {
+        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("baijimu:local-app:hello"));
+        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("announceReady();"));
+        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("window.addEventListener(\"pageshow\", announceReady)"));
+        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("message.type === HELLO_TYPE"));
     }
 
     #[test]

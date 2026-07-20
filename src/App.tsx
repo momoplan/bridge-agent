@@ -5617,22 +5617,22 @@ function App() {
 
 function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const uiOriginRef = useRef("");
   const [uiUrl, setUiUrl] = useState("");
-  const [uiOrigin, setUiOrigin] = useState("");
   const [loadError, setLoadError] = useState("");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let active = true;
     setUiUrl("");
-    setUiOrigin("");
+    uiOriginRef.current = "";
     setLoadError("");
     setReady(false);
     void invoke<string>("connector_app_ui_url", { id: props.connectorId })
       .then((url) => {
         if (!active) return;
         const parsed = new URL(url);
-        setUiOrigin(parsed.origin);
+        uiOriginRef.current = parsed.origin;
         setUiUrl(parsed.toString());
       })
       .catch((error) => {
@@ -5644,10 +5644,10 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
   }, [props.connectorId]);
 
   useEffect(() => {
-    if (!uiOrigin) return;
     const handleMessage = (event: MessageEvent<unknown>) => {
       const target = iframeRef.current?.contentWindow;
-      if (!target || event.source !== target || event.origin !== uiOrigin) return;
+      const uiOrigin = uiOriginRef.current;
+      if (!target || !uiOrigin || event.source !== target || event.origin !== uiOrigin) return;
       if (!isLocalAppBridgeMessage(event.data)) return;
       if (event.data.type === "baijimu:local-app:ready") {
         setReady(true);
@@ -5686,7 +5686,15 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [props.connectorId, uiOrigin]);
+  }, [props.connectorId]);
+
+  useEffect(() => {
+    if (!uiUrl || ready) return;
+    const timer = window.setTimeout(() => {
+      setLoadError("应用界面已加载，但未能与 Bridge Agent 完成安全握手。请关闭后重新打开应用详情。");
+    }, 10000);
+    return () => window.clearTimeout(timer);
+  }, [ready, uiUrl]);
 
   if (loadError) {
     return <div className="error-banner">加载应用界面失败：{loadError}</div>;
@@ -5704,7 +5712,14 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
         title={props.title}
         sandbox="allow-forms allow-same-origin allow-scripts"
         referrerPolicy="no-referrer"
-        onLoad={() => setLoadError("")}
+        onLoad={() => {
+          setLoadError("");
+          const target = iframeRef.current?.contentWindow;
+          const uiOrigin = uiOriginRef.current;
+          if (target && uiOrigin) {
+            target.postMessage({ type: "baijimu:local-app:hello", version: 1 }, uiOrigin);
+          }
+        }}
       />
     </div>
   );
