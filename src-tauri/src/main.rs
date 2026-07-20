@@ -304,6 +304,7 @@ fn write_startup_state(path: &Path, state: &PersistentStartupState) -> Result<()
 #[derive(Clone)]
 struct LocalAppUiHttpState {
     token: String,
+    diagnostics: StartupDiagnostics,
 }
 
 const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
@@ -1174,7 +1175,10 @@ fn start_local_app_ui_server(
             Some(format!("127.0.0.1:{port}")),
         );
         diagnostics.info(format!("local app UI server listening on 127.0.0.1:{port}"));
-        let state = LocalAppUiHttpState { token };
+        let state = LocalAppUiHttpState {
+            token,
+            diagnostics: diagnostics.clone(),
+        };
         let router = Router::new()
             .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
             .route(
@@ -1220,10 +1224,21 @@ async fn serve_local_app_ui_asset(
     asset_path: Option<&str>,
     headers: &HeaderMap,
 ) -> AxumResponse {
+    let asset_kind = match asset_path {
+        None => "entry",
+        Some(LOCAL_APP_UI_BRIDGE_ASSET) => "bridge",
+        Some(_) => "asset",
+    };
     if token != state.token || !local_app_ui_request_host_matches(headers, token, connector_id) {
+        state.diagnostics.warn(format!(
+            "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=invalid_endpoint"
+        ));
         return local_app_ui_error(StatusCode::NOT_FOUND, "not found");
     }
     if asset_path == Some(LOCAL_APP_UI_BRIDGE_ASSET) {
+        state.diagnostics.info(format!(
+            "local app UI request: connector_id={connector_id} asset_kind=bridge outcome=served status=200"
+        ));
         return local_app_ui_response(
             StatusCode::OK,
             "application/javascript; charset=utf-8",
@@ -1233,26 +1248,52 @@ async fn serve_local_app_ui_asset(
 
     let record = match show_connector(connector_id) {
         Ok(record) => record,
-        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "application not found"),
+        Err(_) => {
+            state.diagnostics.warn(format!(
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=application_not_found"
+            ));
+            return local_app_ui_error(StatusCode::NOT_FOUND, "application not found");
+        }
     };
     let Some(ui) = record.manifest.ui.as_ref() else {
+        state.diagnostics.warn(format!(
+            "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=ui_not_declared"
+        ));
         return local_app_ui_error(StatusCode::NOT_FOUND, "application UI not found");
     };
     let package_path = Path::new(&record.package_path);
     let resolved = match resolve_connector_ui_asset(package_path, ui, asset_path) {
         Ok(path) => path,
-        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found"),
+        Err(_) => {
+            state.diagnostics.warn(format!(
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=asset_not_found"
+            ));
+            return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found");
+        }
     };
     let mut body = match tokio::fs::read(&resolved).await {
         Ok(body) => body,
-        Err(_) => return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found"),
+        Err(_) => {
+            state.diagnostics.warn(format!(
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=asset_read_failed"
+            ));
+            return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found");
+        }
     };
     if asset_path.is_none() {
         body = match inject_local_app_ui_bridge(body) {
             Ok(body) => body,
-            Err(message) => return local_app_ui_error(StatusCode::UNPROCESSABLE_ENTITY, &message),
+            Err(message) => {
+                state.diagnostics.warn(format!(
+                    "local app UI request: connector_id={connector_id} asset_kind=entry outcome=rejected reason=bridge_injection_failed"
+                ));
+                return local_app_ui_error(StatusCode::UNPROCESSABLE_ENTITY, &message);
+            }
         };
     }
+    state.diagnostics.info(format!(
+        "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=served status=200"
+    ));
     local_app_ui_response(StatusCode::OK, local_app_ui_content_type(&resolved), body)
 }
 
@@ -3973,8 +4014,17 @@ mod tests {
     fn local_app_ui_bridge_reannounces_ready_after_host_hello() {
         assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("baijimu:local-app:hello"));
         assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("announceReady();"));
-        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("window.addEventListener(\"pageshow\", announceReady)"));
+        assert!(LOCAL_APP_UI_BRIDGE_SCRIPT
+            .contains("window.addEventListener(\"pageshow\", announceReady)"));
         assert!(LOCAL_APP_UI_BRIDGE_SCRIPT.contains("message.type === HELLO_TYPE"));
+    }
+
+    #[test]
+    fn macos_bundle_allows_loopback_assets_inside_webview() {
+        let info_plist = include_str!("../Info.plist");
+        assert!(info_plist.contains("NSAppTransportSecurity"));
+        assert!(info_plist.contains("NSAllowsArbitraryLoadsInWebContent"));
+        assert!(info_plist.contains("<true/>"));
     }
 
     #[test]

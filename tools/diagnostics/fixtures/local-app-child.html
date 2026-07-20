@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Local App Handshake Child</title>
+    <script>
+      const reportReady = (reason) => {
+        window.parent.postMessage(
+          {
+            type: "baijimu:local-app:ready",
+            version: 1,
+            reason,
+            childOrigin: window.location.origin
+          },
+          "*"
+        );
+      };
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        if (event.data?.type !== "baijimu:local-app:hello" || event.data?.version !== 1) return;
+        window.parent.postMessage(
+          {
+            type: "baijimu:local-app:ready",
+            version: 1,
+            reason: "hello",
+            childOrigin: window.location.origin,
+            helloOrigin: event.origin,
+            helloSourceMatches: event.source === window.parent
+          },
+          "*"
+        );
+      });
+
+      reportReady("script");
+      window.addEventListener("pageshow", () => reportReady("pageshow"));
+    </script>
+  </head>
+  <body>Local App Handshake Child</body>
+</html>

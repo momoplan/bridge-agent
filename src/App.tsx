@@ -5675,8 +5675,19 @@ function App() {
   );
 }
 
+function reportLocalAppUiHandshake(
+  connectorId: string,
+  event: string,
+  detail: Record<string, string | number | boolean | null> = {},
+) {
+  void invoke("report_frontend_bootstrap_event", {
+    message: `local_app_ui ${JSON.stringify({ connectorId, event, ...detail })}`,
+  }).catch(() => {});
+}
+
 function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const iframeLoadedRef = useRef(false);
   const uiOriginRef = useRef("");
   const [uiUrl, setUiUrl] = useState("");
   const [loadError, setLoadError] = useState("");
@@ -5685,18 +5696,25 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
   useEffect(() => {
     let active = true;
     setUiUrl("");
+    iframeLoadedRef.current = false;
     uiOriginRef.current = "";
     setLoadError("");
     setReady(false);
+    reportLocalAppUiHandshake(props.connectorId, "url_request_started");
     void invoke<string>("connector_app_ui_url", { id: props.connectorId })
       .then((url) => {
         if (!active) return;
         const parsed = new URL(url);
         uiOriginRef.current = parsed.origin;
         setUiUrl(parsed.toString());
+        reportLocalAppUiHandshake(props.connectorId, "url_resolved", { origin: parsed.origin });
       })
       .catch((error) => {
-        if (active) setLoadError(readError(error));
+        if (active) {
+          const message = readError(error);
+          reportLocalAppUiHandshake(props.connectorId, "url_request_failed");
+          setLoadError(message);
+        }
       });
     return () => {
       active = false;
@@ -5707,9 +5725,23 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
     const handleMessage = (event: MessageEvent<unknown>) => {
       const target = iframeRef.current?.contentWindow;
       const uiOrigin = uiOriginRef.current;
-      if (!target || !uiOrigin || event.source !== target || event.origin !== uiOrigin) return;
+      const sourceMatches = Boolean(target && event.source === target);
+      const originMatches = Boolean(uiOrigin && event.origin === uiOrigin);
+      const messageType = readLocalAppBridgeMessageType(event.data);
+      if (sourceMatches || originMatches || messageType !== "unknown") {
+        reportLocalAppUiHandshake(props.connectorId, "message_received", {
+          actualOrigin: event.origin,
+          expectedOrigin: uiOrigin || null,
+          sourcePresent: event.source !== null,
+          sourceMatches,
+          originMatches,
+          messageType,
+        });
+      }
+      if (!target || !uiOrigin || !sourceMatches || !originMatches) return;
       if (!isLocalAppBridgeMessage(event.data)) return;
       if (event.data.type === "baijimu:local-app:ready") {
+        reportLocalAppUiHandshake(props.connectorId, "ready_accepted");
         setReady(true);
         return;
       }
@@ -5751,7 +5783,16 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
   useEffect(() => {
     if (!uiUrl || ready) return;
     const timer = window.setTimeout(() => {
-      setLoadError("应用界面已加载，但未能与 Bridge Agent 完成安全握手。请关闭后重新打开应用详情。");
+      reportLocalAppUiHandshake(props.connectorId, "ready_timeout", {
+        expectedOrigin: uiOriginRef.current || null,
+        iframePresent: iframeRef.current !== null,
+        iframeLoaded: iframeLoadedRef.current,
+      });
+      setLoadError(
+        iframeLoadedRef.current
+          ? "应用界面已加载，但通信桥接未就绪。请在“诊断 > 日志”中查看 local_app_ui 记录。"
+          : "应用界面未能从本机 UI 服务加载。请在“诊断 > 日志”中查看 local_app_ui 记录。",
+      );
     }, 10000);
     return () => window.clearTimeout(timer);
   }, [ready, uiUrl]);
@@ -5773,11 +5814,17 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
         sandbox="allow-forms allow-same-origin allow-scripts"
         referrerPolicy="no-referrer"
         onLoad={() => {
+          iframeLoadedRef.current = true;
           setLoadError("");
           const target = iframeRef.current?.contentWindow;
           const uiOrigin = uiOriginRef.current;
+          reportLocalAppUiHandshake(props.connectorId, "iframe_loaded", {
+            expectedOrigin: uiOrigin || null,
+            targetPresent: target !== null && target !== undefined,
+          });
           if (target && uiOrigin) {
             target.postMessage({ type: "baijimu:local-app:hello", version: 1 }, uiOrigin);
+            reportLocalAppUiHandshake(props.connectorId, "hello_sent", { targetOrigin: uiOrigin });
           }
         }}
       />
@@ -5808,6 +5855,14 @@ function isLocalAppBridgeMessage(value: unknown): value is LocalAppBridgeMessage
     typeof message.operation === "string" &&
     /^[A-Za-z0-9._-]{1,128}$/.test(message.operation)
   );
+}
+
+function readLocalAppBridgeMessageType(value: unknown): string {
+  if (!value || typeof value !== "object") return "unknown";
+  const message = value as Record<string, unknown>;
+  return typeof message.type === "string" && message.type.startsWith("baijimu:local-app:")
+    ? message.type.slice("baijimu:local-app:".length, 48)
+    : "unknown";
 }
 
 function defaultLocalAppDetailTab(app: LocalAppItem): LocalAppDetailTab {
