@@ -117,7 +117,7 @@ connector-root/
 
 ## connector.json
 
-`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.1`；未声明 `ui` 的 `1.0` 清单继续兼容。
+`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.2`；`1.0` 和 `1.1` 清单继续兼容。
 
 必填字段：
 
@@ -137,12 +137,14 @@ connector-root/
 - `configSchema`
 - `remoteCapabilities`
 - `hooks`
+- `permissions`
+- `legacyAutostartLabels`
 
 示例：
 
 ```json
 {
-  "schemaVersion": "1.1",
+  "schemaVersion": "1.2",
   "id": "com.baijimu.connector.wechat",
   "name": "WeChat Connector",
   "version": "0.2.3",
@@ -158,6 +160,7 @@ connector-root/
   },
   "runtime": {
     "type": "process",
+    "startPolicy": "automatic",
     "command": "wechat-bridge-collector",
     "args": ["start"]
   },
@@ -179,6 +182,29 @@ connector-root/
   ]
 }
 ```
+
+`runtime.startPolicy` 支持：
+
+- `automatic`（默认）：健康检查失败时，Bridge Agent 可执行 `startCommand` 恢复服务。
+- `manual`：仅允许用户从本机应用页显式启动。运行时重建、重连和健康检查都不会在后台执行 `startCommand`。访问 macOS 受保护数据的 Connector 必须使用该策略，避免在用户未完成系统授权时触发 TCC 提示。
+
+需要系统权限的 Connector 应在 manifest 顶层声明：
+
+```json
+{
+  "permissions": [
+    {
+      "id": "macos.fullDiskAccess",
+      "title": "完全磁盘访问",
+      "description": "读取应用沙盒中的本地数据。",
+      "platforms": ["macos"]
+    }
+  ],
+  "legacyAutostartLabels": ["com.example.old-launch-agent"]
+}
+```
+
+Bridge Agent 会在应用详情页展示权限说明，并可打开对应系统设置。`legacyAutostartLabels` 用于升级/同步/卸载时停止并删除 Connector 旧版本遗留的 LaunchAgent；不得把新的长期进程生命周期重新交给 Connector 自建的登录项。
 
 ## 内嵌应用界面
 

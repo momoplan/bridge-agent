@@ -20,6 +20,7 @@ const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
 const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
 const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
 const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
+const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 const CONNECTOR_MANAGEMENT_TOKEN_FILE: &str = "management-token";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,10 @@ pub struct ConnectorManifest {
     pub config_schema: Option<Value>,
     #[serde(default)]
     pub remote_capabilities: Vec<ConnectorRemoteCapability>,
+    #[serde(default)]
+    pub permissions: Vec<ConnectorPermission>,
+    #[serde(default)]
+    pub legacy_autostart_labels: Vec<String>,
     #[serde(default)]
     pub services: Vec<ServiceRegistration>,
     #[serde(default)]
@@ -97,6 +102,23 @@ pub struct ConnectorRuntime {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub health_check: Option<Value>,
+    #[serde(default = "default_connector_start_policy")]
+    pub start_policy: String,
+}
+
+fn default_connector_start_policy() -> String {
+    "automatic".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorPermission {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub platforms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +187,8 @@ pub struct ConnectorSummary {
     pub source_path: String,
     pub source_reference: Option<String>,
     pub ui: Option<ConnectorUi>,
+    pub permissions: Vec<ConnectorPermission>,
+    pub start_policy: String,
     pub service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
     pub last_synced_at_epoch_ms: u64,
@@ -335,7 +359,7 @@ pub fn install_connector_from_path_with_source_reference(
         prepare_connector_package_destination(&package_path, replace)?;
     }
     copy_connector_package(&source, &package_path)?;
-    resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest.id)?;
+    resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
     cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
     for service in &services {
@@ -515,7 +539,7 @@ fn sync_installed_connector_record(
         &mut services,
         &package_path,
         &config.runtime,
-        &record.manifest.id,
+        &record.manifest,
     )?;
 
     for service in services {
@@ -585,9 +609,9 @@ pub fn stop_connector(connector_id: &str, config_path: &Path) -> Result<Connecto
 }
 
 fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
-    if !matches!(manifest.schema_version.as_str(), "1.0" | "1.1") {
+    if !matches!(manifest.schema_version.as_str(), "1.0" | "1.1" | "1.2") {
         bail!(
-            "connector schemaVersion `{}` is not supported; expected 1.0 or 1.1",
+            "connector schemaVersion `{}` is not supported; expected 1.0, 1.1 or 1.2",
             manifest.schema_version
         );
     }
@@ -608,10 +632,32 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         validate_management(management)?;
     }
     if let Some(ui) = manifest.ui.as_ref() {
-        if manifest.schema_version != "1.1" {
-            bail!("connector ui requires schemaVersion 1.1");
+        if manifest.schema_version == "1.0" {
+            bail!("connector ui requires schemaVersion 1.1 or newer");
         }
         validate_connector_ui(ui)?;
+    }
+    let start_policy = manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.start_policy.trim())
+        .unwrap_or("automatic");
+    if !matches!(start_policy, "automatic" | "manual") {
+        bail!("connector runtime.startPolicy must be automatic or manual");
+    }
+    if manifest.schema_version != "1.2"
+        && (!manifest.permissions.is_empty()
+            || !manifest.legacy_autostart_labels.is_empty()
+            || start_policy == "manual")
+    {
+        bail!(
+            "connector permissions, legacyAutostartLabels and manual startPolicy require schemaVersion 1.2"
+        );
+    }
+    for permission in &manifest.permissions {
+        if permission.id.trim().is_empty() || permission.title.trim().is_empty() {
+            bail!("connector permission id and title cannot be empty");
+        }
     }
     Ok(())
 }
@@ -927,9 +973,21 @@ fn resolve_installed_start_commands(
     services: &mut [ServiceConfig],
     package_path: &Path,
     runtime_config: &RuntimeConfig,
-    connector_id: &str,
+    manifest: &ConnectorManifest,
 ) -> Result<()> {
-    let data_dir = connector_data_dir(connector_id)?;
+    let data_dir = connector_data_dir(&manifest.id)?;
+    let start_policy = manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.start_policy.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("automatic");
+    if !matches!(start_policy, "automatic" | "manual") {
+        bail!(
+            "connector `{}` has unsupported runtime.startPolicy `{start_policy}`",
+            manifest.id
+        );
+    }
     fs::create_dir_all(&data_dir).with_context(|| {
         format!(
             "failed to create connector data directory {}",
@@ -957,6 +1015,10 @@ fn resolve_installed_start_commands(
             env.insert(
                 CONNECTOR_DATA_DIR_ENV.to_string(),
                 data_dir.display().to_string(),
+            );
+            env.insert(
+                CONNECTOR_START_POLICY_ENV.to_string(),
+                start_policy.to_string(),
             );
             resolve_installed_shell_command(
                 command,
@@ -1731,10 +1793,23 @@ fn cleanup_legacy_connector_autostarts_for_manifest(manifest: &ConnectorManifest
 }
 
 fn legacy_autostart_labels_for_manifest(manifest: &ConnectorManifest) -> Vec<String> {
-    let mut labels = Vec::new();
+    let mut labels = manifest.legacy_autostart_labels.clone();
+    // WeChat Connector <= 0.3.x installed this fixed LaunchAgent label but did
+    // not record it in connector.json. Keep the migration explicit so an
+    // upgraded Bridge Agent can remove the old unsigned Python launcher before
+    // the Connector package itself is upgraded.
+    if manifest.id == "com.baijimu.connector.wechat"
+        && !labels
+            .iter()
+            .any(|label| label == "com.baijimu.wechat-bridge-collector")
+    {
+        labels.push("com.baijimu.wechat-bridge-collector".to_string());
+    }
     for value in manifest.hooks.values() {
         if value.contains("install-autostart") {
-            labels.push(manifest.id.clone());
+            if !labels.contains(&manifest.id) {
+                labels.push(manifest.id.clone());
+            }
             break;
         }
     }
@@ -1823,6 +1898,12 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
     } else {
         record.last_synced_at_epoch_ms
     };
+    let start_policy = record
+        .manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.start_policy.clone())
+        .unwrap_or_else(default_connector_start_policy);
     ConnectorSummary {
         id: record.manifest.id,
         name: record.manifest.name,
@@ -1831,6 +1912,8 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         source_path: record.source_path,
         source_reference: record.source_reference,
         ui: record.manifest.ui,
+        permissions: record.manifest.permissions,
+        start_policy,
         service_names: record.service_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
         last_synced_at_epoch_ms,
@@ -2100,7 +2183,7 @@ mod tests {
         assert!(load_connector_manifest(dir.path())
             .unwrap_err()
             .to_string()
-            .contains("requires schemaVersion 1.1"));
+            .contains("requires schemaVersion 1.1 or newer"));
     }
 
     #[test]
@@ -2900,7 +2983,7 @@ bad-python-connector = "bad_python_connector.app:main"
     }
 
     #[test]
-    fn legacy_autostart_cleanup_does_not_remove_current_wechat_collector_label() {
+    fn legacy_autostart_cleanup_uses_manifest_labels() {
         let manifest = ConnectorManifest {
             schema_version: "1.0".to_string(),
             id: "com.baijimu.connector.wechat".to_string(),
@@ -2914,6 +2997,8 @@ bad-python-connector = "bad_python_connector.app:main"
             ui: None,
             config_schema: None,
             remote_capabilities: Vec::new(),
+            permissions: Vec::new(),
+            legacy_autostart_labels: Vec::new(),
             services: Vec::new(),
             service_registration_files: Vec::new(),
             hooks: BTreeMap::from([(
@@ -2924,7 +3009,10 @@ bad-python-connector = "bad_python_connector.app:main"
 
         assert_eq!(
             legacy_autostart_labels_for_manifest(&manifest),
-            vec!["com.baijimu.connector.wechat".to_string()]
+            vec![
+                "com.baijimu.wechat-bridge-collector".to_string(),
+                "com.baijimu.connector.wechat".to_string(),
+            ]
         );
     }
 }

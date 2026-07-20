@@ -1723,6 +1723,9 @@ fn open_desktop_permission_settings(permission: String) -> Result<(), String> {
             "accessibility" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             }
+            "full_disk_access" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+            }
             other => return Err(format!("不支持的权限类型: {other}")),
         };
 

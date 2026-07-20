@@ -31,6 +31,7 @@ use uuid::Uuid;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
+const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -506,6 +507,18 @@ async fn ensure_registered_service_ready(service: &ServiceConfig, client: &Clien
     let Some(start_command) = service.start_command.as_ref() else {
         return false;
     };
+
+    if matches!(
+        start_command,
+        ServiceStartCommand::ShellCommand { env, .. }
+            if env.get(CONNECTOR_START_POLICY_ENV).map(String::as_str) == Some("manual")
+    ) {
+        info!(
+            service = %service.name,
+            "registered service requires an explicit user start; skipping automatic start"
+        );
+        return false;
+    }
 
     match run_registered_service_start_command(service, start_command).await {
         Ok(completed) if completed.success => {
@@ -3398,11 +3411,11 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 mod tests {
     use super::{
         is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, PrepareUploadRequest,
-        ServiceRegistry, ShellCommand, ShellExecArgs,
+        ServiceRegistry, ShellCommand, ShellExecArgs, CONNECTOR_START_POLICY_ENV,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
-        ServiceHealthCheck,
+        ServiceHealthCheck, ServiceStartCommand,
     };
     use axum::{
         routing::{get, post},
@@ -3990,6 +4003,47 @@ mod tests {
             .iter()
             .any(|service| service.name == "wechatLocal"));
         assert!(!registry.has_event("wechatLocal", "messageReceived"));
+    }
+
+    #[tokio::test]
+    async fn checked_registry_never_auto_starts_manual_connector_service() {
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.services.push(ServiceConfig {
+            name: "permissionGatedService".to_string(),
+            description: "Requires explicit user permission.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:1/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: Some(ServiceStartCommand::ShellCommand {
+                command: vec!["this-command-must-never-run".to_string()],
+                cwd: None,
+                env: BTreeMap::from([(
+                    CONNECTOR_START_POLICY_ENV.to_string(),
+                    "manual".to_string(),
+                )]),
+                timeout_secs: Some(1),
+            }),
+            stop_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "ready".to_string(),
+                description: "Ready.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
+            .await
+            .unwrap();
+        assert!(!registry.has_event("permissionGatedService", "ready"));
     }
 
     #[tokio::test]

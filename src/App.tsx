@@ -420,9 +420,18 @@ interface ConnectorSummary {
   sourcePath: string;
   sourceReference?: string | null;
   ui?: ConnectorUi | null;
+  permissions: ConnectorPermission[];
+  startPolicy: "automatic" | "manual";
   serviceNames: string[];
   installedAtEpochMs: number;
   lastSyncedAtEpochMs: number;
+}
+
+interface ConnectorPermission {
+  id: string;
+  title: string;
+  description: string;
+  platforms: string[];
 }
 
 interface ConnectorUi {
@@ -2289,7 +2298,9 @@ function App() {
     }
   }
 
-  async function openDesktopPermissionSettings(permission: "accessibility" | "screen_recording") {
+  async function openDesktopPermissionSettings(
+    permission: "accessibility" | "screen_recording" | "full_disk_access"
+  ) {
     try {
       setError("");
       await invoke("open_desktop_permission_settings", { permission });
@@ -3635,6 +3646,48 @@ function App() {
     );
   }
 
+  function renderConnectorPermissionPanel(connector: ConnectorSummary) {
+    const platform = desktopPermissions?.platform;
+    const permissions = (connector.permissions ?? []).filter(
+      (permission) =>
+        permission.platforms.length === 0 || !platform || permission.platforms.includes(platform)
+    );
+    if (permissions.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="service-permission-panel">
+        <div className="runtime-config-head">
+          <div>
+            <strong>本机权限</strong>
+            <small>这些权限授予百积木桌面应用，由它作为 Connector 的可信启动宿主。</small>
+          </div>
+        </div>
+        <div className="status-detail-grid">
+          {permissions.map((permission) => (
+            <InfoRow
+              key={permission.id}
+              label={permission.title}
+              value={permission.description || "需要在系统设置中授权"}
+            />
+          ))}
+        </div>
+        {permissions.some((permission) => permission.id === "macos.fullDiskAccess") ? (
+          <div className="permission-actions">
+            <button
+              className="secondary"
+              onClick={() => void openDesktopPermissionSettings("full_disk_access")}
+            >
+              打开完全磁盘访问设置
+            </button>
+            <small>请把“百积木”加入并开启，随后重启百积木，再从这里启动应用。</small>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderServiceDefinitionJson(service: UiServiceConfig, serviceIndex: number) {
     const draft = serviceJsonDrafts[serviceIndex] ?? serviceCapabilitiesJson(service);
     const error = serviceJsonErrors[serviceIndex];
@@ -4928,7 +4981,13 @@ function App() {
                   </>
                 ) : null}
                 {app.connector ? (
-                  <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
+                  <>
+                    <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
+                    <InfoRow
+                      label="启动策略"
+                      value={app.connector.startPolicy === "manual" ? "用户授权后手动启动" : "自动启动"}
+                    />
+                  </>
                 ) : null}
                 {updateStatus ? (
                   <InfoRow
@@ -4945,6 +5004,7 @@ function App() {
                 ) : null}
               </div>
               {appComputerService ? renderComputerPermissionPanel(appComputerService) : null}
+              {app.connector ? renderConnectorPermissionPanel(app.connector) : null}
               {renderLocalAppRuntime(app)}
             </div>
           ) : null}
