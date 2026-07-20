@@ -26,7 +26,8 @@ pub use connector::{
     stop_connector, sync_installed_connector, sync_installed_connectors,
     sync_installed_connectors_report, uninstall_connector, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorManagement, ConnectorManagementOperation, ConnectorManifest,
-    ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure, ConnectorSyncReport, ConnectorUi,
+    ConnectorServiceStartResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure,
+    ConnectorSyncReport, ConnectorUi,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

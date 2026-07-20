@@ -1364,7 +1364,11 @@ fn normalize_local_http_outcome(
     status_code: u16,
     body: &Value,
 ) -> Option<ServiceOutcome> {
-    if let Some(success) = body.get("success").and_then(Value::as_bool) {
+    if let Some(success) = body
+        .get("success")
+        .or_else(|| body.get("ok"))
+        .and_then(Value::as_bool)
+    {
         return Some(ServiceOutcome {
             success: http_success && success,
             data: body.get("data").cloned(),
@@ -1378,7 +1382,7 @@ fn normalize_local_http_outcome(
                         "HTTP_REQUEST_FAILED".to_string()
                     },
                     message: if http_success {
-                        "local connector returned success=false".to_string()
+                        "local connector returned an unsuccessful response".to_string()
                     } else {
                         format!("local endpoint returned status {status_code}")
                     },
@@ -4186,6 +4190,101 @@ mod tests {
         let error = result.error.unwrap();
         assert_eq!(error.code, "LOCAL_FAILED");
         assert_eq!(error.message, "collector failed");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_binding_unwraps_ok_local_connector_success_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        Json(json!({
+                            "ok": true,
+                            "data": {"result": {"data": [{"id": "thread-1"}]}}
+                        }))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-http-ok".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["result"]["data"][0]["id"], "thread-1");
+        assert!(result.error.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_binding_preserves_ok_local_connector_error_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "ok": false,
+                                "error": {
+                                    "code": "CODEX_APP_SERVER_FAILED",
+                                    "message": "thread/list rejected the request"
+                                }
+                            })),
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config
+            .services
+            .push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+
+        let result = registry
+            .invoke(
+                "req-http-ok-error".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "CODEX_APP_SERVER_FAILED");
+        assert_eq!(error.message, "thread/list rejected the request");
         server.abort();
     }
 
