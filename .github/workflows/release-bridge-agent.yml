@@ -715,17 +715,21 @@ jobs:
           set -euo pipefail
 
           retry_gh() {
-            local attempt
-            for attempt in $(seq 1 6); do
+            local attempt delay
+            for attempt in $(seq 1 20); do
               if "$@"; then
                 return 0
               fi
-              if [ "$attempt" -eq 6 ]; then
+              if [ "$attempt" -eq 20 ]; then
                 echo "GitHub CLI command failed after ${attempt} attempts: $*" >&2
                 return 1
               fi
-              echo "GitHub CLI command failed; retrying in $((attempt * 5)) seconds (${attempt}/6): $*" >&2
-              sleep $((attempt * 5))
+              delay=$((attempt * 5))
+              if [ "$delay" -gt 60 ]; then
+                delay=60
+              fi
+              echo "GitHub CLI command failed; retrying in ${delay} seconds (${attempt}/20): $*" >&2
+              sleep "$delay"
             done
           }
 
@@ -788,7 +792,9 @@ jobs:
             exit 1
           fi
 
-          retry_gh gh release upload "$RELEASE_TAG" "${bundle_files[@]}" --clobber
+          for asset in "${bundle_files[@]}"; do
+            retry_gh gh release upload "$RELEASE_TAG" "$asset" --clobber
+          done
 
       - name: Upload release bundles to domestic release service
         shell: bash
