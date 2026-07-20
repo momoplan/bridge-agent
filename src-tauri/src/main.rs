@@ -23,8 +23,8 @@ use bridge_agent::{
     resolve_connector_ui_entry, save_config as save_agent_config, show_connector, start_connector,
     stop_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
     uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorServiceStartResult, ConnectorStartResult, ConnectorSummary,
-    RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
+    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -4019,6 +4019,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bridge_agent::ConnectorServiceStartResult;
 
     fn update_release_response(
         force_update: Option<bool>,
