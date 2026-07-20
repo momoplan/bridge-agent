@@ -148,6 +148,10 @@ tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$release_c
 if [ "$REPAIR_RELEASE" = true ]; then
   dispatch_payload="$(jq -nc --arg ref main --arg tag "$tag" '{ref: $ref, inputs: {release_tag: $tag}}')"
   dispatch_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 20 \
+    --retry 6 \
+    --retry-all-errors \
+    --retry-delay 5 \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
