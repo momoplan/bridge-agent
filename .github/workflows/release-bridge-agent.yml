@@ -714,6 +714,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          retry_gh() {
+            local attempt
+            for attempt in $(seq 1 6); do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 6 ]; then
+                echo "GitHub CLI command failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "GitHub CLI command failed; retrying in $((attempt * 5)) seconds (${attempt}/6): $*" >&2
+              sleep $((attempt * 5))
+            done
+          }
+
           release_notes="$(mktemp)"
           cat > "$release_notes" <<'NOTES'
           百积木桌面端发布。
@@ -732,12 +747,12 @@ jobs:
           esac
 
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
+            retry_gh gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "百积木 $RELEASE_TAG" \
               --notes-file "$release_notes" \
               "${prerelease_flag[@]}" \
-              || gh release view "$RELEASE_TAG" >/dev/null
+              || retry_gh gh release view "$RELEASE_TAG" >/dev/null
           fi
 
           shopt -s nullglob
@@ -773,7 +788,7 @@ jobs:
             exit 1
           fi
 
-          gh release upload "$RELEASE_TAG" "${bundle_files[@]}" --clobber
+          retry_gh gh release upload "$RELEASE_TAG" "${bundle_files[@]}" --clobber
 
       - name: Upload release bundles to domestic release service
         shell: bash

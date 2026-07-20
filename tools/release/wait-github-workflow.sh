@@ -19,6 +19,10 @@ case "$event" in push|workflow_dispatch) ;; *) echo "unsupported workflow event:
 api="https://api.github.com/repos/${repository}/actions/workflows/${workflow}/runs?event=${event}&per_page=100"
 for attempt in $(seq 1 120); do
   payload="$(curl -fsS \
+    --connect-timeout 20 \
+    --retry 6 \
+    --retry-all-errors \
+    --retry-delay 5 \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
