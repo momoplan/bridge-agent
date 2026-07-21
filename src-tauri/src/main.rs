@@ -15,16 +15,16 @@ use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
-    browser_auth_manifest_json, connector_management_token_path, default_config_path,
-    ensure_browser_auth_agent_id, ensure_config_exists, format_connector_sync_failures,
-    install_connector_from_path_with_source_reference, install_rustls_crypto_provider,
-    list_connectors, load_config as load_agent_config, load_connector_manifest,
-    manifest_preview_json, reset_invalid_config, resolve_connector_ui_asset,
-    resolve_connector_ui_entry, save_config as save_agent_config, show_connector, start_connector,
-    stop_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, RuntimeLockConflict,
-    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
+    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
+    format_connector_sync_failures, install_connector_from_path_with_source_reference,
+    install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
+    load_connector_manifest, manifest_preview_json, reset_invalid_config,
+    resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
+    show_connector, start_connector, stop_connector, sync_installed_connectors_report,
+    terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
+    RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -400,7 +400,7 @@ fn command_error_message(message: impl Into<String>) -> CommandError {
 struct ConfigDocument {
     config_path: String,
     manifest_preview: String,
-    config: AgentConfig,
+    config: Value,
     runtime: RuntimeSnapshot,
 }
 
@@ -409,7 +409,7 @@ struct ConfigRecoveryDocument {
     config_path: String,
     archived_path: Option<String>,
     manifest_preview: String,
-    config: AgentConfig,
+    config: Value,
     runtime: RuntimeSnapshot,
 }
 
@@ -428,8 +428,17 @@ struct BrowserAuthStartResponse {
 struct BrowserAuthPollResponse {
     status: String,
     message: String,
-    config: Option<AgentConfig>,
+    config: Option<Value>,
     runtime: Option<RuntimeSnapshot>,
+}
+
+fn config_for_ui(config: &AgentConfig) -> Result<Value, String> {
+    let mut value = serde_json::to_value(config).map_err(|err| err.to_string())?;
+    value["relay"]["token"] = Value::String(String::new());
+    value["credential_status"] = serde_json::json!({
+        "relay_token_configured": !config.relay.token.trim().is_empty()
+    });
+    Ok(value)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -699,7 +708,7 @@ async fn load_config(state: tauri::State<'_, DesktopState>) -> Result<ConfigDocu
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -710,12 +719,13 @@ async fn save_config(
     config: AgentConfig,
 ) -> Result<ConfigDocument, String> {
     save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let runtime = state.runtime.snapshot().await;
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -752,7 +762,7 @@ async fn save_service(
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -784,7 +794,7 @@ async fn delete_service(
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -892,6 +902,7 @@ async fn clear_logs(state: tauri::State<'_, DesktopState>) -> Result<(), String>
 async fn reset_example_config(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<ConfigDocument, String> {
+    clear_relay_credentials(&state.config_path).map_err(|err| err.to_string())?;
     let config = AgentConfig::example();
     save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
@@ -899,7 +910,7 @@ async fn reset_example_config(
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -918,7 +929,7 @@ async fn recover_invalid_config(
             .archived_path
             .map(|path| path.display().to_string()),
         manifest_preview,
-        config: recovery.config,
+        config: config_for_ui(&recovery.config)?,
         runtime,
     })
 }
@@ -1690,7 +1701,11 @@ async fn install_connector_app(
         ensure_connector_lifecycle_command_succeeded("停止旧版应用", &stopped)?;
         wait_for_connector_health(
             &state.config_path,
-            &stopped.services.iter().map(|service| service.service.clone()).collect::<Vec<_>>(),
+            &stopped
+                .services
+                .iter()
+                .map(|service| service.service.clone())
+                .collect::<Vec<_>>(),
             false,
         )
         .await?;
@@ -1705,7 +1720,8 @@ async fn install_connector_app(
         Ok(install) => install,
         Err(err) => {
             if restart_after_replace {
-                if let Err(restart_err) = start_connector(&candidate_manifest.id, &state.config_path)
+                if let Err(restart_err) =
+                    start_connector(&candidate_manifest.id, &state.config_path)
                 {
                     return Err(format!(
                         "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
@@ -1722,7 +1738,11 @@ async fn install_connector_app(
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
         wait_for_connector_health(
             &state.config_path,
-            &started.services.iter().map(|service| service.service.clone()).collect::<Vec<_>>(),
+            &started
+                .services
+                .iter()
+                .map(|service| service.service.clone())
+                .collect::<Vec<_>>(),
             true,
         )
         .await?;
@@ -1740,7 +1760,7 @@ async fn install_connector_app(
         config: ConfigDocument {
             config_path: state.config_path.display().to_string(),
             manifest_preview,
-            config,
+            config: config_for_ui(&config)?,
             runtime,
         },
     })
@@ -1883,7 +1903,7 @@ async fn uninstall_connector_app(
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
         manifest_preview,
-        config,
+        config: config_for_ui(&config)?,
         runtime,
     })
 }
@@ -2110,7 +2130,7 @@ async fn poll_browser_auth(
     Ok(BrowserAuthPollResponse {
         status: payload.status,
         message: payload.message,
-        config: Some(updated),
+        config: Some(config_for_ui(&updated).map_err(command_error_message)?),
         runtime: Some(runtime),
     })
 }
@@ -2320,14 +2340,6 @@ fn open_startup_log(state: tauri::State<'_, DesktopState>) -> Result<(), String>
 }
 
 #[tauri::command]
-fn report_frontend_bootstrap_event(state: tauri::State<'_, DesktopState>, message: String) {
-    state
-        .startup_health
-        .diagnostics
-        .info(format!("frontend bootstrap: {message}"));
-}
-
-#[tauri::command]
 async fn check_app_update() -> Result<AppUpdateStatus, String> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|err| format!("当前版本号无效: {err}"))?;
@@ -2397,7 +2409,7 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     let asset_name = update
         .download_url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned);
 
@@ -3348,6 +3360,11 @@ impl StartupDiagnostics {
             let _ = append_startup_log_line(&self.fallback_path, &line);
         }
         eprint!("{line}");
+        match level {
+            "ERROR" => log::error!(target: "desktop_startup", "{message}"),
+            "WARN" => log::warn!(target: "desktop_startup", "{message}"),
+            _ => log::info!(target: "desktop_startup", "{message}"),
+        }
     }
 }
 
@@ -3847,6 +3864,16 @@ fn main() {
     let setup_health = startup_health.clone();
     let setup_local_app_ui = Arc::clone(&local_app_ui);
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                .build(),
+        )
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(
             move |app, _argv, _cwd| {
@@ -3880,6 +3907,41 @@ fn main() {
                 }
             }
             setup_health.set_component("updater", "官方更新器", "ready", None);
+            #[cfg(not(debug_assertions))]
+            match app.autolaunch().is_enabled() {
+                Ok(true) => setup_health.set_component("autostart", "开机启动", "ready", None),
+                Ok(false) => match app.autolaunch().enable() {
+                    Ok(()) => {
+                        setup_diagnostics.info("official autostart integration enabled");
+                        setup_health.set_component("autostart", "开机启动", "ready", None);
+                    }
+                    Err(err) => {
+                        setup_diagnostics.error(format!("failed to enable autostart: {err:#}"));
+                        setup_health.set_component(
+                            "autostart",
+                            "开机启动",
+                            "degraded",
+                            Some(err.to_string()),
+                        );
+                    }
+                },
+                Err(err) => {
+                    setup_diagnostics.error(format!("failed to inspect autostart: {err:#}"));
+                    setup_health.set_component(
+                        "autostart",
+                        "开机启动",
+                        "degraded",
+                        Some(err.to_string()),
+                    );
+                }
+            }
+            #[cfg(debug_assertions)]
+            setup_health.set_component(
+                "autostart",
+                "开机启动",
+                "skipped",
+                Some("开发构建不注册系统登录项".to_string()),
+            );
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"
@@ -3967,7 +4029,6 @@ fn main() {
             mark_frontend_ready,
             restart_in_normal_mode,
             open_startup_log,
-            report_frontend_bootstrap_event,
             check_app_update,
             install_app_update,
             baijimu_cli_status,
@@ -4020,6 +4081,18 @@ fn main() {
 mod tests {
     use super::*;
     use bridge_agent::ConnectorServiceStartResult;
+
+    #[test]
+    fn config_for_ui_redacts_relay_credentials_and_reports_status() {
+        let mut config = AgentConfig::example();
+        config.relay.token = "relay-secret".to_string();
+
+        let value = config_for_ui(&config).unwrap();
+
+        assert_eq!(value["relay"]["token"], "");
+        assert_eq!(value["credential_status"]["relay_token_configured"], true);
+        assert!(!value.to_string().contains("relay-secret"));
+    }
 
     fn update_release_response(
         force_update: Option<bool>,

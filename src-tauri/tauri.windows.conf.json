@@ -13,7 +13,6 @@
         ],
         "componentRefs": [
           "BridgeAgentServiceComponent",
-          "BridgeAgentDesktopAutoStartComponent",
           "BridgeAgentDataDirectoryComponent"
         ]
       },

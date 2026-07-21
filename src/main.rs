@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use bridge_agent::{
-    default_config_path, ensure_config_exists, install_connector_from_path,
-    install_rustls_crypto_provider, list_connectors, load_config, save_config, show_connector,
-    start_connector, uninstall_connector, AgentConfig, AgentRuntimeManager, ServiceConfig,
-    ServiceRegistration,
+    clear_relay_credentials, default_config_path, ensure_config_exists,
+    install_connector_from_path, install_rustls_crypto_provider, list_connectors, load_config,
+    save_config, show_connector, start_connector, uninstall_connector, AgentConfig,
+    AgentRuntimeManager, ServiceConfig, ServiceRegistration,
 };
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -132,7 +132,7 @@ async fn wait_for_shutdown_signal() -> Result<()> {
             result = tokio::signal::ctrl_c() => result.context("failed to install Ctrl+C handler")?,
             _ = terminate.recv() => {},
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -153,6 +153,9 @@ async fn init_config_command(output: Option<PathBuf>, force: bool) -> Result<()>
         );
     }
 
+    if force {
+        clear_relay_credentials(&path)?;
+    }
     save_config(&path, &AgentConfig::example())?;
     println!("{}", path.display());
     Ok(())

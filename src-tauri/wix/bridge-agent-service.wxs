@@ -39,18 +39,6 @@
           Wait="yes" />
       </Component>
 
-      <Component
-        Id="BridgeAgentDesktopAutoStartComponent"
-        Guid="83CC5A59-0715-4E19-B0BD-6875932AC48A"
-        Win64="yes">
-        <RegistryValue
-          Root="HKLM"
-          Key="Software\Microsoft\Windows\CurrentVersion\Run"
-          Name="BaijimuBridgeAgent"
-          Type="string"
-          Value="&quot;[INSTALLDIR]bridge-agent-desktop.exe&quot;"
-          KeyPath="yes" />
-      </Component>
     </DirectoryRef>
   </Fragment>
 

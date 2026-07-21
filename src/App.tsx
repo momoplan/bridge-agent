@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import bjmLogoLight from "./assets/brand/bjm-logo-light.svg";
+import { clientInfo, clientWarn } from "./client-logger";
 
 type RuntimeStatus =
   | "stopped"
@@ -193,6 +194,9 @@ interface AgentConfig {
   device: DeviceConfig;
   runtime: RuntimeConfig;
   services: ServiceConfig[];
+  credential_status?: {
+    relay_token_configured: boolean;
+  };
 }
 
 interface BrowserAuthStartResponse {
@@ -503,6 +507,9 @@ interface UiAgentConfig {
   };
   runtime: RuntimeConfig;
   services: UiServiceConfig[];
+  credential_status: {
+    relay_token_configured: boolean;
+  };
 }
 
 type SettingsSection = "identity" | "connection" | "runtime";
@@ -829,7 +836,7 @@ function App() {
         }
       })
       .catch((err) => {
-        console.warn("桌面基础壳启动握手失败", err);
+        clientWarn("桌面基础壳启动握手失败", err);
       });
     const timer = window.setInterval(() => {
       void invoke<StartupHealthSnapshot>("get_startup_health")
@@ -838,7 +845,7 @@ function App() {
             setStartupHealth(snapshot);
           }
         })
-        .catch((err) => console.warn("读取启动健康状态失败", err));
+        .catch((err) => clientWarn("读取启动健康状态失败", err));
     }, 2000);
     return () => {
       active = false;
@@ -1312,7 +1319,7 @@ function App() {
       const status = await invoke<DesktopPermissionStatus>("desktop_permission_status");
       setDesktopPermissions(status);
     } catch (err) {
-      console.warn("读取桌面权限状态失败", err);
+      clientWarn("读取桌面权限状态失败", err);
     }
   }
 
@@ -1321,7 +1328,7 @@ function App() {
       const statuses = await invoke<RegisteredServiceStatus[]>("registered_service_statuses");
       setRegisteredServiceStatuses(statuses);
     } catch (err) {
-      console.warn("读取本地应用运行状态失败", err);
+      clientWarn("读取本地应用运行状态失败", err);
     }
   }
 
@@ -1330,7 +1337,7 @@ function App() {
       const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
       setConnectorApps(apps);
     } catch (err) {
-      console.warn("读取本地应用列表失败", err);
+      clientWarn("读取本地应用列表失败", err);
     }
   }
 
@@ -1338,7 +1345,7 @@ function App() {
     try {
       setBaijimuCli(await invoke<ManagedToolStatus>("baijimu_cli_status"));
     } catch (err) {
-      console.warn("读取 Baijimu CLI 托管状态失败", err);
+      clientWarn("读取 Baijimu CLI 托管状态失败", err);
       setBaijimuCli(null);
     }
   }
@@ -1348,7 +1355,7 @@ function App() {
       const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
       setMarketConnectors(apps);
     } catch (err) {
-      console.warn("读取本地应用市场失败", err);
+      clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
     }
   }
@@ -1908,7 +1915,7 @@ function App() {
       if (showLatestMessage) {
         setError(message);
       } else {
-        console.warn("自动检查更新失败", err);
+        clientWarn("自动检查更新失败", err);
       }
     }
   }
@@ -1917,7 +1924,7 @@ function App() {
     try {
       setAppVersion(await invoke<AppVersionInfo>("app_version"));
     } catch (err) {
-      console.warn("读取本地应用版本失败", err);
+      clientWarn("读取本地应用版本失败", err);
     }
   }
 
@@ -2771,11 +2778,13 @@ function App() {
                   onChange={(event) => updateRelay("url", event.target.value)}
                 />
               </Field>
-              <Field label="Agent Token">
+              <Field
+                label="设备凭证"
+                hint="凭证保存在操作系统安全存储中，不会进入配置文件或前端页面。"
+              >
                 <input
-                  type="password"
-                  value={config.relay.token}
-                  onChange={(event) => updateRelay("token", event.target.value)}
+                  value={config.credential_status.relay_token_configured ? "已安全保存" : "未授权"}
+                  readOnly
                 />
               </Field>
               <Field label="重连秒数">
@@ -5680,9 +5689,7 @@ function reportLocalAppUiHandshake(
   event: string,
   detail: Record<string, string | number | boolean | null> = {},
 ) {
-  void invoke("report_frontend_bootstrap_event", {
-    message: `local_app_ui ${JSON.stringify({ connectorId, event, ...detail })}`,
-  }).catch(() => {});
+  clientInfo("local_app_ui", { connectorId, event, ...detail });
 }
 
 function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
@@ -5921,7 +5928,7 @@ function InfoRow(props: {
   );
 }
 
-function toUiConfig(config: AgentConfig): UiAgentConfig {
+export function toUiConfig(config: AgentConfig): UiAgentConfig {
   return {
     platform: {
       base_url: normalizePlatformBaseUrl(config.platform.base_url),
@@ -5933,18 +5940,22 @@ function toUiConfig(config: AgentConfig): UiAgentConfig {
       inline_limit_bytes: config.upload.inline_limit_bytes,
       timeout_secs: config.upload.timeout_secs
     },
-    relay: config.relay,
+    relay: { ...config.relay, token: "" },
     device: {
       name: config.device.name,
       description: config.device.description,
       tags_text: config.device.tags.join(", ")
     },
     runtime: config.runtime,
-    services: config.services.map(toUiService)
+    services: config.services.map(toUiService),
+    credential_status: {
+      relay_token_configured:
+        config.credential_status?.relay_token_configured === true || Boolean(config.relay.token.trim())
+    }
   };
 }
 
-function fromUiConfig(config: UiAgentConfig): AgentConfig {
+export function fromUiConfig(config: UiAgentConfig): AgentConfig {
   return {
     platform: {
       base_url: normalizePlatformBaseUrl(config.platform.base_url),
@@ -5955,7 +5966,7 @@ function fromUiConfig(config: UiAgentConfig): AgentConfig {
       inline_limit_bytes: config.upload.inline_limit_bytes,
       timeout_secs: config.upload.timeout_secs
     },
-    relay: config.relay,
+    relay: { ...config.relay, token: "" },
     device: {
       name: config.device.name.trim(),
       description: config.device.description.trim(),
@@ -6687,8 +6698,8 @@ function formatByteSize(bytes: number): string {
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function needsBrowserAuthorization(config: UiAgentConfig): boolean {
-  return !config.platform.workspace_id.trim() || !config.relay.token.trim();
+export function needsBrowserAuthorization(config: UiAgentConfig): boolean {
+  return !config.platform.workspace_id.trim() || !config.credential_status.relay_token_configured;
 }
 
 function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {

@@ -206,7 +206,7 @@ impl AgentRuntimeManager {
             status: RuntimeStatus::Starting,
             config_path: Some(config_path.display().to_string()),
             agent_id: Some(config.relay.agent_id.clone()),
-            relay_url: Some(ws_url.to_string()),
+            relay_url: Some(config.relay.url.clone()),
             relay_registered: false,
             relay_registered_at: None,
             last_relay_seen_at: None,
@@ -298,7 +298,7 @@ impl AgentRuntimeManager {
                         RuntimeStatus::Stopped,
                         Some(err.to_string()),
                         runner.config.relay.agent_id.clone(),
-                        runner.ws_url.to_string(),
+                        runner.config.relay.url.clone(),
                         runner.config_path.clone(),
                     )
                     .await;
@@ -544,7 +544,7 @@ impl RuntimeRunner {
                 RuntimeStatus::Connecting,
                 None,
                 self.config.relay.agent_id.clone(),
-                self.ws_url.to_string(),
+                self.config.relay.url.clone(),
                 self.config_path.clone(),
             )
             .await;
@@ -569,7 +569,7 @@ impl RuntimeRunner {
                             RuntimeStatus::Backoff,
                             Some(err.to_string()),
                             self.config.relay.agent_id.clone(),
-                            self.ws_url.to_string(),
+                            self.config.relay.url.clone(),
                             self.config_path.clone(),
                         )
                         .await;
@@ -582,7 +582,7 @@ impl RuntimeRunner {
                         RuntimeStatus::Backoff,
                         Some(err.to_string()),
                         self.config.relay.agent_id.clone(),
-                        self.ws_url.to_string(),
+                        self.config.relay.url.clone(),
                         self.config_path.clone(),
                     )
                     .await;
@@ -596,7 +596,7 @@ impl RuntimeRunner {
                         RuntimeStatus::Backoff,
                         Some(message.clone()),
                         self.config.relay.agent_id.clone(),
-                        self.ws_url.to_string(),
+                        self.config.relay.url.clone(),
                         self.config_path.clone(),
                     )
                     .await;
@@ -622,7 +622,7 @@ impl RuntimeRunner {
             RuntimeStatus::Stopped,
             None,
             self.config.relay.agent_id.clone(),
-            self.ws_url.to_string(),
+            self.config.relay.url.clone(),
             self.config_path.clone(),
         )
         .await;
@@ -1224,7 +1224,7 @@ fn describe_process(pid: u32) -> RuntimeProcessInfo {
 
     #[cfg(unix)]
     {
-        return describe_process_unix(pid);
+        describe_process_unix(pid)
     }
 
     #[cfg(not(any(unix, windows)))]

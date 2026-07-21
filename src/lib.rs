@@ -6,17 +6,19 @@ mod power;
 mod process_identity;
 pub mod protocol;
 pub mod runtime;
+mod secret_store;
 pub mod services;
 
 use anyhow::{anyhow, Result};
 
 pub use config::{
-    browser_auth_manifest_json, default_config_path, ensure_browser_auth_agent_id,
-    ensure_config_exists, load_config, manifest_preview_json, reset_invalid_config, save_config,
-    windows_service_config_path, AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig,
-    EventConfig, HttpBinding, MethodBinding, MethodConfig, PlatformConfig, RegistrationHealthCheck,
-    RegistrationMethod, RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig,
-    ServiceHealthCheck, ServiceRegistration, ServiceStartCommand, UploadConfig,
+    browser_auth_manifest_json, clear_relay_credentials, default_config_path,
+    ensure_browser_auth_agent_id, ensure_config_exists, load_config, manifest_preview_json,
+    reset_invalid_config, save_config, windows_service_config_path, AgentConfig, ComputerUseAction,
+    ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig,
+    PlatformConfig, RegistrationHealthCheck, RegistrationMethod, RegistrationTransport,
+    RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration,
+    ServiceStartCommand, UploadConfig,
 };
 pub use connector::{
     connector_data_dir, connector_management_token_path, connectors_dir,

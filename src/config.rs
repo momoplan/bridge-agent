@@ -1,4 +1,5 @@
 use crate::protocol::{EventDefinition, MethodDefinition, ServiceDefinition};
+use crate::secret_store::{delete_relay_token, load_relay_token, store_relay_token};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -847,8 +848,18 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
     let mut changed = config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
     config.validate()?;
+    let legacy_token = config.relay.token.trim().to_string();
+    if legacy_token.is_empty() {
+        if let Some(token) = load_relay_token(path)? {
+            config.relay.token = token;
+        }
+    } else {
+        store_relay_token(path, &legacy_token)?;
+        config.relay.token = legacy_token;
+        changed = true;
+    }
     if changed {
-        save_config(path, &config)?;
+        write_public_config(path, &config)?;
     }
     Ok(config)
 }
@@ -857,17 +868,29 @@ pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
     let mut config = config.clone();
     config.normalize();
     config.validate()?;
+    if !config.relay.token.trim().is_empty() {
+        store_relay_token(path, &config.relay.token)?;
+    }
+    write_public_config(path, &config)
+}
+
+fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+        set_private_directory_permissions(parent)?;
     }
-    let content = serde_json::to_string_pretty(&config)?;
+    let mut public_config = config.clone();
+    public_config.relay.token.clear();
+    let content = serde_json::to_string_pretty(&public_config)?;
     write_config_atomically(path, format!("{content}\n").as_bytes())?;
+    set_private_file_permissions(path)?;
     Ok(())
 }
 
 pub fn ensure_config_exists(path: &Path) -> Result<()> {
     if !path.exists() {
+        delete_relay_token(path)?;
         save_config(path, &AgentConfig::example())?;
     }
     Ok(())
@@ -879,12 +902,37 @@ pub fn reset_invalid_config(path: &Path) -> Result<ConfigRecovery> {
     } else {
         None
     };
+    delete_relay_token(path)?;
     let config = AgentConfig::example();
     save_config(path, &config)?;
     Ok(ConfigRecovery {
         archived_path,
         config,
     })
+}
+
+pub fn clear_relay_credentials(path: &Path) -> Result<()> {
+    delete_relay_token(path)
+}
+
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure config directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure config file {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_config_atomically(path: &Path, content: &[u8]) -> Result<()> {
@@ -909,13 +957,7 @@ fn write_config_atomically(path: &Path, content: &[u8]) -> Result<()> {
 
     if path.exists() {
         let backup_path = backup_config_path(path);
-        fs::copy(path, &backup_path).with_context(|| {
-            format!(
-                "failed to backup config {} to {}",
-                path.display(),
-                backup_path.display()
-            )
-        })?;
+        write_sanitized_config_backup(path, &backup_path)?;
     }
 
     if let Err(err) = replace_file(&temp_path, path) {
@@ -930,6 +972,29 @@ fn backup_config_path(path: &Path) -> PathBuf {
     sibling_path(path, CONFIG_BACKUP_SUFFIX)
 }
 
+fn write_sanitized_config_backup(source: &Path, destination: &Path) -> Result<()> {
+    let content = fs::read(source)
+        .with_context(|| format!("failed to read config backup source {}", source.display()))?;
+    let sanitized = serde_json::from_slice::<Value>(&content)
+        .ok()
+        .and_then(|mut value| {
+            value
+                .get_mut("relay")?
+                .as_object_mut()?
+                .insert("token".to_string(), Value::String(String::new()));
+            serde_json::to_vec_pretty(&value).ok()
+        })
+        .unwrap_or(content);
+    fs::write(destination, sanitized).with_context(|| {
+        format!(
+            "failed to backup config {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    set_private_file_permissions(destination)
+}
+
 fn archive_existing_config(path: &Path) -> Result<PathBuf> {
     let archived_path = unique_sibling_path(path, INVALID_CONFIG_MARKER);
     fs::rename(path, &archived_path).with_context(|| {
@@ -939,6 +1004,7 @@ fn archive_existing_config(path: &Path) -> Result<PathBuf> {
             archived_path.display()
         )
     })?;
+    set_private_file_permissions(&archived_path)?;
     Ok(archived_path)
 }
 
@@ -1645,9 +1711,7 @@ fn normalize_default_platform_base_url(value: &str) -> Option<String> {
     let Ok(url) = Url::parse(trimmed) else {
         return None;
     };
-    let Some(host) = url.host_str() else {
-        return None;
-    };
+    let host = url.host_str()?;
     let host = host.trim_start_matches("www.");
     if host != "baijimu.com" {
         return None;
@@ -1807,6 +1871,65 @@ mod tests {
         ] {
             assert!(shell_methods.contains(&method));
         }
+    }
+
+    #[test]
+    fn save_config_keeps_relay_token_out_of_public_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.token = "relay-secret".to_string();
+
+        save_config(&path, &config).unwrap();
+
+        let public_config = fs::read_to_string(&path).unwrap();
+        assert!(!public_config.contains("relay-secret"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&public_config).unwrap()["relay"]["token"],
+            ""
+        );
+        assert_eq!(load_config(&path).unwrap().relay.token, "relay-secret");
+    }
+
+    #[test]
+    fn load_config_migrates_legacy_plaintext_relay_token() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.token = "legacy-secret".to_string();
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+
+        assert_eq!(loaded.relay.token, "legacy-secret");
+        assert!(!fs::read_to_string(&path).unwrap().contains("legacy-secret"));
+        assert!(
+            !fs::read_to_string(path.with_file_name("agent-config.json.bak"))
+                .unwrap()
+                .contains("legacy-secret")
+        );
+        assert_eq!(load_config(&path).unwrap().relay.token, "legacy-secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_config_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("bridge-agent");
+        let path = config_dir.join("agent-config.json");
+
+        save_config(&path, &AgentConfig::example()).unwrap();
+
+        assert_eq!(
+            fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

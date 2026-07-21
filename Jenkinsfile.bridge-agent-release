@@ -10,7 +10,7 @@ pipeline {
     parameters {
         string(name: 'BRIDGE_REF', defaultValue: 'main', description: 'Bridge Agent branch containing the release commit')
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
-        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.107', description: 'Bridge Agent version')
+        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.108', description: 'Bridge Agent version')
         string(name: 'CLI_VERSION', defaultValue: '0.1.7', description: 'Pinned Baijimu native CLI version')
         booleanParam(name: 'REPAIR_RELEASE', defaultValue: false, description: 'Repair an existing immutable release tag by dispatching the fixed workflow from main')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs')
@@ -82,9 +82,14 @@ case "$CARGO_TARGET_DIR" in
 esac
 trap 'rm -rf -- "$CARGO_TARGET_DIR"' EXIT
 npm ci
+npm test
 npm run build
+cargo fmt --all -- --check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --workspace
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 '''
             }
         }

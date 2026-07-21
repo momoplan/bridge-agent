@@ -66,9 +66,57 @@ jobs:
             --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\",\"releaseName\":\"百积木 $RELEASE_TAG\",\"source\":\"github-actions\"}" \
             "$api/releases/$RELEASE_TAG"
 
+  quality-gate:
+    name: Release quality gate
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Rust quality tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup set profile minimal
+          rustup toolchain install stable --component clippy,rustfmt --no-self-update
+          rustup default stable
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Run release checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm run build
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo test --workspace
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
   release:
     name: ${{ matrix.name }}
-    needs: prepare-domestic-release
+    needs: [prepare-domestic-release, quality-gate]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

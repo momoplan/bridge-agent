@@ -41,7 +41,6 @@ commands.allow = [
   "mark_frontend_ready",
   "restart_in_normal_mode",
   "open_startup_log",
-  "report_frontend_bootstrap_event",
   "check_app_update",
   "install_app_update",
   "baijimu_cli_status",

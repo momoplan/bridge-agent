@@ -3,5 +3,5 @@
   "identifier": "main-local",
   "description": "Permissions for the trusted Bridge Agent main webview only.",
   "windows": ["main"],
-  "permissions": ["core:default", "allow-main-commands"]
+  "permissions": ["core:default", "log:default", "allow-main-commands"]
 }

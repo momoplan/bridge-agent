@@ -1001,6 +1001,14 @@ fn resolve_installed_start_commands(
     let python_env = ensure_python_project_environment(package_path, &python_scripts)?;
     let node_path = resolve_command_path("node", runtime_config);
     let codex_path = resolve_command_path("codex", runtime_config);
+    let command_runtime = InstalledCommandRuntime {
+        package_path,
+        package_bins: &package_bins,
+        python_scripts: &python_scripts,
+        python_env: python_env.as_deref(),
+        node_path: &node_path,
+        codex_path: &codex_path,
+    };
     for service in services {
         if service.stop_command.is_none() {
             service.stop_command = derive_stop_command_from_start(service.start_command.as_ref());
@@ -1020,17 +1028,7 @@ fn resolve_installed_start_commands(
                 CONNECTOR_START_POLICY_ENV.to_string(),
                 start_policy.to_string(),
             );
-            resolve_installed_shell_command(
-                command,
-                cwd,
-                env,
-                package_path,
-                &package_bins,
-                &python_scripts,
-                python_env.as_deref(),
-                &node_path,
-                &codex_path,
-            );
+            resolve_installed_shell_command(command, cwd, env, &command_runtime);
         }
     }
     Ok(())
@@ -1060,16 +1058,20 @@ fn derive_stop_command_from_start(
     })
 }
 
+struct InstalledCommandRuntime<'a> {
+    package_path: &'a Path,
+    package_bins: &'a BTreeMap<String, String>,
+    python_scripts: &'a BTreeMap<String, String>,
+    python_env: Option<&'a Path>,
+    node_path: &'a Option<PathBuf>,
+    codex_path: &'a Option<PathBuf>,
+}
+
 fn resolve_installed_shell_command(
     command: &mut Vec<String>,
     cwd: &mut Option<String>,
     env: &mut BTreeMap<String, String>,
-    package_path: &Path,
-    package_bins: &BTreeMap<String, String>,
-    python_scripts: &BTreeMap<String, String>,
-    python_env: Option<&Path>,
-    node_path: &Option<PathBuf>,
-    codex_path: &Option<PathBuf>,
+    runtime: &InstalledCommandRuntime<'_>,
 ) {
     if command.is_empty() {
         return;
@@ -1079,40 +1081,47 @@ fn resolve_installed_shell_command(
         return;
     }
 
-    if let Some(direct_path) = native_command_path(package_path, executable) {
+    if let Some(direct_path) = native_command_path(runtime.package_path, executable) {
         command[0] = direct_path.display().to_string();
-        enrich_start_command_env(env, [node_path, codex_path]);
+        enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-            *cwd = Some(package_path.display().to_string());
+            *cwd = Some(runtime.package_path.display().to_string());
         }
         return;
     }
 
-    if python_scripts.contains_key(executable) {
-        if let Some(env_path) = python_env {
+    if runtime.python_scripts.contains_key(executable) {
+        if let Some(env_path) = runtime.python_env {
             command[0] = python_script_path(env_path, executable)
                 .display()
                 .to_string();
-            enrich_start_command_env(env, [node_path, codex_path]);
+            enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
             prepend_path_entry(env, python_bin_dir(env_path));
             if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                *cwd = Some(package_path.display().to_string());
+                *cwd = Some(runtime.package_path.display().to_string());
             }
             return;
         }
     }
 
-    if let Some(relative_bin) = package_bins.get(executable) {
-        command[0] = node_path
+    if let Some(relative_bin) = runtime.package_bins.get(executable) {
+        command[0] = runtime
+            .node_path
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "node".to_string());
-        command.insert(1, package_path.join(relative_bin).display().to_string());
-        enrich_start_command_env(env, [node_path, codex_path]);
+        command.insert(
+            1,
+            runtime
+                .package_path
+                .join(relative_bin)
+                .display()
+                .to_string(),
+        );
+        enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-            *cwd = Some(package_path.display().to_string());
+            *cwd = Some(runtime.package_path.display().to_string());
         }
-        return;
     }
 }
 
@@ -1147,12 +1156,7 @@ fn native_command_path(package_path: &Path, executable: &str) -> Option<PathBuf>
 }
 
 fn native_platform_bin_dirs() -> Vec<String> {
-    let os = match env::consts::OS {
-        "macos" => "macos",
-        "windows" => "windows",
-        "linux" => "linux",
-        other => other,
-    };
+    let os = env::consts::OS;
     let arch = match env::consts::ARCH {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",
@@ -1261,10 +1265,10 @@ fn bundled_runtime_command_path(executable: &str) -> Option<PathBuf> {
             ],
             _ => &[],
         };
-        return candidates
+        candidates
             .iter()
             .map(PathBuf::from)
-            .find(|candidate| candidate.is_file());
+            .find(|candidate| candidate.is_file())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2777,17 +2781,15 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             "wechat_bridge_collector.app".to_string(),
         )]);
 
-        resolve_installed_shell_command(
-            &mut command,
-            &mut cwd,
-            &mut env_vars,
-            dir.path(),
-            &BTreeMap::new(),
-            &scripts,
-            Some(&env_path),
-            &None,
-            &None,
-        );
+        let command_runtime = InstalledCommandRuntime {
+            package_path: dir.path(),
+            package_bins: &BTreeMap::new(),
+            python_scripts: &scripts,
+            python_env: Some(&env_path),
+            node_path: &None,
+            codex_path: &None,
+        };
+        resolve_installed_shell_command(&mut command, &mut cwd, &mut env_vars, &command_runtime);
 
         assert_eq!(
             command[0],

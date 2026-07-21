@@ -180,7 +180,7 @@ cargo run -- init-config
 - `upload.timeout_secs`
 - `relay.url`
 - `relay.agent_id`
-- `relay.token`
+- `relay.token`（兼容字段；持久化时始终留空，实际凭证由系统安全存储管理）
 - `runtime.default_timeout_secs`
 - `runtime.log_file_enabled`
 - `runtime.log_file_dir`（可选；留空时使用系统默认日志目录）
@@ -191,6 +191,16 @@ cargo run -- init-config
 - `services[].events[]`
 
 `binding.type` 只存在于本地配置里，用来决定本机怎么执行方法，不会进入 relay 协议。
+
+### 设备凭证存储
+
+Relay token 不再明文写入 `agent-config.json`，也不会返回给 WebView 前端。桌面界面只接收“已配置/未配置”状态：
+
+- macOS 使用 Keychain
+- Linux 使用 Secret Service
+- Windows 使用 CNG DPAPI-NG 的机器级保护，使交互桌面进程和 LocalSystem 服务可以读取同一份加密凭证
+
+旧版本配置中的明文 token 会在首次加载时自动迁移到系统安全存储并从 JSON 中删除。Unix 配置目录和配置文件同时收紧为 `0700`、`0600`。Windows 的加密凭证文件与共享配置放在同一 ProgramData 目录，但文件内容不能作为明文读取。
 
 ## 自定义服务事件
 
@@ -331,6 +341,8 @@ CLI 直接修改配置文件，适合安装脚本或 agent 未运行时使用；
 ## 运行日志
 
 运行时日志会同时保存在桌面端“诊断 -> 日志”和本地文件里。文件日志默认开启，按大小轮转，适合排查 Windows service 或用户机器上的联调问题。
+
+桌面壳、启动流程和 WebView 前端日志统一通过 Tauri 官方日志插件记录，按 5 MiB 轮转并保留 5 个文件；不再通过自定义前端 IPC 命令拼接日志。
 
 默认日志路径：
 
@@ -516,7 +528,7 @@ Windows MSI 会安装固定服务名 `BridgeAgent`，并把配置文件放到共
 - MSI 会给 `C:\ProgramData\Baijimu\BridgeAgent` 配置共享 ACL，让 LocalSystem 服务和交互用户都能读写同一份设备配置
 - 未授权时服务保持运行但不连接 relay；授权配置写入后会自动加载，不需要重启服务
 - 用户登录后，LocalSystem 服务会识别活动的 Windows 用户会话并在该会话中启动桌面客户端；桌面进程启动后服务主动让出 runtime，由桌面进程接管，桌面进程退出后服务自动恢复后台连接
-- MSI 仍注册桌面客户端的用户登录启动项；服务侧的活动会话启动机制负责处理 Windows 忽略或禁用 `HKLM\\...\\Run` 的场景，确保需要 GUI、屏幕或用户配置目录的能力不会落到 Session 0
+- 桌面客户端使用 Tauri 官方 Autostart 插件注册当前用户登录启动项；Windows Service 的活动会话启动机制负责首次安装和后台恢复，确保需要 GUI、屏幕或用户配置目录的能力不会落到 Session 0
 - `bridge-agent-service.exe`、桌面端 exe、安装器和后续升级器都要做正式代码签名
 
 ## 桌面应用开发
@@ -537,6 +549,18 @@ npm run tauri dev
 
 ```bash
 npm run build
+```
+
+执行与正式发布一致的本地质量门禁：
+
+```bash
+npm test
+cargo fmt --all -- --check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --workspace
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 ### 启动恢复与安全模式
