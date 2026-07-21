@@ -145,12 +145,26 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Setup Rust quality tools
         shell: pwsh
         run: |
           rustup set profile minimal
           rustup toolchain install stable --component clippy --no-self-update
           rustup default stable
+
+      - name: Build frontend for Tauri context
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm ci
+          npm run build
 
       - name: Check Windows Rust targets
         shell: pwsh
