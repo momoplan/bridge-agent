@@ -683,6 +683,31 @@ jobs:
           $uninstallLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-uninstall.log"
           $installSucceeded = $false
           $desktopProcess = $null
+          function Get-OptionalRegistryValue {
+            param(
+              [Parameter(Mandatory = $true)]
+              [Microsoft.Win32.RegistryKey]$Hive,
+              [Parameter(Mandatory = $true)]
+              [string]$SubKey,
+              [Parameter(Mandatory = $true)]
+              [string]$Name
+            )
+
+            $key = $Hive.OpenSubKey($SubKey)
+            if ($null -eq $key) {
+              return $null
+            }
+            try {
+              return $key.GetValue(
+                $Name,
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+              )
+            } finally {
+              $key.Dispose()
+            }
+          }
+
           try {
             $install = Start-Process `
               -FilePath "msiexec.exe" `
@@ -728,10 +753,10 @@ jobs:
             }
             Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json | Out-Null
 
-            $machineRunValue = Get-ItemPropertyValue `
-              -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" `
-              -Name "BaijimuBridgeAgent" `
-              -ErrorAction SilentlyContinue
+            $machineRunValue = Get-OptionalRegistryValue `
+              -Hive ([Microsoft.Win32.Registry]::LocalMachine) `
+              -SubKey "Software\Microsoft\Windows\CurrentVersion\Run" `
+              -Name "BaijimuBridgeAgent"
             if ($null -ne $machineRunValue) {
               throw "Legacy machine-wide desktop autostart is still registered: $machineRunValue"
             }
@@ -744,10 +769,10 @@ jobs:
 
             $deadline = (Get-Date).AddSeconds(20)
             do {
-              $userRunValue = Get-ItemPropertyValue `
-                -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-                -Name "BaijimuBridgeAgent" `
-                -ErrorAction SilentlyContinue
+              $userRunValue = Get-OptionalRegistryValue `
+                -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
+                -SubKey "Software\Microsoft\Windows\CurrentVersion\Run" `
+                -Name "BaijimuBridgeAgent"
               if ($userRunValue -like "*bridge-agent-desktop.exe*") {
                 break
               }
