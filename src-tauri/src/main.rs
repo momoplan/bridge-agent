@@ -48,6 +48,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
+#[cfg(not(debug_assertions))]
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_updater::UpdaterExt;
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;

@@ -74,7 +74,9 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          # A repair release is dispatched from the fixed main commit while keeping
+          # the existing immutable release tag only as the artifact version.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -113,6 +115,7 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo check --release --manifest-path src-tauri/Cargo.toml
 
   release:
     name: ${{ matrix.name }}
@@ -142,7 +145,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          # Repair releases build the dispatched main commit, not the old tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
