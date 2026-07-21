@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 export async function prepareGiteeRelease({
   tagName,
   version,
+  targetCommitish,
   token,
   apiBase = "https://gitee.com/api/v5",
   owner = "zxflimit_admin",
@@ -13,6 +14,9 @@ export async function prepareGiteeRelease({
 }) {
   if (!tagName || !version || tagName !== `bridge-agent-v${version}`) {
     throw new Error("Usage: prepare-gitee-release.mjs <bridge-agent-vVERSION> <VERSION>");
+  }
+  if (!/^[0-9a-f]{40}$/.test(targetCommitish ?? "")) {
+    throw new Error("GITHUB_SHA must be the exact 40-character release commit");
   }
   if (!token?.trim()) {
     throw new Error("Missing GITEE_ACCESS_TOKEN");
@@ -38,6 +42,9 @@ export async function prepareGiteeRelease({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         tag_name: tagName,
+        // Gitee requires an explicit branch or commit SHA even when tag_name
+        // already exists. Pin the Release to the workflow's exact source SHA.
+        target_commitish: targetCommitish,
         name: `百积木 ${tagName}`,
         body: [
           "百积木桌面端国内镜像发布。",
@@ -51,7 +58,9 @@ export async function prepareGiteeRelease({
   }
 
   if (!currentRelease?.id) {
-    throw new Error(`Gitee Release ${tagName} has no id`);
+    throw new Error(
+      `Gitee Release ${tagName} has no id: ${summarizeUnexpectedRelease(currentRelease)}`,
+    );
   }
 
   const releases = await request(`/repos/${owner}/${repository}/releases?page=1&per_page=100`);
@@ -110,11 +119,24 @@ function releaseTime(release) {
   return Date.parse(release.created_at ?? release.published_at ?? 0) || 0;
 }
 
+function summarizeUnexpectedRelease(value) {
+  if (value === null) return "null response";
+  if (Array.isArray(value)) return `array response (${value.length} items)`;
+  if (typeof value !== "object") return `${typeof value} response`;
+  const summary = {
+    keys: Object.keys(value).sort(),
+    message: typeof value.message === "string" ? value.message : undefined,
+    errors: Array.isArray(value.errors) ? value.errors : undefined,
+  };
+  return JSON.stringify(summary);
+}
+
 async function main() {
   const [tagName, version] = process.argv.slice(2);
   await prepareGiteeRelease({
     tagName,
     version,
+    targetCommitish: process.env.GITHUB_SHA,
     token: process.env.GITEE_ACCESS_TOKEN,
   });
 }

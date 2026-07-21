@@ -7,6 +7,7 @@ const release = {
   tag_name: "bridge-agent-v0.1.110",
   created_at: "2026-07-21T18:19:00Z",
 };
+const releaseCommit = "87bc02566e010f114f1eee0ffa6e04e808970c61";
 
 describe("prepareGiteeRelease", () => {
   it("creates a release when Gitee represents a missing tag as HTTP 200 null", async () => {
@@ -21,6 +22,7 @@ describe("prepareGiteeRelease", () => {
       prepareGiteeRelease({
         tagName: release.tag_name,
         version: "0.1.110",
+        targetCommitish: releaseCommit,
         token: "test-token",
         fetchImpl,
         logger,
@@ -31,6 +33,7 @@ describe("prepareGiteeRelease", () => {
     expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "POST" });
     expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toMatchObject({
       tag_name: release.tag_name,
+      target_commitish: releaseCommit,
       name: `百积木 ${release.tag_name}`,
     });
     expect(logger.log).toHaveBeenCalledWith(`Created Gitee Release ${release.tag_name}`);
@@ -47,6 +50,7 @@ describe("prepareGiteeRelease", () => {
       prepareGiteeRelease({
         tagName: release.tag_name,
         version: "0.1.110",
+        targetCommitish: releaseCommit,
         token: "test-token",
         fetchImpl,
         logger: { log: vi.fn() },
