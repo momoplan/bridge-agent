@@ -637,7 +637,7 @@ fn find_desktop_process() -> Result<Option<DesktopProcess>> {
                 handle: Some(OwnedHandle(handle)),
             }));
         }
-        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        has_entry = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
     }
     Ok(None)
 }

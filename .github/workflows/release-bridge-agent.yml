@@ -135,9 +135,35 @@ jobs:
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
           cargo check --release --manifest-path src-tauri/Cargo.toml
 
+  windows-quality-gate:
+    name: Windows release quality gate
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Setup Rust quality tools
+        shell: pwsh
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable --component clippy --no-self-update
+          rustup default stable
+
+      - name: Check Windows Rust targets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo check --locked --workspace --all-targets
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
   release:
     name: ${{ matrix.name }}
-    needs: [prepare-domestic-release, quality-gate]
+    needs: [prepare-domestic-release, quality-gate, windows-quality-gate]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
