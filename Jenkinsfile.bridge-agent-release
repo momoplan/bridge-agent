@@ -200,7 +200,12 @@ fi
                 expression { return !params.DRY_RUN }
             }
             steps {
-                sh '''#!/bin/bash
+                withCredentials([usernamePassword(
+                    credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
+                    usernameVariable: 'GITEE_USER',
+                    passwordVariable: 'GITEE_TOKEN'
+                )]) {
+                    sh '''#!/bin/bash
 set -euo pipefail
 release="$(curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/bridge-agent-v${BRIDGE_VERSION}")"
 printf '%s' "$release" | jq -e --arg version "$BRIDGE_VERSION" '
@@ -214,6 +219,25 @@ printf '%s' "$release" | jq -e --arg version "$BRIDGE_VERSION" '
   ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage.sig") != null) and
   ([.assets[].name] | index("Baijimu_" + $version + "_amd64.deb") != null)'
 
+gitee_release="$(curl -fsS \
+  -H "Authorization: Bearer ${GITEE_TOKEN}" \
+  "https://gitee.com/api/v5/repos/zxflimit_admin/bridge-agent/releases/tags/bridge-agent-v${BRIDGE_VERSION}")"
+gitee_release_id="$(printf '%s' "$gitee_release" | jq -er '.id')"
+gitee_assets="$(curl -fsS \
+  -H "Authorization: Bearer ${GITEE_TOKEN}" \
+  "https://gitee.com/api/v5/repos/zxflimit_admin/bridge-agent/releases/${gitee_release_id}/attach_files?page=1&per_page=100")"
+printf '%s' "$gitee_assets" | jq -e --arg version "$BRIDGE_VERSION" '
+  length == 8 and
+  ([.[].name] | index("Baijimu_" + $version + "_universal.dmg") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_universal.app.tar.gz") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_universal.app.tar.gz.sig") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_x64_en-US.msi") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_x64_en-US.msi.sig") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_amd64.AppImage") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_amd64.AppImage.sig") != null) and
+  ([.[].name] | index("Baijimu_" + $version + "_amd64.deb") != null) and
+  all(.[]; .browser_download_url | startswith("https://gitee.com/zxflimit_admin/bridge-agent/"))'
+
 latest="$(curl -fsS 'https://updates.baijimu.com/api/bridge-agent/releases/latest')"
 printf '%s' "$latest" | jq -e --arg version "$BRIDGE_VERSION" '
   ((.data // .).version // (.data // .).latestVersion // "") == $version and
@@ -222,9 +246,11 @@ printf '%s' "$latest" | jq -e --arg version "$BRIDGE_VERSION" '
 tauri_update="$(curl -fsS "https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=darwin&arch=aarch64&currentVersion=0.0.0")"
 printf '%s' "$tauri_update" | jq -e --arg version "$BRIDGE_VERSION" '
   .version == $version and
+  (.url | startswith("https://gitee.com/zxflimit_admin/bridge-agent/")) and
   (.url | endswith(".app.tar.gz")) and
   (.signature | length) > 0'
 '''
+                }
             }
         }
     }
