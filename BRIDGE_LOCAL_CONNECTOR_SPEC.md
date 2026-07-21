@@ -529,5 +529,9 @@ Connector 发布到市场前至少确认：
 - 安装后记录写入本机 connectors 目录下的 `install.json`，包括 `sourceReference`、`sourcePath`、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
 - Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
 - 服务注册 transport 目前支持 `http`。
+- 桌面端在配置目录写入权限为 `0600` 的 `local-app-control.json`，内容包含进程 ID、随机令牌和 loopback HTTP 地址；控制服务正常停止时删除，重启时覆盖并轮换令牌。
+- `baijimu local-app install` 和 `baijimu local-app device ...` 必须通过该本机控制面调用桌面端实现，不得自行写 Connector 目录或复制安装算法。
+- 本机控制面支持市场查询、已安装应用查询、安装、启动、停止、来源同步、卸载以及清单声明的 management operation；所有请求必须携带发现文件中的 Bearer token。
+- 本机控制面只允许绑定 loopback；CLI 读取发现文件后必须再次校验 URL，禁止向远端主机发送本机控制 token。
 
 后续如果新增包签名、checksum、压缩包分发或沙箱运行，应在本文中扩展对应章节。

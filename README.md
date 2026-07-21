@@ -109,6 +109,24 @@ Codex 的运行状态与账户状态彼此独立：应用状态来自 Connector 
 
 Connector 安装采用分级信任：只有从应用市场选择、由后端重新读取市场记录，并通过 HTTPS、SHA-256、Connector ID 和版本一致性校验的发布包才标记为“平台信任”。本地目录、Git 仓库以及其他直接来源始终标记为“用户信任、平台未验证”，即使它们使用了与市场应用相同的 Connector ID，也不会自动获得市场身份或市场升级入口。桌面端要求安装前确认风险，后续重新同步也会再次确认；CLI 安装需显式传入 `--accept-untrusted`。安装记录会保存来源、信任等级以及安装内容摘要。
 
+运行中的桌面端会发布仅当前用户可读的本机控制发现文件，`baijimu` CLI 通过随机令牌和 loopback HTTP 管理本地应用。AI 和自动化工具不需要直接修改 `agent-config.json` 或 Connector 安装目录：
+
+```bash
+baijimu local-app device status
+baijimu local-app device market
+baijimu local-app install codex --market
+baijimu local-app install /path/to/connector --accept-untrusted
+baijimu local-app device list
+baijimu local-app device get com.baijimu.connector.codex
+baijimu local-app device start com.baijimu.connector.codex
+baijimu local-app device stop com.baijimu.connector.codex
+baijimu local-app device sync com.baijimu.connector.codex
+baijimu local-app device invoke com.baijimu.connector.codex credentialState
+baijimu local-app device uninstall com.baijimu.connector.codex --yes
+```
+
+CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可用 `BAIJIMU_LOCAL_APP_CONTROL_FILE` 或 `--control-file` 指定发现文件。非市场安装必须显式传 `--accept-untrusted`，卸载必须显式传 `--yes`。
+
 ## 对外暴露的模型
 
 外部协议仍然看到业务服务模型，而不是本地实现细节。桌面端产品界面不再把“服务”作为普通用户主入口，而是把服务归入应用里的内部运行项和能力组。
@@ -605,7 +623,7 @@ baijimu-jenkins build bridge-agent-desktop-release \
   BRIDGE_REF=codex/local-app-embedded-ui \
   BRIDGE_COMMIT=<40-character-commit> \
   BRIDGE_VERSION=0.1.105 \
-  CLI_VERSION=0.1.7 \
+  CLI_VERSION=0.1.14 \
   DRY_RUN=true
 ```
 

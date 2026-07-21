@@ -6,9 +6,9 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, State as AxumState},
     http::{header, HeaderMap, Response as HttpResponse, StatusCode},
-    response::Response as AxumResponse,
-    routing::get,
-    Router,
+    response::{IntoResponse, Response as AxumResponse},
+    routing::{get, post},
+    Json, Router,
 };
 use bridge_agent::config::resolve_config_base_dir;
 use bridge_agent::logging::LogMetadata;
@@ -83,6 +83,7 @@ const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-state.json";
+const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
 const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -373,8 +374,52 @@ fn write_startup_state(path: &Path, state: &PersistentStartupState) -> Result<()
 
 #[derive(Clone)]
 struct LocalAppUiHttpState {
-    token: String,
+    ui_token: String,
+    control_token: String,
     diagnostics: StartupDiagnostics,
+    config_path: PathBuf,
+    runtime: AgentRuntimeManager,
+    registered_services: RegisteredServiceMonitor,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAppControlDiscovery {
+    schema_version: u32,
+    pid: u32,
+    base_url: String,
+    token: String,
+    started_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAppControlInstallRequest {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    replace: bool,
+    checksum: Option<String>,
+    allow_git: Option<bool>,
+    market_app_id: Option<String>,
+    #[serde(default)]
+    accept_untrusted: bool,
+    #[serde(default)]
+    start: bool,
+}
+
+struct ConnectorInstallOptions {
+    source: String,
+    replace: bool,
+    checksum: Option<String>,
+    allow_git: Option<bool>,
+    market_app_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAppControlManagementRequest {
+    payload: Option<Value>,
 }
 
 const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
@@ -1289,6 +1334,9 @@ fn start_local_app_ui_server(
     endpoint: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     startup_health: StartupHealthManager,
     diagnostics: StartupDiagnostics,
+    config_path: PathBuf,
+    runtime: AgentRuntimeManager,
+    registered_services: RegisteredServiceMonitor,
 ) {
     startup_health.set_component("local_app_ui_server", "本地应用界面服务", "starting", None);
     tauri::async_runtime::spawn(async move {
@@ -1321,12 +1369,13 @@ fn start_local_app_ui_server(
                 return;
             }
         };
-        let token = uuid::Uuid::new_v4().simple().to_string();
+        let ui_token = uuid::Uuid::new_v4().simple().to_string();
+        let control_token = uuid::Uuid::new_v4().simple().to_string();
         match endpoint.write() {
             Ok(mut value) => {
                 *value = Some(LocalAppUiEndpoint {
                     port,
-                    token: token.clone(),
+                    token: ui_token.clone(),
                 });
             }
             Err(_) => {
@@ -1349,17 +1398,66 @@ fn start_local_app_ui_server(
         );
         diagnostics.info(format!("local app UI server listening on 127.0.0.1:{port}"));
         let state = LocalAppUiHttpState {
-            token,
+            ui_token,
+            control_token: control_token.clone(),
             diagnostics: diagnostics.clone(),
+            config_path: config_path.clone(),
+            runtime,
+            registered_services,
         };
+        let control_path = local_app_control_discovery_path(&config_path);
+        if let Err(err) = write_local_app_control_discovery(&control_path, port, &control_token) {
+            diagnostics.error(format!(
+                "failed to publish local app control endpoint: {err}"
+            ));
+            startup_health.set_component(
+                "local_app_ui_server",
+                "本地应用界面服务",
+                "degraded",
+                Some(err),
+            );
+            return;
+        }
         let router = Router::new()
+            .route("/api/v1/status", get(local_app_control_status_handler))
+            .route(
+                "/api/v1/local-app-market",
+                get(local_app_control_market_handler),
+            )
+            .route("/api/v1/local-apps", get(local_app_control_list_handler))
+            .route(
+                "/api/v1/local-apps/install",
+                post(local_app_control_install_handler),
+            )
+            .route(
+                "/api/v1/local-apps/{connector_id}",
+                get(local_app_control_show_handler).delete(local_app_control_uninstall_handler),
+            )
+            .route(
+                "/api/v1/local-apps/{connector_id}/start",
+                post(local_app_control_start_handler),
+            )
+            .route(
+                "/api/v1/local-apps/{connector_id}/stop",
+                post(local_app_control_stop_handler),
+            )
+            .route(
+                "/api/v1/local-apps/{connector_id}/sync",
+                post(local_app_control_sync_handler),
+            )
+            .route(
+                "/api/v1/local-apps/{connector_id}/management/{operation}",
+                post(local_app_control_management_handler),
+            )
             .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
             .route(
                 "/{token}/{connector_id}/{*asset_path}",
                 get(local_app_ui_asset_handler),
             )
             .with_state(state);
-        if let Err(err) = axum::serve(listener, router).await {
+        let serve_result = axum::serve(listener, router).await;
+        let _ = fs::remove_file(&control_path);
+        if let Err(err) = serve_result {
             diagnostics.error(format!("local app UI server stopped: {err:#}"));
             if let Ok(mut value) = endpoint.write() {
                 *value = None;
@@ -1372,6 +1470,332 @@ fn start_local_app_ui_server(
             );
         }
     });
+}
+
+fn local_app_control_discovery_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LOCAL_APP_CONTROL_FILE_NAME)
+}
+
+fn write_local_app_control_discovery(path: &Path, port: u16, token: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "无法确定本机应用控制文件目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| format!("创建本机应用控制目录失败: {err}"))?;
+    let document = LocalAppControlDiscovery {
+        schema_version: 1,
+        pid: std::process::id(),
+        base_url: format!("http://127.0.0.1:{port}/api/v1"),
+        token: token.to_string(),
+        started_at_epoch_ms: now_ms(),
+    };
+    let bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|err| format!("序列化本机应用控制地址失败: {err}"))?;
+    let temporary_path = path.with_extension("json.tmp");
+    fs::write(&temporary_path, bytes).map_err(|err| format!("写入本机应用控制地址失败: {err}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("保护本机应用控制地址失败: {err}"))?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| format!("替换本机应用控制地址失败: {err}"))?;
+    }
+    fs::rename(&temporary_path, path).map_err(|err| format!("提交本机应用控制地址失败: {err}"))?;
+    Ok(())
+}
+
+fn local_app_control_is_authorized(state: &LocalAppUiHttpState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .is_some_and(|value| value == state.control_token)
+}
+
+fn local_app_control_error(status: StatusCode, message: impl Into<String>) -> AxumResponse {
+    (
+        status,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": { "message": message.into() }
+        })),
+    )
+        .into_response()
+}
+
+fn local_app_control_success<T: Serialize>(value: T) -> AxumResponse {
+    Json(serde_json::json!({ "ok": true, "data": value })).into_response()
+}
+
+fn local_app_control_result<T: Serialize>(result: Result<T, String>) -> AxumResponse {
+    match result {
+        Ok(value) => local_app_control_success(value),
+        Err(err) => local_app_control_error(StatusCode::BAD_REQUEST, err),
+    }
+}
+
+async fn local_app_control_status_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+        Ok::<_, String>(serde_json::json!({
+            "schemaVersion": 1,
+            "pid": std::process::id(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "configPath": state.config_path.display().to_string(),
+            "authorized": config_is_authorized(&config),
+            "workspaceId": config.platform.workspace_id,
+            "relayTokenConfigured": !config.relay.token.trim().is_empty(),
+            "runtime": state.runtime.snapshot().await
+        }))
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_market_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    local_app_control_result(fetch_market_connector_apps(&state.config_path).await)
+}
+
+async fn local_app_control_list_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let report =
+            sync_installed_connectors_report(&state.config_path).map_err(|err| err.to_string())?;
+        let apps = list_connectors().map_err(|err| err.to_string())?;
+        let services = state.registered_services.statuses().await?;
+        Ok::<_, String>(serde_json::json!({
+            "apps": apps,
+            "syncFailures": report.failures,
+            "services": services,
+            "runtime": state.runtime.snapshot().await
+        }))
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_show_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath(connector_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
+        let services =
+            connector_service_statuses(&state.config_path, &record.service_names).await?;
+        Ok::<_, String>(serde_json::json!({
+            "app": record,
+            "services": services,
+            "runtime": state.runtime.snapshot().await
+        }))
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_install_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    headers: HeaderMap,
+    Json(request): Json<LocalAppControlInstallRequest>,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let market_install = request
+        .market_app_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !market_install && !request.accept_untrusted {
+        return local_app_control_error(
+            StatusCode::FORBIDDEN,
+            "本地目录、Git 或直接下载来源未经平台验证；检查来源后传 acceptUntrusted=true",
+        );
+    }
+    let result = async {
+        let document = install_connector_app_with_context(
+            &state.config_path,
+            &state.runtime,
+            &state.registered_services,
+            ConnectorInstallOptions {
+                source: request.source,
+                replace: request.replace,
+                checksum: request.checksum,
+                allow_git: request.allow_git,
+                market_app_id: request.market_app_id,
+            },
+        )
+        .await?;
+        let started = if request.start {
+            let result = start_connector(&document.install.connector_id, &state.config_path)
+                .map_err(|err| err.to_string())?;
+            ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
+            wait_for_connector_health(
+                &state.config_path,
+                &result
+                    .services
+                    .iter()
+                    .map(|service| service.service.clone())
+                    .collect::<Vec<_>>(),
+                true,
+            )
+            .await?;
+            state.registered_services.request_refresh();
+            Some(result)
+        } else {
+            None
+        };
+        Ok::<_, String>(serde_json::json!({
+            "install": document,
+            "start": started
+        }))
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_start_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath(connector_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let result = start_connector(connector_id.trim(), &state.config_path)
+            .map_err(|err| err.to_string())?;
+        ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
+        wait_for_connector_health(
+            &state.config_path,
+            &result
+                .services
+                .iter()
+                .map(|service| service.service.clone())
+                .collect::<Vec<_>>(),
+            true,
+        )
+        .await?;
+        state.registered_services.request_refresh();
+        Ok::<_, String>(result)
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_stop_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath(connector_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let result = stop_connector(connector_id.trim(), &state.config_path)
+            .map_err(|err| err.to_string())?;
+        ensure_connector_lifecycle_command_succeeded("停止应用", &result)?;
+        wait_for_connector_health(
+            &state.config_path,
+            &result
+                .services
+                .iter()
+                .map(|service| service.service.clone())
+                .collect::<Vec<_>>(),
+            false,
+        )
+        .await?;
+        state.registered_services.request_refresh();
+        Ok::<_, String>(result)
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_sync_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath(connector_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    let result = async {
+        let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
+        let source = record
+            .source_reference
+            .clone()
+            .unwrap_or_else(|| record.source_path.clone());
+        install_connector_app_with_context(
+            &state.config_path,
+            &state.runtime,
+            &state.registered_services,
+            ConnectorInstallOptions {
+                source,
+                replace: true,
+                checksum: record.source_checksum,
+                allow_git: Some(true),
+                market_app_id: record.market_app_id,
+            },
+        )
+        .await
+    }
+    .await;
+    local_app_control_result(result)
+}
+
+async fn local_app_control_management_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath((connector_id, operation)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<LocalAppControlManagementRequest>,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    local_app_control_result(
+        invoke_connector_management(connector_id, operation, request.payload).await,
+    )
+}
+
+async fn local_app_control_uninstall_handler(
+    AxumState(state): AxumState<LocalAppUiHttpState>,
+    AxumPath(connector_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> AxumResponse {
+    if !local_app_control_is_authorized(&state, &headers) {
+        return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
+    }
+    local_app_control_result(
+        uninstall_connector_app_with_context(
+            &state.config_path,
+            &state.runtime,
+            &state.registered_services,
+            connector_id,
+        )
+        .await,
+    )
 }
 
 async fn local_app_ui_entry_handler(
@@ -1402,7 +1826,7 @@ async fn serve_local_app_ui_asset(
         Some(LOCAL_APP_UI_BRIDGE_ASSET) => "bridge",
         Some(_) => "asset",
     };
-    if token != state.token || !local_app_ui_request_host_matches(headers, token, connector_id) {
+    if token != state.ui_token || !local_app_ui_request_host_matches(headers, token, connector_id) {
         state.diagnostics.warn(format!(
             "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=invalid_endpoint"
         ));
@@ -1846,19 +2270,41 @@ async fn install_connector_app(
     allow_git: Option<bool>,
     market_app_id: Option<String>,
 ) -> Result<ConnectorAppInstallDocument, String> {
-    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let requested_source = source.trim();
-    if requested_source.is_empty() && market_app_id.as_deref().is_none_or(str::is_empty) {
+    install_connector_app_with_context(
+        &state.config_path,
+        &state.runtime,
+        &state.registered_services,
+        ConnectorInstallOptions {
+            source,
+            replace,
+            checksum,
+            allow_git,
+            market_app_id,
+        },
+    )
+    .await
+}
+
+async fn install_connector_app_with_context(
+    config_path: &Path,
+    runtime_manager: &AgentRuntimeManager,
+    registered_services: &RegisteredServiceMonitor,
+    options: ConnectorInstallOptions,
+) -> Result<ConnectorAppInstallDocument, String> {
+    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
+    let requested_source = options.source.trim();
+    if requested_source.is_empty() && options.market_app_id.as_deref().is_none_or(str::is_empty) {
         return Err("安装来源不能为空".to_string());
     }
 
-    let market_app = match market_app_id
+    let market_app = match options
+        .market_app_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         Some(id) => Some(
-            fetch_market_connector_apps(&state.config_path)
+            fetch_market_connector_apps(config_path)
                 .await?
                 .into_iter()
                 .find(|app| app.id == id)
@@ -1879,8 +2325,8 @@ async fn install_connector_app(
         } else {
             (
                 requested_source.to_string(),
-                checksum.filter(|value| !value.trim().is_empty()),
-                allow_git.unwrap_or(true),
+                options.checksum.filter(|value| !value.trim().is_empty()),
+                options.allow_git.unwrap_or(true),
             )
         };
     let resolved_source = resolve_connector_source(
@@ -1904,10 +2350,10 @@ async fn install_connector_app(
         .map_err(|err| err.to_string())?
         .into_iter()
         .find(|connector| connector.id == candidate_manifest.id);
-    let restart_after_replace = if replace {
+    let restart_after_replace = if options.replace {
         match existing.as_ref() {
             Some(connector) => {
-                connector_has_healthy_service(&state.config_path, &connector.service_names).await?
+                connector_has_healthy_service(config_path, &connector.service_names).await?
             }
             None => false,
         }
@@ -1916,11 +2362,11 @@ async fn install_connector_app(
     };
 
     if restart_after_replace {
-        let stopped = stop_connector(&candidate_manifest.id, &state.config_path)
+        let stopped = stop_connector(&candidate_manifest.id, config_path)
             .map_err(|err| format!("升级前停止旧版应用失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("停止旧版应用", &stopped)?;
         wait_for_connector_health(
-            &state.config_path,
+            config_path,
             &stopped
                 .services
                 .iter()
@@ -1942,16 +2388,14 @@ async fn install_connector_app(
     };
     let install = match install_connector_from_path_with_provenance(
         resolved_source.path(),
-        &state.config_path,
-        replace,
+        config_path,
+        options.replace,
         provenance,
     ) {
         Ok(install) => install,
         Err(err) => {
             if restart_after_replace {
-                if let Err(restart_err) =
-                    start_connector(&candidate_manifest.id, &state.config_path)
-                {
+                if let Err(restart_err) = start_connector(&candidate_manifest.id, config_path) {
                     return Err(format!(
                         "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
                     ));
@@ -1962,11 +2406,11 @@ async fn install_connector_app(
     };
 
     if restart_after_replace {
-        let started = start_connector(&install.connector_id, &state.config_path)
+        let started = start_connector(&install.connector_id, config_path)
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
         wait_for_connector_health(
-            &state.config_path,
+            config_path,
             &started
                 .services
                 .iter()
@@ -1977,18 +2421,17 @@ async fn install_connector_app(
         .await?;
     }
 
-    let runtime = state
-        .runtime
-        .apply_capabilities_from_path(&state.config_path)
+    let runtime = runtime_manager
+        .apply_capabilities_from_path(config_path)
         .await
         .map_err(|err| err.to_string())?;
-    state.registered_services.request_refresh();
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    registered_services.request_refresh();
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConnectorAppInstallDocument {
         install,
         config: ConfigDocument {
-            config_path: state.config_path.display().to_string(),
+            config_path: config_path.display().to_string(),
             manifest_preview,
             config: config_for_ui(&config)?,
             runtime,
@@ -2126,17 +2569,31 @@ async fn uninstall_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConfigDocument, String> {
-    uninstall_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())?;
-    let runtime = state
-        .runtime
-        .apply_capabilities_from_path(&state.config_path)
+    uninstall_connector_app_with_context(
+        &state.config_path,
+        &state.runtime,
+        &state.registered_services,
+        id,
+    )
+    .await
+}
+
+async fn uninstall_connector_app_with_context(
+    config_path: &Path,
+    runtime_manager: &AgentRuntimeManager,
+    registered_services: &RegisteredServiceMonitor,
+    id: String,
+) -> Result<ConfigDocument, String> {
+    uninstall_connector(id.trim(), config_path).map_err(|err| err.to_string())?;
+    let runtime = runtime_manager
+        .apply_capabilities_from_path(config_path)
         .await
         .map_err(|err| err.to_string())?;
-    state.registered_services.request_refresh();
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    registered_services.request_refresh();
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConfigDocument {
-        config_path: state.config_path.display().to_string(),
+        config_path: config_path.display().to_string(),
         manifest_preview,
         config: config_for_ui(&config)?,
         runtime,
@@ -4320,6 +4777,9 @@ fn main() {
                     Arc::clone(&setup_local_app_ui),
                     setup_health.clone(),
                     setup_diagnostics.clone(),
+                    config_path.clone(),
+                    runtime.clone(),
+                    registered_services.clone(),
                 );
                 bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
                 auto_start_agent(
@@ -4750,6 +5210,25 @@ mod tests {
             token,
             "com.baijimu.connector.second"
         ));
+    }
+
+    #[test]
+    fn local_app_control_discovery_is_private_and_loopback_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(LOCAL_APP_CONTROL_FILE_NAME);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        write_local_app_control_discovery(&path, 39100, token).unwrap();
+
+        let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["schemaVersion"], 1);
+        assert_eq!(document["baseUrl"], "http://127.0.0.1:39100/api/v1");
+        assert_eq!(document["token"], token);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
