@@ -399,6 +399,7 @@ fn read_archive_entry(reader: &mut impl Read) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn verify_platform_signature(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -433,6 +434,11 @@ fn verify_platform_signature(path: &Path) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn verify_platform_signature(_path: &Path) -> Result<()> {
     Ok(())
 }
 
