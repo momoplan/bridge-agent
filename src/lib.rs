@@ -23,13 +23,14 @@ pub use config::{
 pub use connector::{
     connector_data_dir, connector_management_token_path, connectors_dir,
     format_connector_sync_failures, install_connector_from_path,
-    install_connector_from_path_with_source_reference, list_connectors, load_connector_manifest,
-    resolve_connector_ui_asset, resolve_connector_ui_entry, show_connector, start_connector,
-    stop_connector, sync_installed_connector, sync_installed_connectors,
-    sync_installed_connectors_report, uninstall_connector, ConnectorInstallRecord,
+    install_connector_from_path_with_provenance, install_connector_from_path_with_source_reference,
+    list_connectors, load_connector_manifest, resolve_connector_ui_asset,
+    resolve_connector_ui_entry, show_connector, start_connector, stop_connector,
+    sync_installed_connector, sync_installed_connectors, sync_installed_connectors_report,
+    uninstall_connector, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorManagement, ConnectorManagementOperation, ConnectorManifest,
     ConnectorServiceStartResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure,
-    ConnectorSyncReport, ConnectorUi,
+    ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

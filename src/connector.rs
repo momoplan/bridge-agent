@@ -6,9 +6,11 @@ use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -161,10 +163,61 @@ pub struct ConnectorInstallRecord {
     pub source_path: String,
     #[serde(default)]
     pub source_reference: Option<String>,
+    #[serde(default)]
+    pub trust_level: ConnectorTrustLevel,
+    #[serde(default)]
+    pub market_app_id: Option<String>,
+    #[serde(default)]
+    pub source_checksum: Option<String>,
+    #[serde(default)]
+    pub package_checksum: Option<String>,
     pub service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
     #[serde(default)]
     pub last_synced_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorTrustLevel {
+    PlatformTrusted,
+    #[default]
+    UserTrusted,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConnectorInstallProvenance {
+    source_reference: Option<String>,
+    trust_level: ConnectorTrustLevel,
+    market_app_id: Option<String>,
+    source_checksum: Option<String>,
+}
+
+impl ConnectorInstallProvenance {
+    pub fn user_trusted(source_reference: Option<&str>) -> Self {
+        Self {
+            source_reference: normalized_optional_text(source_reference),
+            ..Self::default()
+        }
+    }
+
+    pub fn platform_trusted(
+        source_reference: &str,
+        market_app_id: &str,
+        source_checksum: &str,
+    ) -> Result<Self> {
+        let source_reference = normalized_optional_text(Some(source_reference))
+            .context("platform-trusted connector source is required")?;
+        let market_app_id = normalized_optional_text(Some(market_app_id))
+            .context("platform-trusted connector market app id is required")?;
+        let source_checksum = normalize_sha256_checksum(source_checksum)?;
+        Ok(Self {
+            source_reference: Some(source_reference),
+            trust_level: ConnectorTrustLevel::PlatformTrusted,
+            market_app_id: Some(market_app_id),
+            source_checksum: Some(source_checksum),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +239,10 @@ pub struct ConnectorSummary {
     pub package_path: String,
     pub source_path: String,
     pub source_reference: Option<String>,
+    pub trust_level: ConnectorTrustLevel,
+    pub market_app_id: Option<String>,
+    pub source_checksum: Option<String>,
+    pub package_checksum: Option<String>,
     pub ui: Option<ConnectorUi>,
     pub permissions: Vec<ConnectorPermission>,
     pub start_policy: String,
@@ -334,6 +391,20 @@ pub fn install_connector_from_path_with_source_reference(
     replace: bool,
     source_reference: Option<&str>,
 ) -> Result<ConnectorInstallResult> {
+    install_connector_from_path_with_provenance(
+        source,
+        config_path,
+        replace,
+        ConnectorInstallProvenance::user_trusted(source_reference),
+    )
+}
+
+pub fn install_connector_from_path_with_provenance(
+    source: &Path,
+    config_path: &Path,
+    replace: bool,
+    provenance: ConnectorInstallProvenance,
+) -> Result<ConnectorInstallResult> {
     ensure_config_exists(config_path)?;
     let mut config = load_config(config_path)?;
     let source = source
@@ -359,6 +430,7 @@ pub fn install_connector_from_path_with_source_reference(
         prepare_connector_package_destination(&package_path, replace)?;
     }
     copy_connector_package(&source, &package_path)?;
+    let package_checksum = connector_package_sha256(&package_path)?;
     resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
     cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
@@ -375,10 +447,11 @@ pub fn install_connector_from_path_with_source_reference(
         manifest: manifest.clone(),
         package_path: package_path.display().to_string(),
         source_path: source.display().to_string(),
-        source_reference: source_reference
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        source_reference: provenance.source_reference,
+        trust_level: provenance.trust_level,
+        market_app_id: provenance.market_app_id,
+        source_checksum: provenance.source_checksum,
+        package_checksum: Some(package_checksum),
         service_names: service_names.clone(),
         installed_at_epoch_ms,
         last_synced_at_epoch_ms: now,
@@ -392,6 +465,21 @@ pub fn install_connector_from_path_with_source_reference(
         package_path: package_path.display().to_string(),
         service_names,
     })
+}
+
+fn normalized_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_sha256_checksum(value: &str) -> Result<String> {
+    let value = value.trim().strip_prefix("sha256:").unwrap_or(value.trim());
+    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
+        bail!("platform-trusted connector source requires a valid SHA-256 checksum");
+    }
+    Ok(format!("sha256:{}", value.to_ascii_lowercase()))
 }
 
 pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
@@ -929,6 +1017,68 @@ fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
     }
 
     copy_dir_recursive(source, destination)
+}
+
+fn connector_package_sha256(package_path: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_connector_package_files(package_path, package_path, &mut files)?;
+    files.sort();
+
+    let mut digest = Sha256::new();
+    digest.update(b"bridge-agent-connector-package-v1\0");
+    let mut buffer = [0_u8; 64 * 1024];
+    for relative_path in files {
+        let relative = relative_path.to_string_lossy();
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative.as_bytes());
+        let path = package_path.join(&relative_path);
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to inspect connector file {}", path.display()))?;
+        digest.update(metadata.len().to_le_bytes());
+        let mut file = fs::File::open(&path)
+            .with_context(|| format!("failed to hash connector file {}", path.display()))?;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("failed to hash connector file {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn collect_connector_package_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read connector package {}", directory.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_connector_package_files(root, &entry.path(), files)?;
+        } else if file_type.is_file() {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .with_context(|| {
+                        format!(
+                            "connector file {} escaped package {}",
+                            entry.path().display(),
+                            root.display()
+                        )
+                    })?
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
@@ -1915,6 +2065,10 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         package_path: record.package_path,
         source_path: record.source_path,
         source_reference: record.source_reference,
+        trust_level: record.trust_level,
+        market_app_id: record.market_app_id,
+        source_checksum: record.source_checksum,
+        package_checksum: record.package_checksum,
         ui: record.manifest.ui,
         permissions: record.manifest.permissions,
         start_policy,
@@ -2238,6 +2392,53 @@ mod tests {
         assert_eq!(ui.entry, "ui/index.html");
         assert_eq!(ui.title.as_deref(), Some("设置"));
         assert!(ui.default_view);
+        assert_eq!(summary.trust_level, ConnectorTrustLevel::UserTrusted);
+        assert!(summary
+            .package_checksum
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71));
+
+        let market_checksum = format!("sha256:{}", "a".repeat(64));
+        let provenance = ConnectorInstallProvenance::platform_trusted(
+            "https://downloads.example.test/connector.zip",
+            "market-app-1",
+            &market_checksum,
+        )
+        .unwrap();
+        install_connector_from_path_with_provenance(&source, &config_path, true, provenance)
+            .unwrap();
+        let trusted = list_connectors().unwrap().remove(0);
+        assert_eq!(trusted.trust_level, ConnectorTrustLevel::PlatformTrusted);
+        assert_eq!(trusted.market_app_id.as_deref(), Some("market-app-1"));
+        assert_eq!(
+            trusted.source_checksum.as_deref(),
+            Some(market_checksum.as_str())
+        );
+
+        let mut legacy = serde_json::to_value(show_connector(&trusted.id).unwrap()).unwrap();
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("trustLevel");
+        legacy.remove("marketAppId");
+        legacy.remove("sourceChecksum");
+        legacy.remove("packageChecksum");
+        let legacy: ConnectorInstallRecord =
+            serde_json::from_value(serde_json::Value::Object(legacy.clone())).unwrap();
+        assert_eq!(legacy.trust_level, ConnectorTrustLevel::UserTrusted);
+        assert!(legacy.market_app_id.is_none());
+    }
+
+    #[test]
+    fn platform_trusted_provenance_requires_complete_sha256_evidence() {
+        assert!(ConnectorInstallProvenance::platform_trusted(
+            "https://downloads.example.test/connector.zip",
+            "market-app-1",
+            "invalid",
+        )
+        .is_err());
+        assert!(
+            ConnectorInstallProvenance::platform_trusted("", "market-app-1", &"a".repeat(64),)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2958,6 +3159,10 @@ bad-python-connector = "bad_python_connector.app:main"
                 .display()
                 .to_string(),
             source_reference: None,
+            trust_level: ConnectorTrustLevel::UserTrusted,
+            market_app_id: None,
+            source_checksum: None,
+            package_checksum: None,
             service_names: vec!["badPythonService".to_string()],
             installed_at_epoch_ms: 1,
             last_synced_at_epoch_ms: 1,

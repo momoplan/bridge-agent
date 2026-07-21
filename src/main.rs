@@ -61,6 +61,9 @@ enum ConnectorCommand {
         config: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         replace: bool,
+        /// Confirm that this non-market source is trusted by the user.
+        #[arg(long, default_value_t = false)]
+        accept_untrusted: bool,
     },
     Uninstall {
         id: String,
@@ -234,7 +237,13 @@ async fn connector_command(command: ConnectorCommand) -> Result<()> {
             source,
             config,
             replace,
+            accept_untrusted,
         } => {
+            if !accept_untrusted {
+                anyhow::bail!(
+                    "connector CLI installs are platform-unverified; inspect the source and pass --accept-untrusted to continue"
+                );
+            }
             let config_path = config.unwrap_or(default_config_path()?);
             let result = install_connector_from_path(&source, &config_path, replace)?;
             println!("{}", serde_json::to_string_pretty(&result)?);

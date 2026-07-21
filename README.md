@@ -107,6 +107,8 @@ Codex 的运行状态与账户状态彼此独立：应用状态来自 Connector 
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
+Connector 安装采用分级信任：只有从应用市场选择、由后端重新读取市场记录，并通过 HTTPS、SHA-256、Connector ID 和版本一致性校验的发布包才标记为“平台信任”。本地目录、Git 仓库以及其他直接来源始终标记为“用户信任、平台未验证”，即使它们使用了与市场应用相同的 Connector ID，也不会自动获得市场身份或市场升级入口。桌面端要求安装前确认风险，后续重新同步也会再次确认；CLI 安装需显式传入 `--accept-untrusted`。安装记录会保存来源、信任等级以及安装内容摘要。
+
 ## 对外暴露的模型
 
 外部协议仍然看到业务服务模型，而不是本地实现细节。桌面端产品界面不再把“服务”作为普通用户主入口，而是把服务归入应用里的内部运行项和能力组。

@@ -423,6 +423,10 @@ interface ConnectorSummary {
   packagePath: string;
   sourcePath: string;
   sourceReference?: string | null;
+  trustLevel: "platform_trusted" | "user_trusted";
+  marketAppId?: string | null;
+  sourceChecksum?: string | null;
+  packageChecksum?: string | null;
   ui?: ConnectorUi | null;
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
@@ -821,6 +825,7 @@ function App() {
   const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("choose");
   const [selectedMarketAppId, setSelectedMarketAppId] = useState("");
   const [installSource, setInstallSource] = useState("");
+  const [customInstallConfirmed, setCustomInstallConfirmed] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
 
   useEffect(() => {
@@ -1428,6 +1433,10 @@ function App() {
       setError(installSourceMode === "market" ? "请选择要安装的应用" : "请输入本地目录或 Git 仓库地址");
       return;
     }
+    if (installSourceMode === "custom" && !customInstallConfirmed) {
+      setError("请先确认自定义来源风险");
+      return;
+    }
     try {
       setInstallBusy(true);
       setMessage("");
@@ -1437,7 +1446,8 @@ function App() {
         source,
         replace: true,
         checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
-        allowGit: installSourceMode === "custom"
+        allowGit: installSourceMode === "custom",
+        marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -1445,6 +1455,7 @@ function App() {
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
       setActivePage("apps");
       setInstallPanelOpen(false);
+      setCustomInstallConfirmed(false);
       setMessage(`应用 ${document.install.name} ${document.install.version} 已安装`);
     } catch (err) {
       handleCommandError(err);
@@ -1454,10 +1465,18 @@ function App() {
   }
 
   function marketConnectorForLocalApp(app: LocalAppItem): MarketConnector | undefined {
-    if (app.kind !== "connector" || !app.connector) {
+    if (
+      app.kind !== "connector" ||
+      !app.connector ||
+      app.connector.trustLevel !== "platform_trusted" ||
+      !app.connector.marketAppId
+    ) {
       return undefined;
     }
-    return marketConnectors.find((marketApp) => marketApp.connectorId === app.connector?.id);
+    return marketConnectors.find(
+      (marketApp) =>
+        marketApp.id === app.connector?.marketAppId && marketApp.connectorId === app.connector?.id
+    );
   }
 
   function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
@@ -1566,11 +1585,11 @@ function App() {
   }
 
   function connectorSourceKind(app: LocalAppItem, marketApp?: MarketConnector): string {
-    if (marketApp) {
-      return "市场应用";
+    if (app.connector?.trustLevel === "platform_trusted" && marketApp) {
+      return "市场应用（平台信任）";
     }
     const source = connectorSyncSource(app);
-    return isGitSourceText(source) ? "Git 仓库" : "本地目录";
+    return isGitSourceText(source) ? "Git 仓库（用户信任）" : "本地目录（用户信任）";
   }
 
   function isGitSourceText(source: string): boolean {
@@ -1597,9 +1616,7 @@ function App() {
       setRuntimeConflict(null);
       const status = await invoke<ConnectorAppUpdateStatus>("check_connector_app_update", {
         id: app.connector.id,
-        source: marketApp.source,
-        checksum: marketApp.checksum ?? null,
-        allowGit: false
+        marketAppId: marketApp.id
       });
       setConnectorUpdateStatuses((current) => ({
         ...current,
@@ -1636,7 +1653,8 @@ function App() {
         source: marketApp.source,
         replace: true,
         checksum: marketApp.checksum ?? null,
-        allowGit: false
+        allowGit: false,
+        marketAppId: marketApp.id
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -1666,9 +1684,20 @@ function App() {
       setError(`应用 ${app.name} 不是可同步安装应用`);
       return;
     }
+    if (app.connector.trustLevel !== "user_trusted") {
+      setError(`应用 ${app.name} 是平台信任的市场安装，请通过市场检查更新`);
+      return;
+    }
     const source = connectorSyncSource(app);
     if (!source) {
       setError(`应用 ${app.name} 没有记录安装来源，无法重新同步`);
+      return;
+    }
+    if (
+      !window.confirm(
+        `“${app.name}”来自平台未验证的自定义来源。继续会重新读取该来源并覆盖当前安装内容，是否继续？`
+      )
+    ) {
       return;
     }
     try {
@@ -1680,7 +1709,8 @@ function App() {
         source,
         replace: true,
         checksum: null,
-        allowGit: true
+        allowGit: true,
+        marketAppId: null
       });
       applyConfigDocument(document.config);
       await refreshConnectorApps();
@@ -4602,6 +4632,7 @@ function App() {
       }
       setInstallPanelOpen(false);
       setInstallSourceMode("choose");
+      setCustomInstallConfirmed(false);
     };
 
     return (
@@ -4635,7 +4666,13 @@ function App() {
                 <strong>从市场安装</strong>
                 <span>选择官方维护的本地应用，安装后直接生效。</span>
               </button>
-              <button className="install-choice-card" onClick={() => setInstallSourceMode("custom")}>
+              <button
+                className="install-choice-card"
+                onClick={() => {
+                  setCustomInstallConfirmed(false);
+                  setInstallSourceMode("custom");
+                }}
+              >
                 <strong>自定义安装</strong>
                 <span>从本地目录或 Git 仓库安装开发中的 connector。</span>
               </button>
@@ -4672,6 +4709,20 @@ function App() {
                   placeholder="/Users/me/connectors/my-app 或 https://gitee.com/org/repo.git"
                 />
               </Field>
+              <div className="install-risk-note">
+                <strong>平台未验证的自定义来源</strong>
+                <span>
+                  本地目录或 Git 仓库不属于市场可信发布。安装后应用可以执行其声明的本机命令，后续同步也需要再次确认。
+                </span>
+              </div>
+              <label className="check-row wide">
+                <input
+                  type="checkbox"
+                  checked={customInstallConfirmed}
+                  onChange={(event) => setCustomInstallConfirmed(event.target.checked)}
+                />
+                <span>我确认来源可信，并同意以“用户信任”状态安装</span>
+              </label>
             </div>
           )}
 
@@ -4685,7 +4736,11 @@ function App() {
                 <button className="secondary" onClick={() => setInstallSourceMode("choose")} disabled={installBusy}>
                   返回
                 </button>
-                <button className="primary" onClick={() => void installLocalApp()} disabled={installBusy}>
+                <button
+                  className="primary"
+                  onClick={() => void installLocalApp()}
+                  disabled={installBusy || (installSourceMode === "custom" && !customInstallConfirmed)}
+                >
                   {installBusy ? "安装中" : "安装应用"}
                 </button>
               </>
@@ -4719,6 +4774,7 @@ function App() {
             className="primary"
             onClick={() => {
               setInstallSourceMode("choose");
+              setCustomInstallConfirmed(false);
               setInstallPanelOpen(true);
             }}
           >
@@ -4914,7 +4970,7 @@ function App() {
                     {updateBusy ? "检查中" : "检查更新"}
                   </button>
                 )
-              ) : app.connector ? (
+              ) : app.connector?.trustLevel === "user_trusted" ? (
                 <button
                   className="secondary"
                   onClick={() => void syncLocalApp(app)}
@@ -4978,6 +5034,16 @@ function App() {
                   label="来源类型"
                   value={isManagedTool ? "官方独立发行" : app.connector ? connectorSourceKind(app, marketApp) : "内置"}
                 />
+                {app.connector ? (
+                  <InfoRow
+                    label="信任状态"
+                    value={
+                      app.connector.trustLevel === "platform_trusted"
+                        ? "平台信任 · 市场来源已校验"
+                        : "用户信任 · 平台未验证"
+                    }
+                  />
+                ) : null}
                 <InfoRow label="安装来源" value={isManagedTool ? marketApp?.source ?? "等待市场版本" : syncSource || "内置"} />
                 <InfoRow label="安装位置" value={app.managedTool?.activePath ?? app.connector?.packagePath ?? "随客户端发布"} />
                 <InfoRow label="版本" value={app.managedTool?.installedVersion ?? app.connector?.version ?? "随客户端发布"} />
@@ -4992,6 +5058,7 @@ function App() {
                 {app.connector ? (
                   <>
                     <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
+                    <InfoRow label="内容摘要" value={app.connector.packageChecksum ?? "旧版本未记录"} />
                     <InfoRow
                       label="启动策略"
                       value={app.connector.startPolicy === "manual" ? "用户授权后手动启动" : "自动启动"}

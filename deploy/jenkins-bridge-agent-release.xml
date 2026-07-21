@@ -8,7 +8,7 @@
       <parameterDefinitions>
         <hudson.model.StringParameterDefinition><name>BRIDGE_REF</name><defaultValue>main</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>BRIDGE_COMMIT</name><defaultValue></defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
-        <hudson.model.StringParameterDefinition><name>BRIDGE_VERSION</name><defaultValue>0.1.108</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition><name>BRIDGE_VERSION</name><defaultValue>0.1.109</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.StringParameterDefinition><name>CLI_VERSION</name><defaultValue>0.1.7</defaultValue><trim>true</trim></hudson.model.StringParameterDefinition>
         <hudson.model.BooleanParameterDefinition><name>DRY_RUN</name><defaultValue>true</defaultValue></hudson.model.BooleanParameterDefinition>
       </parameterDefinitions>

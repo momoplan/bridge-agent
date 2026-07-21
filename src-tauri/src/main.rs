@@ -17,14 +17,15 @@ use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    format_connector_sync_failures, install_connector_from_path_with_source_reference,
+    format_connector_sync_failures, install_connector_from_path_with_provenance,
     install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
     load_connector_manifest, manifest_preview_json, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, start_connector, stop_connector, sync_installed_connectors_report,
     terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
-    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
-    RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
+    ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel, RuntimeLockConflict,
+    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -1446,7 +1447,13 @@ async fn list_connector_apps(
 async fn list_market_connector_apps(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<MarketConnectorApp>, String> {
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    fetch_market_connector_apps(&state.config_path).await
+}
+
+async fn fetch_market_connector_apps(
+    config_path: &Path,
+) -> Result<Vec<MarketConnectorApp>, String> {
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
@@ -1617,29 +1624,42 @@ async fn invoke_connector_management(
 
 #[tauri::command]
 async fn check_connector_app_update(
+    state: tauri::State<'_, DesktopState>,
     id: String,
-    source: String,
-    checksum: Option<String>,
-    allow_git: Option<bool>,
+    market_app_id: String,
 ) -> Result<ConnectorAppUpdateStatus, String> {
     let connector_id = id.trim();
     if connector_id.is_empty() {
         return Err("应用 ID 不能为空".to_string());
     }
-    let source = source.trim();
-    if source.is_empty() {
-        return Err("更新来源不能为空".to_string());
-    }
-
     let installed = show_connector(connector_id).map_err(|err| err.to_string())?;
+    if installed.trust_level != ConnectorTrustLevel::PlatformTrusted {
+        return Err("用户信任的应用不能静默切换到市场更新源，请从市场重新安装".to_string());
+    }
+    if installed.market_app_id.as_deref() != Some(market_app_id.trim()) {
+        return Err("已安装应用的市场身份与更新来源不匹配".to_string());
+    }
+    let market_app = fetch_market_connector_apps(&state.config_path)
+        .await?
+        .into_iter()
+        .find(|app| app.id == market_app_id.trim())
+        .ok_or_else(|| "市场中找不到该应用".to_string())?;
+    validate_market_connector_identity(&market_app, connector_id)?;
+    let checksum = required_market_checksum(&market_app)?;
     let resolved_source =
-        resolve_connector_source(source, allow_git.unwrap_or(true), checksum.as_deref()).await?;
+        resolve_connector_source(&market_app.source, false, Some(&checksum)).await?;
     let latest_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
     if latest_manifest.id != installed.manifest.id {
         return Err(format!(
             "更新来源应用 ID 不匹配：当前 `{}`，来源 `{}`",
             installed.manifest.id, latest_manifest.id
+        ));
+    }
+    if latest_manifest.version != market_app.version {
+        return Err(format!(
+            "市场版本与安装包清单不匹配：市场 `{}`，安装包 `{}`",
+            market_app.version, latest_manifest.version
         ));
     }
 
@@ -1652,7 +1672,7 @@ async fn check_connector_app_update(
             &latest_manifest.version,
             &installed.manifest.version,
         ),
-        source: source.to_string(),
+        source: market_app.source,
     })
 }
 
@@ -1663,23 +1683,62 @@ async fn install_connector_app(
     replace: bool,
     checksum: Option<String>,
     allow_git: Option<bool>,
+    market_app_id: Option<String>,
 ) -> Result<ConnectorAppInstallDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let source = source.trim();
-    if source.is_empty() {
+    let requested_source = source.trim();
+    if requested_source.is_empty() && market_app_id.as_deref().is_none_or(str::is_empty) {
         return Err("安装来源不能为空".to_string());
     }
 
-    let allow_git = allow_git.unwrap_or(true);
-    if !allow_git
-        && connector_archive_kind(source).is_some()
-        && checksum.as_deref().is_none_or(str::is_empty)
+    let market_app = match market_app_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        return Err("市场本地应用发布包必须提供 SHA-256 checksum".to_string());
-    }
-    let resolved_source = resolve_connector_source(source, allow_git, checksum.as_deref()).await?;
+        Some(id) => Some(
+            fetch_market_connector_apps(&state.config_path)
+                .await?
+                .into_iter()
+                .find(|app| app.id == id)
+                .ok_or_else(|| "市场中找不到该应用".to_string())?,
+        ),
+        None => None,
+    };
+    let (resolved_source_text, resolved_checksum, resolved_allow_git) =
+        if let Some(market_app) = market_app.as_ref() {
+            if market_app.application_type != "connector" {
+                return Err("该市场条目不是 Connector 应用".to_string());
+            }
+            (
+                market_app.source.clone(),
+                Some(required_market_checksum(market_app)?),
+                false,
+            )
+        } else {
+            (
+                requested_source.to_string(),
+                checksum.filter(|value| !value.trim().is_empty()),
+                allow_git.unwrap_or(true),
+            )
+        };
+    let resolved_source = resolve_connector_source(
+        &resolved_source_text,
+        resolved_allow_git,
+        resolved_checksum.as_deref(),
+    )
+    .await?;
     let candidate_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
+    if let Some(market_app) = market_app.as_ref() {
+        validate_market_connector_identity(market_app, &candidate_manifest.id)?;
+        if candidate_manifest.version != market_app.version {
+            return Err(format!(
+                "市场版本与安装包清单不匹配：市场 `{}`，安装包 `{}`",
+                market_app.version, candidate_manifest.version
+            ));
+        }
+    }
     let existing = list_connectors()
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -1711,11 +1770,20 @@ async fn install_connector_app(
         .await?;
     }
 
-    let install = match install_connector_from_path_with_source_reference(
+    let provenance = match market_app.as_ref() {
+        Some(market_app) => ConnectorInstallProvenance::platform_trusted(
+            &resolved_source_text,
+            &market_app.id,
+            resolved_checksum.as_deref().unwrap_or_default(),
+        )
+        .map_err(|err| err.to_string())?,
+        None => ConnectorInstallProvenance::user_trusted(Some(&resolved_source_text)),
+    };
+    let install = match install_connector_from_path_with_provenance(
         resolved_source.path(),
         &state.config_path,
         replace,
-        Some(source),
+        provenance,
     ) {
         Ok(install) => install,
         Err(err) => {
@@ -2943,6 +3011,43 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
     }
 }
 
+fn validate_market_connector_identity(
+    market_app: &MarketConnectorApp,
+    connector_id: &str,
+) -> Result<(), String> {
+    if market_app.application_type != "connector" {
+        return Err("该市场条目不是 Connector 应用".to_string());
+    }
+    if market_app.connector_id.trim() != connector_id.trim() {
+        return Err(format!(
+            "市场应用 ID 与安装包不匹配：市场 `{}`，安装包 `{}`",
+            market_app.connector_id, connector_id
+        ));
+    }
+    if !market_app.source.trim().starts_with("https://") {
+        return Err("市场 Connector 安装源必须使用 HTTPS".to_string());
+    }
+    Ok(())
+}
+
+fn required_market_checksum(market_app: &MarketConnectorApp) -> Result<String, String> {
+    let checksum = market_app
+        .checksum
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "市场本地应用发布包必须提供 SHA-256 checksum".to_string())?;
+    let digest = checksum.strip_prefix("sha256:").unwrap_or(checksum);
+    if digest.len() != 64
+        || !digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("市场本地应用 SHA-256 checksum 格式无效".to_string());
+    }
+    Ok(format!("sha256:{}", digest.to_ascii_lowercase()))
+}
+
 fn select_market_tool_artifact(manifest: &Value) -> Option<Value> {
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
@@ -4082,6 +4187,43 @@ fn main() {
 mod tests {
     use super::*;
     use bridge_agent::ConnectorServiceStartResult;
+
+    fn market_connector(checksum: Option<&str>) -> MarketConnectorApp {
+        MarketConnectorApp {
+            id: "market-app-1".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
+            application_type: "connector".to_string(),
+            name: "Test Connector".to_string(),
+            description: String::new(),
+            source: "https://downloads.example.test/connector.zip".to_string(),
+            checksum: checksum.map(str::to_string),
+            archive_path: None,
+            risk: String::new(),
+            risk_level: "medium".to_string(),
+            capability: String::new(),
+            version: "1.0.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn market_connector_trust_requires_checksum_and_matching_identity() {
+        let valid = market_connector(Some(&"a".repeat(64)));
+        assert_eq!(
+            required_market_checksum(&valid).unwrap(),
+            format!("sha256:{}", "a".repeat(64))
+        );
+        assert!(validate_market_connector_identity(&valid, "com.baijimu.connector.test").is_ok());
+
+        assert!(required_market_checksum(&market_connector(None)).is_err());
+        assert!(required_market_checksum(&market_connector(Some("invalid"))).is_err());
+        assert!(validate_market_connector_identity(&valid, "com.example.other").is_err());
+
+        let mut insecure = valid;
+        insecure.source = "http://downloads.example.test/connector.zip".to_string();
+        assert!(
+            validate_market_connector_identity(&insecure, "com.baijimu.connector.test").is_err()
+        );
+    }
 
     #[test]
     fn config_for_ui_redacts_relay_credentials_and_reports_status() {
