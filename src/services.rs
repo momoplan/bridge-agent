@@ -1,9 +1,12 @@
 use crate::config::{
-    AgentConfig, ComputerUseAction, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig,
-    ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding, UploadConfig,
+    AgentConfig, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
+    ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
 };
+#[cfg(any(target_os = "macos", windows))]
+use crate::config::{ComputerUseAction, UploadConfig};
 use crate::protocol::{EventDefinition, InvokeError, InvokeResult, ServiceDefinition};
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(any(target_os = "macos", windows))]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
 use image::GenericImageView;
@@ -100,6 +103,7 @@ struct HttpMethod {
     timeout_secs: u64,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 struct ComputerMethod {
     action: ComputerUseAction,
     display_id: Option<u32>,
@@ -110,6 +114,9 @@ struct ComputerMethod {
     workspace_id: Option<u64>,
     client: Client,
 }
+
+#[cfg(not(any(target_os = "macos", windows)))]
+struct ComputerMethod;
 
 struct ServiceOutcome {
     success: bool,
@@ -301,12 +308,14 @@ enum ShellOutputStream {
     Stderr,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerPoint {
     x: f64,
     y: f64,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerMouseArgs {
     x: f64,
@@ -317,6 +326,7 @@ struct ComputerMouseArgs {
     keys: Vec<String>,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerScrollArgs {
     x: f64,
@@ -329,22 +339,26 @@ struct ComputerScrollArgs {
     keys: Vec<String>,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerTypeArgs {
     text: String,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerKeypressArgs {
     keys: Vec<String>,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerWaitArgs {
     #[serde(default = "default_wait_ms")]
     ms: u64,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 struct ComputerDragArgs {
     path: Vec<ComputerPoint>,
@@ -352,6 +366,7 @@ struct ComputerDragArgs {
     keys: Vec<String>,
 }
 
+#[cfg(any(test, target_os = "macos", windows))]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PrepareUploadRequest {
@@ -364,6 +379,7 @@ struct PrepareUploadRequest {
     purpose: String,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrepareUploadResponse {
@@ -1617,6 +1633,7 @@ fn build_http_method(
     })
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn build_computer_method(
     _service: &ServiceConfig,
     _method: &MethodConfig,
@@ -1635,10 +1652,22 @@ fn build_computer_method(
     })
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
+fn build_computer_method(
+    _service: &ServiceConfig,
+    _method: &MethodConfig,
+    _config: &AgentConfig,
+    _binding: &ComputerUseBinding,
+) -> Result<ComputerMethod> {
+    Ok(ComputerMethod)
+}
+
+#[cfg(any(target_os = "macos", windows))]
 fn default_mouse_button() -> String {
     "left".to_string()
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn default_wait_ms() -> u64 {
     500
 }
@@ -1907,6 +1936,7 @@ async fn capture_macos_screenshot(method: &ComputerMethod) -> Result<ServiceOutc
     })))
 }
 
+#[cfg(any(target_os = "macos", windows))]
 async fn upload_screenshot(
     method: &ComputerMethod,
     bytes: Vec<u8>,
@@ -2111,6 +2141,7 @@ async fn perform_macos_drag(args: &ComputerDragArgs) -> Result<ServiceOutcome> {
     })))
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn success_outcome(data: Value) -> ServiceOutcome {
     ServiceOutcome {
         success: true,
