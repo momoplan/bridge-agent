@@ -370,7 +370,7 @@ jobs:
         id: build_release_bundles
         shell: bash
         env:
-          RUSTFLAGS: -D warnings
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static -D warnings' || '-D warnings' }}
           BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
           BRIDGE_AGENT_RELEASE_PAGE_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_PAGE_URL }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
