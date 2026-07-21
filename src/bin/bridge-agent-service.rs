@@ -22,7 +22,7 @@ use std::fs;
 use std::os::windows::fs::MetadataExt;
 
 #[cfg(windows)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use std::ptr::{null, null_mut};
@@ -532,7 +532,7 @@ struct ConfigFingerprint {
 }
 
 #[cfg(windows)]
-fn config_fingerprint(config_path: &PathBuf) -> std::io::Result<ConfigFingerprint> {
+fn config_fingerprint(config_path: &Path) -> std::io::Result<ConfigFingerprint> {
     let metadata = fs::metadata(config_path)?;
     Ok(ConfigFingerprint {
         creation_time: metadata.creation_time(),
@@ -546,7 +546,7 @@ struct ConfigChangeWatch(HANDLE);
 
 #[cfg(windows)]
 impl ConfigChangeWatch {
-    fn new(config_path: &PathBuf) -> Result<Self> {
+    fn new(config_path: &Path) -> Result<Self> {
         let watch_dir = config_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -673,7 +673,7 @@ fn launch_desktop_in_session(session_id: u32) -> Result<LaunchedDesktop> {
     let application = wide_null(desktop_executable.as_os_str());
     let current_directory = wide_null(install_dir.as_os_str());
     let mut desktop_name = wide_null(std::ffi::OsStr::new("winsta0\\default"));
-    let mut startup_info = STARTUPINFOW {
+    let startup_info = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         lpDesktop: desktop_name.as_mut_ptr(),
         ..Default::default()
@@ -691,7 +691,7 @@ fn launch_desktop_in_session(session_id: u32) -> Result<LaunchedDesktop> {
             CREATE_UNICODE_ENVIRONMENT,
             environment.0,
             current_directory.as_ptr(),
-            &mut startup_info,
+            &startup_info,
             &mut process_info,
         )
     };
