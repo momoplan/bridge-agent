@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 #[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
 const KEYRING_SERVICE: &str = "com.baijimu.bridge-agent.relay";
-#[cfg(windows)]
+#[cfg(all(not(test), windows))]
 const WINDOWS_SECRET_SUFFIX: &str = "credentials";
 
 pub fn load_relay_token(config_path: &Path) -> Result<Option<String>> {

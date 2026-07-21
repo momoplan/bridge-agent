@@ -1305,27 +1305,25 @@ pub fn terminate_runtime_lock_owner(
     }
 }
 
+#[cfg(windows)]
 fn describe_process(pid: u32) -> RuntimeProcessInfo {
-    #[cfg(windows)]
-    {
-        return describe_process_windows(pid);
-    }
+    describe_process_windows(pid)
+}
 
-    #[cfg(unix)]
-    {
-        describe_process_unix(pid)
-    }
+#[cfg(unix)]
+fn describe_process(pid: u32) -> RuntimeProcessInfo {
+    describe_process_unix(pid)
+}
 
-    #[cfg(not(any(unix, windows)))]
-    {
-        RuntimeProcessInfo {
-            pid,
-            parent_pid: None,
-            name: None,
-            executable_path: None,
-            command_line: None,
-            running: process_is_running(pid),
-        }
+#[cfg(not(any(unix, windows)))]
+fn describe_process(pid: u32) -> RuntimeProcessInfo {
+    RuntimeProcessInfo {
+        pid,
+        parent_pid: None,
+        name: None,
+        executable_path: None,
+        command_line: None,
+        running: process_is_running(pid),
     }
 }
 
@@ -1425,8 +1423,10 @@ fn find_windows_snapshot_process(pid: u32) -> Option<Option<WindowsSnapshotProce
         TH32CS_SNAPPROCESS,
     };
 
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -1683,9 +1683,8 @@ fn process_is_running(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    match find_windows_snapshot_process(pid) {
-        Some(found) => return found.is_some(),
-        None => {}
+    if let Some(found) = find_windows_snapshot_process(pid) {
+        return found.is_some();
     }
 
     let filter = format!("PID eq {pid}");

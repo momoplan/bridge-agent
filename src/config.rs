@@ -822,22 +822,20 @@ pub fn default_config_path() -> Result<PathBuf> {
     project_config_path()
 }
 
+#[cfg(windows)]
 pub fn windows_service_config_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let program_data = env::var_os("ProgramData")?;
-        return Some(
-            PathBuf::from(program_data)
-                .join("Baijimu")
-                .join("BridgeAgent")
-                .join(DEFAULT_CONFIG_FILE_NAME),
-        );
-    }
+    let program_data = env::var_os("ProgramData")?;
+    Some(
+        PathBuf::from(program_data)
+            .join("Baijimu")
+            .join("BridgeAgent")
+            .join(DEFAULT_CONFIG_FILE_NAME),
+    )
+}
 
-    #[cfg(not(windows))]
-    {
-        None
-    }
+#[cfg(not(windows))]
+pub fn windows_service_config_path() -> Option<PathBuf> {
+    None
 }
 
 pub fn load_config(path: &Path) -> Result<AgentConfig> {

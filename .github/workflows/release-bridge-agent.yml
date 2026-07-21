@@ -170,6 +170,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo check --locked --workspace --all-targets
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
