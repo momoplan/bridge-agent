@@ -99,6 +99,7 @@ impl LogMetadata {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
+    pub sequence: u64,
     pub timestamp_ms: u64,
     pub level: String,
     pub message: String,
@@ -224,6 +225,7 @@ mod tests {
         .unwrap();
 
         sink.append(&super::LogEntry {
+            sequence: 1,
             timestamp_ms: 123,
             level: "info".to_string(),
             message: "hello".to_string(),

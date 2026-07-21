@@ -13,6 +13,7 @@ type RuntimeStatus =
   | "stopping";
 
 interface RuntimeSnapshot {
+  revision: number;
   status: RuntimeStatus;
   config_path: string | null;
   agent_id: string | null;
@@ -47,6 +48,7 @@ type CommandError =
   | { code: "message"; message: string };
 
 interface LogEntry {
+  sequence: number;
   timestamp_ms: number;
   level: string;
   message: string;
@@ -302,6 +304,7 @@ interface StartupComponentHealth {
 }
 
 interface StartupHealthSnapshot {
+  revision: number;
   safeMode: boolean;
   forcedSafeMode: boolean;
   consecutiveFailures: number;
@@ -776,6 +779,8 @@ function App() {
   const [savedServiceSignatures, setSavedServiceSignatures] = useState<string[]>([]);
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const logsClearedThroughRef = useRef(0);
+  const [mainWindowVisible, setMainWindowVisible] = useState(true);
   const [logServiceFilter, setLogServiceFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -829,33 +834,77 @@ function App() {
   const [installBusy, setInstallBusy] = useState(false);
 
   useEffect(() => {
-    void refreshAll();
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<RuntimeSnapshot>("runtime-snapshot-changed", (event) => {
+      if (active) {
+        applyRuntimeSnapshot(event.payload);
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅 Agent 运行状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
     let active = true;
-    void invoke<StartupHealthSnapshot>("mark_frontend_ready")
-      .then((snapshot) => {
-        if (active) {
-          setStartupHealth(snapshot);
-        }
-      })
-      .catch((err) => {
-        clientWarn("桌面基础壳启动握手失败", err);
-      });
-    const timer = window.setInterval(() => {
-      void invoke<StartupHealthSnapshot>("get_startup_health")
-        .then((snapshot) => {
+    let unlisten: (() => void) | null = null;
+    async function initializeStartupHealth() {
+      try {
+        const dispose = await listen<StartupHealthSnapshot>("startup-health-changed", (event) => {
           if (active) {
-            setStartupHealth(snapshot);
+            applyStartupHealthSnapshot(event.payload);
           }
-        })
-        .catch((err) => clientWarn("读取启动健康状态失败", err));
-    }, 2000);
+        });
+        if (!active) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+        const snapshot = await invoke<StartupHealthSnapshot>("mark_frontend_ready");
+        if (active) {
+          applyStartupHealthSnapshot(snapshot);
+        }
+      } catch (err) {
+        clientWarn("桌面基础壳启动握手失败", err);
+      }
+    }
+    void initializeStartupHealth();
     return () => {
       active = false;
-      window.clearInterval(timer);
+      unlisten?.();
     };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<RegisteredServiceStatus[]>("registered-services-changed", (event) => {
+      if (active) {
+        setRegisteredServiceStatuses(event.payload);
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅本地应用运行状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    void refreshAll();
   }, []);
 
   useEffect(() => {
@@ -865,14 +914,6 @@ function App() {
 
   useEffect(() => {
     void refreshDesktopPermissions();
-  }, []);
-
-  useEffect(() => {
-    void refreshRegisteredServiceStatuses();
-  }, []);
-
-  useEffect(() => {
-    void refreshConnectorApps();
   }, []);
 
   useEffect(() => {
@@ -904,6 +945,26 @@ function App() {
   }, [message]);
 
   useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<boolean>("main-window-visibility-changed", (event) => {
+      if (active) {
+        setMainWindowVisible(event.payload);
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅主窗口可见状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     const handleWindowFocus = () => {
       void refreshDesktopPermissions();
     };
@@ -922,18 +983,70 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refreshRuntime();
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refreshRegisteredServiceStatuses();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (
+      activePage !== "diagnostics" ||
+      activeDetailPanel !== "logs" ||
+      !mainWindowVisible
+    ) {
+      return;
+    }
+    setLogs([]);
+    let active = true;
+    let unlistenAppended: (() => void) | null = null;
+    let unlistenSnapshot: (() => void) | null = null;
+    async function initializeLogs() {
+      try {
+        const disposeAppended = await listen<LogEntry>("runtime-log-appended", (event) => {
+          if (active && event.payload.sequence > logsClearedThroughRef.current) {
+            setLogs((current) => mergeRecentLogs(current, [event.payload]));
+          }
+        });
+        if (!active) {
+          disposeAppended();
+          return;
+        }
+        unlistenAppended = disposeAppended;
+        const disposeSnapshot = await listen<LogEntry[]>("runtime-logs-snapshot", (event) => {
+          if (active) {
+            setLogs(
+              mergeRecentLogs(
+                event.payload.filter(
+                  (entry) => entry.sequence > logsClearedThroughRef.current
+                )
+              )
+            );
+          }
+        });
+        if (!active) {
+          disposeSnapshot();
+          return;
+        }
+        unlistenSnapshot = disposeSnapshot;
+        await updateRuntimeLogStreaming(true);
+        if (!active) {
+          return;
+        }
+        const history = await invoke<LogEntry[]>("list_logs", { limit: 200 });
+        if (active) {
+          const visibleHistory = history.filter(
+            (entry) => entry.sequence > logsClearedThroughRef.current
+          );
+          setLogs((current) => mergeRecentLogs(visibleHistory, current));
+        }
+      } catch (err) {
+        clientWarn("读取或订阅 Agent 日志失败", err);
+      }
+    }
+    void initializeLogs();
+    return () => {
+      active = false;
+      unlistenAppended?.();
+      unlistenSnapshot?.();
+      void updateRuntimeLogStreaming(false).catch((err) =>
+        clientWarn("停止 Agent 日志订阅失败", err)
+      );
+    };
+  }, [activePage, activeDetailPanel, mainWindowVisible]);
 
   useEffect(() => {
     if (!config) {
@@ -1199,7 +1312,7 @@ function App() {
     setManifestPreview(document.manifest_preview);
     setConfig(uiConfig);
     setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
-    setRuntime(document.runtime);
+    applyRuntimeSnapshot(document.runtime);
     setRuntimeConflict(null);
     setServiceNotices({});
     setServiceJsonDrafts({});
@@ -1213,7 +1326,7 @@ function App() {
     const savedService = uiConfig.services[serviceIndex];
     setConfigPath(document.config_path);
     setManifestPreview(document.manifest_preview);
-    setRuntime(document.runtime);
+    applyRuntimeSnapshot(document.runtime);
     if (!savedService) {
       applyConfigDocument(document);
       return;
@@ -1254,7 +1367,7 @@ function App() {
     const uiConfig = toUiConfig(document.config);
     setConfigPath(document.config_path);
     setManifestPreview(document.manifest_preview);
-    setRuntime(document.runtime);
+    applyRuntimeSnapshot(document.runtime);
     setConfig((current) => {
       if (!current) {
         return uiConfig;
@@ -1295,8 +1408,6 @@ function App() {
       setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("load_config");
       applyConfigDocument(document);
-      const latestLogs = await invoke<LogEntry[]>("list_logs", { limit: 200 });
-      setLogs(latestLogs);
       await refreshMarketConnectorApps();
       await refreshConnectorApps();
       await refreshBaijimuCli();
@@ -1306,14 +1417,22 @@ function App() {
     }
   }
 
+  function applyStartupHealthSnapshot(snapshot: StartupHealthSnapshot) {
+    setStartupHealth((current) =>
+      current == null || snapshot.revision >= current.revision ? snapshot : current
+    );
+  }
+
+  function applyRuntimeSnapshot(snapshot: RuntimeSnapshot) {
+    setRuntime((current) =>
+      current == null || snapshot.revision >= current.revision ? snapshot : current
+    );
+  }
+
   async function refreshRuntime() {
     try {
-      const [snapshot, latestLogs] = await Promise.all([
-        invoke<RuntimeSnapshot>("runtime_snapshot"),
-        invoke<LogEntry[]>("list_logs", { limit: 200 })
-      ]);
-      setRuntime(snapshot);
-      setLogs(latestLogs);
+      const snapshot = await invoke<RuntimeSnapshot>("runtime_snapshot");
+      applyRuntimeSnapshot(snapshot);
     } catch (err) {
       setError(readError(err));
     }
@@ -1376,7 +1495,7 @@ function App() {
       });
       if (result.success) {
         const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
-        setRuntime(snapshot);
+        applyRuntimeSnapshot(snapshot);
         setMessage(formatApplyMessage(`应用 ${serviceName} 的启动命令已执行`, snapshot));
         return true;
       } else {
@@ -1759,7 +1878,7 @@ function App() {
           );
         } else {
           const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
-          setRuntime(snapshot);
+          applyRuntimeSnapshot(snapshot);
           setLocalAppLifecycleOverride(app.id, {
             state: "running",
             detail: "启动命令已执行"
@@ -2134,7 +2253,7 @@ function App() {
         config: fromUiConfig(config)
       });
       setSavedServiceSignatures(config.services.map(serviceSignature));
-      setRuntime(snapshot);
+      applyRuntimeSnapshot(snapshot);
       setMessage(formatStartAgentMessage(snapshot));
       await refreshRuntime();
     } catch (err) {
@@ -2169,7 +2288,7 @@ function App() {
         config: fromUiConfig(config)
       });
       setSavedServiceSignatures(config.services.map(serviceSignature));
-      setRuntime(snapshot);
+      applyRuntimeSnapshot(snapshot);
       setMessage("已停止旧实例并重新启动 Agent");
       await refreshRuntime();
     } catch (err) {
@@ -2191,7 +2310,7 @@ function App() {
       setError("");
       setRuntimeConflict(null);
       const snapshot = await invoke<RuntimeSnapshot>("stop_agent");
-      setRuntime(snapshot);
+      applyRuntimeSnapshot(snapshot);
       setMessage("Agent 已停止");
       await refreshRuntime();
     } catch (err) {
@@ -2239,8 +2358,14 @@ function App() {
 
   async function clearLogs() {
     try {
-      await invoke("clear_logs");
-      setLogs([]);
+      const clearedThrough = await invoke<number>("clear_logs");
+      logsClearedThroughRef.current = Math.max(
+        logsClearedThroughRef.current,
+        clearedThrough
+      );
+      setLogs((current) =>
+        current.filter((entry) => entry.sequence > logsClearedThroughRef.current)
+      );
     } catch (err) {
       setError(readError(err));
     }
@@ -2363,36 +2488,6 @@ function App() {
       setError(readError(err));
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function pollBrowserAuthSession() {
-    if (!config || !browserAuth) {
-      return;
-    }
-    try {
-      const result = await invoke<BrowserAuthPollResponse>("poll_browser_auth", {
-        config: fromUiConfig(config),
-        deviceCode: browserAuth.deviceCode
-      });
-      if (result.status === "authorized" && result.config) {
-        const uiConfig = toUiConfig(result.config);
-        setConfig(uiConfig);
-        setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
-        if (result.runtime) {
-          setRuntime(result.runtime);
-        }
-        setBrowserAuth(null);
-        setMessage("浏览器授权成功，Agent 已使用新凭证重启");
-        return;
-      }
-      if (result.status === "denied" || result.status === "expired") {
-        setBrowserAuth(null);
-        setError(result.message);
-      }
-    } catch (err) {
-      setBrowserAuth(null);
-      handleCommandError(err);
     }
   }
 
@@ -5454,13 +5549,56 @@ function App() {
   }
 
   useEffect(() => {
-    if (!browserAuth) {
+    if (!browserAuth || !config) {
       return;
     }
-    const timer = window.setInterval(() => {
-      void pollBrowserAuthSession();
-    }, Math.max(browserAuth.interval, 3) * 1000);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let timer: number | null = null;
+    const intervalMs = Math.max(browserAuth.interval, 1) * 1000;
+    const session = browserAuth;
+    const authConfig = fromUiConfig(config);
+
+    async function poll() {
+      try {
+        const result = await invoke<BrowserAuthPollResponse>("poll_browser_auth", {
+          config: authConfig,
+          deviceCode: session.deviceCode
+        });
+        if (!active) {
+          return;
+        }
+        if (result.status === "authorized" && result.config) {
+          const uiConfig = toUiConfig(result.config);
+          setConfig(uiConfig);
+          setSavedServiceSignatures(uiConfig.services.map(serviceSignature));
+          if (result.runtime) {
+            applyRuntimeSnapshot(result.runtime);
+          }
+          setBrowserAuth(null);
+          setMessage("浏览器授权成功，Agent 已使用新凭证重启");
+          return;
+        }
+        if (result.status === "denied" || result.status === "expired") {
+          setBrowserAuth(null);
+          setError(result.message);
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), intervalMs);
+      } catch (err) {
+        if (active) {
+          setBrowserAuth(null);
+          handleCommandError(err);
+        }
+      }
+    }
+
+    timer = window.setTimeout(() => void poll(), intervalMs);
+    return () => {
+      active = false;
+      if (timer != null) {
+        window.clearTimeout(timer);
+      }
+    };
   }, [browserAuth, config]);
 
   const degradedStartupComponents =
@@ -5749,6 +5887,26 @@ function App() {
       ) : null}
     </main>
   );
+}
+
+let runtimeLogStreamingCommand: Promise<void> = Promise.resolve();
+
+function updateRuntimeLogStreaming(enabled: boolean): Promise<void> {
+  const command = runtimeLogStreamingCommand
+    .catch(() => undefined)
+    .then(() => invoke<void>("set_runtime_log_streaming", { enabled }));
+  runtimeLogStreamingCommand = command.catch(() => undefined);
+  return command;
+}
+
+function mergeRecentLogs(...groups: LogEntry[][]) {
+  const merged = new Map<number, LogEntry>();
+  groups.flat().forEach((entry) => {
+    merged.set(entry.sequence, entry);
+  });
+  return Array.from(merged.values())
+    .sort((left, right) => left.sequence - right.sequence)
+    .slice(-200);
 }
 
 function reportLocalAppUiHandshake(

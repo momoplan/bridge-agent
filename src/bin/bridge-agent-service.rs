@@ -19,16 +19,16 @@ use std::ffi::{c_void, OsString};
 use std::fs;
 
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+#[cfg(windows)]
 use std::path::PathBuf;
 
 #[cfg(windows)]
 use std::ptr::{null, null_mut};
 
 #[cfg(windows)]
-use std::sync::{
-    mpsc::{self, TryRecvError},
-    OnceLock,
-};
+use std::sync::OnceLock;
 
 #[cfg(windows)]
 use std::time::{Duration, Instant};
@@ -51,7 +51,15 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_dispatcher;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -69,7 +77,8 @@ use windows_sys::Win32::System::RemoteDesktop::{
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateEventW, CreateProcessAsUserW, OpenProcess, SetEvent, WaitForMultipleObjects,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
 };
 
 #[cfg(windows)]
@@ -82,7 +91,10 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const DESKTOP_PROCESS_NAME: &str = "bridge-agent-desktop.exe";
 
 #[cfg(windows)]
-const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const FALLBACK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+const CONFIG_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(windows)]
 const DESKTOP_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
@@ -140,12 +152,22 @@ fn service_main(_arguments: Vec<OsString>) {
 fn run_service(config: Option<PathBuf>) -> Result<()> {
     let config_path = resolve_service_config_path(config)?;
 
-    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let shutdown_event = OwnedHandle(unsafe { CreateEventW(null(), 1, 0, null()) });
+    if shutdown_event.0.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .context("create Windows service shutdown event");
+    }
+    let shutdown_event_value = shutdown_event.0 as usize;
     let status_handle =
         service_control_handler::register(SERVICE_NAME, move |control| match control {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             ServiceControl::Stop | ServiceControl::Shutdown => {
-                let _ = shutdown_tx.send(());
+                if unsafe { SetEvent(shutdown_event_value as HANDLE) } == 0 {
+                    tracing::error!(
+                        error = %std::io::Error::last_os_error(),
+                        "failed to signal Windows service shutdown"
+                    );
+                }
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -156,7 +178,7 @@ fn run_service(config: Option<PathBuf>) -> Result<()> {
         .set_service_status(start_pending_status(1))
         .context("failed to mark service as start pending")?;
 
-    let result = run_service_loop(&config_path, shutdown_rx, &status_handle);
+    let result = run_service_loop(&config_path, shutdown_event.0, &status_handle);
     let exit_code = if result.is_ok() {
         ServiceExitCode::Win32(0)
     } else {
@@ -173,7 +195,7 @@ fn run_service(config: Option<PathBuf>) -> Result<()> {
 #[cfg(windows)]
 fn run_service_loop(
     config_path: &PathBuf,
-    shutdown_rx: mpsc::Receiver<()>,
+    shutdown_event: HANDLE,
     status_handle: &service_control_handler::ServiceStatusHandle,
 ) -> Result<()> {
     ensure_config_exists(config_path).with_context(|| {
@@ -193,7 +215,11 @@ fn run_service_loop(
         .set_service_status(running_status())
         .context("failed to mark service as running")?;
 
-    runtime.block_on(run_runtime_supervisor(&manager, config_path, &shutdown_rx))?;
+    runtime.block_on(run_runtime_supervisor(
+        &manager,
+        config_path,
+        shutdown_event,
+    ))?;
 
     status_handle
         .set_service_status(stop_pending_status())
@@ -210,19 +236,50 @@ fn run_service_loop(
 async fn run_runtime_supervisor(
     manager: &AgentRuntimeManager,
     config_path: &PathBuf,
-    shutdown_rx: &mpsc::Receiver<()>,
+    shutdown_event: HANDLE,
 ) -> Result<()> {
-    let mut applied_config: Option<Vec<u8>> = None;
+    let mut applied_config: Option<ConfigFingerprint> = None;
     let mut desktop_handoff_active = false;
     let mut next_desktop_launch_attempt = Instant::now();
+    let mut next_desktop_scan = Instant::now();
+    let mut next_config_retry = None;
+    let mut next_config_fallback_check = None;
+    let mut config_check_requested = true;
+    let mut desktop = None;
+    let mut config_watch = match ConfigChangeWatch::new(config_path) {
+        Ok(watch) => Some(watch),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "config change notifications are unavailable; using a five-second metadata fallback"
+            );
+            next_config_fallback_check = Some(Instant::now());
+            None
+        }
+    };
 
     loop {
-        match shutdown_rx.try_recv() {
-            Ok(()) | Err(TryRecvError::Disconnected) => break,
-            Err(TryRecvError::Empty) => {}
+        let now = Instant::now();
+        let desktop_needs_scan = desktop
+            .as_ref()
+            .is_none_or(|process: &DesktopProcess| process.handle.is_none());
+        if desktop_needs_scan && now >= next_desktop_scan {
+            let desktop_was_running = desktop.is_some();
+            match find_desktop_process() {
+                Ok(found) => {
+                    desktop = found;
+                    if desktop_was_running && desktop.is_none() {
+                        config_check_requested = true;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to inspect Windows desktop process state")
+                }
+            }
+            next_desktop_scan = Instant::now() + FALLBACK_CHECK_INTERVAL;
         }
 
-        if desktop_process_running() {
+        if desktop.is_some() {
             if !desktop_handoff_active {
                 manager
                     .stop()
@@ -232,82 +289,313 @@ async fn run_runtime_supervisor(
                 desktop_handoff_active = true;
                 tracing::info!("bridge-agent runtime handed off to the desktop client");
             }
-            tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
-            continue;
-        }
-        desktop_handoff_active = false;
+        } else {
+            desktop_handoff_active = false;
 
-        if Instant::now() >= next_desktop_launch_attempt {
-            match launch_desktop_in_active_session() {
-                Ok(Some(session_id)) => {
-                    tracing::info!(
-                        session_id,
-                        "started bridge-agent desktop client in the active Windows session"
-                    );
-                    next_desktop_launch_attempt = Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
-                    tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to start bridge-agent desktop client in the active Windows session"
-                    );
-                }
-            }
-            next_desktop_launch_attempt = Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
-        }
-
-        match fs::read(config_path) {
-            Ok(contents) if applied_config.as_deref() != Some(contents.as_slice()) => {
-                let config = match bridge_agent::load_config(config_path) {
-                    Ok(config) => config,
+            if now >= next_desktop_launch_attempt {
+                match active_user_session_id() {
+                    Ok(Some(session_id)) => {
+                        manager
+                            .stop()
+                            .await
+                            .context("failed to release service runtime before desktop launch")?;
+                        applied_config = None;
+                        desktop_handoff_active = true;
+                        match launch_desktop_in_session(session_id) {
+                            Ok(launched) => {
+                                tracing::info!(
+                                    session_id = launched.session_id,
+                                    "started bridge-agent desktop client in the active Windows session"
+                                );
+                                desktop = Some(launched.process);
+                                next_desktop_launch_attempt =
+                                    Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
+                                continue;
+                            }
+                            Err(err) => {
+                                desktop_handoff_active = false;
+                                config_check_requested = true;
+                                tracing::warn!(
+                                    error = %err,
+                                    "failed to start bridge-agent desktop client in the active Windows session"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(
-                            "waiting for a valid bridge-agent config at {}: {err:#}",
-                            config_path.display()
+                            error = %err,
+                            "failed to inspect the active Windows session"
                         );
-                        tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
-                        continue;
                     }
-                };
+                }
+                next_desktop_launch_attempt = Instant::now() + DESKTOP_LAUNCH_RETRY_INTERVAL;
+            }
 
-                manager
-                    .stop()
-                    .await
-                    .context("failed to stop runtime before applying service config")?;
+            if next_config_retry.is_some_and(|deadline| now >= deadline) {
+                config_check_requested = true;
+                next_config_retry = None;
+            }
+            if next_config_fallback_check.is_some_and(|deadline| now >= deadline) {
+                config_check_requested = true;
+                next_config_fallback_check = Some(now + FALLBACK_CHECK_INTERVAL);
+            }
 
-                if config_is_authorized(&config) {
-                    match manager.start(config, config_path).await {
-                        Ok(_) => applied_config = Some(contents),
-                        Err(err) => {
-                            tracing::warn!(
-                                "service runtime start deferred for {}: {err:#}",
-                                config_path.display()
+            if config_check_requested {
+                config_check_requested = false;
+                match config_fingerprint(config_path) {
+                    Ok(fingerprint) if applied_config.as_ref() != Some(&fingerprint) => {
+                        let config = match bridge_agent::load_config(config_path) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "waiting for a valid bridge-agent config at {}: {err:#}",
+                                    config_path.display()
+                                );
+                                next_config_retry = Some(Instant::now() + CONFIG_RETRY_INTERVAL);
+                                continue;
+                            }
+                        };
+                        match config_fingerprint(config_path) {
+                            Ok(verified) if verified == fingerprint => {}
+                            Ok(_) => {
+                                config_check_requested = true;
+                                continue;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "failed to verify bridge-agent config {} after loading: {err}",
+                                    config_path.display()
+                                );
+                                next_config_retry = Some(Instant::now() + CONFIG_RETRY_INTERVAL);
+                                continue;
+                            }
+                        }
+
+                        manager
+                            .stop()
+                            .await
+                            .context("failed to stop runtime before applying service config")?;
+
+                        if config_is_authorized(&config) {
+                            match manager.start(config, config_path).await {
+                                Ok(_) => {
+                                    applied_config = Some(fingerprint);
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "service runtime start deferred for {}: {err:#}",
+                                        config_path.display()
+                                    );
+                                    next_config_retry =
+                                        Some(Instant::now() + CONFIG_RETRY_INTERVAL);
+                                }
+                            }
+                        } else {
+                            applied_config = Some(fingerprint);
+                            tracing::info!(
+                                "bridge-agent service is waiting for desktop device authorization"
                             );
                         }
                     }
-                } else {
-                    applied_config = Some(contents);
-                    tracing::info!(
-                        "bridge-agent service is waiting for desktop device authorization"
-                    );
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "failed to inspect bridge-agent config {}: {err}",
+                            config_path.display()
+                        );
+                        next_config_retry = Some(Instant::now() + CONFIG_RETRY_INTERVAL);
+                    }
                 }
-            }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::warn!(
-                    "failed to read bridge-agent config {}: {err}",
-                    config_path.display()
-                );
             }
         }
 
-        tokio::time::sleep(CONFIG_POLL_INTERVAL).await;
+        let mut wait_handles = vec![(shutdown_event, SupervisorEvent::Shutdown)];
+        if desktop.is_none() {
+            if let Some(watch) = config_watch.as_ref() {
+                wait_handles.push((watch.0, SupervisorEvent::ConfigChanged));
+            }
+        } else if let Some(handle) = desktop.as_ref().and_then(|process| process.handle.as_ref()) {
+            wait_handles.push((handle.0, SupervisorEvent::DesktopExited));
+        }
+
+        let wait_deadline = if desktop.is_some() {
+            desktop
+                .as_ref()
+                .filter(|process| process.handle.is_none())
+                .map(|_| next_desktop_scan)
+        } else {
+            [
+                Some(next_desktop_scan),
+                Some(next_desktop_launch_attempt),
+                next_config_retry,
+                next_config_fallback_check,
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+        };
+
+        match wait_for_supervisor_event(wait_handles, wait_deadline).await? {
+            SupervisorEvent::Shutdown => break,
+            SupervisorEvent::ConfigChanged => {
+                config_check_requested = true;
+                if let Some(watch) = config_watch.as_ref() {
+                    if let Err(err) = watch.rearm() {
+                        tracing::warn!(
+                            error = %err,
+                            "config change notifications stopped; using a five-second metadata fallback"
+                        );
+                        config_watch = None;
+                        next_config_fallback_check = Some(Instant::now());
+                    }
+                }
+            }
+            SupervisorEvent::DesktopExited => {
+                desktop = None;
+                next_desktop_scan = Instant::now();
+                config_check_requested = true;
+            }
+            SupervisorEvent::Timeout => {}
+        }
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+enum SupervisorEvent {
+    Shutdown,
+    ConfigChanged,
+    DesktopExited,
+    Timeout,
+}
+
+#[cfg(windows)]
+async fn wait_for_supervisor_event(
+    handles: Vec<(HANDLE, SupervisorEvent)>,
+    deadline: Option<Instant>,
+) -> Result<SupervisorEvent> {
+    let timeout = deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .map(duration_to_windows_timeout)
+        .unwrap_or(u32::MAX);
+    let raw_handles = handles
+        .iter()
+        .map(|(handle, _)| *handle as usize)
+        .collect::<Vec<_>>();
+    let wait_result = tokio::task::spawn_blocking(move || {
+        let raw_handles = raw_handles
+            .into_iter()
+            .map(|handle| handle as HANDLE)
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            WaitForMultipleObjects(raw_handles.len() as u32, raw_handles.as_ptr(), 0, timeout)
+        };
+        if result == WAIT_FAILED {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(result)
+        }
+    })
+    .await
+    .context("join Windows supervisor wait")?
+    .context("wait for Windows supervisor event")?;
+
+    if wait_result == WAIT_TIMEOUT {
+        return Ok(SupervisorEvent::Timeout);
+    }
+    let index = wait_result.saturating_sub(WAIT_OBJECT_0) as usize;
+    handles
+        .get(index)
+        .map(|(_, event)| *event)
+        .context("Windows supervisor wait returned an unknown handle")
+}
+
+#[cfg(windows)]
+fn duration_to_windows_timeout(duration: Duration) -> u32 {
+    if duration.is_zero() {
+        return 0;
+    }
+    let milliseconds = duration.as_millis().saturating_add(1);
+    milliseconds.min((u32::MAX - 1) as u128) as u32
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConfigFingerprint {
+    creation_time: u64,
+    last_write_time: u64,
+    file_size: u64,
+}
+
+#[cfg(windows)]
+fn config_fingerprint(config_path: &PathBuf) -> std::io::Result<ConfigFingerprint> {
+    let metadata = fs::metadata(config_path)?;
+    Ok(ConfigFingerprint {
+        creation_time: metadata.creation_time(),
+        last_write_time: metadata.last_write_time(),
+        file_size: metadata.file_size(),
+    })
+}
+
+#[cfg(windows)]
+struct ConfigChangeWatch(HANDLE);
+
+#[cfg(windows)]
+impl ConfigChangeWatch {
+    fn new(config_path: &PathBuf) -> Result<Self> {
+        let watch_dir = config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(env::current_dir().context("resolve config watch directory")?);
+        let watch_dir = wide_null(watch_dir.as_os_str());
+        let handle = unsafe {
+            FindFirstChangeNotificationW(
+                watch_dir.as_ptr(),
+                0,
+                FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_SIZE,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).context("watch config directory");
+        }
+        Ok(Self(handle))
+    }
+
+    fn rearm(&self) -> Result<()> {
+        if unsafe { FindNextChangeNotification(self.0) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("rearm config directory watch");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConfigChangeWatch {
+    fn drop(&mut self) {
+        if self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                FindCloseChangeNotification(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct DesktopProcess {
+    handle: Option<OwnedHandle>,
+}
+
+#[cfg(windows)]
+struct LaunchedDesktop {
+    session_id: u32,
+    process: DesktopProcess,
 }
 
 #[cfg(any(windows, test))]
@@ -316,22 +604,18 @@ fn config_is_authorized(config: &bridge_agent::AgentConfig) -> bool {
 }
 
 #[cfg(windows)]
-fn desktop_process_running() -> bool {
+fn find_desktop_process() -> Result<Option<DesktopProcess>> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        tracing::warn!(
-            "failed to enumerate Windows processes: {}",
-            std::io::Error::last_os_error()
-        );
-        return false;
+        return Err(std::io::Error::last_os_error()).context("enumerate Windows processes");
     }
+    let snapshot = OwnedHandle(snapshot);
 
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..unsafe { std::mem::zeroed() }
     };
-    let mut found = false;
-    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    let mut has_entry = unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0;
     while has_entry {
         let end = entry
             .szExeFile
@@ -340,24 +624,26 @@ fn desktop_process_running() -> bool {
             .unwrap_or(entry.szExeFile.len());
         let process_name = String::from_utf16_lossy(&entry.szExeFile[..end]);
         if process_name.eq_ignore_ascii_case(DESKTOP_PROCESS_NAME) {
-            found = true;
-            break;
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, entry.th32ProcessID) };
+            if handle.is_null() {
+                tracing::warn!(
+                    process_id = entry.th32ProcessID,
+                    error = %std::io::Error::last_os_error(),
+                    "desktop process is running but cannot be observed by handle"
+                );
+                return Ok(Some(DesktopProcess { handle: None }));
+            }
+            return Ok(Some(DesktopProcess {
+                handle: Some(OwnedHandle(handle)),
+            }));
         }
         has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
     }
-
-    unsafe {
-        CloseHandle(snapshot);
-    }
-    found
+    Ok(None)
 }
 
 #[cfg(windows)]
-fn launch_desktop_in_active_session() -> Result<Option<u32>> {
-    let Some(session_id) = active_user_session_id()? else {
-        return Ok(None);
-    };
-
+fn launch_desktop_in_session(session_id: u32) -> Result<LaunchedDesktop> {
     let service_executable = env::current_exe().context("resolve Windows service executable")?;
     let install_dir = service_executable
         .parent()
@@ -420,9 +706,13 @@ fn launch_desktop_in_active_session() -> Result<Option<u32>> {
 
     unsafe {
         CloseHandle(process_info.hThread);
-        CloseHandle(process_info.hProcess);
     }
-    Ok(Some(session_id))
+    Ok(LaunchedDesktop {
+        session_id,
+        process: DesktopProcess {
+            handle: Some(OwnedHandle(process_info.hProcess)),
+        },
+    })
 }
 
 #[cfg(windows)]

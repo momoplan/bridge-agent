@@ -18,9 +18,12 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, sleep, timeout, Duration};
 use tokio_tungstenite::connect_async;
@@ -36,6 +39,7 @@ const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_LOG_LIMIT: usize = 500;
+const RELAY_SEEN_EVENT_INTERVAL_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +54,7 @@ pub enum RuntimeStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSnapshot {
+    pub revision: u64,
     pub status: RuntimeStatus,
     pub config_path: Option<String>,
     pub agent_id: Option<String>,
@@ -60,6 +65,12 @@ pub struct RuntimeSnapshot {
     pub log_file_path: Option<String>,
     pub last_error: Option<String>,
     pub last_event_at: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    SnapshotChanged(RuntimeSnapshot),
+    LogAppended(LogEntry),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,12 +109,27 @@ pub struct AgentRuntimeManager {
     inner: Arc<RuntimeInner>,
 }
 
-#[derive(Default)]
 struct RuntimeInner {
     lifecycle: Mutex<()>,
     state: Mutex<ManagedState>,
     logs: Mutex<VecDeque<LogEntry>>,
     file_log: Mutex<Option<FileLogSink>>,
+    events: broadcast::Sender<RuntimeEvent>,
+    next_log_sequence: AtomicU64,
+}
+
+impl Default for RuntimeInner {
+    fn default() -> Self {
+        let (events, _) = broadcast::channel(512);
+        Self {
+            lifecycle: Mutex::new(()),
+            state: Mutex::new(ManagedState::default()),
+            logs: Mutex::new(VecDeque::new()),
+            file_log: Mutex::new(None),
+            events,
+            next_log_sequence: AtomicU64::new(0),
+        }
+    }
 }
 
 struct ManagedState {
@@ -111,6 +137,7 @@ struct ManagedState {
     task: Option<JoinHandle<()>>,
     shutdown: Option<watch::Sender<bool>>,
     apply: Option<mpsc::UnboundedSender<RuntimeRegistryUpdate>>,
+    last_relay_seen_event_at: Option<u64>,
 }
 
 pub(crate) struct RuntimeRegistryUpdate {
@@ -128,6 +155,7 @@ impl Default for ManagedState {
     fn default() -> Self {
         Self {
             snapshot: RuntimeSnapshot {
+                revision: 0,
                 status: RuntimeStatus::Stopped,
                 config_path: None,
                 agent_id: None,
@@ -142,6 +170,7 @@ impl Default for ManagedState {
             task: None,
             shutdown: None,
             apply: None,
+            last_relay_seen_event_at: None,
         }
     }
 }
@@ -149,6 +178,10 @@ impl Default for ManagedState {
 impl AgentRuntimeManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.inner.events.subscribe()
     }
 
     pub async fn push_desktop_log(&self, level: &str, message: &str, metadata: LogMetadata) {
@@ -203,6 +236,7 @@ impl AgentRuntimeManager {
         )
         .await?;
         let snapshot = RuntimeSnapshot {
+            revision: 0,
             status: RuntimeStatus::Starting,
             config_path: Some(config_path.display().to_string()),
             agent_id: Some(config.relay.agent_id.clone()),
@@ -215,10 +249,15 @@ impl AgentRuntimeManager {
             last_event_at: now_ms(),
         };
 
-        {
+        let snapshot_event = {
             let mut state = self.inner.state.lock().await;
-            state.snapshot = snapshot;
-        }
+            let mut snapshot = snapshot;
+            snapshot.revision = state.snapshot.revision.saturating_add(1);
+            state.snapshot = snapshot.clone();
+            state.last_relay_seen_event_at = None;
+            snapshot
+        };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot_event));
         {
             let mut active_file_log = self.inner.file_log.lock().await;
             *active_file_log = file_log;
@@ -354,9 +393,11 @@ impl AgentRuntimeManager {
             apply
                 .send(update)
                 .context("failed to send runtime config update")?;
+            state.snapshot.revision = state.snapshot.revision.saturating_add(1);
             state.snapshot.last_event_at = now_ms();
             state.snapshot.clone()
         };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot.clone()));
 
         self.push_log(
             "info",
@@ -389,26 +430,36 @@ impl AgentRuntimeManager {
             .collect()
     }
 
-    pub async fn clear_logs(&self) {
-        self.inner.logs.lock().await.clear();
+    pub async fn clear_logs(&self) -> u64 {
+        let mut logs = self.inner.logs.lock().await;
+        let cleared_through = self.inner.next_log_sequence.load(Ordering::Relaxed);
+        logs.clear();
         let file_log = self.inner.file_log.lock().await.clone();
         if let Some(file_log) = file_log {
             if let Err(err) = file_log.clear() {
                 warn!("failed to clear file log: {err:#}");
             }
         }
+        cleared_through
     }
 
     async fn stop_if_running(&self) -> Result<()> {
-        let (shutdown, task, apply) = {
+        let (shutdown, task, apply, snapshot) = {
             let mut state = self.inner.state.lock().await;
             if state.snapshot.status == RuntimeStatus::Stopped {
                 return Ok(());
             }
+            state.snapshot.revision = state.snapshot.revision.saturating_add(1);
             state.snapshot.status = RuntimeStatus::Stopping;
             state.snapshot.last_event_at = now_ms();
-            (state.shutdown.take(), state.task.take(), state.apply.take())
+            (
+                state.shutdown.take(),
+                state.task.take(),
+                state.apply.take(),
+                state.snapshot.clone(),
+            )
         };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot));
 
         if let Some(shutdown) = shutdown {
             let _ = shutdown.send(true);
@@ -478,13 +529,19 @@ impl AgentRuntimeManager {
     }
 
     async fn force_stopped_after_failed_stop(&self, last_error: String) {
-        let mut state = self.inner.state.lock().await;
-        state.snapshot.status = RuntimeStatus::Stopped;
-        state.snapshot.relay_registered = false;
-        state.snapshot.relay_registered_at = None;
-        state.snapshot.last_relay_seen_at = None;
-        state.snapshot.last_error = Some(last_error);
-        state.snapshot.last_event_at = now_ms();
+        let snapshot = {
+            let mut state = self.inner.state.lock().await;
+            state.snapshot.status = RuntimeStatus::Stopped;
+            state.snapshot.relay_registered = false;
+            state.snapshot.relay_registered_at = None;
+            state.snapshot.last_relay_seen_at = None;
+            state.snapshot.last_error = Some(last_error);
+            state.snapshot.revision = state.snapshot.revision.saturating_add(1);
+            state.snapshot.last_event_at = now_ms();
+            state.last_relay_seen_event_at = None;
+            state.snapshot.clone()
+        };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot));
     }
 
     async fn active_start_snapshot(
@@ -850,34 +907,64 @@ impl RuntimeRunner {
         relay_url: String,
         config_path: String,
     ) {
-        let mut state = self.inner.state.lock().await;
-        state.snapshot = RuntimeSnapshot {
-            status,
-            config_path: Some(config_path),
-            agent_id: Some(agent_id),
-            relay_url: Some(relay_url),
-            relay_registered: false,
-            relay_registered_at: None,
-            last_relay_seen_at: None,
-            log_file_path: state.snapshot.log_file_path.clone(),
-            last_error,
-            last_event_at: now_ms(),
+        let snapshot = {
+            let mut state = self.inner.state.lock().await;
+            let revision = state.snapshot.revision.saturating_add(1);
+            state.snapshot = RuntimeSnapshot {
+                revision,
+                status,
+                config_path: Some(config_path),
+                agent_id: Some(agent_id),
+                relay_url: Some(relay_url),
+                relay_registered: false,
+                relay_registered_at: None,
+                last_relay_seen_at: None,
+                log_file_path: state.snapshot.log_file_path.clone(),
+                last_error,
+                last_event_at: now_ms(),
+            };
+            state.last_relay_seen_event_at = None;
+            state.snapshot.clone()
         };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot));
     }
 
     async fn update_registered_snapshot(&self, ack: &crate::protocol::RegisteredAck) {
-        let mut state = self.inner.state.lock().await;
-        state.snapshot.status = RuntimeStatus::Online;
-        state.snapshot.relay_registered = true;
-        state.snapshot.relay_registered_at = Some(ack.registered_at_epoch_seconds);
-        state.snapshot.last_relay_seen_at = Some(now_ms());
-        state.snapshot.last_error = None;
-        state.snapshot.last_event_at = now_ms();
+        let snapshot = {
+            let mut state = self.inner.state.lock().await;
+            let now = now_ms();
+            state.snapshot.revision = state.snapshot.revision.saturating_add(1);
+            state.snapshot.status = RuntimeStatus::Online;
+            state.snapshot.relay_registered = true;
+            state.snapshot.relay_registered_at = Some(ack.registered_at_epoch_seconds);
+            state.snapshot.last_relay_seen_at = Some(now);
+            state.snapshot.last_error = None;
+            state.snapshot.last_event_at = now;
+            state.last_relay_seen_event_at = Some(now);
+            state.snapshot.clone()
+        };
+        publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot));
     }
 
     async fn update_relay_seen(&self) {
-        let mut state = self.inner.state.lock().await;
-        state.snapshot.last_relay_seen_at = Some(now_ms());
+        let snapshot = {
+            let mut state = self.inner.state.lock().await;
+            let now = now_ms();
+            state.snapshot.revision = state.snapshot.revision.saturating_add(1);
+            state.snapshot.last_relay_seen_at = Some(now);
+            let should_emit = state
+                .last_relay_seen_event_at
+                .is_none_or(|last| now.saturating_sub(last) >= RELAY_SEEN_EVENT_INTERVAL_MS);
+            if should_emit {
+                state.last_relay_seen_event_at = Some(now);
+                Some(state.snapshot.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            publish_runtime_event(&self.inner, RuntimeEvent::SnapshotChanged(snapshot));
+        }
     }
 
     async fn push_log(&self, level: &str, message: &str) {
@@ -915,28 +1002,30 @@ async fn push_log_entry(
     metadata: LogMetadata,
 ) {
     emit_tracing(level, message);
+    let mut logs = inner.logs.lock().await;
     let entry = LogEntry {
+        sequence: inner.next_log_sequence.fetch_add(1, Ordering::Relaxed) + 1,
         timestamp_ms: now_ms(),
         level: level.to_string(),
         message: message.to_string(),
         metadata,
     };
-    let mut logs = inner.logs.lock().await;
     logs.push_back(entry.clone());
     while logs.len() > limit {
         logs.pop_front();
     }
-    drop(logs);
-    append_file_log(inner, &entry).await;
-}
-
-async fn append_file_log(inner: &RuntimeInner, entry: &LogEntry) {
     let file_log = inner.file_log.lock().await.clone();
     if let Some(file_log) = file_log {
-        if let Err(err) = file_log.append(entry) {
+        if let Err(err) = file_log.append(&entry) {
             warn!("failed to append file log: {err:#}");
         }
     }
+    drop(logs);
+    publish_runtime_event(inner, RuntimeEvent::LogAppended(entry));
+}
+
+fn publish_runtime_event(inner: &RuntimeInner, event: RuntimeEvent) {
+    let _ = inner.events.send(event);
 }
 
 async fn write_json<S>(sink: &mut S, message: &AgentMessage) -> Result<()>
@@ -1628,9 +1717,10 @@ mod tests {
         parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
         runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
         terminate_runtime_lock_owner, wide_null_terminated_to_string, AgentRuntimeManager,
-        RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
+        RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
     };
     use crate::config::AgentConfig;
+    use crate::logging::LogMetadata;
     use crate::protocol::AgentMessage;
     use std::fs;
     use tempfile::tempdir;
@@ -1642,6 +1732,48 @@ mod tests {
             url.as_str(),
             "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_subscriber_receives_incremental_log_events() {
+        let manager = AgentRuntimeManager::new();
+        let mut events = manager.subscribe();
+
+        manager
+            .push_desktop_log("info", "event delivery test", LogMetadata::category("test"))
+            .await;
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("runtime event timed out")
+            .expect("runtime event channel closed");
+        match event {
+            RuntimeEvent::LogAppended(entry) => {
+                assert_eq!(entry.level, "info");
+                assert_eq!(entry.message, "event delivery test");
+                assert_eq!(entry.metadata.category.as_deref(), Some("test"));
+            }
+            RuntimeEvent::SnapshotChanged(_) => panic!("expected a log event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_logs_returns_a_sequence_barrier() {
+        let manager = AgentRuntimeManager::new();
+        manager
+            .push_desktop_log("info", "before clear", LogMetadata::category("test"))
+            .await;
+
+        let cleared_through = manager.clear_logs().await;
+        assert!(manager.logs(200).await.is_empty());
+
+        manager
+            .push_desktop_log("info", "after clear", LogMetadata::category("test"))
+            .await;
+        let logs = manager.logs(200).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "after clear");
+        assert!(logs[0].sequence > cleared_through);
     }
 
     #[test]

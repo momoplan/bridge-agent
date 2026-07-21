@@ -34,8 +34,8 @@ pub use connector::{
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{
-    terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeLockConflict, RuntimeProcessInfo,
-    RuntimeSnapshot, RuntimeStatus,
+    terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeEvent, RuntimeLockConflict,
+    RuntimeProcessInfo, RuntimeSnapshot, RuntimeStatus,
 };
 
 pub fn install_rustls_crypto_provider() -> Result<()> {

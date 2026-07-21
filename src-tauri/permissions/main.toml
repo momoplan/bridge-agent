@@ -13,6 +13,7 @@ commands.allow = [
   "apply_saved_config_to_runtime",
   "test_capability",
   "list_logs",
+  "set_runtime_log_streaming",
   "clear_logs",
   "reset_example_config",
   "recover_invalid_config",

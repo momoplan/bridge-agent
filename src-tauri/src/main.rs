@@ -24,7 +24,7 @@ use bridge_agent::{
     show_connector, start_connector, stop_connector, sync_installed_connectors_report,
     terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
     ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
-    ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel, RuntimeLockConflict,
+    ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel, RuntimeEvent, RuntimeLockConflict,
     RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
@@ -67,6 +67,13 @@ use core_foundation::string::CFString;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
+const RUNTIME_SNAPSHOT_EVENT: &str = "runtime-snapshot-changed";
+const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
+const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
+const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
+const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
+const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
+const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
 const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -90,6 +97,38 @@ struct DesktopState {
     quitting: Arc<AtomicBool>,
     local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     startup_health: StartupHealthManager,
+    registered_services: RegisteredServiceMonitor,
+    runtime_log_streaming_requested: Arc<AtomicBool>,
+    runtime_log_streaming: Arc<AtomicBool>,
+    main_window_visible: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct RegisteredServiceMonitor {
+    request_tx: tokio::sync::mpsc::UnboundedSender<RegisteredServiceMonitorRequest>,
+}
+
+impl RegisteredServiceMonitor {
+    fn request_refresh(&self) {
+        let _ = self
+            .request_tx
+            .send(RegisteredServiceMonitorRequest::Refresh);
+    }
+
+    async fn statuses(&self) -> Result<Vec<RegisteredServiceStatus>, String> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.request_tx
+            .send(RegisteredServiceMonitorRequest::RefreshAndRespond(reply_tx))
+            .map_err(|_| "本地应用健康监控已停止".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "本地应用健康监控未返回结果".to_string())?
+    }
+}
+
+enum RegisteredServiceMonitorRequest {
+    Refresh,
+    RefreshAndRespond(tokio::sync::oneshot::Sender<Result<Vec<RegisteredServiceStatus>, String>>),
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +149,7 @@ struct StartupComponentHealth {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartupHealthSnapshot {
+    revision: u64,
     safe_mode: bool,
     forced_safe_mode: bool,
     consecutive_failures: u32,
@@ -131,6 +171,7 @@ struct PersistentStartupState {
 #[derive(Clone)]
 struct StartupHealthManager {
     inner: Arc<Mutex<StartupHealthSnapshot>>,
+    event_app: Arc<Mutex<Option<tauri::AppHandle>>>,
     state_path: PathBuf,
     diagnostics: StartupDiagnostics,
 }
@@ -159,6 +200,7 @@ impl StartupHealthManager {
         let startup_log_path = diagnostics.primary_path.display().to_string();
         let manager = Self {
             inner: Arc::new(Mutex::new(StartupHealthSnapshot {
+                revision: 0,
                 safe_mode,
                 forced_safe_mode,
                 consecutive_failures,
@@ -166,6 +208,7 @@ impl StartupHealthManager {
                 startup_log_path,
                 components: Vec::new(),
             })),
+            event_app: Arc::new(Mutex::new(None)),
             state_path,
             diagnostics,
         };
@@ -198,23 +241,46 @@ impl StartupHealthManager {
         }
     }
 
-    fn set_component(&self, id: &str, label: &str, status: &str, detail: Option<String>) {
-        let mut health = match self.inner.lock() {
-            Ok(health) => health,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(component) = health.components.iter_mut().find(|item| item.id == id) {
-            component.label = label.to_string();
-            component.status = status.to_string();
-            component.detail = detail;
-        } else {
-            health.components.push(StartupComponentHealth {
-                id: id.to_string(),
-                label: label.to_string(),
-                status: status.to_string(),
-                detail,
-            });
+    fn attach_event_app(&self, app: tauri::AppHandle) {
+        match self.event_app.lock() {
+            Ok(mut target) => *target = Some(app),
+            Err(poisoned) => *poisoned.into_inner() = Some(app),
         }
+        self.emit_snapshot(self.snapshot());
+    }
+
+    fn emit_snapshot(&self, snapshot: StartupHealthSnapshot) {
+        let app = match self.event_app.lock() {
+            Ok(target) => target.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(app) = app {
+            let _ = app.emit(STARTUP_HEALTH_EVENT, snapshot);
+        }
+    }
+
+    fn set_component(&self, id: &str, label: &str, status: &str, detail: Option<String>) {
+        let snapshot = {
+            let mut health = match self.inner.lock() {
+                Ok(health) => health,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(component) = health.components.iter_mut().find(|item| item.id == id) {
+                component.label = label.to_string();
+                component.status = status.to_string();
+                component.detail = detail;
+            } else {
+                health.components.push(StartupComponentHealth {
+                    id: id.to_string(),
+                    label: label.to_string(),
+                    status: status.to_string(),
+                    detail,
+                });
+            }
+            health.revision = health.revision.saturating_add(1);
+            health.clone()
+        };
+        self.emit_snapshot(snapshot);
     }
 
     fn mark_frontend_ready(&self) -> Result<StartupHealthSnapshot, String> {
@@ -232,11 +298,14 @@ impl StartupHealthManager {
                 component.status = "ready".to_string();
                 component.detail = None;
             }
+            health.revision = health.revision.saturating_add(1);
         }
+        let snapshot = self.snapshot();
+        self.emit_snapshot(snapshot.clone());
         self.write_ready_state()?;
         self.diagnostics
             .info("frontend readiness handshake completed");
-        Ok(self.snapshot())
+        Ok(snapshot)
     }
 
     fn reset_for_normal_restart(&self) -> Result<(), String> {
@@ -524,7 +593,7 @@ struct DesktopPermissionStatus {
     screen_recording_supported: bool,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RegisteredServiceState {
     NotConfigured,
@@ -533,7 +602,7 @@ enum RegisteredServiceState {
     Unknown,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisteredServiceStatus {
     service: String,
@@ -894,9 +963,17 @@ async fn list_logs(
 }
 
 #[tauri::command]
-async fn clear_logs(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
-    state.runtime.clear_logs().await;
-    Ok(())
+fn set_runtime_log_streaming(state: tauri::State<'_, DesktopState>, enabled: bool) {
+    state
+        .runtime_log_streaming_requested
+        .store(enabled, Ordering::SeqCst);
+    let enabled = enabled && state.main_window_visible.load(Ordering::SeqCst);
+    state.runtime_log_streaming.store(enabled, Ordering::SeqCst);
+}
+
+#[tauri::command]
+async fn clear_logs(state: tauri::State<'_, DesktopState>) -> Result<u64, String> {
+    Ok(state.runtime.clear_logs().await)
 }
 
 #[tauri::command]
@@ -1062,8 +1139,14 @@ fn desktop_permission_status() -> Result<DesktopPermissionStatus, String> {
 async fn registered_service_statuses(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<RegisteredServiceStatus>, String> {
-    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    state.registered_services.statuses().await
+}
+
+async fn collect_registered_service_statuses(
+    config_path: &Path,
+) -> Result<Vec<RegisteredServiceStatus>, String> {
+    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let client = Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -1078,6 +1161,80 @@ async fn registered_service_statuses(
     }
 
     Ok(statuses)
+}
+
+fn registered_service_statuses_changed(
+    previous: &[RegisteredServiceStatus],
+    current: &[RegisteredServiceStatus],
+) -> bool {
+    previous.len() != current.len()
+        || previous.iter().zip(current).any(|(left, right)| {
+            left.service != right.service
+                || left.status != right.status
+                || left.detail != right.detail
+                || left.health_check_configured != right.health_check_configured
+                || left.start_command_configured != right.start_command_configured
+                || left.stop_command_configured != right.stop_command_configured
+        })
+}
+
+fn start_registered_service_monitor(
+    app: tauri::AppHandle,
+    config_path: PathBuf,
+    mut request_rx: tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut previous: Option<Vec<RegisteredServiceStatus>> = None;
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + REGISTERED_SERVICES_MONITOR_INTERVAL,
+            REGISTERED_SERVICES_MONITOR_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            let mut responders = Vec::new();
+            tokio::select! {
+                _ = interval.tick() => {}
+                request = request_rx.recv() => {
+                    match request {
+                        Some(RegisteredServiceMonitorRequest::Refresh) => {}
+                        Some(RegisteredServiceMonitorRequest::RefreshAndRespond(reply)) => {
+                            responders.push(reply);
+                        }
+                        None => break,
+                    }
+                }
+            }
+
+            while let Ok(request) = request_rx.try_recv() {
+                if let RegisteredServiceMonitorRequest::RefreshAndRespond(reply) = request {
+                    responders.push(reply);
+                }
+            }
+
+            let result = collect_registered_service_statuses(&config_path).await;
+            match result.as_ref() {
+                Ok(current) => {
+                    let changed = previous
+                        .as_deref()
+                        .is_none_or(|last| registered_service_statuses_changed(last, current));
+                    if changed {
+                        log::debug!("registered service status changed");
+                    }
+                    if responders.is_empty() {
+                        let _ = app.emit(REGISTERED_SERVICES_EVENT, current.clone());
+                    }
+                    previous = Some(current.clone());
+                }
+                Err(err) => {
+                    log::warn!("failed to refresh registered service statuses: {err}");
+                }
+            }
+            for responder in responders {
+                let _ = responder.send(result.clone());
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1099,7 +1256,9 @@ async fn start_registered_service(
     let Some(start_command) = service_config.start_command else {
         return Err(format!("服务 `{requested_service}` 没有注册启动命令"));
     };
-    run_start_command(service_config.name, start_command).await
+    let result = run_start_command(service_config.name, start_command).await;
+    state.registered_services.request_refresh();
+    result
 }
 
 #[tauri::command]
@@ -1121,7 +1280,9 @@ async fn stop_registered_service(
     let Some(stop_command) = service_config.stop_command else {
         return Err(format!("服务 `{requested_service}` 没有注册停止命令"));
     };
-    run_start_command(service_config.name, stop_command).await
+    let result = run_start_command(service_config.name, stop_command).await;
+    state.registered_services.request_refresh();
+    result
 }
 
 fn start_local_app_ui_server(
@@ -1821,6 +1982,7 @@ async fn install_connector_app(
         .apply_capabilities_from_path(&state.config_path)
         .await
         .map_err(|err| err.to_string())?;
+    state.registered_services.request_refresh();
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConnectorAppInstallDocument {
@@ -1944,7 +2106,9 @@ async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    start_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())
+    let result = start_connector(id.trim(), &state.config_path).map_err(|err| err.to_string());
+    state.registered_services.request_refresh();
+    result
 }
 
 #[tauri::command]
@@ -1952,7 +2116,9 @@ async fn stop_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    stop_connector(id.trim(), &state.config_path).map_err(|err| err.to_string())
+    let result = stop_connector(id.trim(), &state.config_path).map_err(|err| err.to_string());
+    state.registered_services.request_refresh();
+    result
 }
 
 #[tauri::command]
@@ -1966,6 +2132,7 @@ async fn uninstall_connector_app(
         .apply_capabilities_from_path(&state.config_path)
         .await
         .map_err(|err| err.to_string())?;
+    state.registered_services.request_refresh();
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConfigDocument {
@@ -3681,6 +3848,16 @@ fn restore_main_window(window: &tauri::WebviewWindow, diagnostics: Option<&Start
         "main window focus completed",
         || window.set_focus(),
     );
+    if window.is_visible().unwrap_or(false) {
+        if let Some(state) = window.app_handle().try_state::<DesktopState>() {
+            state.main_window_visible.store(true, Ordering::SeqCst);
+            state.runtime_log_streaming.store(
+                state.runtime_log_streaming_requested.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+        }
+        let _ = window.app_handle().emit(MAIN_WINDOW_VISIBILITY_EVENT, true);
+    }
 }
 
 fn run_window_action(
@@ -3726,6 +3903,13 @@ fn restore_main_window_once(
 }
 
 fn hide_to_tray(window: &tauri::Window) {
+    if let Some(state) = window.app_handle().try_state::<DesktopState>() {
+        state.main_window_visible.store(false, Ordering::SeqCst);
+        state.runtime_log_streaming.store(false, Ordering::SeqCst);
+    }
+    let _ = window
+        .app_handle()
+        .emit(MAIN_WINDOW_VISIBILITY_EVENT, false);
     if let Err(err) = window.hide() {
         eprintln!("failed to hide main window: {err}");
     }
@@ -3922,6 +4106,37 @@ fn baijimu_cli_binary_name() -> &'static str {
     }
 }
 
+fn forward_runtime_events(
+    app: tauri::AppHandle,
+    runtime: AgentRuntimeManager,
+    runtime_log_streaming: Arc<AtomicBool>,
+) {
+    let mut events = runtime.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(RuntimeEvent::SnapshotChanged(snapshot)) => {
+                    let _ = app.emit(RUNTIME_SNAPSHOT_EVENT, snapshot);
+                }
+                Ok(RuntimeEvent::LogAppended(entry)) => {
+                    if runtime_log_streaming.load(Ordering::SeqCst) {
+                        let _ = app.emit(RUNTIME_LOG_EVENT, entry);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let snapshot = runtime.snapshot().await;
+                    let _ = app.emit(RUNTIME_SNAPSHOT_EVENT, snapshot);
+                    if runtime_log_streaming.load(Ordering::SeqCst) {
+                        let logs = runtime.logs(200).await;
+                        let _ = app.emit(RUNTIME_LOGS_SNAPSHOT_EVENT, logs);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 fn main() {
     let bootstrap_diagnostics = StartupDiagnostics::bootstrap();
     install_panic_diagnostics(bootstrap_diagnostics.clone());
@@ -3961,6 +4176,14 @@ fn main() {
     }
 
     let runtime = AgentRuntimeManager::new();
+    let (registered_service_request_tx, registered_service_request_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let registered_services = RegisteredServiceMonitor {
+        request_tx: registered_service_request_tx,
+    };
+    let runtime_log_streaming_requested = Arc::new(AtomicBool::new(false));
+    let runtime_log_streaming = Arc::new(AtomicBool::new(false));
+    let main_window_visible = Arc::new(AtomicBool::new(true));
     let quitting = Arc::new(AtomicBool::new(false));
     let local_app_ui = Arc::new(RwLock::new(None));
     let single_instance_diagnostics = diagnostics.clone();
@@ -3968,6 +4191,8 @@ fn main() {
     let page_load_diagnostics = diagnostics.clone();
     let setup_health = startup_health.clone();
     let setup_local_app_ui = Arc::clone(&local_app_ui);
+    let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
+    let page_load_runtime_log_streaming = Arc::clone(&runtime_log_streaming);
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -3995,8 +4220,18 @@ fn main() {
             quitting: Arc::clone(&quitting),
             local_app_ui,
             startup_health: startup_health.clone(),
+            registered_services: registered_services.clone(),
+            runtime_log_streaming_requested: Arc::clone(&runtime_log_streaming_requested),
+            runtime_log_streaming: Arc::clone(&runtime_log_streaming),
+            main_window_visible,
         })
         .on_page_load(move |webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                page_load_runtime_log_streaming_requested.store(false, Ordering::SeqCst);
+                page_load_runtime_log_streaming.store(false, Ordering::SeqCst);
+            }
             page_load_diagnostics.info(format!(
                 "webview page load {:?}: label={} url={}",
                 payload.event(),
@@ -4006,6 +4241,17 @@ fn main() {
         })
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
+            setup_health.attach_event_app(app.handle().clone());
+            forward_runtime_events(
+                app.handle().clone(),
+                runtime.clone(),
+                Arc::clone(&runtime_log_streaming),
+            );
+            start_registered_service_monitor(
+                app.handle().clone(),
+                config_path.clone(),
+                registered_service_request_rx,
+            );
             #[cfg(debug_assertions)]
             if std::env::var_os("BRIDGE_AGENT_OPEN_DEVTOOLS").is_some() {
                 if let Some(window) = app.get_webview_window("main") {
@@ -4107,6 +4353,7 @@ fn main() {
             apply_saved_config_to_runtime,
             test_capability,
             list_logs,
+            set_runtime_log_streaming,
             clear_logs,
             reset_example_config,
             recover_invalid_config,
@@ -4235,6 +4482,31 @@ mod tests {
         assert_eq!(value["relay"]["token"], "");
         assert_eq!(value["credential_status"]["relay_token_configured"], true);
         assert!(!value.to_string().contains("relay-secret"));
+    }
+
+    fn registered_status(
+        status: RegisteredServiceState,
+        checked_at_ms: u64,
+    ) -> RegisteredServiceStatus {
+        RegisteredServiceStatus {
+            service: "local-app".to_string(),
+            status,
+            detail: None,
+            checked_at_ms,
+            health_check_configured: true,
+            start_command_configured: true,
+            stop_command_configured: true,
+        }
+    }
+
+    #[test]
+    fn registered_service_monitor_emits_only_meaningful_changes() {
+        let previous = vec![registered_status(RegisteredServiceState::Healthy, 100)];
+        let refreshed = vec![registered_status(RegisteredServiceState::Healthy, 200)];
+        let unhealthy = vec![registered_status(RegisteredServiceState::Unhealthy, 300)];
+
+        assert!(!registered_service_statuses_changed(&previous, &refreshed));
+        assert!(registered_service_statuses_changed(&previous, &unhealthy));
     }
 
     fn update_release_response(
