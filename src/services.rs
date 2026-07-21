@@ -16,8 +16,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;

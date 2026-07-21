@@ -369,6 +369,7 @@ jobs:
       - name: Build release bundles
         shell: bash
         env:
+          RUSTFLAGS: -D warnings
           BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
           BRIDGE_AGENT_RELEASE_PAGE_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_PAGE_URL }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -680,6 +681,7 @@ jobs:
           $installLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-install.log"
           $uninstallLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-uninstall.log"
           $installSucceeded = $false
+          $desktopProcess = $null
           try {
             $install = Start-Process `
               -FilePath "msiexec.exe" `
@@ -725,16 +727,39 @@ jobs:
             }
             Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json | Out-Null
 
-            $runValue = Get-ItemPropertyValue `
+            $machineRunValue = Get-ItemPropertyValue `
               -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" `
               -Name "BaijimuBridgeAgent" `
-              -ErrorAction Stop
-            if ($runValue -notlike "*bridge-agent-desktop.exe*") {
-              throw "Baijimu desktop logon startup entry is invalid: $runValue"
+              -ErrorAction SilentlyContinue
+            if ($null -ne $machineRunValue) {
+              throw "Legacy machine-wide desktop autostart is still registered: $machineRunValue"
             }
 
-            Write-Host "Verified Windows MSI install lifecycle: service running with shared config"
+            $desktopExecutable = "C:\Program Files\Baijimu\bridge-agent-desktop.exe"
+            if (-not (Test-Path -LiteralPath $desktopExecutable)) {
+              throw "Installed desktop executable was not found: $desktopExecutable"
+            }
+            $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+
+            $deadline = (Get-Date).AddSeconds(20)
+            do {
+              $userRunValue = Get-ItemPropertyValue `
+                -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+                -Name "BaijimuBridgeAgent" `
+                -ErrorAction SilentlyContinue
+              if ($userRunValue -like "*bridge-agent-desktop.exe*") {
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            if ($userRunValue -notlike "*bridge-agent-desktop.exe*") {
+              throw "Official Tauri per-user autostart was not registered: $userRunValue"
+            }
+
+            Write-Host "Verified Windows MSI install lifecycle and official per-user autostart"
           } finally {
+            Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
             if ($installSucceeded) {
               $uninstall = Start-Process `
                 -FilePath "msiexec.exe" `

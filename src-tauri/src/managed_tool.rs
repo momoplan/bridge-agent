@@ -334,13 +334,16 @@ fn write_executable(path: &Path, bytes: &[u8]) -> Result<()> {
     set_executable(path)
 }
 
+#[cfg(unix)]
 fn set_executable(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
-    }
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 

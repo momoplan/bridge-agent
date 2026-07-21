@@ -142,8 +142,8 @@ $autoStart = $registryRows |
         $_.Values[1] -like "*bridge-agent-desktop.exe*"
     } |
     Select-Object -First 1
-if (-not $autoStart) {
-    throw "MSI does not register the interactive desktop client for user logon"
+if ($autoStart) {
+    throw "MSI still contains the legacy machine-wide desktop autostart entry"
 }
 
-Write-Host "Verified Windows MSI service contract: $($resolvedMsi.Path)"
+Write-Host "Verified Windows MSI service contract and absence of legacy autostart: $($resolvedMsi.Path)"

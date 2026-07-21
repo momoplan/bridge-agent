@@ -33,8 +33,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -3872,10 +3870,11 @@ fn main() {
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                 .build(),
         )
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("BaijimuBridgeAgent")
+                .build(),
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(
             move |app, _argv, _cwd| {
