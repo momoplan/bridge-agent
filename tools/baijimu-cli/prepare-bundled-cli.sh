@@ -26,7 +26,27 @@ if [ ! -f "${cli_dir}/Cargo.toml" ]; then
   if [ -n "${BAIJIMU_CLI_RS_GIT_TOKEN:-}" ] && [[ "${clone_url}" == https://gitee.com/* ]]; then
     clone_url="https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
   fi
-  git clone --depth 1 --branch "${cli_git_ref}" "${clone_url}" "${clone_dir}"
+  clone_succeeded=false
+  for attempt in 1 2 3 4 5; do
+    rm -rf "${clone_dir}"
+    if GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone \
+      --depth 1 \
+      --branch "${cli_git_ref}" \
+      "${clone_url}" \
+      "${clone_dir}"; then
+      clone_succeeded=true
+      break
+    fi
+    if [ "${attempt}" -lt 5 ]; then
+      retry_delay=$((attempt * 5))
+      echo "Baijimu CLI clone attempt ${attempt}/5 failed; retrying in ${retry_delay}s" >&2
+      sleep "${retry_delay}"
+    fi
+  done
+  if [ "${clone_succeeded}" != "true" ]; then
+    echo "Failed to clone Baijimu CLI ${cli_git_ref} after 5 attempts" >&2
+    exit 1
+  fi
   cli_dir="${clone_dir}"
 fi
 

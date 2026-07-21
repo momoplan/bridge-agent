@@ -367,6 +367,7 @@ jobs:
           esac
 
       - name: Build release bundles
+        id: build_release_bundles
         shell: bash
         env:
           RUSTFLAGS: -D warnings
@@ -397,7 +398,7 @@ jobs:
           npm run tauri -- build ${{ matrix.tauri_args }}
 
       - name: Diagnose Windows WiX fragment failure
-        if: failure() && runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.build_release_bundles.outcome == 'failure'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
