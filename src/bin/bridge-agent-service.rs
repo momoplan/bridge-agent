@@ -194,7 +194,7 @@ fn run_service(config: Option<PathBuf>) -> Result<()> {
 
 #[cfg(windows)]
 fn run_service_loop(
-    config_path: &PathBuf,
+    config_path: &Path,
     shutdown_event: HANDLE,
     status_handle: &service_control_handler::ServiceStatusHandle,
 ) -> Result<()> {
@@ -235,7 +235,7 @@ fn run_service_loop(
 #[cfg(windows)]
 async fn run_runtime_supervisor(
     manager: &AgentRuntimeManager,
-    config_path: &PathBuf,
+    config_path: &Path,
     shutdown_event: HANDLE,
 ) -> Result<()> {
     let mut applied_config: Option<ConfigFingerprint> = None;
