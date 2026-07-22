@@ -600,8 +600,10 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
