@@ -597,18 +597,19 @@ open -a "百积木" --args --safe-mode
 
 ## 发布与国内分发
 
-`bridge-agent` 的发布入口和状态源是 Jenkins job `bridge-agent-desktop-release`；
-GitHub Actions 只负责需要跨平台 runner 的构建、签名和公证。不要手工推正式 tag。
+`bridge-agent` 独立使用 GitHub Actions 发布，不经过 Jenkins。正式发布的唯一自动化入口是
+`.github/workflows/release-bridge-agent.yml`，由 GitHub `bridge-agent-vX.Y.Z` tag 触发。
 客户端运行时不依赖 GitHub 或 Gitee 判断更新。正式发布链路是：
 
-1. Jenkins 校验精确源码提交、桌面版本和内置 CLI 固定版本，并执行前端与 Rust 测试
-2. Jenkins 推进 Gitee/GitHub `main`，创建不可变 `bridge-agent-vX.Y.Z` tag
-3. GitHub Actions 负责构建、代码签名、公证，并用 Tauri updater 私钥生成更新包签名
-4. GitHub Actions 把安装包和 updater 签名上传到开源镜像仓库的 Gitee Release
-5. 每个附件通过匿名下载冒烟后，把 Gitee 固定公开 URL、附件 ID、sha256 与 minisign 签名登记到 release service
-6. 所有平台产物上传完成后，发布流程调用 release service 的 publish 接口
-7. Jenkins 校验 GitHub 与 Gitee 产物、匿名下载和公开更新接口中的最终版本
-8. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
+1. 发布提交先合入并推送到 GitHub `main`，四处桌面版本号和内置 CLI 固定版本保持一致
+2. 在该提交上创建不可变 `bridge-agent-vX.Y.Z` tag，并只把 tag 推送到 GitHub
+3. GitHub Actions 校验 tag、精确提交、`main` 归属、桌面版本和内置 CLI tag，并串行执行发布
+4. GitHub Actions 把同一个不可变 tag 镜像到 Gitee，然后执行前端、Rust 和 Windows 质量门禁
+5. GitHub Actions 负责 macOS、Windows、Linux 构建、代码签名、公证，并用 Tauri updater 私钥生成更新包签名
+6. GitHub Actions 把安装包和 updater 签名上传到 GitHub Release 与 Gitee Release
+7. 每个附件通过匿名下载冒烟后，把 Gitee 固定公开 URL、附件 ID、sha256 与 minisign 签名登记到 release service
+8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口与下载地址
+9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
 Gitee Release 是国内二进制下载源，但不承担版本策略。客户端仍只向 `updates.baijimu.com` 查询最新版本；更新服务只返回元数据和 Gitee 固定公开 URL，不上传文件、不申请 OSS token，也不依赖 lowcode 运行服务。Gitee Release 只保留最近 5 个版本以控制附件配额，删除 Release 时保留 Git tag；GitHub Release 保留完整历史。
 
@@ -619,35 +620,28 @@ Gitee Release 是国内二进制下载源，但不承担版本策略。客户端
 标准触发方式：
 
 ```bash
-baijimu-jenkins build bridge-agent-desktop-release \
-  BRIDGE_REF=codex/local-app-embedded-ui \
-  BRIDGE_COMMIT=<40-character-commit> \
-  BRIDGE_VERSION=0.1.105 \
-  CLI_VERSION=0.1.14 \
-  DRY_RUN=true
+git switch main
+git pull --ff-only origin main
+git tag -a bridge-agent-v0.1.110 -m "Release bridge-agent v0.1.110"
+git push origin bridge-agent-v0.1.110
 ```
 
-干跑成功后以相同参数执行 `DRY_RUN=false`。GitHub 的 tag push 和
-`workflow_dispatch` 是 Jenkins 后面的构建机制，不是日常人工发布入口。
-失败的下游签名构建可以从修复后的工作流分支以原 `release_tag` 重跑；工作流会
-checkout 该不可变标签，避免把工作流修复提交误装进既有版本。
-修复提交先按正常流程执行 `DRY_RUN=true`，确认通过后再由 Jenkins 使用
-`REPAIR_RELEASE=true DRY_RUN=false` 推进 main 并调度修复构建；禁止移动既有标签。
+只能给已经存在于 GitHub `main` 的提交打正式 tag。工作流使用全局
+`bridge-agent-release` concurrency group，前一个版本未结束时，后一个版本会在
+GitHub Actions 队列中等待，不占用其他项目的发布系统。
 
-Jenkins Linux 构建节点必须由节点管理员一次性安装与 GitHub Linux runner
-相同的 Tauri 系统依赖；发布任务会在下载 Rust 依赖前检查这些包，缺失时立即失败：
+如果签名、runner 或工作流本身的问题导致已有 tag 发布失败，修复提交合入 `main` 后，
+可以从 GitHub Actions 页面选择 `main`，用原 `release_tag` 执行
+`workflow_dispatch`；命令行等价操作是：
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  libwebkit2gtk-4.1-dev \
-  libappindicator3-dev \
-  librsvg2-dev \
-  patchelf
+gh workflow run release-bridge-agent.yml \
+  --ref main \
+  -f release_tag=bridge-agent-v0.1.110
 ```
 
-流水线使用工作区内独立的临时 Cargo target 目录，并在测试成功或失败后自动清理，
-避免 Tauri 与主程序的编译缓存长期挤满 Jenkins 节点磁盘。
+修复发布要求新提交是原 tag 提交的后代，且版本号不变；工作流不会移动或覆盖既有
+GitHub/Gitee tag。普通正式发布不要使用 `workflow_dispatch`，直接推送新 tag。
 
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
 
@@ -800,9 +794,9 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
 
 `downloadUrl` 必须属于 `zxflimit_admin/bridge-agent` 的 Gitee Release 固定公开地址，不能包含 token、签名查询参数或其他临时凭证。release service 不提供上传接口，也不持有 Gitee token。
 
-## 打包分发
+## 本地打包验证
 
-推荐的正式分发方式不是手工发二进制，而是通过 GitHub Actions 构建并签名后同步到 GitHub Release 和国内 Gitee Release，再由 release service 发布最新版本元数据。
+正式分发统一使用前述 GitHub Actions 工作流。本节命令只用于本机验证，不用于发布正式二进制。
 
 macOS 推荐直接构建 universal 安装包，这样最终用户不需要自己区分 Intel 和 Apple Silicon：
 
@@ -816,22 +810,16 @@ npm run tauri:build:macos-universal
 npm run tauri:build:macos-universal -- --debug
 ```
 
-发布步骤：
+正式发布前需要同步更新：
 
-1. 同步更新版本号
-   - `package.json`
-   - `Cargo.toml`
-   - `src-tauri/Cargo.toml`
-   - `src-tauri/tauri.conf.json`
-2. 推送版本 tag，例如 `bridge-agent-v0.1.12`
-3. GitHub Actions 会自动构建各平台安装包
-4. 工作流把安装包上传到 Gitee Release，并验证无需登录即可下载
-5. release service 保存 Gitee 下载地址、sha256 和签名，确认五类产物齐全后才允许 publish
-6. 最终用户从平台下载页下载，或在应用内通过自有更新服务自动下载安装
+- `package.json`
+- `Cargo.toml`
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+- `tools/baijimu-cli/VERSION`
 
-对应 workflow：
-
-- `.github/workflows/release-bridge-agent.yml`
+版本提交合入 GitHub `main` 后，再按“发布与国内分发”一节创建并推送正式 tag；
+工作流会拒绝版本不一致、tag 不属于 `main`、内置 CLI tag 不存在或既有 tag 被移动的发布。
 
 调试打包：
 
@@ -844,13 +832,9 @@ npm run tauri build -- --debug
 - `src-tauri/target/universal-apple-darwin/debug/bundle/macos/百积木.app`
 - `src-tauri/target/universal-apple-darwin/release/bundle/dmg/百积木_0.1.12_universal.dmg`
 
-后续如果要做 Windows / Linux 分发，直接在对应平台执行同样的 `tauri build` 即可。
-
-注意：
-
-- macOS 正式对外分发建议补代码签名和 notarization
-- Windows 正式对外分发建议补代码签名
-- 没签名也可以先做内测发布，但安装体验会差一些
+macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建。正式工作流强制
+执行 Apple 签名与公证、Windows Authenticode 签名和 Tauri updater 签名；缺少任何
+必需凭证都会终止发布，不会降级生成未签名正式包。
 
 ## 方法绑定
 

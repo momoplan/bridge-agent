@@ -8,9 +8,8 @@ pipeline {
     }
 
     parameters {
-        string(name: 'BRIDGE_REF', defaultValue: 'codex/codex-management-app', description: 'Bridge Agent branch containing the release')
-        string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge Agent commit to publish')
-        string(name: 'BRIDGE_VERSION', defaultValue: '0.1.110', description: 'Bridge Agent version')
+        string(name: 'BRIDGE_REF', defaultValue: 'codex/codex-management-app', description: 'Bridge repository branch containing the Codex local app release tooling')
+        string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact bridge repository commit containing the Codex local app release tooling')
         string(name: 'CONNECTOR_REF', defaultValue: 'codex/local-app-embedded-ui', description: 'Codex local app source branch')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
         string(name: 'CONNECTOR_VERSION', defaultValue: '0.5.0', description: 'Codex local app version')
@@ -26,9 +25,6 @@ test -n "$BRIDGE_COMMIT"
 test -n "$CONNECTOR_COMMIT"
 test "$(git rev-parse "${BRIDGE_COMMIT}^{commit}")" = "$BRIDGE_COMMIT"
 git merge-base --is-ancestor "$BRIDGE_COMMIT" HEAD
-test "$(git show "${BRIDGE_COMMIT}:package.json" | jq -r '.version')" = "$BRIDGE_VERSION"
-test "$(git show "${BRIDGE_COMMIT}:src-tauri/tauri.conf.json" | jq -r '.version')" = "$BRIDGE_VERSION"
-case "$BRIDGE_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
 '''
                 dir('connector-src') {
@@ -108,18 +104,6 @@ chmod 700 "$askpass"
 export GIT_ASKPASS="$askpass"
 export GIT_TERMINAL_PROMPT=0
 
-publish_branch() {
-  remote="$1"
-  commit="$2"
-  branch="$3"
-  current="$(git ls-remote "$remote" "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
-  if [ -n "$current" ] && ! git merge-base --is-ancestor "$current" "$commit"; then
-    echo "refusing non-fast-forward publish to $branch" >&2
-    exit 1
-  fi
-  git push "$remote" "$commit:refs/heads/$branch"
-}
-
 publish_tag() {
   remote="$1"
   commit="$2"
@@ -156,11 +140,9 @@ else
   git -C connector-src push "$gitee_connector" "$CONNECTOR_COMMIT:refs/tags/v${CONNECTOR_VERSION}"
 fi
 
-publish_branch "$gitee_bridge" "$BRIDGE_COMMIT" main
 publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "codex-local-app-v${CONNECTOR_VERSION}"
 
 rm -f "$askpass"
-tools/release/publish-github-ref.sh momoplan/bridge-agent branch main "$BRIDGE_COMMIT"
 tools/release/publish-github-ref.sh momoplan/bridge-agent tag "codex-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
 set -x
 '''
@@ -201,75 +183,13 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
             }
         }
 
-        stage('Publish Bridge Agent release ref') {
-            when {
-                expression { return !params.DRY_RUN }
-            }
-            steps {
-                withCredentials([
-                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
-                    usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
-                ]) {
-                    sh '''#!/bin/bash
-set -euo pipefail
-set +x
-remote="https://gitee.com/zxflimit_admin/bridge-agent.git"
-askpass="$WORKSPACE/.bridge-release-git-askpass.sh"
-cat > "$askpass" <<'ASKPASS'
-#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' "$GITEE_USER" ;;
-  *Password*) printf '%s\n' "$GITEE_TOKEN" ;;
-  *) exit 1 ;;
-esac
-ASKPASS
-chmod 700 "$askpass"
-export GIT_ASKPASS="$askpass"
-export GIT_TERMINAL_PROMPT=0
-tag="bridge-agent-v${BRIDGE_VERSION}"
-current="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
-if [ -n "$current" ]; then
-  test "$current" = "$BRIDGE_COMMIT"
-else
-  git push "$remote" "$BRIDGE_COMMIT:refs/tags/$tag"
-fi
-rm -f "$askpass"
-tools/release/publish-github-ref.sh momoplan/bridge-agent tag "$tag" "$BRIDGE_COMMIT"
-set -x
-'''
-                }
-            }
-        }
-
-        stage('Wait for signed Bridge Agent release') {
-            when {
-                expression { return !params.DRY_RUN }
-            }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-momoplan-token',
-                    usernameVariable: 'GITHUB_USER',
-                    passwordVariable: 'GITHUB_TOKEN'
-                )]) {
-                    sh 'tools/release/wait-github-workflow.sh momoplan/bridge-agent release-bridge-agent.yml "bridge-agent-v${BRIDGE_VERSION}" "$BRIDGE_COMMIT"'
-                }
-            }
-        }
-
-        stage('Verify published releases') {
+        stage('Verify published local app') {
             when {
                 expression { return !params.DRY_RUN }
             }
             steps {
                 sh '''#!/bin/bash
 set -euo pipefail
-curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/bridge-agent-v${BRIDGE_VERSION}" \
-  | jq -e --arg version "$BRIDGE_VERSION" '
-      .draft == false and
-      ([.assets[].name] | index("Baijimu_" + $version + "_universal.dmg") != null) and
-      ([.assets[].name] | index("Baijimu_" + $version + "_x64_en-US.msi") != null) and
-      ([.assets[].name] | index("Baijimu_" + $version + "_amd64.AppImage") != null) and
-      ([.assets[].name] | index("Baijimu_" + $version + "_amd64.deb") != null)'
 curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/codex-local-app-v${CONNECTOR_VERSION}" \
   | jq -e --arg version "$CONNECTOR_VERSION" '
       .draft == false and
