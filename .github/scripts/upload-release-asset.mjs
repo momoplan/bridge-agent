@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
+
+import { uploadMultipartFile } from "./multipart-file-upload.mjs";
 
 const [apiBaseArg, tagName, version, target, filePath, signaturePath] = process.argv.slice(2);
 
@@ -24,14 +27,13 @@ if (!isAllowedReleaseAsset(assetName, target)) {
   throw new Error(`Refusing to upload non-release bundle for ${target}: ${assetName}`);
 }
 
-const assetBytes = await readFile(filePath);
 const { size } = await stat(filePath);
 if (size > maximumAttachmentBytes) {
   throw new Error(
     `${assetName} is ${size} bytes and exceeds Gitee's 100 MB release attachment limit`,
   );
 }
-const sha256 = createHash("sha256").update(assetBytes).digest("hex");
+const sha256 = await sha256File(filePath);
 const contentType = contentTypeFor(assetName);
 const signature = signaturePath ? (await readFile(signaturePath, "utf8")).trim() : undefined;
 if (signaturePath && !signature) {
@@ -46,13 +48,11 @@ if (!releaseId) {
   throw new Error(`Gitee release ${tagName} has no id`);
 }
 
-const filesToUpload = [{ name: assetName, path: filePath, bytes: assetBytes, type: contentType }];
+const filesToUpload = [{ name: assetName, path: filePath, type: contentType }];
 if (signaturePath) {
-  const signatureBytes = await readFile(signaturePath);
   filesToUpload.push({
     name: basename(signaturePath),
     path: signaturePath,
-    bytes: signatureBytes,
     type: "text/plain",
   });
 }
@@ -107,18 +107,23 @@ console.log(`Registered ${assetName} (${size} bytes, sha256:${sha256})`);
 
 async function uploadGiteeAttachment(releaseId, file) {
   return retry(async () => {
-    const form = new FormData();
-    form.set("file", new Blob([file.bytes], { type: file.type }), file.name);
-    const response = await fetch(
-      `${giteeApiBase}/repos/${owner}/${repository}/releases/${releaseId}/attach_files`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${giteeToken}` },
-        body: form,
-      },
-    );
+    const response = await uploadMultipartFile({
+      url: `${giteeApiBase}/repos/${owner}/${repository}/releases/${releaseId}/attach_files`,
+      headers: { Authorization: `Bearer ${giteeToken}` },
+      filePath: file.path,
+      fileName: file.name,
+      contentType: file.type,
+    });
     return decodeJsonResponse(response, `upload Gitee attachment ${file.name}`);
   }, `Gitee upload for ${file.name}`, 4);
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
 }
 
 async function giteeJson(path, options = {}) {
