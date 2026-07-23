@@ -497,12 +497,15 @@ pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<Con
     });
     save_config(config_path, &config)?;
 
-    let package_path = PathBuf::from(&record.package_path);
-    if package_path.exists() {
-        fs::remove_dir_all(&package_path).with_context(|| {
+    let install_root = install_record_path(connector_id)?
+        .parent()
+        .with_context(|| format!("connector `{connector_id}` install root is missing"))?
+        .to_path_buf();
+    if install_root.exists() {
+        fs::remove_dir_all(&install_root).with_context(|| {
             format!(
-                "failed to remove connector package {}",
-                package_path.display()
+                "failed to remove connector installation {}",
+                install_root.display()
             )
         })?;
     }
@@ -2536,6 +2539,56 @@ mod tests {
             .services
             .iter()
             .any(|service| service.name == "inlineService"));
+    }
+
+    #[test]
+    fn uninstall_connector_removes_package_and_install_record() {
+        let dir = tempdir().unwrap();
+        let connectors_dir = dir.path().join("connectors");
+        let _env = connector_test_env(connectors_dir.clone());
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.uninstall-test",
+                "name": "Uninstall Test Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "uninstallTestService",
+                    "description": "Uninstall test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18121"
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let install_root = connectors_dir.join("com.baijimu.connector.uninstall-test");
+        assert!(install_root.join("package").is_dir());
+        assert!(install_root.join(CONNECTOR_INSTALL_RECORD_FILE).is_file());
+
+        uninstall_connector("com.baijimu.connector.uninstall-test", &config_path).unwrap();
+
+        assert!(!install_root.exists());
+        assert!(list_connectors().unwrap().is_empty());
+        assert!(!load_config(&config_path)
+            .unwrap()
+            .services
+            .iter()
+            .any(|service| service.name == "uninstallTestService"));
     }
 
     #[test]

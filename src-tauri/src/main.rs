@@ -38,7 +38,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, RwLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -73,6 +73,7 @@ const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
 const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
 const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
 const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
+const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
@@ -97,11 +98,69 @@ struct DesktopState {
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
     local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+    local_apps: LocalAppsChangeNotifier,
     startup_health: StartupHealthManager,
     registered_services: RegisteredServiceMonitor,
     runtime_log_streaming_requested: Arc<AtomicBool>,
     runtime_log_streaming: Arc<AtomicBool>,
     main_window_visible: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LocalAppsChangedEvent {
+    revision: u64,
+    operation: LocalAppsChangeOperation,
+    connector_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LocalAppsChangeOperation {
+    Install,
+    Sync,
+    Uninstall,
+}
+
+#[derive(Clone, Default)]
+struct LocalAppsChangeNotifier {
+    revision: Arc<AtomicU64>,
+    event_app: Arc<Mutex<Option<tauri::AppHandle>>>,
+}
+
+impl LocalAppsChangeNotifier {
+    fn attach_event_app(&self, app: tauri::AppHandle) {
+        if let Ok(mut current) = self.event_app.lock() {
+            *current = Some(app);
+        }
+    }
+
+    fn notify(
+        &self,
+        operation: LocalAppsChangeOperation,
+        connector_id: &str,
+    ) -> LocalAppsChangedEvent {
+        let event = LocalAppsChangedEvent {
+            revision: self.revision.fetch_add(1, Ordering::SeqCst) + 1,
+            operation,
+            connector_id: connector_id.to_string(),
+        };
+        let app = self
+            .event_app
+            .lock()
+            .ok()
+            .and_then(|current| current.clone());
+        if let Some(app) = app {
+            if let Err(err) = app.emit(LOCAL_APPS_CHANGED_EVENT, event.clone()) {
+                log::warn!(
+                    "failed to emit local apps changed event: operation={:?} connector_id={} error={err}",
+                    event.operation,
+                    event.connector_id
+                );
+            }
+        }
+        event
+    }
 }
 
 #[derive(Clone)]
@@ -380,6 +439,7 @@ struct LocalAppUiHttpState {
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
     registered_services: RegisteredServiceMonitor,
+    local_apps: LocalAppsChangeNotifier,
 }
 
 #[derive(Debug, Serialize)]
@@ -1337,6 +1397,7 @@ fn start_local_app_ui_server(
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
     registered_services: RegisteredServiceMonitor,
+    local_apps: LocalAppsChangeNotifier,
 ) {
     startup_health.set_component("local_app_ui_server", "本地应用界面服务", "starting", None);
     tauri::async_runtime::spawn(async move {
@@ -1404,6 +1465,7 @@ fn start_local_app_ui_server(
             config_path: config_path.clone(),
             runtime,
             registered_services,
+            local_apps,
         };
         let control_path = local_app_control_discovery_path(&config_path);
         if let Err(err) = write_local_app_control_discovery(&control_path, port, &control_token) {
@@ -1666,6 +1728,10 @@ async fn local_app_control_install_handler(
         } else {
             None
         };
+        state.local_apps.notify(
+            LocalAppsChangeOperation::Install,
+            &document.install.connector_id,
+        );
         Ok::<_, String>(serde_json::json!({
             "install": document,
             "start": started
@@ -1747,7 +1813,7 @@ async fn local_app_control_sync_handler(
             .source_reference
             .clone()
             .unwrap_or_else(|| record.source_path.clone());
-        install_connector_app_with_context(
+        let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
             &state.registered_services,
@@ -1759,7 +1825,12 @@ async fn local_app_control_sync_handler(
                 market_app_id: record.market_app_id,
             },
         )
-        .await
+        .await?;
+        state.local_apps.notify(
+            LocalAppsChangeOperation::Sync,
+            &document.install.connector_id,
+        );
+        Ok::<_, String>(document)
     }
     .await;
     local_app_control_result(result)
@@ -1787,15 +1858,22 @@ async fn local_app_control_uninstall_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    local_app_control_result(
-        uninstall_connector_app_with_context(
+    let result = async {
+        let connector_id = connector_id.trim().to_string();
+        let document = uninstall_connector_app_with_context(
             &state.config_path,
             &state.runtime,
             &state.registered_services,
-            connector_id,
+            connector_id.clone(),
         )
-        .await,
-    )
+        .await?;
+        state
+            .local_apps
+            .notify(LocalAppsChangeOperation::Uninstall, &connector_id);
+        Ok::<_, String>(document)
+    }
+    .await;
+    local_app_control_result(result)
 }
 
 async fn local_app_ui_entry_handler(
@@ -2270,7 +2348,7 @@ async fn install_connector_app(
     allow_git: Option<bool>,
     market_app_id: Option<String>,
 ) -> Result<ConnectorAppInstallDocument, String> {
-    install_connector_app_with_context(
+    let document = install_connector_app_with_context(
         &state.config_path,
         &state.runtime,
         &state.registered_services,
@@ -2282,7 +2360,12 @@ async fn install_connector_app(
             market_app_id,
         },
     )
-    .await
+    .await?;
+    state.local_apps.notify(
+        LocalAppsChangeOperation::Install,
+        &document.install.connector_id,
+    );
+    Ok(document)
 }
 
 async fn install_connector_app_with_context(
@@ -2569,13 +2652,18 @@ async fn uninstall_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConfigDocument, String> {
-    uninstall_connector_app_with_context(
+    let connector_id = id.trim().to_string();
+    let document = uninstall_connector_app_with_context(
         &state.config_path,
         &state.runtime,
         &state.registered_services,
-        id,
+        connector_id.clone(),
     )
-    .await
+    .await?;
+    state
+        .local_apps
+        .notify(LocalAppsChangeOperation::Uninstall, &connector_id);
+    Ok(document)
 }
 
 async fn uninstall_connector_app_with_context(
@@ -4638,6 +4726,7 @@ fn main() {
     let registered_services = RegisteredServiceMonitor {
         request_tx: registered_service_request_tx,
     };
+    let local_apps = LocalAppsChangeNotifier::default();
     let runtime_log_streaming_requested = Arc::new(AtomicBool::new(false));
     let runtime_log_streaming = Arc::new(AtomicBool::new(false));
     let main_window_visible = Arc::new(AtomicBool::new(true));
@@ -4648,6 +4737,7 @@ fn main() {
     let page_load_diagnostics = diagnostics.clone();
     let setup_health = startup_health.clone();
     let setup_local_app_ui = Arc::clone(&local_app_ui);
+    let setup_local_apps = local_apps.clone();
     let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
     let page_load_runtime_log_streaming = Arc::clone(&runtime_log_streaming);
     tauri::Builder::default()
@@ -4676,6 +4766,7 @@ fn main() {
             config_path: config_path.clone(),
             quitting: Arc::clone(&quitting),
             local_app_ui,
+            local_apps: local_apps.clone(),
             startup_health: startup_health.clone(),
             registered_services: registered_services.clone(),
             runtime_log_streaming_requested: Arc::clone(&runtime_log_streaming_requested),
@@ -4699,6 +4790,7 @@ fn main() {
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
             setup_health.attach_event_app(app.handle().clone());
+            setup_local_apps.attach_event_app(app.handle().clone());
             forward_runtime_events(
                 app.handle().clone(),
                 runtime.clone(),
@@ -4780,6 +4872,7 @@ fn main() {
                     config_path.clone(),
                     runtime.clone(),
                     registered_services.clone(),
+                    setup_local_apps.clone(),
                 );
                 bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
                 auto_start_agent(
@@ -4967,6 +5060,23 @@ mod tests {
 
         assert!(!registered_service_statuses_changed(&previous, &refreshed));
         assert!(registered_service_statuses_changed(&previous, &unhealthy));
+    }
+
+    #[test]
+    fn local_app_change_notifications_have_monotonic_revisions_and_context() {
+        let notifier = LocalAppsChangeNotifier::default();
+
+        let installed = notifier.notify(
+            LocalAppsChangeOperation::Install,
+            "com.baijimu.connector.test",
+        );
+        let synced = notifier.notify(LocalAppsChangeOperation::Sync, "com.baijimu.connector.test");
+
+        assert_eq!(installed.revision, 1);
+        assert_eq!(installed.operation, LocalAppsChangeOperation::Install);
+        assert_eq!(installed.connector_id, "com.baijimu.connector.test");
+        assert_eq!(synced.revision, 2);
+        assert_eq!(synced.operation, LocalAppsChangeOperation::Sync);
     }
 
     fn update_release_response(

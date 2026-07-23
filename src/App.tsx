@@ -438,6 +438,12 @@ interface ConnectorSummary {
   lastSyncedAtEpochMs: number;
 }
 
+interface LocalAppsChangedEvent {
+  revision: number;
+  operation: "install" | "sync" | "uninstall";
+  connectorId: string;
+}
+
 interface ConnectorPermission {
   id: string;
   title: string;
@@ -792,6 +798,7 @@ function App() {
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
+  const localAppsChangeRevisionRef = useRef(0);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [baijimuCli, setBaijimuCli] = useState<ManagedToolStatus | null>(null);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
@@ -847,6 +854,28 @@ function App() {
         dispose();
       }
     }).catch((err) => clientWarn("订阅 Agent 运行状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<LocalAppsChangedEvent>("local-apps-changed", (event) => {
+      if (!active || event.payload.revision <= localAppsChangeRevisionRef.current) {
+        return;
+      }
+      localAppsChangeRevisionRef.current = event.payload.revision;
+      void refreshLocalAppCatalog(event.payload.revision);
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅本地应用目录变更失败", err));
     return () => {
       active = false;
       unlisten?.();
@@ -1414,6 +1443,22 @@ function App() {
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
+    }
+  }
+
+  async function refreshLocalAppCatalog(revision: number) {
+    try {
+      // list_connector_apps first synchronizes installed manifests into the saved Agent config.
+      const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
+      const document = await invoke<ConfigDocument>("load_config");
+      if (revision < localAppsChangeRevisionRef.current) {
+        return;
+      }
+      setConnectorApps(apps);
+      applyConfigDocument(document);
+      await refreshRegisteredServiceStatuses();
+    } catch (err) {
+      clientWarn("刷新本地应用目录失败", err);
     }
   }
 
