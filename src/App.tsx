@@ -1,8 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import bjmLogoLight from "./assets/brand/bjm-logo-light.svg";
+import {
+  AlertTriangle,
+  Blocks,
+  CircleCheck,
+  ExternalLink,
+  Play,
+  Plus,
+  Search,
+  Settings2,
+  Square,
+  Terminal,
+  Wifi
+} from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
+import {
+  DesktopHeader,
+  DesktopSidebar,
+  DesktopStatusBar,
+  type DesktopPage
+} from "./components/DesktopShell";
 
 type RuntimeStatus =
   | "stopped"
@@ -527,7 +545,7 @@ interface UiAgentConfig {
 
 type SettingsSection = "identity" | "connection" | "runtime";
 const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
-type AppPage = "overview" | "apps" | "diagnostics";
+type AppPage = DesktopPage;
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
 type LocalAppKind = "connector" | "managed_tool" | "built_in" | "custom";
 type InstallSourceMode = "choose" | "market" | "custom";
@@ -788,6 +806,9 @@ function App() {
   const logsClearedThroughRef = useRef(0);
   const [mainWindowVisible, setMainWindowVisible] = useState(true);
   const [logServiceFilter, setLogServiceFilter] = useState("");
+  const [localAppQuery, setLocalAppQuery] = useState("");
+  const [localAppKindFilter, setLocalAppKindFilter] = useState<LocalAppKind | "all">("all");
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -943,6 +964,36 @@ function App() {
 
   useEffect(() => {
     void refreshDesktopPermissions();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyboardShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+        return;
+      }
+      const tagName = (event.target as HTMLElement | null)?.tagName;
+      const editing = tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+      if (editing && event.key !== ",") {
+        return;
+      }
+      const pageByKey: Partial<Record<string, AppPage>> = {
+        "1": "overview",
+        "2": "apps",
+        "3": "diagnostics",
+        "4": "settings",
+        ",": "settings"
+      };
+      const page = pageByKey[event.key];
+      if (page) {
+        event.preventDefault();
+        setActivePage(page);
+        if (page === "apps") {
+          setSelectedLocalAppId(null);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyboardShortcut);
+    return () => window.removeEventListener("keydown", handleKeyboardShortcut);
   }, []);
 
   useEffect(() => {
@@ -1432,6 +1483,7 @@ function App() {
   }
 
   async function refreshAll() {
+    setRefreshing(true);
     try {
       setError("");
       setRuntimeConflict(null);
@@ -1443,6 +1495,8 @@ function App() {
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -3127,126 +3181,162 @@ function App() {
     const hasRuntimeError = Boolean(runtime?.last_error) && !needsAuthorization;
     const hasAttention =
       needsAuthorization || hasRuntimeConflict || hasRuntimeError || hasDesktopPermissionGap;
+    const runtimeHealthy = runtime?.status === "online" && runtime.relay_registered;
+    const RuntimeIcon = runtimeHealthy ? CircleCheck : Wifi;
 
     return (
-      <div className="overview-grid">
-        <Card title="运行">
-          <div className="overview-stack">
-            <div className="overview-status-row">
-              <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
-              <div className="overview-meta">
-                <span>最近事件</span>
-                <strong>{runtime ? formatTime(runtime.last_event_at) : "-"}</strong>
-              </div>
+      <div className="overview-dashboard">
+        <section className="overview-hero" aria-labelledby="runtime-overview-title">
+          <div className="overview-hero-main">
+            <div className="overview-hero-icon">
+              <RuntimeIcon size={24} strokeWidth={1.8} aria-hidden="true" />
             </div>
-            <div className="hero-actions compact-actions">
+            <div>
+              <h2 id="runtime-overview-title">
+                {runtimeHealthy ? "本机能力已连接" : statusLabel}
+              </h2>
+              <p>
+                {runtimeHealthy
+                  ? "百积木工作区可以安全调用这台设备开放的本地应用与能力。"
+                  : needsAuthorization
+                    ? "完成浏览器授权后，即可把本机能力连接到百积木工作区。"
+                    : "Agent 当前未处于可用状态，请启动或检查连接。"}
+              </p>
+              <div className="hero-actions compact-actions">
               <button
-                className="primary accent"
+                className="primary accent button-with-icon"
                 onClick={() => void startAgent()}
                 disabled={busy || startActionLocked}
               >
+                <Play size={15} fill="currentColor" aria-hidden="true" />
                 {startActionLabel}
               </button>
               {runtimeCanStop ? (
-                <button className="secondary" onClick={() => void stopAgent()} disabled={busy}>
+                <button
+                  className="secondary button-with-icon"
+                  onClick={() => void stopAgent()}
+                  disabled={busy}
+                >
+                  <Square size={14} fill="currentColor" aria-hidden="true" />
                   停止
                 </button>
               ) : null}
-              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
+              <button
+                className="secondary button-with-icon"
+                onClick={() => void beginBrowserAuth()}
+                disabled={busy}
+              >
+                <Settings2 size={15} aria-hidden="true" />
                 重新授权
               </button>
               {!needsAuthorization ? (
-                <button className="secondary" onClick={() => void openConsole()} disabled={busy}>
+                <button
+                  className="secondary button-with-icon"
+                  onClick={() => void openConsole()}
+                  disabled={busy}
+                >
+                  <ExternalLink size={15} aria-hidden="true" />
                   打开控制台
                 </button>
               ) : null}
+              </div>
             </div>
           </div>
-        </Card>
-
-        <Card title="设备">
-          <div className="status-detail-grid">
-            <InfoRow label="设备名称" value={config.device.name} />
-            <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
-            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-          </div>
-        </Card>
-
-        <Card title="状态">
-          <div className="status-detail-grid">
-            <InfoRow label="连接状态" value={statusLabel} />
-            <InfoRow
-              label="Relay 注册"
-              value={formatRelayRegistration(runtime)}
-              tone={runtime?.relay_registered ? "normal" : "warning"}
-            />
-            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-            <InfoRow
-              label="最近错误"
-              value={hasRuntimeError ? runtime?.last_error || "无" : "无"}
-              tone={hasRuntimeError ? "danger" : "normal"}
-            />
-          </div>
-        </Card>
-
-        <Card title="需要处理">
-          {hasAttention ? (
-            <div className="attention-list">
-              {needsAuthorization ? (
-                <button className="attention-item" onClick={() => void beginBrowserAuth()} disabled={busy}>
-                  <strong>需要浏览器授权</strong>
-                  <span>完成授权后会自动写回工作区和连接凭证。</span>
-                </button>
-              ) : null}
-              {hasDesktopPermissionGap ? (
-                <button
-                  className="attention-item"
-                  onClick={() => {
-                    setActivePage("apps");
-                    const computerIndex = config.services.findIndex(isComputerService);
-                    if (computerIndex >= 0) {
-                      setExpandedServiceIndex(computerIndex);
-                      setSelectedLocalAppId("built-in:desktop-control");
-                    }
-                  }}
-                >
-                  <strong>桌面控制需要权限</strong>
-                  <span>打开桌面控制应用处理屏幕录制和辅助功能授权。</span>
-                </button>
-              ) : null}
-              {runtimeConflict ? (
-                <button className="attention-item" onClick={() => setActivePage("overview")}>
-                  <strong>已有 Agent 实例占用运行锁</strong>
-                  <span>PID {runtimeConflict.pid} 正在使用当前配置，可以停止旧实例后重新启动。</span>
-                </button>
-              ) : null}
-              {hasRuntimeError ? (
-                <button className="attention-item" onClick={() => setActivePage("diagnostics")}>
-                  <strong>运行错误</strong>
-                  <span>{runtime?.last_error}</span>
-                </button>
-              ) : null}
+          <div className="overview-hero-stats" aria-label="运行摘要">
+            <div className="overview-stat">
+              <span>连接状态</span>
+              <strong>{statusLabel}</strong>
             </div>
-          ) : (
-            <div className="empty-state compact-empty">当前没有需要处理的问题。</div>
-          )}
-        </Card>
-
-        <Card
-          title="本地应用"
-          action={
-            <button className="secondary" onClick={() => setActivePage("apps")}>
-              打开应用页
-            </button>
-          }
-        >
-          <div className="status-detail-grid">
-            <InfoRow label="应用总数" value={String(localApps.length)} />
-            <InfoRow label="已启用应用" value={String(enabledLocalAppCount)} />
-            <InfoRow label="已开放能力" value={String(exposedCapabilityCount)} />
-            <InfoRow label="最近日志" value={latestLog ? formatTime(latestLog.timestamp_ms) : "暂无"} />
+            <div className="overview-stat">
+              <span>本地应用</span>
+              <strong>{enabledLocalAppCount} / {localApps.length}</strong>
+            </div>
+            <div className="overview-stat">
+              <span>开放能力</span>
+              <strong>{exposedCapabilityCount}</strong>
+            </div>
+            <div className="overview-stat">
+              <span>工作区</span>
+              <strong title={config.platform.workspace_id || "未授权"}>
+                {config.platform.workspace_id || "未授权"}
+              </strong>
+            </div>
           </div>
-        </Card>
+        </section>
+
+        <div className="overview-grid">
+          <Card title="需要处理">
+            {hasAttention ? (
+              <div className="attention-list">
+                {needsAuthorization ? (
+                  <button className="attention-item" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                    <strong>需要浏览器授权</strong>
+                    <span>完成授权后会自动写回工作区和连接凭证。</span>
+                  </button>
+                ) : null}
+                {hasDesktopPermissionGap ? (
+                  <button
+                    className="attention-item"
+                    onClick={() => {
+                      setActivePage("apps");
+                      const computerIndex = config.services.findIndex(isComputerService);
+                      if (computerIndex >= 0) {
+                        setExpandedServiceIndex(computerIndex);
+                        setSelectedLocalAppId("built-in:desktop-control");
+                      }
+                    }}
+                  >
+                    <strong>桌面控制需要权限</strong>
+                    <span>打开桌面控制应用处理屏幕录制和辅助功能授权。</span>
+                  </button>
+                ) : null}
+                {runtimeConflict ? (
+                  <button className="attention-item" onClick={() => setActivePage("overview")}>
+                    <strong>已有 Agent 实例占用运行锁</strong>
+                    <span>PID {runtimeConflict.pid} 正在使用当前配置，可以停止旧实例后重新启动。</span>
+                  </button>
+                ) : null}
+                {hasRuntimeError ? (
+                  <button className="attention-item" onClick={() => setActivePage("diagnostics")}>
+                    <strong>运行错误</strong>
+                    <span>{runtime?.last_error}</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="empty-state compact-empty">
+                <CircleCheck size={20} aria-hidden="true" />
+                当前没有需要处理的问题。
+              </div>
+            )}
+          </Card>
+
+          <Card
+            title="连接详情"
+            action={
+              <button className="ghost button-with-icon" onClick={() => setActivePage("diagnostics")}>
+                <Terminal size={15} aria-hidden="true" />
+                打开诊断
+              </button>
+            }
+          >
+            <div className="status-detail-grid">
+              <InfoRow label="设备名称" value={config.device.name} />
+              <InfoRow label="运行名称" value={runtime?.agent_id ?? config.relay.agent_id} />
+              <InfoRow
+                label="Relay 注册"
+                value={formatRelayRegistration(runtime)}
+                tone={runtime?.relay_registered ? "normal" : "warning"}
+              />
+              <InfoRow label="最近事件" value={runtime ? formatTime(runtime.last_event_at) : "-"} />
+              <InfoRow
+                label="最近错误"
+                value={hasRuntimeError ? runtime?.last_error || "无" : "无"}
+                tone={hasRuntimeError ? "danger" : "normal"}
+              />
+            </div>
+          </Card>
+        </div>
       </div>
     );
   }
@@ -4895,29 +4985,62 @@ function App() {
     if (!config) {
       return <div />;
     }
+    const normalizedQuery = localAppQuery.trim().toLocaleLowerCase();
+    const visibleApps = localApps.filter((app) => {
+      if (localAppKindFilter !== "all" && app.kind !== localAppKindFilter) {
+        return false;
+      }
+      if (!normalizedQuery) {
+        return true;
+      }
+      return `${app.name} ${app.description} ${formatLocalAppKind(app.kind)}`
+        .toLocaleLowerCase()
+        .includes(normalizedQuery);
+    });
     const groupedApps: Array<{ title: string; apps: LocalAppItem[] }> = [
-      { title: "官方工具", apps: localApps.filter((app) => app.kind === "managed_tool") },
-      { title: "已安装应用", apps: localApps.filter((app) => app.kind === "connector") },
-      { title: "内置应用", apps: localApps.filter((app) => app.kind === "built_in") },
-      { title: "自定义应用", apps: localApps.filter((app) => app.kind === "custom") }
+      { title: "官方工具", apps: visibleApps.filter((app) => app.kind === "managed_tool") },
+      { title: "已安装应用", apps: visibleApps.filter((app) => app.kind === "connector") },
+      { title: "内置应用", apps: visibleApps.filter((app) => app.kind === "built_in") },
+      { title: "自定义应用", apps: visibleApps.filter((app) => app.kind === "custom") }
     ].filter((group) => group.apps.length > 0);
 
     return (
       <div className="local-app-panel">
-        <div className="local-app-panel-head">
-          <div>
-            <p className="eyebrow">本地应用</p>
-            <h2>应用</h2>
-            <p>管理官方工具和 connector，查看本机能力、版本和授权状态。</p>
+        <div className="app-toolbar">
+          <div className="app-toolbar-group">
+            <label className="app-search">
+              <Search size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span className="sr-only">搜索本地应用</span>
+              <input
+                type="search"
+                value={localAppQuery}
+                onChange={(event) => setLocalAppQuery(event.target.value)}
+                placeholder="搜索应用或能力"
+              />
+            </label>
+            <select
+              className="app-kind-filter"
+              value={localAppKindFilter}
+              onChange={(event) => setLocalAppKindFilter(event.target.value as LocalAppKind | "all")}
+              aria-label="按应用类型筛选"
+            >
+              <option value="all">全部类型</option>
+              <option value="managed_tool">官方工具</option>
+              <option value="connector">已安装应用</option>
+              <option value="built_in">内置应用</option>
+              <option value="custom">自定义应用</option>
+            </select>
+            <span className="app-result-count">{visibleApps.length} 个应用</span>
           </div>
           <button
-            className="primary"
+            className="primary button-with-icon"
             onClick={() => {
               setInstallSourceMode("choose");
               setCustomInstallConfirmed(false);
               setInstallPanelOpen(true);
             }}
           >
+            <Plus size={16} strokeWidth={2} aria-hidden="true" />
             安装应用
           </button>
         </div>
@@ -4954,8 +5077,17 @@ function App() {
             ))}
           </div>
         ) : (
-          <Card title="还没有应用" description="从应用市场安装 connector，或从本地目录安装开发中的应用。">
-            <div className="empty-state">还没有安装应用。</div>
+          <Card
+            title={localApps.length === 0 ? "还没有应用" : "没有匹配的应用"}
+            description={
+              localApps.length === 0
+                ? "从应用市场安装 connector，或从本地目录安装开发中的应用。"
+                : "调整搜索词或应用类型筛选后重试。"
+            }
+          >
+            <div className="empty-state">
+              {localApps.length === 0 ? "还没有安装应用。" : "当前筛选条件下没有结果。"}
+            </div>
           </Card>
         )}
       </div>
@@ -5030,7 +5162,7 @@ function App() {
     const closeDetail = () => setSelectedLocalAppId(null);
 
     return (
-      <div className="modal-backdrop" role="presentation" onClick={closeDetail}>
+      <div className="modal-backdrop app-detail-backdrop" role="presentation" onClick={closeDetail}>
         <section
           className="app-detail-dialog"
           role="dialog"
@@ -5537,12 +5669,6 @@ function App() {
             系统
           </button>
           <button
-            className={`section-tab ${activeDetailPanel === "settings" ? "active" : ""}`}
-            onClick={() => setActiveDetailPanel("settings")}
-          >
-            设置
-          </button>
-          <button
             className={`section-tab ${activeDetailPanel === "logs" ? "active" : ""}`}
             onClick={() => setActiveDetailPanel("logs")}
           >
@@ -5556,6 +5682,57 @@ function App() {
           </button>
         </div>
         {renderDetailPanel()}
+      </div>
+    );
+  }
+
+  function renderSettingsPage() {
+    if (!config) {
+      return <div />;
+    }
+    return (
+      <div className="settings-page">
+        <Card
+          title="客户端设置"
+          description="管理设备身份、工作区连接和本机运行参数。"
+          action={
+            <div className="service-actions">
+              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
+                浏览器授权
+              </button>
+              <button className="primary" onClick={() => void saveConfig()} disabled={busy}>
+                {busy ? "保存中" : "保存配置"}
+              </button>
+            </div>
+          }
+        >
+          <div className="status-detail-grid connection-summary-grid">
+            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
+            <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
+            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
+          </div>
+          <div className="section-tabs">
+            <button
+              className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("identity")}
+            >
+              设备
+            </button>
+            <button
+              className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("connection")}
+            >
+              连接
+            </button>
+            <button
+              className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection("runtime")}
+            >
+              运行
+            </button>
+          </div>
+          {renderSettingsSection()}
+        </Card>
       </div>
     );
   }
@@ -5825,100 +6002,97 @@ function App() {
   const pageTitleMap: Record<AppPage, string> = {
     overview: "概览",
     apps: "本地应用",
-    diagnostics: "诊断"
+    diagnostics: "诊断",
+    settings: "设置"
   };
 
   const pageDescriptionMap: Record<AppPage, string> = {
-    overview: "",
+    overview: "连接状态、本机能力与需要处理的事项",
     apps: "安装、启动和授权本机应用",
-    diagnostics: "系统、日志与清单"
+    diagnostics: "系统状态、运行日志与对外能力清单",
+    settings: "设备身份、工作区连接与本机运行参数"
   };
-  const showPageHeader = activePage !== "apps";
+  const runtimeStatusClass = runtime?.status ?? "stopped";
+  const currentVersion = appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-";
+
+  function navigateToPage(page: AppPage) {
+    setActivePage(page);
+    if (page === "apps") {
+      setSelectedLocalAppId(null);
+    }
+    if (page === "diagnostics" && activeDetailPanel === "settings") {
+      setActiveDetailPanel("system");
+    }
+  }
 
   return (
     <main className="app-shell">
       <div className="desktop-shell">
-        <aside className="sidebar">
-          <div className="sidebar-brand">
-            <div className="sidebar-brand-heading">
-              <img className="sidebar-brand-logo" src={bjmLogoLight} alt="" aria-hidden="true" />
-              <div>
-                <p className="eyebrow">百积木</p>
-                <h1>本地连接客户端</h1>
-              </div>
-            </div>
-            <p className="sidebar-device-name">{config.device.name}</p>
-            <div className={`status-pill status-${runtime?.status ?? "stopped"}`}>{statusLabel}</div>
-          </div>
-
-          <nav className="sidebar-nav">
-            <button
-              className={`sidebar-nav-item ${activePage === "overview" ? "active" : ""}`}
-              onClick={() => setActivePage("overview")}
-            >
-              <span>概览</span>
-              <small>状态与主操作</small>
-            </button>
-            <button
-              className={`sidebar-nav-item ${activePage === "apps" ? "active" : ""}`}
-              onClick={() => {
-                setActivePage("apps");
-                setSelectedLocalAppId(null);
-              }}
-            >
-              <span>应用</span>
-              <small>市场与本机</small>
-            </button>
-            <button
-              className={`sidebar-nav-item ${activePage === "diagnostics" ? "active" : ""}`}
-              onClick={() => setActivePage("diagnostics")}
-            >
-              <span>诊断</span>
-              <small>{latestLog ? "查看日志与清单" : "系统信息"}</small>
-            </button>
-          </nav>
-
-        </aside>
+        <DesktopSidebar
+          activePage={activePage}
+          deviceName={config.device.name}
+          statusClass={runtimeStatusClass}
+          statusLabel={statusLabel}
+          onNavigate={navigateToPage}
+        />
 
         <section className="main-panel">
-          {showPageHeader ? (
-            <header className="page-header">
-              <div>
-                <p className="eyebrow">{pageTitleMap[activePage]}</p>
-                <h2>{pageTitleMap[activePage]}</h2>
-                {pageDescriptionMap[activePage] ? <p>{pageDescriptionMap[activePage]}</p> : null}
-              </div>
-              <div className="page-actions">
+          <div className="desktop-workspace">
+            <DesktopHeader
+              title={pageTitleMap[activePage]}
+              description={pageDescriptionMap[activePage]}
+              busy={refreshing}
+              onRefresh={() => void refreshAll()}
+              actions={
+                <div className="desktop-toolbar">
+                  <span className={`status-pill status-${runtimeStatusClass}`}>{statusLabel}</span>
                 {activePage === "diagnostics" ? (
                   <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
                     恢复示例
                   </button>
                 ) : null}
+                </div>
+              }
+            />
+
+            <div className="desktop-content">
+              <div className="desktop-content-inner">
+                {renderRuntimeConflictPanel()}
+                {degradedStartupComponents.length > 0 && !startupHealth?.safeMode ? (
+                  <div className="alert warning startup-health-alert">
+                    <span>
+                      部分启动组件处于降级状态：
+                      {degradedStartupComponents.map((component) => component.label).join("、")}。桌面客户端仍可使用。
+                    </span>
+                    <button className="ghost" onClick={() => void openStartupLog()}>
+                      查看启动日志
+                    </button>
+                  </div>
+                ) : null}
+                {runtime?.last_error && !needsAuthorization && activePage !== "diagnostics" ? (
+                  <div className="alert warning">
+                    <AlertTriangle size={16} aria-hidden="true" />
+                    {runtime.last_error}
+                  </div>
+                ) : null}
+                {renderBrowserAuthPanel()}
+
+                <div className="page-body">
+                  {activePage === "overview" ? renderOverviewPage() : null}
+                  {activePage === "apps" ? renderAppsPage() : null}
+                  {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
+                  {activePage === "settings" ? renderSettingsPage() : null}
+                </div>
               </div>
-            </header>
-          ) : null}
-
-          {renderRuntimeConflictPanel()}
-          {degradedStartupComponents.length > 0 && !startupHealth?.safeMode ? (
-            <div className="alert warning startup-health-alert">
-              <span>
-                部分启动组件处于降级状态：
-                {degradedStartupComponents.map((component) => component.label).join("、")}。桌面客户端仍可使用。
-              </span>
-              <button className="ghost" onClick={() => void openStartupLog()}>
-                查看启动日志
-              </button>
             </div>
-          ) : null}
-          {runtime?.last_error && !needsAuthorization && activePage !== "diagnostics" ? (
-            <div className="alert warning">{runtime.last_error}</div>
-          ) : null}
-          {renderBrowserAuthPanel()}
 
-          <div className="page-body">
-            {activePage === "overview" ? renderOverviewPage() : null}
-            {activePage === "apps" ? renderAppsPage() : null}
-            {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
+            <DesktopStatusBar
+              statusClass={runtimeStatusClass}
+              statusLabel={statusLabel}
+              workspace={config.platform.workspace_id}
+              version={currentVersion}
+              lastEvent={runtime ? formatTime(runtime.last_event_at) : "-"}
+            />
           </div>
         </section>
       </div>
