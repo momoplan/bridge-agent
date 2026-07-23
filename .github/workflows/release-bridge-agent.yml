@@ -1061,15 +1061,46 @@ jobs:
             retry_gh gh release upload "$RELEASE_TAG" "$asset" --clobber
           done
 
+  mirror-domestic-release:
+    name: Mirror release bundles to Gitee
+    runs-on: ubuntu-22.04
+    needs: release
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Download signed release bundles from GitHub
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets \
+            --pattern 'Baijimu_*'
+
       - name: Upload release bundles to Gitee and register metadata
         shell: bash
         env:
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
           BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
           GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
-          RELEASE_TARGET: ${{ matrix.name }}
         run: |
           set -euo pipefail
+
+          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN GITEE_ACCESS_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
 
           api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
           case "$api" in
@@ -1077,57 +1108,49 @@ jobs:
           esac
           version="${RELEASE_TAG#bridge-agent-v}"
 
-          shopt -s nullglob
-          case "$RELEASE_TARGET" in
-            "macOS Universal")
-              bundle_files=(
-                src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-                src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
-              )
-              ;;
-            "Windows x64")
-              bundle_files=(src-tauri/target/release/bundle/msi/*.msi)
-              ;;
-            "Linux x64")
-              bundle_files=(
-                src-tauri/target/release/bundle/appimage/*.AppImage
-                src-tauri/target/release/bundle/deb/*.deb
-              )
-              ;;
-            *)
-              echo "Unsupported release target: $RELEASE_TARGET" >&2
+          upload_asset() {
+            local target="$1"
+            local asset="$2"
+            local signature="${asset}.sig"
+            if [ ! -s "$asset" ]; then
+              echo "Missing release bundle: $asset" >&2
               exit 1
-              ;;
-          esac
+            fi
+            if [ -s "$signature" ]; then
+              node .github/scripts/upload-release-asset.mjs \
+                "$api" "$RELEASE_TAG" "$version" "$target" "$asset" "$signature"
+            else
+              node .github/scripts/upload-release-asset.mjs \
+                "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
+            fi
+          }
 
-          if [ "${#bundle_files[@]}" -eq 0 ]; then
-            echo "No release bundles found for $RELEASE_TARGET" >&2
+          shopt -s nullglob
+          windows=(release-assets/*.msi)
+          macos_tar=(release-assets/*.app.tar.gz)
+          macos_dmg=(release-assets/*.dmg)
+          linux_deb=(release-assets/*.deb)
+          linux_appimage=(release-assets/*.AppImage)
+          if [ "${#windows[@]}" -ne 1 ] ||
+             [ "${#macos_tar[@]}" -ne 1 ] ||
+             [ "${#macos_dmg[@]}" -ne 1 ] ||
+             [ "${#linux_deb[@]}" -ne 1 ] ||
+             [ "${#linux_appimage[@]}" -ne 1 ]; then
+            echo "Expected exactly one release bundle for each published format" >&2
+            find release-assets -maxdepth 1 -type f -print | sort
             exit 1
           fi
 
-          for asset in "${bundle_files[@]}"; do
-            if [ -s "${asset}.sig" ]; then
-              node .github/scripts/upload-release-asset.mjs \
-                "$api" \
-                "$RELEASE_TAG" \
-                "$version" \
-                "$RELEASE_TARGET" \
-                "$asset" \
-                "${asset}.sig"
-            else
-              node .github/scripts/upload-release-asset.mjs \
-                "$api" \
-                "$RELEASE_TAG" \
-                "$version" \
-                "$RELEASE_TARGET" \
-                "$asset"
-            fi
-          done
+          upload_asset "Windows x64" "${windows[0]}"
+          upload_asset "macOS Universal" "${macos_tar[0]}"
+          upload_asset "macOS Universal" "${macos_dmg[0]}"
+          upload_asset "Linux x64" "${linux_deb[0]}"
+          upload_asset "Linux x64" "${linux_appimage[0]}"
 
   publish-update-service:
     name: Publish update service metadata
     runs-on: ubuntu-22.04
-    needs: release
+    needs: mirror-domestic-release
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
