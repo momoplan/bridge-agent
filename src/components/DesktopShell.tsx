@@ -2,14 +2,13 @@ import type { ReactNode } from "react";
 import {
   Activity,
   Blocks,
-  Home,
   RefreshCw,
   Settings,
   SlidersHorizontal
 } from "lucide-react";
 import bjmLogoLight from "../assets/brand/bjm-logo-light.svg";
 
-export type DesktopPage = "overview" | "apps" | "diagnostics" | "settings";
+export type DesktopPage = "apps" | "diagnostics" | "settings";
 
 interface DesktopSidebarProps {
   activePage: DesktopPage;
@@ -23,10 +22,9 @@ const NAV_ITEMS: Array<{
   id: DesktopPage;
   label: string;
   description: string;
-  icon: typeof Home;
+  icon: typeof Blocks;
 }> = [
-  { id: "overview", label: "概览", description: "连接与运行状态", icon: Home },
-  { id: "apps", label: "本地应用", description: "应用与开放能力", icon: Blocks },
+  { id: "apps", label: "应用", description: "本机应用与开放能力", icon: Blocks },
   { id: "diagnostics", label: "诊断", description: "系统、日志与清单", icon: Activity }
 ];
 

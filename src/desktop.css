@@ -472,90 +472,6 @@ select {
   justify-content: center;
 }
 
-.overview-dashboard {
-  display: grid;
-  gap: var(--ds-space-lg);
-}
-
-.overview-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
-  gap: var(--ds-space-xl);
-  padding: var(--ds-space-xl);
-  border: 1px solid var(--ds-color-border);
-  border-radius: var(--ds-radius-lg);
-  background: var(--ds-color-panel);
-  box-shadow: var(--ds-shadow-panel);
-}
-
-.overview-hero-main {
-  display: flex;
-  gap: var(--ds-space-lg);
-  align-items: flex-start;
-}
-
-.overview-hero-icon {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: var(--ds-radius-lg);
-  background: rgba(37, 99, 235, 0.1);
-  color: var(--ds-color-brand-primary);
-}
-
-.overview-hero h2 {
-  margin: 0;
-  font-size: var(--ds-font-headline);
-  line-height: var(--ds-line-heading);
-}
-
-.overview-hero p {
-  margin: var(--ds-space-sm) 0 0;
-  color: var(--ds-color-text-secondary);
-}
-
-.overview-hero .hero-actions {
-  margin-top: var(--ds-space-lg);
-}
-
-.overview-hero-stats {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--ds-space-sm);
-}
-
-.overview-stat {
-  padding: var(--ds-space-md);
-  border: 1px solid var(--ds-color-border);
-  border-radius: var(--ds-radius-md);
-  background: var(--ds-color-page);
-}
-
-.overview-stat span,
-.overview-stat strong {
-  display: block;
-}
-
-.overview-stat span {
-  color: var(--ds-color-text-muted);
-  font-size: 11px;
-}
-
-.overview-stat strong {
-  margin-top: var(--ds-space-xs);
-  overflow: hidden;
-  font-size: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.overview-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--ds-space-lg);
-}
-
 .status-detail-grid {
   gap: 0;
 }
@@ -617,6 +533,43 @@ select {
 .local-app-groups,
 .local-app-group {
   gap: var(--ds-space-lg);
+}
+
+.app-attention-stack {
+  display: grid;
+  gap: var(--ds-space-sm);
+}
+
+.app-attention-stack .notice-banner,
+.local-app-panel > .notice-banner {
+  display: flex;
+  gap: var(--ds-space-lg);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-attention-stack .notice-banner > div:first-child {
+  min-width: 0;
+}
+
+.app-attention-stack .notice-banner strong,
+.app-attention-stack .notice-banner span,
+.local-app-panel > .notice-banner strong,
+.local-app-panel > .notice-banner span {
+  display: block;
+}
+
+.app-attention-stack .notice-banner span,
+.local-app-panel > .notice-banner span {
+  margin-top: 2px;
+  color: var(--ds-color-text-secondary);
+}
+
+.notice-banner-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--ds-space-sm);
+  align-items: center;
 }
 
 .local-app-grid {
@@ -745,10 +698,6 @@ select {
 }
 
 @media (max-width: 1180px) {
-  .overview-hero {
-    grid-template-columns: 1fr;
-  }
-
   .desktop-shell {
     grid-template-columns: 210px minmax(0, 1fr);
   }
@@ -795,5 +744,11 @@ select {
 
   .app-detail-dialog {
     width: calc(100vw - 72px);
+  }
+
+  .app-attention-stack .notice-banner,
+  .local-app-panel > .notice-banner {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
