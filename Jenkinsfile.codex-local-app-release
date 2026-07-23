@@ -8,11 +8,11 @@ pipeline {
     }
 
     parameters {
-        string(name: 'BRIDGE_REF', defaultValue: 'codex/codex-management-app', description: 'Bridge repository branch containing the Codex local app release tooling')
+        string(name: 'BRIDGE_REF', defaultValue: 'main', description: 'Bridge repository branch containing the Codex local app release tooling')
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact bridge repository commit containing the Codex local app release tooling')
-        string(name: 'CONNECTOR_REF', defaultValue: 'codex/local-app-embedded-ui', description: 'Codex local app source branch')
+        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
-        string(name: 'CONNECTOR_VERSION', defaultValue: '0.5.0', description: 'Codex local app version')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '0.6.0', description: 'Codex local app version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
     }
 
