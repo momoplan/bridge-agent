@@ -1625,7 +1625,11 @@ function App() {
     const source =
       installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
     if (!source) {
-      setError(installSourceMode === "market" ? "请选择要安装的应用" : "请输入本地目录或 Git 仓库地址");
+      setError(
+        installSourceMode === "market"
+          ? "请选择要安装的应用"
+          : "请输入本地目录、Git 仓库或远程压缩包地址"
+      );
       return;
     }
     if (installSourceMode === "custom" && !customInstallConfirmed) {
@@ -4713,7 +4717,7 @@ function App() {
                 }}
               >
                 <strong>自定义安装</strong>
-                <span>从本地目录或 Git 仓库安装开发中的 connector。</span>
+                <span>从本地目录、Git 仓库或远程 ZIP / tar.gz 包安装 connector。</span>
               </button>
             </div>
           ) : installSourceMode === "market" ? (
@@ -4741,17 +4745,17 @@ function App() {
             </div>
           ) : (
             <div className="form-grid">
-              <Field label="本地目录或 Git 仓库" wide>
+              <Field label="本地目录、Git 仓库或远程压缩包" wide>
                 <input
                   value={installSource}
                   onChange={(event) => setInstallSource(event.target.value)}
-                  placeholder="/Users/me/connectors/my-app 或 https://gitee.com/org/repo.git"
+                  placeholder="/path/to/app、https://gitee.com/org/repo.git 或 https://example.com/app.zip"
                 />
               </Field>
               <div className="install-risk-note">
                 <strong>平台未验证的自定义来源</strong>
                 <span>
-                  本地目录或 Git 仓库不属于市场可信发布。安装后应用可以执行其声明的本机命令，后续同步也需要再次确认。
+                  本地目录、Git 仓库和远程压缩包不属于市场可信发布。安装后应用可以执行其声明的本机命令，后续同步也需要再次确认。
                 </span>
               </div>
               <label className="check-row wide">

@@ -66,6 +66,11 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 
 const UPDATE_USER_AGENT: &str = concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
+const CONNECTOR_DOWNLOAD_USER_AGENT: &str = concat!(
+    "Baijimu-Connector-Installer/",
+    env!("CARGO_PKG_VERSION"),
+    " Wget/1.21.4"
+);
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const RUNTIME_SNAPSHOT_EVENT: &str = "runtime-snapshot-changed";
 const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
@@ -3856,7 +3861,10 @@ async fn resolve_connector_archive_source(
         .ok_or_else(|| "本地应用下载源必须是 .zip、.tar.gz 或 .tgz 文件。".to_string())?;
     let response = Client::new()
         .get(archive_url)
-        .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
+        .header(
+            reqwest::header::USER_AGENT,
+            CONNECTOR_DOWNLOAD_USER_AGENT,
+        )
         .send()
         .await
         .map_err(|err| format!("下载本地应用失败: {err}"))?;

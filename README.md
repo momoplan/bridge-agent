@@ -622,8 +622,8 @@ Gitee Release 是国内二进制下载源，但不承担版本策略。客户端
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag -a bridge-agent-v0.1.113 -m "Release bridge-agent v0.1.113"
-git push origin bridge-agent-v0.1.113
+git tag -a bridge-agent-v0.1.114 -m "Release bridge-agent v0.1.114"
+git push origin bridge-agent-v0.1.114
 ```
 
 只能给已经存在于 GitHub `main` 的提交打正式 tag。工作流使用全局
