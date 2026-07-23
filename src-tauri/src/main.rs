@@ -3861,10 +3861,7 @@ async fn resolve_connector_archive_source(
         .ok_or_else(|| "本地应用下载源必须是 .zip、.tar.gz 或 .tgz 文件。".to_string())?;
     let response = Client::new()
         .get(archive_url)
-        .header(
-            reqwest::header::USER_AGENT,
-            CONNECTOR_DOWNLOAD_USER_AGENT,
-        )
+        .header(reqwest::header::USER_AGENT, CONNECTOR_DOWNLOAD_USER_AGENT)
         .send()
         .await
         .map_err(|err| format!("下载本地应用失败: {err}"))?;
