@@ -1633,6 +1633,39 @@ select:focus {
   margin-bottom: 14px;
 }
 
+.python-runtime-fields,
+.python-runtime-panel,
+.python-runtime-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.python-runtime-fields {
+  flex-direction: column;
+}
+
+.python-runtime-panel,
+.python-runtime-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.python-runtime-panel {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.python-runtime-actions {
+  margin-top: 2px;
+}
+
+.python-runtime-path {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .service-list,
 .method-list {
   display: grid;

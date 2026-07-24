@@ -79,6 +79,8 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub node_path: Option<String>,
     #[serde(default)]
+    pub python_path: Option<String>,
+    #[serde(default)]
     pub codex_binary_path: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub default_timeout_secs: u64,
@@ -288,6 +290,7 @@ impl AgentConfig {
             },
             runtime: RuntimeConfig {
                 node_path: None,
+                python_path: None,
                 codex_binary_path: None,
                 default_timeout_secs: default_timeout_secs(),
                 max_timeout_secs: default_max_timeout_secs(),
@@ -339,6 +342,7 @@ impl AgentConfig {
             bail!("runtime timeouts must be greater than zero");
         }
         validate_optional_runtime_path("runtime.node_path", self.runtime.node_path.as_deref())?;
+        validate_optional_runtime_path("runtime.python_path", self.runtime.python_path.as_deref())?;
         validate_optional_runtime_path(
             "runtime.codex_binary_path",
             self.runtime.codex_binary_path.as_deref(),

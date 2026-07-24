@@ -102,6 +102,7 @@ interface DeviceConfig {
 
 interface RuntimeConfig {
   node_path?: string | null;
+  python_path?: string | null;
   codex_binary_path?: string | null;
   default_timeout_secs: number;
   max_timeout_secs: number;
@@ -115,6 +116,15 @@ interface RuntimeConfig {
   event_server_token?: string | null;
   service_registration_enabled: boolean;
   service_registration_token?: string | null;
+}
+
+interface PythonRuntimeStatus {
+  requirement: string;
+  configuredPath?: string | null;
+  detectedPath?: string | null;
+  version?: string | null;
+  compatible: boolean;
+  message: string;
 }
 
 interface ShellBinding {
@@ -853,6 +863,8 @@ function App() {
   const [installSource, setInstallSource] = useState("");
   const [customInstallConfirmed, setCustomInstallConfirmed] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
+  const [pythonStatus, setPythonStatus] = useState<PythonRuntimeStatus | null>(null);
+  const [pythonCheckBusy, setPythonCheckBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1465,6 +1477,7 @@ function App() {
       setRuntimeConflict(null);
       const document = await invoke<ConfigDocument>("load_config");
       applyConfigDocument(document);
+      await refreshPythonRuntime(document.config.runtime.python_path);
       await refreshMarketConnectorApps();
       await refreshConnectorApps();
       await refreshBaijimuCli();
@@ -1474,6 +1487,32 @@ function App() {
     } finally {
       setRefreshing(false);
     }
+  }
+
+  async function refreshPythonRuntime(pythonPath?: string | null) {
+    try {
+      setPythonCheckBusy(true);
+      const status = await invoke<PythonRuntimeStatus>("python_runtime_status", {
+        pythonPath: pythonPath ?? ""
+      });
+      setPythonStatus(status);
+    } catch (err) {
+      setPythonStatus({
+        requirement: ">=3.12,<3.13",
+        compatible: false,
+        message: readError(err)
+      });
+    } finally {
+      setPythonCheckBusy(false);
+    }
+  }
+
+  function useDetectedPython() {
+    if (!pythonStatus?.compatible || !pythonStatus.detectedPath) {
+      return;
+    }
+    updateRuntime("python_path", pythonStatus.detectedPath);
+    setMessage("已填入检测到的 Python 3.12 路径，请保存配置。");
   }
 
   async function refreshLocalAppCatalog(revision: number) {
@@ -3041,6 +3080,57 @@ function App() {
       case "runtime":
         return (
           <div className="form-grid">
+            <Field
+              label="Python 3.12 路径"
+              wide
+              hint="微信、企业微信、微信发送、企业微信发送共用此解释器；客户端会为每个应用创建独立虚拟环境，不会向全局 Python 安装依赖。"
+            >
+              <div className="python-runtime-fields">
+              <input
+                value={config.runtime.python_path ?? ""}
+                onChange={(event) => {
+                  updateRuntime("python_path", emptyToNull(event.target.value));
+                  setPythonStatus(null);
+                }}
+                placeholder="/opt/homebrew/bin/python3.12"
+              />
+              <div className="python-runtime-panel">
+                <span className={`status-pill status-${pythonStatus?.compatible ? "online" : "stopped"}`}>
+                  {pythonStatus?.compatible ? "Python 可用" : "Python 未就绪"}
+                </span>
+                <span>
+                  {pythonStatus?.message ?? "点击“检测 Python”检查当前路径或自动发现 Python 3.12。"}
+                </span>
+              </div>
+              <div className="python-runtime-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void refreshPythonRuntime(config.runtime.python_path)}
+                  disabled={pythonCheckBusy}
+                >
+                  {pythonCheckBusy ? "检测中…" : "检测 Python"}
+                </button>
+                {!config.runtime.python_path && pythonStatus?.compatible && pythonStatus.detectedPath ? (
+                  <button type="button" className="secondary" onClick={useDetectedPython}>
+                    使用检测路径
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() =>
+                    void openExternalUrl("https://www.python.org/downloads/release/python-31210/")
+                  }
+                >
+                  安装 Python 3.12
+                </button>
+              </div>
+              {pythonStatus?.detectedPath ? (
+                <code className="python-runtime-path">{pythonStatus.detectedPath}</code>
+              ) : null}
+              </div>
+            </Field>
             <Field label="Node 路径" hint="留空时自动从 PATH、登录 shell 和桌面 App 内置 runtime 查找。">
               <input
                 value={config.runtime.node_path ?? ""}

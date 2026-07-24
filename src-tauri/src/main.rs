@@ -18,7 +18,8 @@ use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     format_connector_sync_failures, install_connector_from_path_with_provenance,
-    install_rustls_crypto_provider, list_connectors, load_config as load_agent_config,
+    inspect_python_runtime, install_rustls_crypto_provider, list_connectors,
+    load_config as load_agent_config,
     load_connector_manifest, manifest_preview_json, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, start_connector, stop_connector, sync_installed_connectors_report,
@@ -891,6 +892,23 @@ async fn load_config(state: tauri::State<'_, DesktopState>) -> Result<ConfigDocu
         config: config_for_ui(&config)?,
         runtime,
     })
+}
+
+#[tauri::command]
+async fn python_runtime_status(
+    state: tauri::State<'_, DesktopState>,
+    python_path: Option<String>,
+) -> Result<bridge_agent::PythonRuntimeStatus, String> {
+    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
+    let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    if let Some(path) = python_path {
+        config.runtime.python_path = if path.trim().is_empty() {
+            None
+        } else {
+            Some(path)
+        };
+    }
+    Ok(inspect_python_runtime(&config.runtime))
 }
 
 #[tauri::command]
@@ -4902,6 +4920,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
+            python_runtime_status,
             save_config,
             save_service,
             delete_service,

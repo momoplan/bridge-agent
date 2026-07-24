@@ -20,6 +20,7 @@ pub use config::{
     RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration,
     ServiceStartCommand, UploadConfig,
 };
+pub use connector::inspect_python_runtime;
 pub use connector::{
     connector_data_dir, connector_management_token_path, connectors_dir,
     format_connector_sync_failures, install_connector_from_path,
@@ -30,7 +31,7 @@ pub use connector::{
     uninstall_connector, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorManagement, ConnectorManagementOperation, ConnectorManifest,
     ConnectorServiceStartResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure,
-    ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi,
+    ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi, PythonRuntimeStatus,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

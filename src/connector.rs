@@ -20,10 +20,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
 const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
+const CONNECTOR_PYTHON_REQUIREMENT: &str = ">=3.12,<3.13";
 const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
 const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
 const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 const CONNECTOR_MANAGEMENT_TOKEN_FILE: &str = "management-token";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonRuntimeStatus {
+    pub requirement: String,
+    pub configured_path: Option<String>,
+    pub detected_path: Option<String>,
+    pub version: Option<String>,
+    pub compatible: bool,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1151,7 +1163,8 @@ fn resolve_installed_start_commands(
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
-    let python_env = ensure_python_project_environment(package_path, &python_scripts)?;
+    let python_env =
+        ensure_python_project_environment(package_path, &python_scripts, runtime_config)?;
     let node_path = resolve_command_path("node", runtime_config);
     let codex_path = resolve_command_path("codex", runtime_config);
     let command_runtime = InstalledCommandRuntime {
@@ -1525,14 +1538,25 @@ fn read_python_project_scripts(package_path: &Path) -> Result<BTreeMap<String, S
 fn ensure_python_project_environment(
     package_path: &Path,
     scripts: &BTreeMap<String, String>,
+    runtime_config: &RuntimeConfig,
 ) -> Result<Option<PathBuf>> {
     if scripts.is_empty() {
         return Ok(None);
     }
     let env_path = package_path.join(CONNECTOR_PYTHON_ENV_DIR);
     let python = python_env_executable(&env_path);
+    let requires_python = read_python_requires_python(package_path)?;
+    let base_python = resolve_python_for_project(requires_python.as_deref(), runtime_config)?;
+    if python.exists() && !python_env_uses_base_interpreter(&python, Path::new(&base_python)) {
+        fs::remove_dir_all(&env_path).with_context(|| {
+            format!(
+                "failed to recreate Python connector environment {} after interpreter change",
+                env_path.display()
+            )
+        })?;
+    }
     if !python.exists() {
-        create_python_env(package_path, &env_path)?;
+        create_python_env(&env_path, &base_python)?;
     }
     if python_project_install_needed(package_path, &env_path)? {
         install_python_project_dependencies(package_path, &python)?;
@@ -1553,7 +1577,12 @@ fn python_project_install_needed(package_path: &Path, env_path: &Path) -> Result
         .metadata()
         .and_then(|metadata| metadata.modified())
         .with_context(|| format!("failed to inspect {}", marker.display()))?;
-    for relative in ["pyproject.toml", "setup.py", "setup.cfg"] {
+    for relative in [
+        "pyproject.toml",
+        "requirements.lock",
+        "setup.py",
+        "setup.cfg",
+    ] {
         let path = package_path.join(relative);
         if !path.exists() {
             continue;
@@ -1569,18 +1598,18 @@ fn python_project_install_needed(package_path: &Path, env_path: &Path) -> Result
     Ok(false)
 }
 
-fn create_python_env(package_path: &Path, env_path: &Path) -> Result<()> {
+fn create_python_env(env_path: &Path, base_python: &str) -> Result<()> {
     let parent = env_path
         .parent()
         .with_context(|| format!("failed to resolve parent for {}", env_path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let requires_python = read_python_requires_python(package_path)?;
-    let python = resolve_python_for_project(requires_python.as_deref())?;
-    let output = Command::new(&python)
+    let output = Command::new(base_python)
         .args(["-m", "venv"])
         .arg(env_path)
         .output()
-        .with_context(|| format!("failed to create Python environment with `{python} -m venv`"))?;
+        .with_context(|| {
+            format!("failed to create Python environment with `{base_python} -m venv`")
+        })?;
     if !output.status.success() {
         bail!(
             "failed to create Python connector environment {}\nstdout:\n{}\nstderr:\n{}",
@@ -1590,6 +1619,28 @@ fn create_python_env(package_path: &Path, env_path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn python_env_uses_base_interpreter(env_python: &Path, base_python: &Path) -> bool {
+    let output = Command::new(env_python)
+        .args([
+            "-I",
+            "-c",
+            "import os,sys; print(os.path.realpath(sys._base_executable))",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let current = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let expected = base_python
+        .canonicalize()
+        .unwrap_or_else(|_| base_python.to_path_buf());
+    let current = current.canonicalize().unwrap_or(current);
+    current == expected
 }
 
 fn read_python_requires_python(package_path: &Path) -> Result<Option<String>> {
@@ -1637,33 +1688,87 @@ fn read_python_project_metadata(package_path: &Path) -> Result<Option<toml::Valu
     Ok(Some(project))
 }
 
-fn resolve_python_for_project(requires_python: Option<&str>) -> Result<String> {
-    for candidate in python_candidates() {
+fn resolve_python_for_project(
+    requires_python: Option<&str>,
+    runtime_config: &RuntimeConfig,
+) -> Result<String> {
+    let requirement = requires_python.unwrap_or(CONNECTOR_PYTHON_REQUIREMENT);
+    for candidate in python_candidates(runtime_config) {
         if python_matches_requirement(&candidate, requires_python) {
             return Ok(candidate.display().to_string());
         }
     }
     bail!(
-        "failed to find a Python interpreter matching {}. Install Python 3.10+ and make it available in PATH.",
-        requires_python.unwrap_or("the connector requirement")
+        "failed to find a Python interpreter matching {requirement}. Install Python 3.12, then set runtime.python_path to its absolute executable path.",
     )
 }
 
-fn python_candidates() -> Vec<PathBuf> {
+pub fn inspect_python_runtime(runtime_config: &RuntimeConfig) -> PythonRuntimeStatus {
+    let requirement = CONNECTOR_PYTHON_REQUIREMENT.to_string();
+    let configured_path = runtime_config
+        .python_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    for candidate in python_candidates(runtime_config) {
+        let Some(version) = python_version(&candidate) else {
+            continue;
+        };
+        let version_text = format!("{}.{}.{}", version.0, version.1, version.2);
+        let detected_path = candidate
+            .canonicalize()
+            .unwrap_or(candidate)
+            .display()
+            .to_string();
+        let compatible = python_version_satisfies_requirement(version, &requirement);
+        let message = if compatible {
+            format!("已检测到 Python {version_text}，可供本地应用使用。")
+        } else {
+            format!(
+                "当前解释器是 Python {version_text}，不满足 {requirement}；请安装并选择 Python 3.12。"
+            )
+        };
+        return PythonRuntimeStatus {
+            requirement,
+            configured_path,
+            detected_path: Some(detected_path),
+            version: Some(version_text),
+            compatible,
+            message,
+        };
+    }
+
+    PythonRuntimeStatus {
+        requirement,
+        configured_path,
+        detected_path: None,
+        version: None,
+        compatible: false,
+        message: "未检测到可执行的 Python 3.12。请先安装 Python 3.12，再选择其可执行文件。"
+            .to_string(),
+    }
+}
+
+fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(value) = runtime_config
+        .python_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_unique_path_entry(&mut candidates, PathBuf::from(value));
+        return candidates;
+    }
     if let Some(value) = env::var("BRIDGE_AGENT_PYTHON")
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
         push_unique_path_entry(&mut candidates, PathBuf::from(value));
     }
-    for executable in [
-        "python3.12",
-        "python3.11",
-        "python3.10",
-        "python3",
-        "python",
-    ] {
+    for executable in ["python3.12", "python3", "python"] {
         for path in find_commands_in_paths(executable) {
             push_unique_path_entry(&mut candidates, path);
         }
@@ -1701,10 +1806,31 @@ fn python_matches_requirement(candidate: &Path, requires_python: Option<&str>) -
     let Some(version) = python_version(candidate) else {
         return false;
     };
-    match minimum_python_version(requires_python) {
-        Some(minimum) => version >= minimum,
-        None => true,
-    }
+    python_version_satisfies_requirement(version, CONNECTOR_PYTHON_REQUIREMENT)
+        && requires_python
+            .map(|requirement| python_version_satisfies_requirement(version, requirement))
+            .unwrap_or(true)
+}
+
+fn python_version_satisfies_requirement(version: (u32, u32, u32), requirement: &str) -> bool {
+    requirement.split(',').map(str::trim).all(|part| {
+        if let Some(required) = part.strip_prefix(">=").and_then(parse_python_version) {
+            return version >= required;
+        }
+        if let Some(required) = part.strip_prefix("<=").and_then(parse_python_version) {
+            return version <= required;
+        }
+        if let Some(required) = part.strip_prefix("==").and_then(parse_python_version) {
+            return version == required;
+        }
+        if let Some(required) = part.strip_prefix('>').and_then(parse_python_version) {
+            return version > required;
+        }
+        if let Some(required) = part.strip_prefix('<').and_then(parse_python_version) {
+            return version < required;
+        }
+        false
+    })
 }
 
 fn python_version(candidate: &Path) -> Option<(u32, u32, u32)> {
@@ -1740,22 +1866,42 @@ fn parse_python_version(value: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-fn minimum_python_version(requires_python: Option<&str>) -> Option<(u32, u32, u32)> {
-    let requires_python = requires_python?;
-    requires_python
-        .split(',')
-        .filter_map(|part| part.trim().strip_prefix(">="))
-        .filter_map(parse_python_version)
-        .max()
-}
-
 fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Result<()> {
+    let lock_path = package_path.join("requirements.lock");
+    if lock_path.is_file() {
+        let output = Command::new(python)
+            .args([
+                "-I",
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--requirement",
+            ])
+            .arg(&lock_path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to install locked Python connector dependencies with {}",
+                    python.display()
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "failed to install locked Python connector dependencies for {}\nstdout:\n{}\nstderr:\n{}",
+                package_path.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return Ok(());
+    }
     let dependencies = read_python_project_dependencies(package_path)?;
     if dependencies.is_empty() {
         return Ok(());
     }
     let output = Command::new(python)
-        .args(["-m", "pip", "install", "--disable-pip-version-check"])
+        .args(["-I", "-m", "pip", "install", "--disable-pip-version-check"])
         .args(&dependencies)
         .output()
         .with_context(|| {
@@ -1804,7 +1950,7 @@ fn write_python_project_script(
     {
         let python = python_env_executable(env_path);
         let runner = format!(
-            "@echo off\r\n\"{}\" -c \"import sys; sys.path.insert(0, r'{}'); from {} import {}; raise SystemExit({}())\" %*\r\n",
+            "@echo off\r\nset PYTHONNOUSERSITE=1\r\nset PYTHONPATH=\r\n\"{}\" -I -c \"import sys; sys.path.insert(0, r'{}'); from {} import {}; raise SystemExit({}())\" %*\r\n",
             python.display(),
             package_path.display(),
             module,
@@ -1824,7 +1970,7 @@ fn write_python_project_script(
 
         let python = python_env_executable(env_path);
         let runner = format!(
-            "#!/bin/sh\nexec {} - \"$@\" <<'PY'\nimport sys\nsys.path.insert(0, {:?})\nfrom {} import {}\nif __name__ == '__main__':\n    raise SystemExit({}())\nPY\n",
+            "#!/bin/sh\nunset PYTHONPATH\nexport PYTHONNOUSERSITE=1\nexec {} -I - \"$@\" <<'PY'\nimport sys\nsys.path.insert(0, {:?})\nfrom {} import {}\nif __name__ == '__main__':\n    raise SystemExit({}())\nPY\n",
             shell_single_quote(&python.display().to_string()),
             package_path.display().to_string(),
             module,
@@ -3064,11 +3210,18 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
     fn parses_python_version_requirements() {
         assert_eq!(parse_python_version("Python 3.12.7"), Some((3, 12, 7)));
         assert_eq!(parse_python_version("3.10"), Some((3, 10, 0)));
-        assert_eq!(minimum_python_version(Some(">=3.10,<4")), Some((3, 10, 0)));
-        assert_eq!(
-            minimum_python_version(Some(">=3.10,>=3.11")),
-            Some((3, 11, 0))
-        );
+        assert!(python_version_satisfies_requirement(
+            (3, 12, 7),
+            ">=3.12,<3.13"
+        ));
+        assert!(!python_version_satisfies_requirement(
+            (3, 11, 9),
+            ">=3.12,<3.13"
+        ));
+        assert!(!python_version_satisfies_requirement(
+            (3, 13, 0),
+            ">=3.12,<3.13"
+        ));
     }
 
     #[test]
