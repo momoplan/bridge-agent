@@ -293,7 +293,6 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-      REQUESTED_CLI_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_commit || '' }}
 
     steps:
       - name: Checkout release tooling
@@ -324,46 +323,24 @@ jobs:
           echo "CLI_VERSION=$version" >> "$GITHUB_ENV"
           echo "CLI_ASSETS_DIRECTORY=$assets" >> "$GITHUB_ENV"
 
-      - name: Resolve immutable Gitee CLI source commit
+      - name: Mirror immutable CLI release tag to Gitee
         shell: bash
         env:
           GITEE_USER: zxflimit_admin
           GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
-          cli_commit="$REQUESTED_CLI_COMMIT"
-          if [ -z "$cli_commit" ]; then
-            if [ -z "$GITEE_ACCESS_TOKEN" ]; then
-              echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
-              exit 1
-            fi
-            askpass="$RUNNER_TEMP/baijimu-cli-gitee-askpass.sh"
-            cleanup_askpass() {
-              rm -f "$askpass"
-            }
-            trap cleanup_askpass EXIT
-            cat > "$askpass" <<'ASKPASS'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' "$GITEE_USER" ;;
-            *Password*) printf '%s\n' "$GITEE_ACCESS_TOKEN" ;;
-            *) exit 1 ;;
-          esac
-          ASKPASS
-            chmod 700 "$askpass"
-            export GIT_ASKPASS="$askpass"
-            export GIT_TERMINAL_PROMPT=0
-            remote="https://gitee.com/zxflimit_admin/baijimu-cli-rs.git"
-            cli_commit="$(git ls-remote "$remote" "refs/tags/v${CLI_VERSION}^{}" | awk 'NR == 1 {print $1}')"
-            if [ -z "$cli_commit" ]; then
-              cli_commit="$(git ls-remote "$remote" "refs/tags/v${CLI_VERSION}" | awk 'NR == 1 {print $1}')"
-            fi
-          fi
-          if ! [[ "$cli_commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Unable to resolve exact Gitee CLI commit for v${CLI_VERSION}" >&2
+          if [ -z "$GITEE_ACCESS_TOKEN" ]; then
+            echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
             exit 1
           fi
-          echo "CLI_COMMIT=$cli_commit" >> "$GITHUB_ENV"
+          if ! git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null; then
+            git fetch origin \
+              "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          fi
+          release_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          tools/release/publish-gitee-tag.sh "$RELEASE_TAG" "$release_commit"
+          echo "RELEASE_COMMIT=$release_commit" >> "$GITHUB_ENV"
 
       - name: Mirror and verify domestic release
         shell: bash
@@ -376,9 +353,9 @@ jobs:
             exit 1
           fi
           node .github/scripts/mirror-cli-release-to-gitee.mjs \
-            "v${CLI_VERSION}" \
+            "$RELEASE_TAG" \
             "$CLI_VERSION" \
-            "$CLI_COMMIT" \
+            "$RELEASE_COMMIT" \
             "$CLI_ASSETS_DIRECTORY"
 
   publish-npm:

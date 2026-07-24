@@ -9,7 +9,7 @@ import { mirrorCliReleaseToGitee } from "./mirror-cli-release-to-gitee.mjs";
 
 const cleanups = [];
 const version = "0.1.17";
-const tagName = `v${version}`;
+const tagName = `baijimu-cli-v${version}`;
 const targetCommitish = "a".repeat(40);
 const release = {
   id: 117,
@@ -35,6 +35,9 @@ describe("mirrorCliReleaseToGitee", () => {
       if (url.pathname.endsWith(`/releases/tags/${tagName}`)) {
         return jsonResponse(null);
       }
+      if (url.pathname.endsWith(`/baijimu-cli-rs/releases/tags/v${version}`)) {
+        return jsonResponse(null);
+      }
       if (url.pathname.endsWith("/releases") && options.method === "POST") {
         releaseRequests.push(JSON.parse(options.body));
         return jsonResponse(release, 201);
@@ -53,7 +56,7 @@ describe("mirrorCliReleaseToGitee", () => {
         {
           id: uploads.length,
           browser_download_url:
-            `https://gitee.com/zxflimit_admin/baijimu-cli-rs/attach_files/` +
+            `https://gitee.com/zxflimit_admin/bridge-agent/attach_files/` +
             `${uploads.length}/download/${encodeURIComponent(fileName)}`,
         },
         201,
@@ -128,10 +131,11 @@ describe("mirrorCliReleaseToGitee", () => {
       id: index + 1,
       name,
       browser_download_url:
-        `https://gitee.com/zxflimit_admin/baijimu-cli-rs/attach_files/` +
+        `https://gitee.com/zxflimit_admin/bridge-agent/attach_files/` +
         `${index + 1}/download/${encodeURIComponent(name)}`,
     }));
-    const fetchImpl = vi.fn(async (input) => {
+    const deletedReleases = [];
+    const fetchImpl = vi.fn(async (input, options = {}) => {
       const url = new URL(input);
       if (url.hostname === "gitee.com" && url.pathname.includes("/attach_files/")) {
         const name = decodeURIComponent(url.pathname.split("/download/")[1]);
@@ -139,6 +143,20 @@ describe("mirrorCliReleaseToGitee", () => {
       }
       if (url.pathname.endsWith(`/releases/tags/${tagName}`)) {
         return jsonResponse(release);
+      }
+      if (url.pathname.endsWith(`/baijimu-cli-rs/releases/tags/v${version}`)) {
+        return jsonResponse({
+          id: 999,
+          tag_name: `v${version}`,
+          name: `Baijimu CLI ${version}`,
+        });
+      }
+      if (
+        url.pathname.endsWith("/baijimu-cli-rs/releases/999") &&
+        options.method === "DELETE"
+      ) {
+        deletedReleases.push(999);
+        return new Response(null, { status: 204 });
       }
       if (url.pathname.endsWith("/releases")) {
         return jsonResponse([release]);
@@ -164,6 +182,7 @@ describe("mirrorCliReleaseToGitee", () => {
 
     expect(uploadImpl).not.toHaveBeenCalled();
     expect(result.assets[0].downloadUrl).toBe(attachments[0].browser_download_url);
+    expect(deletedReleases).toEqual([999]);
   });
 });
 
