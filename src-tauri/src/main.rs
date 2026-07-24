@@ -17,16 +17,16 @@ use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    format_connector_sync_failures, install_connector_from_path_with_provenance,
-    inspect_python_runtime, install_rustls_crypto_provider, list_connectors,
-    load_config as load_agent_config,
-    load_connector_manifest, manifest_preview_json, reset_invalid_config,
-    resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
-    show_connector, start_connector, stop_connector, sync_installed_connectors_report,
-    terminate_runtime_lock_owner, uninstall_connector, AgentConfig, AgentRuntimeManager,
-    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
-    ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel, RuntimeEvent, RuntimeLockConflict,
-    RuntimeSnapshot, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    format_connector_sync_failures, inspect_python_runtime,
+    install_connector_from_path_with_provenance, install_rustls_crypto_provider, list_connectors,
+    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
+    reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
+    save_config as save_agent_config, show_connector, start_connector, stop_connector,
+    sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
+    AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
+    RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
+    ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
