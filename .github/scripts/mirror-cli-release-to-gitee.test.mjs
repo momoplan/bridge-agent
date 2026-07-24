@@ -28,8 +28,8 @@ describe("mirrorCliReleaseToGitee", () => {
     const releaseRequests = [];
     const fetchImpl = vi.fn(async (input, options = {}) => {
       const url = new URL(input);
-      if (url.hostname === "gitee.com" && url.pathname.includes("/attach_files/")) {
-        const name = decodeURIComponent(url.pathname.split("/download/")[1]);
+      if (url.hostname === "gitee.com" && url.pathname.includes("/releases/download/")) {
+        const name = decodeURIComponent(url.pathname.split("/").at(-1));
         return new Response(files.get(name), { status: 200 });
       }
       if (url.pathname.endsWith(`/releases/tags/${tagName}`)) {
@@ -56,8 +56,8 @@ describe("mirrorCliReleaseToGitee", () => {
         {
           id: uploads.length,
           browser_download_url:
-            `https://gitee.com/zxflimit_admin/bridge-agent/attach_files/` +
-            `${uploads.length}/download/${encodeURIComponent(fileName)}`,
+            `https://gitee.com/zxflimit_admin/bridge-agent/releases/download/${tagName}/` +
+            encodeURIComponent(fileName),
         },
         201,
       );
@@ -131,14 +131,14 @@ describe("mirrorCliReleaseToGitee", () => {
       id: index + 1,
       name,
       browser_download_url:
-        `https://gitee.com/zxflimit_admin/bridge-agent/attach_files/` +
-        `${index + 1}/download/${encodeURIComponent(name)}`,
+        `https://gitee.com/zxflimit_admin/bridge-agent/releases/download/${tagName}/` +
+        encodeURIComponent(name),
     }));
     const deletedReleases = [];
     const fetchImpl = vi.fn(async (input, options = {}) => {
       const url = new URL(input);
-      if (url.hostname === "gitee.com" && url.pathname.includes("/attach_files/")) {
-        const name = decodeURIComponent(url.pathname.split("/download/")[1]);
+      if (url.hostname === "gitee.com" && url.pathname.includes("/releases/download/")) {
+        const name = decodeURIComponent(url.pathname.split("/").at(-1));
         return new Response(files.get(name), { status: 200 });
       }
       if (url.pathname.endsWith(`/releases/tags/${tagName}`)) {
