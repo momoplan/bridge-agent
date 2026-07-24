@@ -122,7 +122,7 @@ export async function mirrorCliReleaseToGitee({
           logger,
         ));
       const downloadUrl = uploaded.browser_download_url ?? uploaded.download_url;
-      validateDownloadUrl(downloadUrl, owner, repository, file.name);
+      validateDownloadUrl(downloadUrl, owner, repository, tagName, file.name);
       await verifyAnonymousDownload({
         url: downloadUrl,
         file,
@@ -371,8 +371,15 @@ function parseChecksumFile(value, expectedName) {
   return match[1].toLowerCase();
 }
 
-function validateDownloadUrl(value, owner, repository, expectedName) {
+function validateDownloadUrl(value, owner, repository, tagName, expectedName) {
   const url = new URL(value);
+  const encodedName = encodeURIComponent(expectedName);
+  const isReleaseDownload =
+    url.pathname ===
+    `/${owner}/${repository}/releases/download/${encodeURIComponent(tagName)}/${encodedName}`;
+  const isLegacyAttachmentDownload =
+    url.pathname.startsWith(`/${owner}/${repository}/attach_files/`) &&
+    url.pathname.endsWith(`/download/${encodedName}`);
   if (
     url.protocol !== "https:" ||
     url.hostname !== "gitee.com" ||
@@ -380,8 +387,7 @@ function validateDownloadUrl(value, owner, repository, expectedName) {
     url.password ||
     url.search ||
     url.hash ||
-    !url.pathname.startsWith(`/${owner}/${repository}/`) ||
-    !url.pathname.endsWith(`/download/${encodeURIComponent(expectedName)}`)
+    (!isReleaseDownload && !isLegacyAttachmentDownload)
   ) {
     throw new Error(`Gitee returned an invalid permanent download URL for ${expectedName}`);
   }
