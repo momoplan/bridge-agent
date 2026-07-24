@@ -508,4 +508,17 @@ jobs:
           npm ci
           npm test
           npm run pack:check
-          npm publish --access public --registry https://registry.npmjs.org/
+          published_version="$(
+            npm view "@baijimu/cli@${CLI_VERSION}" version \
+              --registry https://registry.npmjs.org/ 2>/dev/null || true
+          )"
+          if [ "$published_version" = "$CLI_VERSION" ]; then
+            published_native_version="$(
+              npm view "@baijimu/cli@${CLI_VERSION}" baijimu.nativeVersion \
+                --registry https://registry.npmjs.org/
+            )"
+            test "$published_native_version" = "$CLI_VERSION"
+            echo "Reusing immutable @baijimu/cli@${CLI_VERSION} from npm"
+          else
+            npm publish --access public --registry https://registry.npmjs.org/
+          fi
