@@ -326,10 +326,33 @@ jobs:
 
       - name: Resolve immutable Gitee CLI source commit
         shell: bash
+        env:
+          GITEE_USER: zxflimit_admin
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
           cli_commit="$REQUESTED_CLI_COMMIT"
           if [ -z "$cli_commit" ]; then
+            if [ -z "$GITEE_ACCESS_TOKEN" ]; then
+              echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
+              exit 1
+            fi
+            askpass="$RUNNER_TEMP/baijimu-cli-gitee-askpass.sh"
+            cleanup_askpass() {
+              rm -f "$askpass"
+            }
+            trap cleanup_askpass EXIT
+            cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' "$GITEE_USER" ;;
+            *Password*) printf '%s\n' "$GITEE_ACCESS_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          ASKPASS
+            chmod 700 "$askpass"
+            export GIT_ASKPASS="$askpass"
+            export GIT_TERMINAL_PROMPT=0
             remote="https://gitee.com/zxflimit_admin/baijimu-cli-rs.git"
             cli_commit="$(git ls-remote "$remote" "refs/tags/v${CLI_VERSION}^{}" | awk 'NR == 1 {print $1}')"
             if [ -z "$cli_commit" ]; then
