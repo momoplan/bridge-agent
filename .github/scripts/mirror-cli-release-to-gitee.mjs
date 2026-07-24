@@ -8,7 +8,7 @@ import { uploadMultipartFile } from "./multipart-file-upload.mjs";
 
 const defaultApiBase = "https://gitee.com/api/v5";
 const defaultOwner = "zxflimit_admin";
-const defaultRepository = "baijimu-cli-rs";
+const defaultRepository = "bridge-agent";
 const maximumAttachmentBytes = 100_000_000;
 const platformNames = ["macos-universal", "windows-x64", "linux-x64"];
 
@@ -149,7 +149,36 @@ export async function mirrorCliReleaseToGitee({
     }
   }
 
+  await removeLegacyPrivateRelease({ request, owner, version, logger });
   return { releaseId: String(release.id), tagName, version, assets: mirrored };
+}
+
+async function removeLegacyPrivateRelease({ request, owner, version, logger }) {
+  const repository = "baijimu-cli-rs";
+  const tagName = `v${version}`;
+  let release;
+  try {
+    release = await request(
+      `/repos/${owner}/${repository}/releases/tags/${encodeURIComponent(tagName)}`,
+    );
+  } catch (error) {
+    if (error.status === 404) return;
+    throw error;
+  }
+  if (release === null) return;
+  if (
+    !release?.id ||
+    release.tag_name !== tagName ||
+    release.name !== `Baijimu CLI ${version}`
+  ) {
+    throw new Error(
+      `Refusing to delete unrecognized private CLI release metadata for ${tagName}`,
+    );
+  }
+  await request(`/repos/${owner}/${repository}/releases/${release.id}`, {
+    method: "DELETE",
+  });
+  logger.log(`Deleted legacy private CLI Release ${tagName}; source tag was preserved`);
 }
 
 async function prepareRelease({
@@ -198,7 +227,7 @@ async function prepareRelease({
     throw new Error("Gitee CLI releases response is not an array");
   }
   const managed = releases
-    .filter((release) => /^v\d+\.\d+\.\d+$/.test(release.tag_name ?? ""))
+    .filter((release) => /^baijimu-cli-v\d+\.\d+\.\d+$/.test(release.tag_name ?? ""))
     .sort((left, right) => releaseTime(right) - releaseTime(left));
   const keepIds = new Set(
     [currentRelease, ...managed.filter((release) => release.id !== currentRelease.id)]
@@ -321,8 +350,11 @@ async function retry(
 }
 
 function validateReleaseIdentity({ tagName, version, targetCommitish, assetsDirectory, token }) {
-  if (!/^\d+\.\d+\.\d+$/.test(version ?? "") || tagName !== `v${version}`) {
-    throw new Error("CLI Gitee release tag must be v<semantic-version>");
+  if (
+    !/^\d+\.\d+\.\d+$/.test(version ?? "") ||
+    tagName !== `baijimu-cli-v${version}`
+  ) {
+    throw new Error("CLI Gitee release tag must be baijimu-cli-v<semantic-version>");
   }
   if (!/^[0-9a-f]{40}$/.test(targetCommitish ?? "")) {
     throw new Error("CLI target commit must be an exact 40-character commit");

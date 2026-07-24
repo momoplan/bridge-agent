@@ -12,8 +12,8 @@ remote="${GITEE_REMOTE_URL:-https://gitee.com/zxflimit_admin/bridge-agent.git}"
 : "${GITEE_USER:?GITEE_USER is required}"
 : "${GITEE_ACCESS_TOKEN:?GITEE_ACCESS_TOKEN is required}"
 
-if ! [[ "$tag" =~ ^bridge-agent-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-  echo "invalid Bridge Agent release tag: $tag" >&2
+if ! [[ "$tag" =~ ^(bridge-agent|baijimu-cli)-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "invalid Bridge Agent or Baijimu CLI release tag: $tag" >&2
   exit 2
 fi
 if ! [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]]; then
