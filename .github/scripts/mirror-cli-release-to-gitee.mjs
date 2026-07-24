@@ -102,8 +102,34 @@ export async function mirrorCliReleaseToGitee({
         );
       }
 
+      let reusable = existing[0];
+      if (reusable) {
+        const downloadUrl = reusable.browser_download_url ?? reusable.download_url;
+        validateDownloadUrl(downloadUrl, owner, repository, tagName, file.name);
+        try {
+          await verifyAnonymousDownload({
+            url: downloadUrl,
+            file,
+            fetchImpl,
+            sleepImpl,
+            logger,
+          });
+          logger.log(`Reused and verified immutable ${file.name}`);
+        } catch (error) {
+          if (error.retryable !== false) throw error;
+          await request(
+            `/repos/${owner}/${repository}/releases/${release.id}/attach_files/${reusable.id}`,
+            { method: "DELETE" },
+          );
+          logger.warn?.(
+            `Deleted incomplete mismatched Gitee attachment ${file.name}: ${error.message}`,
+          );
+          reusable = null;
+        }
+      }
+
       const uploaded =
-        existing[0] ??
+        reusable ??
         (await retry(
           async () => {
             const response = await uploadImpl({
@@ -123,18 +149,16 @@ export async function mirrorCliReleaseToGitee({
         ));
       const downloadUrl = uploaded.browser_download_url ?? uploaded.download_url;
       validateDownloadUrl(downloadUrl, owner, repository, tagName, file.name);
-      await verifyAnonymousDownload({
-        url: downloadUrl,
-        file,
-        fetchImpl,
-        sleepImpl,
-        logger,
-      });
-      logger.log(
-        existing[0]
-          ? `Reused and verified immutable ${file.name}`
-          : `Mirrored and verified ${file.name}`,
-      );
+      if (!reusable) {
+        await verifyAnonymousDownload({
+          url: downloadUrl,
+          file,
+          fetchImpl,
+          sleepImpl,
+          logger,
+        });
+        logger.log(`Mirrored and verified ${file.name}`);
+      }
 
       if (file.name === asset.name) {
         mirrored.push({
@@ -287,18 +311,20 @@ async function verifyAnonymousDownload({ url, file, fetchImpl, sleepImpl, logger
       const bytes = Buffer.from(await response.arrayBuffer());
       if (file.expectedBytes) {
         if (!bytes.equals(file.expectedBytes)) {
-          throw new Error(`anonymous checksum attachment content mismatch for ${file.name}`);
+          throw deterministicMismatch(
+            `anonymous checksum attachment content mismatch for ${file.name}`,
+          );
         }
         return;
       }
       if (bytes.length !== file.expectedSize) {
-        throw new Error(
+        throw deterministicMismatch(
           `anonymous download size ${bytes.length} does not match ${file.expectedSize} for ${file.name}`,
         );
       }
       const checksum = createHash("sha256").update(bytes).digest("hex");
       if (checksum !== file.expectedSha256) {
-        throw new Error(
+        throw deterministicMismatch(
           `anonymous download checksum mismatch for ${file.name}: expected ${file.expectedSha256}, got ${checksum}`,
         );
       }
@@ -308,7 +334,14 @@ async function verifyAnonymousDownload({ url, file, fetchImpl, sleepImpl, logger
     10_000,
     sleepImpl,
     logger,
+    (error) => error.retryable !== false,
   );
+}
+
+function deterministicMismatch(message) {
+  const error = new Error(message);
+  error.retryable = false;
+  return error;
 }
 
 async function decodeJsonResponse(response, label) {

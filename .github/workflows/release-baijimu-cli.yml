@@ -134,8 +134,34 @@ jobs:
           fi
           echo "CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
 
+      - name: Reuse existing immutable release asset
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="baijimu-cli-${CLI_VERSION}-${{ matrix.name }}.zip"
+          assets="$RUNNER_TEMP/existing-baijimu-cli-release-asset"
+          mkdir -p "$assets"
+          if gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$assets" \
+            --pattern "$asset" \
+            --pattern "$asset.sha256" &&
+             (
+               cd "$assets"
+               sha256sum --check "$asset.sha256"
+             ); then
+            echo "REUSE_CLI_RELEASE_ASSET=true" >> "$GITHUB_ENV"
+            echo "Reusing verified immutable GitHub Release asset $asset"
+          else
+            echo "REUSE_CLI_RELEASE_ASSET=false" >> "$GITHUB_ENV"
+            echo "No complete verified GitHub Release asset found for $asset; rebuilding"
+          fi
+
       - name: Build macOS universal CLI
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +176,7 @@ jobs:
           chmod 755 "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
 
       - name: Sign macOS CLI
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -178,7 +204,7 @@ jobs:
           codesign --verify --strict --verbose=2 "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
 
       - name: Build Windows CLI
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -189,7 +215,7 @@ jobs:
           Copy-Item -Force (Join-Path $cliDir "target\release\baijimu.exe") (Join-Path $packageBin "baijimu.exe")
 
       - name: Prepare Windows signing tools
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: pwsh
         env:
           SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
@@ -216,7 +242,7 @@ jobs:
           "WINDOWS_SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Sign Windows CLI
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: pwsh
         env:
           SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
@@ -232,7 +258,7 @@ jobs:
           if ($signature.Status -ne "Valid") { throw "CLI signature status is $($signature.Status)" }
 
       - name: Build Linux CLI
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -242,6 +268,7 @@ jobs:
           install -m 755 "$cli_dir/target/release/baijimu" "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
 
       - name: Verify and package CLI
+        if: env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -264,6 +291,7 @@ jobs:
           echo "RELEASE_ASSET=$output" >> "$GITHUB_ENV"
 
       - name: Upload CLI release assets
+        if: env.REUSE_CLI_RELEASE_ASSET != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

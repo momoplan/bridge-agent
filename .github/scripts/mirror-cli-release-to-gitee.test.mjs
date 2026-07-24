@@ -184,6 +184,79 @@ describe("mirrorCliReleaseToGitee", () => {
     expect(result.assets[0].downloadUrl).toBe(attachments[0].browser_download_url);
     expect(deletedReleases).toEqual([999]);
   });
+
+  it("replaces a mismatched attachment left by an incomplete recovery", async () => {
+    const { directory, files } = await createReleaseAssets();
+    const name = `baijimu-cli-${version}-macos-universal.zip`;
+    const staleAttachment = {
+      id: 77,
+      name,
+      browser_download_url:
+        `https://gitee.com/zxflimit_admin/bridge-agent/releases/download/${tagName}/` +
+        encodeURIComponent(name),
+    };
+    let stale = true;
+    const deletedAttachments = [];
+    const fetchImpl = vi.fn(async (input, options = {}) => {
+      const url = new URL(input);
+      if (url.pathname.includes("/releases/download/")) {
+        const requestedName = decodeURIComponent(url.pathname.split("/").at(-1));
+        if (requestedName === name && stale) {
+          return new Response(Buffer.from("stale ZIP bytes"), { status: 200 });
+        }
+        return new Response(files.get(requestedName), { status: 200 });
+      }
+      if (url.pathname.endsWith(`/releases/tags/${tagName}`)) {
+        return jsonResponse(release);
+      }
+      if (url.pathname.endsWith(`/baijimu-cli-rs/releases/tags/v${version}`)) {
+        return jsonResponse(null);
+      }
+      if (
+        url.pathname.endsWith(`/${release.id}/attach_files/${staleAttachment.id}`) &&
+        options.method === "DELETE"
+      ) {
+        stale = false;
+        deletedAttachments.push(staleAttachment.id);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/releases")) {
+        return jsonResponse([release]);
+      }
+      if (url.pathname.endsWith(`/${release.id}/attach_files`)) {
+        return jsonResponse([staleAttachment]);
+      }
+      throw new Error(`Unexpected fetch: ${options.method ?? "GET"} ${url}`);
+    });
+    const uploadedNames = [];
+    const uploadImpl = vi.fn(async ({ fileName }) => {
+      uploadedNames.push(fileName);
+      return jsonResponse(
+        {
+          id: 100 + uploadedNames.length,
+          browser_download_url:
+            `https://gitee.com/zxflimit_admin/bridge-agent/releases/download/${tagName}/` +
+            encodeURIComponent(fileName),
+        },
+        201,
+      );
+    });
+
+    await mirrorCliReleaseToGitee({
+      tagName,
+      version,
+      targetCommitish,
+      assetsDirectory: directory,
+      token: "test-token",
+      fetchImpl,
+      uploadImpl,
+      logger: { log: vi.fn(), warn: vi.fn() },
+      sleepImpl: vi.fn(),
+    });
+
+    expect(deletedAttachments).toEqual([staleAttachment.id]);
+    expect(uploadedNames).toContain(name);
+  });
 });
 
 async function createReleaseAssets() {
