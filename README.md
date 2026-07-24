@@ -103,6 +103,12 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 
 Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端内置一个首次安装基线版本，后续版本由本地应用管理器独立升级和回滚，不跟随客户端覆盖或降级。CLI 不注册远程能力，也不经过 relay。
 
+Baijimu CLI 的正式二进制同时保留在 GitHub Release，并同步到
+`zxflimit_admin/baijimu-cli-rs` 的 Gitee Release。GitHub Release 是完整历史和构建摘要
+来源，Gitee Release 是桌面端官方工具升级使用的国内下载源。只有三个平台 ZIP 和
+`.sha256` 均完成国内上传、匿名整包下载和 SHA-256 回读验证后，CLI 发布流水线才允许
+本地应用市场登记该版本；市场 manifest 不得直接返回 GitHub 下载地址。
+
 Codex 的运行状态与账户状态彼此独立：应用状态来自 Connector 的 health check，账户页单独显示当前工作区、项目和凭证有效性。LLM key 只由 Codex 本地应用处理，不进入 Bridge Agent、前端状态或 relay，也不会作为 `codexSession` 方法暴露给远端。
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
@@ -612,6 +618,12 @@ open -a "百积木" --args --safe-mode
 9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
 Gitee Release 是国内二进制下载源，但不承担版本策略。客户端仍只向 `updates.baijimu.com` 查询最新版本；更新服务只返回元数据和 Gitee 固定公开 URL，不上传文件、不申请 OSS token，也不依赖 lowcode 运行服务。Gitee Release 只保留最近 5 个版本以控制附件配额，删除 Release 时保留 Git tag；GitHub Release 保留完整历史。
+
+独立 Baijimu CLI 的 `baijimu-cli-vX.Y.Z` GitHub Release 也遵循相同的国内制品原则，
+但其版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，不登记到桌面端
+Tauri 更新服务。CLI 的 `vX.Y.Z` 源码 tag、ZIP 和 `.sha256` 同步到
+`zxflimit_admin/baijimu-cli-rs` Gitee Release；市场发布前必须验证 Gitee 匿名下载得到
+的完整字节与 GitHub Release 服务端 SHA-256 完全一致。
 
 仓库里的工作流文件是：
 

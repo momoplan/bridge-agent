@@ -22,6 +22,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: baijimu-cli-release
+  cancel-in-progress: false
+
 jobs:
   prepare-release:
     runs-on: ubuntu-22.04
@@ -283,8 +287,79 @@ jobs:
           set -euo pipefail
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
 
-  publish-npm:
+  mirror-domestic-release:
+    name: Mirror CLI release assets to Gitee
     needs: publish-release
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      REQUESTED_CLI_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_commit || '' }}
+
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Download and verify GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#baijimu-cli-v}"
+          assets="$RUNNER_TEMP/baijimu-cli-release-assets"
+          mkdir -p "$assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$assets" \
+            --pattern "baijimu-cli-${version}-*.zip" \
+            --pattern "baijimu-cli-${version}-*.zip.sha256"
+          test "$(find "$assets" -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')" = 3
+          test "$(find "$assets" -maxdepth 1 -type f -name '*.zip.sha256' | wc -l | tr -d ' ')" = 3
+          (
+            cd "$assets"
+            sha256sum --check ./*.sha256
+          )
+          echo "CLI_VERSION=$version" >> "$GITHUB_ENV"
+          echo "CLI_ASSETS_DIRECTORY=$assets" >> "$GITHUB_ENV"
+
+      - name: Resolve immutable Gitee CLI source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_commit="$REQUESTED_CLI_COMMIT"
+          if [ -z "$cli_commit" ]; then
+            remote="https://gitee.com/zxflimit_admin/baijimu-cli-rs.git"
+            cli_commit="$(git ls-remote "$remote" "refs/tags/v${CLI_VERSION}^{}" | awk 'NR == 1 {print $1}')"
+            if [ -z "$cli_commit" ]; then
+              cli_commit="$(git ls-remote "$remote" "refs/tags/v${CLI_VERSION}" | awk 'NR == 1 {print $1}')"
+            fi
+          fi
+          if ! [[ "$cli_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to resolve exact Gitee CLI commit for v${CLI_VERSION}" >&2
+            exit 1
+          fi
+          echo "CLI_COMMIT=$cli_commit" >> "$GITHUB_ENV"
+
+      - name: Mirror and verify domestic release
+        shell: bash
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITEE_ACCESS_TOKEN" ]; then
+            echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
+            exit 1
+          fi
+          node .github/scripts/mirror-cli-release-to-gitee.mjs \
+            "v${CLI_VERSION}" \
+            "$CLI_VERSION" \
+            "$CLI_COMMIT" \
+            "$CLI_ASSETS_DIRECTORY"
+
+  publish-npm:
+    needs: mirror-domestic-release
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -334,6 +409,11 @@ jobs:
           npm_native_version="$(node -p 'require(process.argv[1]).baijimu.nativeVersion' "$RUNNER_TEMP/baijimu-cli-rs/npm/package.json")"
           if [ "$npm_native_version" != "$cli_version" ]; then
             echo "npm nativeVersion $npm_native_version does not match CLI version $cli_version" >&2
+            exit 1
+          fi
+          npm_package_version="$(node -p 'require(process.argv[1]).version' "$RUNNER_TEMP/baijimu-cli-rs/npm/package.json")"
+          if [ "$npm_package_version" != "$cli_version" ]; then
+            echo "npm package version $npm_package_version does not match CLI version $cli_version" >&2
             exit 1
           fi
           echo "CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
