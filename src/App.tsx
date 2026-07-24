@@ -12,7 +12,6 @@ import { clientInfo, clientWarn } from "./client-logger";
 import {
   DesktopHeader,
   DesktopSidebar,
-  DesktopStatusBar,
   type DesktopPage
 } from "./components/DesktopShell";
 
@@ -5953,7 +5952,14 @@ function App() {
           deviceName={config.device.name}
           statusClass={runtimeStatusClass}
           statusLabel={statusLabel}
+          workspace={config.platform.workspace_id}
+          relay={runtime?.relay_url ?? config.relay.url}
+          lastEvent={runtime ? formatTime(runtime.last_event_at) : "-"}
+          version={currentVersion}
+          lastError={needsAuthorization ? null : runtime?.last_error}
+          refreshing={refreshing}
           onNavigate={navigateToPage}
+          onRefresh={() => void refreshAll()}
         />
 
         <section className="main-panel">
@@ -5975,12 +5981,11 @@ function App() {
                       打开控制台
                     </button>
                   ) : null}
-                  <span className={`status-pill status-${runtimeStatusClass}`}>{statusLabel}</span>
-                {activePage === "diagnostics" ? (
-                  <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
-                    恢复示例
-                  </button>
-                ) : null}
+                  {activePage === "diagnostics" ? (
+                    <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
+                      恢复示例
+                    </button>
+                  ) : null}
                 </div>
               }
             />
@@ -6017,14 +6022,6 @@ function App() {
                 </div>
               </div>
             </div>
-
-            <DesktopStatusBar
-              statusClass={runtimeStatusClass}
-              statusLabel={statusLabel}
-              workspace={config.platform.workspace_id}
-              version={currentVersion}
-              lastEvent={runtime ? formatTime(runtime.last_event_at) : "-"}
-            />
           </div>
         </section>
       </div>
