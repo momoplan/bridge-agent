@@ -418,47 +418,17 @@ select {
 
 .desktop-workspace {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--ds-color-page);
 }
 
-.desktop-header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--ds-space-lg);
-  align-items: center;
-  min-height: 68px;
-  padding: 10px var(--ds-space-xl);
-  border-bottom: 1px solid var(--ds-color-border);
-  background: rgba(255, 255, 255, 0.96);
-}
-
-.desktop-header-copy {
-  min-width: 0;
-}
-
-.desktop-header h1 {
-  margin: 0;
-  color: var(--ds-color-text);
-  font-size: var(--ds-font-title);
-  line-height: var(--ds-line-heading);
-}
-
-.desktop-header p {
-  margin: 3px 0 0;
-  overflow: hidden;
-  color: var(--ds-color-text-muted);
-  font-size: var(--ds-font-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.desktop-header-actions,
-.desktop-toolbar,
 .app-toolbar,
-.app-toolbar-group {
+.app-toolbar-group,
+.app-toolbar-actions,
+.page-action-bar,
+.page-action-bar-actions {
   display: flex;
   gap: var(--ds-space-sm);
   align-items: center;
@@ -622,12 +592,28 @@ select {
 }
 
 .app-toolbar {
+  flex-wrap: wrap;
   justify-content: space-between;
   padding: var(--ds-space-md);
   border: 1px solid var(--ds-color-border);
   border-radius: var(--ds-radius-md);
   background: var(--ds-color-panel);
   box-shadow: var(--ds-shadow-panel);
+}
+
+.app-toolbar-group {
+  flex: 1 1 520px;
+  flex-wrap: wrap;
+}
+
+.app-toolbar-actions,
+.page-action-bar-actions {
+  flex: 0 0 auto;
+}
+
+.page-action-bar {
+  flex-wrap: wrap;
+  justify-content: space-between;
 }
 
 .app-search {
@@ -888,8 +874,7 @@ select {
     padding: 8px;
   }
 
-  .desktop-content,
-  .desktop-header {
+  .desktop-content {
     padding-inline: var(--ds-space-lg);
   }
 

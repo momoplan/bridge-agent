@@ -5,15 +5,12 @@ import {
   AlertTriangle,
   ExternalLink,
   Plus,
+  RefreshCw,
   Search,
   Terminal
 } from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
-import {
-  DesktopHeader,
-  DesktopSidebar,
-  type DesktopPage
-} from "./components/DesktopShell";
+import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
 
 type RuntimeStatus =
   | "stopped"
@@ -5043,17 +5040,38 @@ function App() {
             </select>
             <span className="app-result-count">{visibleApps.length} 个应用</span>
           </div>
-          <button
-            className="primary button-with-icon"
-            onClick={() => {
-              setInstallSourceMode("choose");
-              setCustomInstallConfirmed(false);
-              setInstallPanelOpen(true);
-            }}
-          >
-            <Plus size={16} strokeWidth={2} aria-hidden="true" />
-            安装应用
-          </button>
+          <div className="app-toolbar-actions">
+            {!needsAuthorization ? (
+              <button
+                className="ghost button-with-icon"
+                onClick={() => void openConsole()}
+                disabled={busy}
+              >
+                <ExternalLink size={15} aria-hidden="true" />
+                打开控制台
+              </button>
+            ) : null}
+            <button
+              className="icon-button"
+              onClick={() => void refreshAll()}
+              disabled={refreshing}
+              aria-label="刷新应用状态"
+              title="刷新"
+            >
+              <RefreshCw size={17} className={refreshing ? "spin" : undefined} aria-hidden="true" />
+            </button>
+            <button
+              className="primary button-with-icon"
+              onClick={() => {
+                setInstallSourceMode("choose");
+                setCustomInstallConfirmed(false);
+                setInstallPanelOpen(true);
+              }}
+            >
+              <Plus size={16} strokeWidth={2} aria-hidden="true" />
+              安装应用
+            </button>
+          </div>
         </div>
         {availableLocalAppUpdates.length > 0 ? (
           <div className="notice-banner warning" role="status">
@@ -5672,25 +5690,41 @@ function App() {
   function renderDiagnosticsPage() {
     return (
       <div className="diagnostics-layout">
-        <div className="section-tabs">
-          <button
-            className={`section-tab ${activeDetailPanel === "system" ? "active" : ""}`}
-            onClick={() => setActiveDetailPanel("system")}
-          >
-            系统
-          </button>
-          <button
-            className={`section-tab ${activeDetailPanel === "logs" ? "active" : ""}`}
-            onClick={() => setActiveDetailPanel("logs")}
-          >
-            日志
-          </button>
-          <button
-            className={`section-tab ${activeDetailPanel === "manifest" ? "active" : ""}`}
-            onClick={() => setActiveDetailPanel("manifest")}
-          >
-            清单
-          </button>
+        <div className="page-action-bar">
+          <div className="section-tabs">
+            <button
+              className={`section-tab ${activeDetailPanel === "system" ? "active" : ""}`}
+              onClick={() => setActiveDetailPanel("system")}
+            >
+              系统
+            </button>
+            <button
+              className={`section-tab ${activeDetailPanel === "logs" ? "active" : ""}`}
+              onClick={() => setActiveDetailPanel("logs")}
+            >
+              日志
+            </button>
+            <button
+              className={`section-tab ${activeDetailPanel === "manifest" ? "active" : ""}`}
+              onClick={() => setActiveDetailPanel("manifest")}
+            >
+              清单
+            </button>
+          </div>
+          <div className="page-action-bar-actions">
+            <button
+              className="icon-button"
+              onClick={() => void refreshAll()}
+              disabled={refreshing}
+              aria-label="刷新诊断状态"
+              title="刷新"
+            >
+              <RefreshCw size={17} className={refreshing ? "spin" : undefined} aria-hidden="true" />
+            </button>
+            <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
+              恢复示例
+            </button>
+          </div>
         </div>
         {renderDetailPanel()}
       </div>
@@ -5708,6 +5742,15 @@ function App() {
           description="管理设备身份、工作区连接和本机运行参数。"
           action={
             <div className="service-actions">
+              <button
+                className="icon-button"
+                onClick={() => void refreshAll()}
+                disabled={refreshing}
+                aria-label="刷新设置状态"
+                title="刷新"
+              >
+                <RefreshCw size={17} className={refreshing ? "spin" : undefined} aria-hidden="true" />
+              </button>
               <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
                 浏览器授权
               </button>
@@ -6016,11 +6059,6 @@ function App() {
     settings: "设置"
   };
 
-  const pageDescriptionMap: Record<AppPage, string> = {
-    apps: "安装、启动和管理本机应用",
-    diagnostics: "系统状态、运行日志与对外能力清单",
-    settings: "设备身份、工作区连接与本机运行参数"
-  };
   const runtimeStatusClass = runtime?.status ?? "stopped";
   const currentVersion = appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-";
 
@@ -6054,34 +6092,9 @@ function App() {
 
         <section className="main-panel">
           <div className="desktop-workspace">
-            <DesktopHeader
-              title={pageTitleMap[activePage]}
-              description={pageDescriptionMap[activePage]}
-              busy={refreshing}
-              onRefresh={() => void refreshAll()}
-              actions={
-                <div className="desktop-toolbar">
-                  {activePage === "apps" && !needsAuthorization ? (
-                    <button
-                      className="ghost button-with-icon"
-                      onClick={() => void openConsole()}
-                      disabled={busy}
-                    >
-                      <ExternalLink size={15} aria-hidden="true" />
-                      打开控制台
-                    </button>
-                  ) : null}
-                  {activePage === "diagnostics" ? (
-                    <button className="ghost" onClick={() => void resetExampleConfig()} disabled={busy}>
-                      恢复示例
-                    </button>
-                  ) : null}
-                </div>
-              }
-            />
-
             <div className="desktop-content">
               <div className="desktop-content-inner">
+                <h1 className="sr-only">{pageTitleMap[activePage]}</h1>
                 {renderRuntimeConflictPanel()}
                 {degradedStartupComponents.length > 0 && !startupHealth?.safeMode ? (
                   <div className="alert warning startup-health-alert">

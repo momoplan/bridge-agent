@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   Blocks,
@@ -249,44 +249,5 @@ export function DesktopSidebar({
         </button>
       </nav>
     </aside>
-  );
-}
-
-interface DesktopHeaderProps {
-  title: string;
-  description?: string;
-  busy?: boolean;
-  onRefresh?: () => void;
-  actions?: ReactNode;
-}
-
-export function DesktopHeader({
-  title,
-  description,
-  busy = false,
-  onRefresh,
-  actions
-}: DesktopHeaderProps) {
-  return (
-    <header className="desktop-header">
-      <div className="desktop-header-copy">
-        <h1>{title}</h1>
-        {description ? <p>{description}</p> : null}
-      </div>
-      <div className="desktop-header-actions">
-        {onRefresh ? (
-          <button
-            className="icon-button"
-            onClick={onRefresh}
-            disabled={busy}
-            aria-label="刷新当前状态"
-            title="刷新"
-          >
-            <RefreshCw size={17} className={busy ? "spin" : undefined} aria-hidden="true" />
-          </button>
-        ) : null}
-        {actions}
-      </div>
-    </header>
   );
 }
