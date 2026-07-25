@@ -1027,9 +1027,11 @@ pub fn windows_service_config_path() -> Option<PathBuf> {
 pub fn load_config(path: &Path) -> Result<AgentConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
+    let has_legacy_local_app_installation_id =
+        config_has_legacy_local_app_installation_id(&content);
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
-    let mut changed = config.normalize();
+    let mut changed = has_legacy_local_app_installation_id || config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
     config.validate()?;
     let legacy_token = config.relay.token.trim().to_string();
@@ -1046,6 +1048,21 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         write_public_config(path, &config)?;
     }
     Ok(config)
+}
+
+fn config_has_legacy_local_app_installation_id(content: &str) -> bool {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .is_some_and(|config| {
+            config
+                .get("local_apps")
+                .and_then(Value::as_array)
+                .is_some_and(|local_apps| {
+                    local_apps.iter().any(|app| {
+                        app.get("installationId").is_some() || app.get("installation_id").is_some()
+                    })
+                })
+        })
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
@@ -2099,6 +2116,35 @@ mod tests {
                 .contains("legacy-secret")
         );
         assert_eq!(load_config(&path).unwrap().relay.token, "legacy-secret");
+    }
+
+    #[test]
+    fn load_config_removes_legacy_local_app_installation_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = serde_json::to_value(AgentConfig::example()).unwrap();
+        config["local_apps"] = json!([{
+            "connectorId": "com.baijimu.connector.test",
+            "installationId": "legacy-installation",
+            "name": "Test",
+            "version": "1.0.0",
+            "events": [{
+                "name": "message.received",
+                "description": "Message received"
+            }]
+        }]);
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+
+        assert_eq!(loaded.local_apps.len(), 1);
+        assert_eq!(
+            loaded.local_apps[0].connector_id,
+            "com.baijimu.connector.test"
+        );
+        assert!(!fs::read_to_string(&path)
+            .unwrap()
+            .contains("installationId"));
     }
 
     #[cfg(unix)]
