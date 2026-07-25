@@ -4,7 +4,8 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { randomBytes } from "node:crypto";
 
-const defaultInactivityTimeoutMs = 30 * 60 * 1_000;
+const defaultInactivityTimeoutMs = 5 * 60 * 1_000;
+const defaultTotalTimeoutMs = 20 * 60 * 1_000;
 const maximumResponseBytes = 1_000_000;
 
 export async function uploadMultipartFile({
@@ -14,6 +15,7 @@ export async function uploadMultipartFile({
   fileName,
   contentType,
   inactivityTimeoutMs = defaultInactivityTimeoutMs,
+  totalTimeoutMs = defaultTotalTimeoutMs,
 }) {
   const url = new URL(inputUrl);
   const requestImpl = requestImplementation(url);
@@ -31,6 +33,7 @@ export async function uploadMultipartFile({
   const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
   const { size } = await stat(filePath);
 
+  let totalTimeout;
   const responsePromise = new Promise((resolve, reject) => {
     const request = requestImpl(
       url,
@@ -49,7 +52,9 @@ export async function uploadMultipartFile({
           responseBytes += chunk.length;
           if (responseBytes > maximumResponseBytes) {
             response.destroy(
-              new Error(`Upload response exceeded ${maximumResponseBytes} bytes`),
+              new Error(
+                `Upload response exceeded ${maximumResponseBytes} bytes`,
+              ),
             );
             return;
           }
@@ -69,9 +74,18 @@ export async function uploadMultipartFile({
 
     request.setTimeout(inactivityTimeoutMs, () => {
       request.destroy(
-        new Error(`Gitee upload had no network activity for ${inactivityTimeoutMs} ms`),
+        new Error(
+          `Gitee upload had no network activity for ${inactivityTimeoutMs} ms`,
+        ),
       );
     });
+    totalTimeout = setTimeout(() => {
+      request.destroy(
+        new Error(
+          `Gitee upload exceeded total timeout of ${totalTimeoutMs} ms`,
+        ),
+      );
+    }, totalTimeoutMs);
     request.once("error", reject);
 
     request.write(prefix);
@@ -81,7 +95,7 @@ export async function uploadMultipartFile({
     file.pipe(request, { end: false });
   });
 
-  return responsePromise;
+  return responsePromise.finally(() => clearTimeout(totalTimeout));
 }
 
 function requestImplementation(url) {

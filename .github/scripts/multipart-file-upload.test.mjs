@@ -15,7 +15,9 @@ afterEach(async () => {
 
 describe("uploadMultipartFile", () => {
   it("streams a multipart file with an exact content length and returns the response", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "bridge-agent-upload-test-"));
+    const directory = await mkdtemp(
+      join(tmpdir(), "bridge-agent-upload-test-"),
+    );
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const filePath = join(directory, "Baijimu_0.1.111_universal.dmg");
     const fileBytes = Buffer.from("signed desktop release bundle");
@@ -33,7 +35,12 @@ describe("uploadMultipartFile", () => {
           body: Buffer.concat(chunks),
         };
         response.writeHead(201, { "content-type": "application/json" });
-        response.end(JSON.stringify({ id: 42, browser_download_url: "https://example.test" }));
+        response.end(
+          JSON.stringify({
+            id: 42,
+            browser_download_url: "https://example.test",
+          }),
+        );
       });
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -69,5 +76,30 @@ describe("uploadMultipartFile", () => {
         contentType: "application/octet-stream",
       }),
     ).rejects.toThrow("Unsafe multipart file name");
+  });
+
+  it("aborts an upload that exceeds the absolute deadline", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "bridge-agent-upload-timeout-test-"),
+    );
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const filePath = join(directory, "Baijimu_0.2.1_amd64.deb");
+    await writeFile(filePath, "signed linux release bundle");
+
+    const server = createServer((_request, _response) => {});
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const address = server.address();
+
+    await expect(
+      uploadMultipartFile({
+        url: `http://127.0.0.1:${address.port}/release-assets`,
+        filePath,
+        fileName: "Baijimu_0.2.1_amd64.deb",
+        contentType: "application/vnd.debian.binary-package",
+        inactivityTimeoutMs: 5_000,
+        totalTimeoutMs: 50,
+      }),
+    ).rejects.toThrow("exceeded total timeout");
   });
 });
