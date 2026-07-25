@@ -25,7 +25,7 @@ use bridge_agent::{
     sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
     AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
+    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
     ServiceStartCommand,
 };
 use reqwest::Client;
@@ -725,6 +725,18 @@ struct RegisteredServiceStatus {
     stop_command_configured: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAppRuntimeStatus {
+    connector_id: String,
+    status: RegisteredServiceState,
+    detail: Option<String>,
+    checked_at_ms: u64,
+    health_check_configured: bool,
+    start_command_configured: bool,
+    stop_command_configured: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartRegisteredServiceResult {
@@ -1083,6 +1095,41 @@ async fn test_capability(
 }
 
 #[tauri::command]
+async fn test_local_app_capability(
+    state: tauri::State<'_, DesktopState>,
+    config: AgentConfig,
+    connector_id: String,
+    method: String,
+    arguments: Value,
+    timeout_secs: Option<u64>,
+) -> Result<InvokeResult, String> {
+    let connector_id = connector_id.trim();
+    let method = method.trim();
+    if connector_id.is_empty() {
+        return Err("connectorId 不能为空".to_string());
+    }
+    if method.is_empty() {
+        return Err("能力名不能为空".to_string());
+    }
+
+    let config_base_dir = resolve_config_base_dir(&state.config_path);
+    let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir)
+        .await
+        .map_err(|err| format!("构建本地应用运行环境失败: {err}"))?;
+    let request_id = format!("desktop-local-app-test-{}", now_ms());
+
+    Ok(registry
+        .invoke_local_app(
+            request_id,
+            connector_id,
+            method,
+            arguments,
+            timeout_secs.filter(|value| *value > 0),
+        )
+        .await)
+}
+
+#[tauri::command]
 async fn list_logs(
     state: tauri::State<'_, DesktopState>,
     limit: Option<usize>,
@@ -1268,6 +1315,29 @@ async fn registered_service_statuses(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<RegisteredServiceStatus>, String> {
     state.registered_services.statuses().await
+}
+
+#[tauri::command]
+async fn local_app_runtime_statuses(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<LocalAppRuntimeStatus>, String> {
+    collect_local_app_runtime_statuses(&state.config_path).await
+}
+
+async fn collect_local_app_runtime_statuses(
+    config_path: &Path,
+) -> Result<Vec<LocalAppRuntimeStatus>, String> {
+    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut statuses = Vec::with_capacity(config.local_apps.len());
+    for app in config.local_apps {
+        statuses.push(check_local_app(&client, app).await);
+    }
+    Ok(statuses)
 }
 
 async fn collect_registered_service_statuses(
@@ -1688,11 +1758,11 @@ async fn local_app_control_show_handler(
     }
     let result = async {
         let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
-        let services =
-            connector_service_statuses(&state.config_path, &record.service_names).await?;
+        let status =
+            connector_local_app_status(&state.config_path, &record.manifest.id).await?;
         Ok::<_, String>(serde_json::json!({
             "app": record,
-            "services": services,
+            "status": status,
             "runtime": state.runtime.snapshot().await
         }))
     }
@@ -1736,15 +1806,7 @@ async fn local_app_control_install_handler(
             let result = start_connector(&document.install.connector_id, &state.config_path)
                 .map_err(|err| err.to_string())?;
             ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-            wait_for_connector_health(
-                &state.config_path,
-                &result
-                    .services
-                    .iter()
-                    .map(|service| service.service.clone())
-                    .collect::<Vec<_>>(),
-                true,
-            )
+            wait_for_connector_health(&state.config_path, &result.connector_id, true)
             .await?;
             state.registered_services.request_refresh();
             Some(result)
@@ -1776,15 +1838,7 @@ async fn local_app_control_start_handler(
         let result = start_connector(connector_id.trim(), &state.config_path)
             .map_err(|err| err.to_string())?;
         ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-        wait_for_connector_health(
-            &state.config_path,
-            &result
-                .services
-                .iter()
-                .map(|service| service.service.clone())
-                .collect::<Vec<_>>(),
-            true,
-        )
+        wait_for_connector_health(&state.config_path, &result.connector_id, true)
         .await?;
         state.registered_services.request_refresh();
         Ok::<_, String>(result)
@@ -1805,15 +1859,7 @@ async fn local_app_control_stop_handler(
         let result = stop_connector(connector_id.trim(), &state.config_path)
             .map_err(|err| err.to_string())?;
         ensure_connector_lifecycle_command_succeeded("停止应用", &result)?;
-        wait_for_connector_health(
-            &state.config_path,
-            &result
-                .services
-                .iter()
-                .map(|service| service.service.clone())
-                .collect::<Vec<_>>(),
-            false,
-        )
+        wait_for_connector_health(&state.config_path, &result.connector_id, false)
         .await?;
         state.registered_services.request_refresh();
         Ok::<_, String>(result)
@@ -2458,9 +2504,7 @@ async fn install_connector_app_with_context(
         .find(|connector| connector.id == candidate_manifest.id);
     let restart_after_replace = if options.replace {
         match existing.as_ref() {
-            Some(connector) => {
-                connector_has_healthy_service(config_path, &connector.service_names).await?
-            }
+            Some(connector) => connector_local_app_is_healthy(config_path, &connector.id).await?,
             None => false,
         }
     } else {
@@ -2471,15 +2515,7 @@ async fn install_connector_app_with_context(
         let stopped = stop_connector(&candidate_manifest.id, config_path)
             .map_err(|err| format!("升级前停止旧版应用失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("停止旧版应用", &stopped)?;
-        wait_for_connector_health(
-            config_path,
-            &stopped
-                .services
-                .iter()
-                .map(|service| service.service.clone())
-                .collect::<Vec<_>>(),
-            false,
-        )
+        wait_for_connector_health(config_path, &stopped.connector_id, false)
         .await?;
     }
 
@@ -2515,15 +2551,7 @@ async fn install_connector_app_with_context(
         let started = start_connector(&install.connector_id, config_path)
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
-        wait_for_connector_health(
-            config_path,
-            &started
-                .services
-                .iter()
-                .map(|service| service.service.clone())
-                .collect::<Vec<_>>(),
-            true,
-        )
+        wait_for_connector_health(config_path, &started.connector_id, true)
         .await?;
     }
 
@@ -2549,100 +2577,71 @@ fn ensure_connector_lifecycle_command_succeeded(
     action: &str,
     result: &ConnectorStartResult,
 ) -> Result<(), String> {
-    let failures = result
-        .services
-        .iter()
-        .filter(|service| !service.configured || service.exit_code != Some(0))
-        .map(|service| {
-            let detail = if !service.configured {
-                "命令未配置".to_string()
-            } else if !service.stderr.trim().is_empty() {
-                service.stderr.trim().to_string()
-            } else {
-                format!("退出码 {:?}", service.exit_code)
-            };
-            format!("{}: {detail}", service.service)
-        })
-        .collect::<Vec<_>>();
-    if failures.is_empty() {
+    let failures = &result.lifecycle;
+    if failures.configured && failures.exit_code == Some(0) {
         Ok(())
     } else {
-        Err(format!("{action}失败：{}", failures.join("；")))
+        let detail = if !failures.configured {
+            "命令未配置".to_string()
+        } else if !failures.stderr.trim().is_empty() {
+            failures.stderr.trim().to_string()
+        } else {
+            format!("退出码 {:?}", failures.exit_code)
+        };
+        Err(format!("{action}失败：{}: {detail}", failures.connector_id))
     }
 }
 
-async fn connector_has_healthy_service(
+async fn connector_local_app_is_healthy(
     config_path: &Path,
-    service_names: &[String],
+    connector_id: &str,
 ) -> Result<bool, String> {
-    let statuses = connector_service_statuses(config_path, service_names).await?;
-    Ok(statuses
-        .iter()
-        .any(|status| status.status == RegisteredServiceState::Healthy))
+    let status = connector_local_app_status(config_path, connector_id).await?;
+    Ok(status.status == RegisteredServiceState::Healthy)
 }
 
-async fn connector_service_statuses(
+async fn connector_local_app_status(
     config_path: &Path,
-    service_names: &[String],
-) -> Result<Vec<RegisteredServiceStatus>, String> {
+    connector_id: &str,
+) -> Result<LocalAppRuntimeStatus, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let client = Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|err| err.to_string())?;
-    let mut statuses = Vec::new();
-    for service_name in service_names {
-        let Some(service) = config
-            .services
-            .iter()
-            .find(|service| &service.name == service_name)
-            .cloned()
-        else {
-            return Err(format!("应用服务 `{service_name}` 不在当前配置中"));
-        };
-        statuses.push(check_registered_service(&client, service).await);
-    }
-    Ok(statuses)
+    let app = config
+        .local_apps
+        .into_iter()
+        .find(|app| app.connector_id == connector_id)
+        .ok_or_else(|| format!("本地应用 `{connector_id}` 不在当前配置中"))?;
+    Ok(check_local_app(&client, app).await)
 }
 
 async fn wait_for_connector_health(
     config_path: &Path,
-    service_names: &[String],
+    connector_id: &str,
     expected_healthy: bool,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let statuses = connector_service_statuses(config_path, service_names).await?;
-        let health_checked = statuses
-            .iter()
-            .filter(|status| status.health_check_configured)
-            .collect::<Vec<_>>();
+        let status = connector_local_app_status(config_path, connector_id).await?;
         let matches = if expected_healthy {
-            health_checked.is_empty()
-                || health_checked
-                    .iter()
-                    .all(|status| status.status == RegisteredServiceState::Healthy)
+            !status.health_check_configured
+                || status.status == RegisteredServiceState::Healthy
         } else {
-            health_checked
-                .iter()
-                .all(|status| status.status != RegisteredServiceState::Healthy)
+            !status.health_check_configured
+                || status.status != RegisteredServiceState::Healthy
         };
         if matches {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let details = statuses
-                .iter()
-                .map(|status| {
-                    format!(
-                        "{}={:?} ({})",
-                        status.service,
-                        status.status,
-                        status.detail.as_deref().unwrap_or("无详情")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("；");
+            let details = format!(
+                "{}={:?} ({})",
+                status.connector_id,
+                status.status,
+                status.detail.as_deref().unwrap_or("无详情")
+            );
             let expected = if expected_healthy { "健康" } else { "停止" };
             return Err(format!("等待应用进入{expected}状态超时：{details}"));
         }
@@ -3567,6 +3566,33 @@ async fn check_registered_service(
                 },
             }
         }
+    }
+}
+
+async fn check_local_app(client: &Client, app: LocalAppConfig) -> LocalAppRuntimeStatus {
+    let connector_id = app.connector_id.clone();
+    let status = check_registered_service(
+        client,
+        ServiceConfig {
+            name: connector_id.clone(),
+            description: app.description,
+            enabled: app.enabled,
+            health_check: app.health_check,
+            start_command: app.start_command,
+            stop_command: app.stop_command,
+            methods: Vec::new(),
+            events: Vec::new(),
+        },
+    )
+    .await;
+    LocalAppRuntimeStatus {
+        connector_id,
+        status: status.status,
+        detail: status.detail,
+        checked_at_ms: status.checked_at_ms,
+        health_check_configured: status.health_check_configured,
+        start_command_configured: status.start_command_configured,
+        stop_command_configured: status.stop_command_configured,
     }
 }
 
@@ -4930,6 +4956,7 @@ fn main() {
             runtime_snapshot,
             apply_saved_config_to_runtime,
             test_capability,
+            test_local_app_capability,
             list_logs,
             set_runtime_log_streaming,
             clear_logs,
@@ -4939,6 +4966,7 @@ fn main() {
             open_in_edge,
             desktop_permission_status,
             registered_service_statuses,
+            local_app_runtime_statuses,
             start_registered_service,
             stop_registered_service,
             list_connector_apps,
@@ -5011,7 +5039,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bridge_agent::ConnectorServiceStartResult;
+    use bridge_agent::ConnectorLifecycleResult;
 
     fn market_connector(checksum: Option<&str>) -> MarketConnectorApp {
         MarketConnectorApp {
@@ -5244,30 +5272,30 @@ mod tests {
     fn connector_upgrade_requires_every_lifecycle_command_to_succeed() {
         let success = ConnectorStartResult {
             connector_id: "com.baijimu.connector.test".to_string(),
-            services: vec![ConnectorServiceStartResult {
-                service: "testService".to_string(),
+            lifecycle: ConnectorLifecycleResult {
+                connector_id: "com.baijimu.connector.test".to_string(),
                 configured: true,
                 exit_code: Some(0),
                 stdout: "started".to_string(),
                 stderr: String::new(),
-            }],
+            },
         };
         assert!(ensure_connector_lifecycle_command_succeeded("启动新版应用", &success).is_ok());
 
         let failure = ConnectorStartResult {
             connector_id: "com.baijimu.connector.test".to_string(),
-            services: vec![ConnectorServiceStartResult {
-                service: "testService".to_string(),
+            lifecycle: ConnectorLifecycleResult {
+                connector_id: "com.baijimu.connector.test".to_string(),
                 configured: false,
                 exit_code: None,
                 stdout: String::new(),
                 stderr: "stop command is not configured".to_string(),
-            }],
+            },
         };
         let error =
             ensure_connector_lifecycle_command_succeeded("停止旧版应用", &failure).unwrap_err();
         assert!(error.contains("命令未配置"));
-        assert!(error.contains("testService"));
+        assert!(error.contains("com.baijimu.connector.test"));
     }
 
     #[test]

@@ -136,14 +136,17 @@ CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可�
 
 ## 对外暴露的模型
 
-外部协议仍然看到业务服务模型，而不是本地实现细节。桌面端产品界面不再把“服务”作为普通用户主入口，而是把服务归入应用里的内部运行项和能力组。
+外部协议同时支持两类能力：内置/兼容能力继续使用 `services[]`，Connector 安装的能力
+使用一等的 `local_apps[]`。本地应用不需要为每个 Connector 再创建 service，也不依赖
+runtime `businessId`。
 
 产品语境里可以把概念分成两层：
 
 - 本地应用：用户安装、启动、卸载和授权的对象，例如 Codex Connector、WeChat Connector、桌面控制。
-- 服务：本机配置和协议里的内部对象，例如 `computer`、`shell`，以及 Connector 注册的运行项。
+- 服务：内置能力和兼容自定义能力的内部对象，例如 `computer`、`shell`。
 - 方法：服务下面的具体动作，例如 `screenshot`、`click`、`exec`、`queryExecution`。
-- 对外能力：启用后的 `service.method`，也就是外部 agent 最终能调用的能力。
+- 对外能力：内置服务使用 `service.method`；本地应用使用
+  `connectorId + method/event`。
 
 所以桌面端默认以“应用”为主概念；“服务”只在开发者配置、CLI、本机注册 API 和协议说明里出现。
 
@@ -173,9 +176,12 @@ CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可�
 注意：
 
 - `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
-- relay 看到的是 `services[].methods[]` 和 `services[].events[]`，例如 `computer.screenshot`、`reportTool.finished`
+- relay 同时看到 `services[]` 和 `local_apps[]`；本地应用定义包含稳定
+  `connectorId + installationId + methods[] + events[]`
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
-- 自定义本地服务发送事件时，不直接连 relay；它请求 bridge-agent 的本机事件入口，由 bridge-agent 校验事件声明后通过现有 websocket 上报 relay
+- Connector 发送事件时不直接连 relay；它使用安装时生成的独立事件凭证请求
+  Bridge Agent 本机入口。事件先写本地 outbox，再通过现有 WebSocket 上报；只有
+  Event Center 持久化成功后的 ACK 才会删除 outbox 文件。
 
 ## 项目结构
 
@@ -228,6 +234,33 @@ Relay token 不再明文写入 `agent-config.json`，也不会返回给 WebView 
 - Windows 使用 CNG DPAPI-NG 的机器级保护，使交互桌面进程和 LocalSystem 服务可以读取同一份加密凭证
 
 旧版本配置中的明文 token 会在首次加载时自动迁移到系统安全存储并从 JSON 中删除。Unix 配置目录和配置文件同时收紧为 `0700`、`0600`。Windows 的加密凭证文件与共享配置放在同一 ProgramData 目录，但文件内容不能作为明文读取。
+
+## Connector 设备事件
+
+Schema `2.0` Connector 在 `connector.json` 顶层声明 `events[]`。Bridge Agent 启动
+Connector 时会注入：
+
+- `BAIJIMU_CONNECTOR_EVENT_ENDPOINT`：默认
+  `http://127.0.0.1:18081/v1/local-app-events`
+- `BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE`：该安装实例独享、权限为 `0600` 的事件凭证文件
+
+Connector 使用 Bearer token 发布：
+
+```bash
+curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
+  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE")" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "connectorId": "com.baijimu.connector.wechat",
+    "event": "messageReceived",
+    "eventId": "evt-01J...",
+    "payload": {"conversationId": "c-1"}
+  }'
+```
+
+返回 `202` 表示事件已经进入本机持久化 outbox。断线或重启后会自动重传；Relay 只有在
+Event Center 完成去重和事务持久化后才 ACK，收到 ACK 后本机才删除该事件。这个链路
+不创建 runtime service，也不生成 `businessId`。
 
 ## 自定义服务事件
 

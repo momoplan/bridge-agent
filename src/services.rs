@@ -1,10 +1,12 @@
 use crate::config::{
-    AgentConfig, ComputerUseBinding, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
-    ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
+    AgentConfig, ComputerUseBinding, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
+    ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
 };
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::{ComputerUseAction, UploadConfig};
-use crate::protocol::{EventDefinition, InvokeError, InvokeResult, ServiceDefinition};
+use crate::protocol::{
+    EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ServiceDefinition,
+};
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(any(target_os = "macos", windows))]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -67,12 +69,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub struct ServiceRegistry {
     services: BTreeMap<String, RuntimeService>,
+    local_apps: BTreeMap<String, RuntimeLocalApp>,
 }
 
 struct RuntimeService {
     definition: ServiceDefinition,
     methods: BTreeMap<String, RuntimeMethod>,
     events: BTreeSet<String>,
+}
+
+struct RuntimeLocalApp {
+    definition: LocalAppDefinition,
+    runtime: RuntimeService,
 }
 
 enum RuntimeMethod {
@@ -398,6 +406,7 @@ struct PrepareUploadResponse {
 impl ServiceRegistry {
     pub fn from_config(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
         let mut services = BTreeMap::new();
+        let mut local_apps = BTreeMap::new();
         let shell_executions = ShellExecutionStore::default();
 
         for service in &config.services {
@@ -411,11 +420,33 @@ impl ServiceRegistry {
             }
         }
 
-        Ok(Self { services })
+        for app in &config.local_apps {
+            if !app.enabled {
+                continue;
+            }
+            let service = local_app_runtime_config(app);
+            let runtime =
+                build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
+            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+                local_apps.insert(
+                    app.connector_id.clone(),
+                    RuntimeLocalApp {
+                        definition: local_app_definition(app),
+                        runtime,
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            services,
+            local_apps,
+        })
     }
 
     pub async fn from_config_checked(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
         let mut services = BTreeMap::new();
+        let mut local_apps = BTreeMap::new();
         let shell_executions = ShellExecutionStore::default();
         let health_client = Client::builder()
             .timeout(Duration::from_secs(3))
@@ -440,7 +471,35 @@ impl ServiceRegistry {
             }
         }
 
-        Ok(Self { services })
+        for app in &config.local_apps {
+            if !app.enabled {
+                continue;
+            }
+            let service = local_app_runtime_config(app);
+            if !ensure_registered_service_ready(&service, &health_client).await {
+                warn!(
+                    connector_id = %app.connector_id,
+                    "local app is not healthy; omitting from runtime capabilities"
+                );
+                continue;
+            }
+            let runtime =
+                build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
+            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+                local_apps.insert(
+                    app.connector_id.clone(),
+                    RuntimeLocalApp {
+                        definition: local_app_definition(app),
+                        runtime,
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            services,
+            local_apps,
+        })
     }
 
     pub fn definitions(&self) -> Vec<ServiceDefinition> {
@@ -450,10 +509,24 @@ impl ServiceRegistry {
             .collect()
     }
 
+    pub fn local_app_definitions(&self) -> Vec<LocalAppDefinition> {
+        self.local_apps
+            .values()
+            .map(|app| app.definition.clone())
+            .collect()
+    }
+
     pub fn has_event(&self, service: &str, event: &str) -> bool {
         self.services
             .get(service)
             .map(|service_definition| service_definition.events.contains(event))
+            .unwrap_or(false)
+    }
+
+    pub fn has_local_app_event(&self, connector_id: &str, event: &str) -> bool {
+        self.local_apps
+            .get(connector_id)
+            .map(|app| app.runtime.events.contains(event))
             .unwrap_or(false)
     }
 
@@ -493,6 +566,89 @@ impl ServiceRegistry {
                 duration_ms: started.elapsed().as_millis() as u64,
             },
         }
+    }
+
+    pub async fn invoke_local_app(
+        &self,
+        request_id: String,
+        connector_id: &str,
+        method: &str,
+        arguments: Value,
+        timeout_secs: Option<u64>,
+    ) -> InvokeResult {
+        let started = Instant::now();
+        let response = match self.local_apps.get(connector_id) {
+            Some(app) => match app.runtime.methods.get(method) {
+                Some(runtime_method) => runtime_method.invoke(arguments, timeout_secs).await,
+                None => Err(anyhow!(
+                    "unknown method `{method}` on local app `{connector_id}`"
+                )),
+            },
+            None => Err(anyhow!("unknown local app `{connector_id}`")),
+        };
+
+        match response {
+            Ok(outcome) => InvokeResult {
+                request_id,
+                success: outcome.success,
+                data: outcome.data,
+                error: outcome.error,
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+            Err(err) => InvokeResult {
+                request_id,
+                success: false,
+                data: None,
+                error: Some(InvokeError {
+                    code: "LOCAL_APP_INVOKE_FAILED".to_string(),
+                    message: err.to_string(),
+                }),
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        }
+    }
+}
+
+fn local_app_runtime_config(app: &LocalAppConfig) -> ServiceConfig {
+    ServiceConfig {
+        name: app.connector_id.clone(),
+        description: app.description.clone(),
+        enabled: app.enabled,
+        health_check: app.health_check.clone(),
+        start_command: app.start_command.clone(),
+        stop_command: app.stop_command.clone(),
+        methods: app.methods.clone(),
+        events: app.events.clone(),
+    }
+}
+
+fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
+    LocalAppDefinition {
+        connector_id: app.connector_id.clone(),
+        installation_id: app.installation_id.clone(),
+        name: app.name.clone(),
+        version: app.version.clone(),
+        description: app.description.clone(),
+        methods: app
+            .methods
+            .iter()
+            .filter(|method| method.enabled)
+            .map(|method| crate::protocol::MethodDefinition {
+                name: method.name.clone(),
+                description: method.description.clone(),
+                input_schema: method.input_schema.clone(),
+            })
+            .collect(),
+        events: app
+            .events
+            .iter()
+            .filter(|event| event.enabled)
+            .map(|event| EventDefinition {
+                name: event.name.clone(),
+                description: event.description.clone(),
+                payload_schema: event.payload_schema.clone(),
+            })
+            .collect(),
     }
 }
 

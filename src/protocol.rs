@@ -3,6 +3,8 @@ use serde_json::Value;
 
 pub const AGENT_PROTOCOL_VERSION: u32 = 2;
 pub const AGENT_PROTOCOL_FEATURE_REGISTERED_ACK: &str = "registered_ack";
+pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1: &str = "local_app_events_v1";
+pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2: &str = "local_app_capabilities_v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -12,6 +14,10 @@ pub enum AgentMessage {
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
     EventEmitted(EventEmitted),
+    LocalAppInvokeRequest(LocalAppInvokeRequest),
+    LocalAppInvokeResult(InvokeResult),
+    LocalAppEventEmitted(LocalAppEventEmitted),
+    EventAck(EventAck),
     Error(ProtocolError),
 }
 
@@ -22,7 +28,10 @@ pub struct AgentCapabilities {
     pub protocol_version: u32,
     #[serde(default)]
     pub protocol_features: Vec<String>,
+    #[serde(default)]
     pub services: Vec<ServiceDefinition>,
+    #[serde(default)]
+    pub local_apps: Vec<LocalAppDefinition>,
 }
 
 fn default_agent_protocol_version() -> u32 {
@@ -63,6 +72,18 @@ pub struct EventDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAppDefinition {
+    pub connector_id: String,
+    pub installation_id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub methods: Vec<MethodDefinition>,
+    #[serde(default)]
+    pub events: Vec<EventDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEmitted {
     #[serde(default)]
     pub event_id: Option<String>,
@@ -75,9 +96,39 @@ pub struct EventEmitted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAppEventEmitted {
+    pub event_id: String,
+    pub connector_id: String,
+    pub installation_id: String,
+    pub event: String,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub occurred_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAck {
+    pub event_id: String,
+    #[serde(default)]
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {
     pub request_id: String,
     pub service: String,
+    pub method: String,
+    #[serde(default)]
+    pub arguments: Value,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAppInvokeRequest {
+    pub request_id: String,
+    pub connector_id: String,
     pub method: String,
     #[serde(default)]
     pub arguments: Value,

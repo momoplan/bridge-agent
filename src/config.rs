@@ -1,4 +1,4 @@
-use crate::protocol::{EventDefinition, MethodDefinition, ServiceDefinition};
+use crate::protocol::{EventDefinition, LocalAppDefinition, MethodDefinition, ServiceDefinition};
 use crate::secret_store::{delete_relay_token, load_relay_token, store_relay_token};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
@@ -36,7 +36,10 @@ pub struct AgentConfig {
     pub relay: RelayConfig,
     pub device: DeviceConfig,
     pub runtime: RuntimeConfig,
+    #[serde(default)]
     pub services: Vec<ServiceConfig>,
+    #[serde(default)]
+    pub local_apps: Vec<LocalAppConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +114,29 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub name: String,
+    pub description: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default, alias = "healthCheck")]
+    pub health_check: Option<ServiceHealthCheck>,
+    #[serde(default, alias = "startCommand")]
+    pub start_command: Option<ServiceStartCommand>,
+    #[serde(default, alias = "stopCommand")]
+    pub stop_command: Option<ServiceStartCommand>,
+    #[serde(default)]
+    pub methods: Vec<MethodConfig>,
+    #[serde(default)]
+    pub events: Vec<EventConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppConfig {
+    pub connector_id: String,
+    pub installation_id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
     pub description: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -234,12 +260,29 @@ pub struct ComputerUseBinding {
 pub struct ManifestPreview {
     pub device: DeviceConfig,
     pub services: Vec<ServiceDefinition>,
+    #[serde(rename = "localApps")]
+    pub local_apps: Vec<LocalAppDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserAuthManifestPreview {
     pub device: DeviceConfig,
     pub services: Vec<BrowserAuthServiceDefinition>,
+    #[serde(rename = "localApps")]
+    pub local_apps: Vec<BrowserAuthLocalAppDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAuthLocalAppDefinition {
+    pub connector_id: String,
+    pub installation_id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub methods: Vec<BrowserAuthMethodDefinition>,
+    #[serde(default)]
+    pub events: Vec<BrowserAuthEventDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -306,6 +349,7 @@ impl AgentConfig {
                 service_registration_token: Some(generate_registration_token()),
             },
             services: vec![default_computer_service(), default_shell_service()],
+            local_apps: Vec::new(),
         }
     }
 
@@ -482,6 +526,42 @@ impl AgentConfig {
             }
         }
 
+        let mut connector_ids = BTreeSet::new();
+        let mut installation_ids = BTreeSet::new();
+        for app in &self.local_apps {
+            if app.connector_id.trim().is_empty() {
+                bail!("local app connectorId cannot be empty");
+            }
+            if !connector_ids.insert(app.connector_id.as_str()) {
+                bail!("duplicate local app connectorId `{}`", app.connector_id);
+            }
+            if app.installation_id.trim().is_empty() {
+                bail!(
+                    "local app installationId cannot be empty for `{}`",
+                    app.connector_id
+                );
+            }
+            if !installation_ids.insert(app.installation_id.as_str()) {
+                bail!(
+                    "duplicate local app installationId `{}`",
+                    app.installation_id
+                );
+            }
+            if app.name.trim().is_empty() || app.version.trim().is_empty() {
+                bail!(
+                    "local app name and version cannot be empty for `{}`",
+                    app.connector_id
+                );
+            }
+            if app.methods.is_empty() && app.events.is_empty() {
+                bail!(
+                    "local app `{}` must declare at least one method or event",
+                    app.connector_id
+                );
+            }
+            validate_local_app_capabilities(app)?;
+        }
+
         Ok(())
     }
 
@@ -517,10 +597,46 @@ impl AgentConfig {
             .collect()
     }
 
+    pub fn local_app_definitions(&self) -> Vec<LocalAppDefinition> {
+        self.local_apps
+            .iter()
+            .filter(|app| app.enabled)
+            .map(|app| LocalAppDefinition {
+                connector_id: app.connector_id.clone(),
+                installation_id: app.installation_id.clone(),
+                name: app.name.clone(),
+                version: app.version.clone(),
+                description: app.description.clone(),
+                methods: app
+                    .methods
+                    .iter()
+                    .filter(|method| method.enabled)
+                    .map(|method| MethodDefinition {
+                        name: method.name.clone(),
+                        description: method.description.clone(),
+                        input_schema: method.input_schema.clone(),
+                    })
+                    .collect(),
+                events: app
+                    .events
+                    .iter()
+                    .filter(|event| event.enabled)
+                    .map(|event| EventDefinition {
+                        name: event.name.clone(),
+                        description: event.description.clone(),
+                        payload_schema: event.payload_schema.clone(),
+                    })
+                    .collect(),
+            })
+            .filter(|app| !app.methods.is_empty() || !app.events.is_empty())
+            .collect()
+    }
+
     pub fn manifest_preview(&self) -> ManifestPreview {
         ManifestPreview {
             device: self.device.clone(),
             services: self.service_definitions(),
+            local_apps: self.local_app_definitions(),
         }
     }
 
@@ -555,8 +671,91 @@ impl AgentConfig {
                 })
                 .filter(|service| !service.methods.is_empty() || !service.events.is_empty())
                 .collect(),
+            local_apps: self
+                .local_apps
+                .iter()
+                .filter(|app| app.enabled)
+                .map(|app| BrowserAuthLocalAppDefinition {
+                    connector_id: app.connector_id.clone(),
+                    installation_id: app.installation_id.clone(),
+                    name: app.name.clone(),
+                    version: app.version.clone(),
+                    description: app.description.clone(),
+                    methods: app
+                        .methods
+                        .iter()
+                        .filter(|method| method.enabled)
+                        .map(|method| BrowserAuthMethodDefinition {
+                            name: method.name.clone(),
+                            description: method.description.clone(),
+                        })
+                        .collect(),
+                    events: app
+                        .events
+                        .iter()
+                        .filter(|event| event.enabled)
+                        .map(|event| BrowserAuthEventDefinition {
+                            name: event.name.clone(),
+                            description: event.description.clone(),
+                        })
+                        .collect(),
+                })
+                .filter(|app| !app.methods.is_empty() || !app.events.is_empty())
+                .collect(),
         }
     }
+}
+
+fn validate_local_app_capabilities(app: &LocalAppConfig) -> Result<()> {
+    let mut method_names = BTreeSet::new();
+    let mut event_names = BTreeSet::new();
+    for method in &app.methods {
+        if method.name.trim().is_empty() {
+            bail!(
+                "method name cannot be empty in local app `{}`",
+                app.connector_id
+            );
+        }
+        if !method_names.insert(method.name.as_str()) {
+            bail!(
+                "duplicate method `{}` in local app `{}`",
+                method.name,
+                app.connector_id
+            );
+        }
+        if let MethodBinding::Http(binding) = &method.binding {
+            if binding.url.trim().is_empty() || binding.http_method.trim().is_empty() {
+                bail!(
+                    "http binding cannot be empty for local app {}.{}",
+                    app.connector_id,
+                    method.name
+                );
+            }
+        }
+    }
+    for event in &app.events {
+        if event.name.trim().is_empty() {
+            bail!(
+                "event name cannot be empty in local app `{}`",
+                app.connector_id
+            );
+        }
+        if !event_names.insert(event.name.as_str()) {
+            bail!(
+                "duplicate event `{}` in local app `{}`",
+                event.name,
+                app.connector_id
+            );
+        }
+        if method_names.contains(event.name.as_str()) {
+            bail!(
+                "event `{}` conflicts with method of the same name in local app `{}`",
+                event.name,
+                app.connector_id
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

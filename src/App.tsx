@@ -214,9 +214,24 @@ interface AgentConfig {
   device: DeviceConfig;
   runtime: RuntimeConfig;
   services: ServiceConfig[];
+  local_apps: LocalAppConfig[];
   credential_status?: {
     relay_token_configured: boolean;
   };
+}
+
+interface LocalAppConfig {
+  connectorId: string;
+  installationId: string;
+  name: string;
+  version: string;
+  description: string;
+  enabled: boolean;
+  healthCheck?: ServiceHealthCheck | null;
+  startCommand?: ServiceStartCommand | null;
+  stopCommand?: ServiceStartCommand | null;
+  methods: MethodConfig[];
+  events: EventConfig[];
 }
 
 interface BrowserAuthStartResponse {
@@ -428,6 +443,16 @@ interface RegisteredServiceStatus {
   stopCommandConfigured: boolean;
 }
 
+interface LocalAppRuntimeStatus {
+  connectorId: string;
+  status: RegisteredServiceState;
+  detail: string | null;
+  checkedAtMs: number;
+  healthCheckConfigured: boolean;
+  startCommandConfigured: boolean;
+  stopCommandConfigured: boolean;
+}
+
 interface StartRegisteredServiceResult {
   service: string;
   success: boolean;
@@ -451,7 +476,9 @@ interface ConnectorSummary {
   ui?: ConnectorUi | null;
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
-  serviceNames: string[];
+  installationId: string;
+  methodNames: string[];
+  eventNames: string[];
   installedAtEpochMs: number;
   lastSyncedAtEpochMs: number;
 }
@@ -481,7 +508,9 @@ interface ConnectorInstallResult {
   name: string;
   version: string;
   packagePath: string;
-  serviceNames: string[];
+  installationId: string;
+  methodNames: string[];
+  eventNames: string[];
 }
 
 interface ConnectorAppInstallDocument {
@@ -489,8 +518,8 @@ interface ConnectorAppInstallDocument {
   config: ConfigDocument;
 }
 
-interface ConnectorServiceStartResult {
-  service: string;
+interface ConnectorLifecycleResult {
+  connectorId: string;
   configured: boolean;
   exitCode: number | null;
   stdout: string;
@@ -499,7 +528,7 @@ interface ConnectorServiceStartResult {
 
 interface ConnectorStartResult {
   connectorId: string;
-  services: ConnectorServiceStartResult[];
+  lifecycle: ConnectorLifecycleResult;
 }
 
 interface ConnectorAppUpdateStatus {
@@ -538,6 +567,7 @@ interface UiAgentConfig {
   };
   runtime: RuntimeConfig;
   services: UiServiceConfig[];
+  local_apps: LocalAppConfig[];
   credential_status: {
     relay_token_configured: boolean;
   };
@@ -581,6 +611,7 @@ interface LocalAppItem {
   description: string;
   kind: LocalAppKind;
   serviceIndexes: number[];
+  localAppIndex?: number;
   connector?: ConnectorSummary;
   managedTool?: ManagedToolStatus;
 }
@@ -818,6 +849,7 @@ function App() {
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [desktopPermissions, setDesktopPermissions] = useState<DesktopPermissionStatus | null>(null);
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
+  const [localAppRuntimeStatuses, setLocalAppRuntimeStatuses] = useState<LocalAppRuntimeStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const localAppsChangeRevisionRef = useRef(0);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
@@ -1243,18 +1275,19 @@ function App() {
     if (!config) {
       return [];
     }
-    const connectorServiceNames = new Set<string>();
     const apps: LocalAppItem[] = connectorApps.map((connector) => {
-      const serviceIndexes = connector.serviceNames
-        .map((serviceName) => config.services.findIndex((service) => service.name === serviceName))
-        .filter((index) => index >= 0);
-      connector.serviceNames.forEach((serviceName) => connectorServiceNames.add(serviceName));
+      const localAppIndex = config.local_apps.findIndex(
+        (localApp) => localApp.connectorId === connector.id
+      );
+      const capabilityCount =
+        connector.methodNames.length + connector.eventNames.length;
       return {
         id: `connector:${connector.id}`,
         name: connector.name,
-        description: `版本 ${connector.version} · ${connector.serviceNames.length} 项能力组`,
+        description: `版本 ${connector.version} · ${capabilityCount} 项能力`,
         kind: "connector",
-        serviceIndexes,
+        serviceIndexes: [],
+        localAppIndex: localAppIndex >= 0 ? localAppIndex : undefined,
         connector
       };
     });
@@ -1271,9 +1304,6 @@ function App() {
     }
 
     config.services.forEach((service, serviceIndex) => {
-      if (connectorServiceNames.has(service.name)) {
-        return;
-      }
       if (isComputerService(service)) {
         apps.push({
           id: "built-in:desktop-control",
@@ -1560,8 +1590,12 @@ function App() {
 
   async function refreshRegisteredServiceStatuses() {
     try {
-      const statuses = await invoke<RegisteredServiceStatus[]>("registered_service_statuses");
-      setRegisteredServiceStatuses(statuses);
+      const [serviceStatuses, appStatuses] = await Promise.all([
+        invoke<RegisteredServiceStatus[]>("registered_service_statuses"),
+        invoke<LocalAppRuntimeStatus[]>("local_app_runtime_statuses")
+      ]);
+      setRegisteredServiceStatuses(serviceStatuses);
+      setLocalAppRuntimeStatuses(appStatuses);
     } catch (err) {
       clientWarn("读取本地应用运行状态失败", err);
     }
@@ -1980,7 +2014,7 @@ function App() {
         const result = await invoke<ConnectorStartResult>("start_connector_app", {
           id: app.connector.id
         });
-        const failed = result.services.filter((service) => service.exitCode !== 0);
+        const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
         await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
           setLocalAppLifecycleOverride(app.id, {
@@ -2043,7 +2077,7 @@ function App() {
         const result = await invoke<ConnectorStartResult>("stop_connector_app", {
           id: app.connector.id
         });
-        const failed = result.services.filter((service) => service.exitCode !== 0);
+        const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
         await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
           setLocalAppLifecycleOverride(app.id, {
@@ -2124,6 +2158,44 @@ function App() {
           status: "error",
           message: readError(err)
         }
+      }));
+    } finally {
+      setCapabilityTestBusy(null);
+    }
+  }
+
+  async function testLocalAppCapability(app: LocalAppItem, methodIndex: number) {
+    const localApp =
+      app.localAppIndex == null ? null : config?.local_apps[app.localAppIndex];
+    const method = localApp?.methods[methodIndex];
+    if (!config || !localApp || !method) {
+      return;
+    }
+    const testKey = `local-app:${localApp.connectorId}:${methodIndex}`;
+    const draft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(toUiMethod(method));
+    try {
+      setCapabilityTestBusy(testKey);
+      setError("");
+      const result = await invoke<CapabilityInvokeResult>("test_local_app_capability", {
+        config: fromUiConfig(config),
+        connectorId: localApp.connectorId,
+        method: method.name,
+        arguments: parseJson(draft)
+      });
+      setCapabilityTestResults((current) => ({
+        ...current,
+        [testKey]: {
+          status: result.success ? "success" : "error",
+          result,
+          message: result.success ? "测试通过" : result.error?.message ?? "测试失败"
+        }
+      }));
+      await refreshRuntime();
+      await refreshRegisteredServiceStatuses();
+    } catch (err) {
+      setCapabilityTestResults((current) => ({
+        ...current,
+        [testKey]: { status: "error", message: readError(err) }
       }));
     } finally {
       setCapabilityTestBusy(null);
@@ -4560,11 +4632,29 @@ function App() {
     if (!config) {
       return <div />;
     }
-    const services = app.serviceIndexes
+    const services: Array<{ serviceIndex: number | null; service: UiServiceConfig }> = app.serviceIndexes
       .map((serviceIndex) => ({ serviceIndex, service: config.services[serviceIndex] }))
       .filter((entry): entry is { serviceIndex: number; service: UiServiceConfig } =>
         Boolean(entry.service)
       );
+    if (app.localAppIndex != null) {
+      const localApp = config.local_apps[app.localAppIndex];
+      if (localApp) {
+        services.push({
+          serviceIndex: null,
+          service: {
+            name: localApp.connectorId,
+            description: localApp.description || localApp.name,
+            enabled: localApp.enabled,
+            health_check: localApp.healthCheck ? toUiServiceHealthCheck(localApp.healthCheck) : null,
+            start_command: localApp.startCommand ? toUiServiceStartCommand(localApp.startCommand) : null,
+            stop_command: localApp.stopCommand ? toUiServiceStartCommand(localApp.stopCommand) : null,
+            methods: localApp.methods.map(toUiMethod),
+            events: localApp.events.map(toUiEvent)
+          }
+        });
+      }
+    }
 
     if (services.length === 0) {
       return <div className="empty-state compact-empty">应用已安装，但当前没有写入能力。</div>;
@@ -4581,7 +4671,7 @@ function App() {
                   {service.enabled ? "启用" : "停用"}
                 </span>
               </div>
-              {canShowConfig ? (
+              {canShowConfig && serviceIndex != null ? (
                 <div className="service-actions">
                   <span
                     className={`service-save-state ${
@@ -4609,11 +4699,15 @@ function App() {
             </div>
             <div className="method-list compact-method-list">
               {service.methods.map((method, methodIndex) => {
-                const testKey = buildCapabilityTestKey(serviceIndex, methodIndex);
+                const testKey =
+                  serviceIndex == null
+                    ? `local-app:${service.name}:${methodIndex}`
+                    : buildCapabilityTestKey(serviceIndex, methodIndex);
                 const testDraft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(method);
                 const testResult = capabilityTestResults[testKey];
                 const testDisabled = !service.enabled || !method.enabled || capabilityTestBusy != null;
-                const configOpen = isMethodAdvancedOpen(serviceIndex, methodIndex);
+                const configOpen =
+                  serviceIndex != null && isMethodAdvancedOpen(serviceIndex, methodIndex);
                 return (
                   <div className="method-card compact-method-card" key={`${service.name}-${method.name}-${methodIndex}`}>
                     <div className="method-topline compact-method-topline">
@@ -4630,12 +4724,16 @@ function App() {
                       <div className="capability-card-actions">
                         <button
                           className="primary compact-config-button"
-                          onClick={() => void testCapability(serviceIndex, methodIndex)}
+                          onClick={() =>
+                            serviceIndex == null
+                              ? void testLocalAppCapability(app, methodIndex)
+                              : void testCapability(serviceIndex, methodIndex)
+                          }
                           disabled={testDisabled}
                         >
                           {capabilityTestBusy === testKey ? "测试中" : "测试"}
                         </button>
-                        {canShowConfig ? (
+                        {canShowConfig && serviceIndex != null ? (
                           <button
                             className={
                               configOpen
@@ -4649,7 +4747,9 @@ function App() {
                         ) : null}
                       </div>
                     </div>
-                    {canShowConfig ? renderCapabilityMethodConfig(method, serviceIndex, methodIndex) : null}
+                    {canShowConfig && serviceIndex != null
+                      ? renderCapabilityMethodConfig(method, serviceIndex, methodIndex)
+                      : null}
                     <div className="capability-test-panel">
                       <label>
                         <span>参数 JSON</span>
@@ -4716,7 +4816,9 @@ function App() {
     const services = app.serviceIndexes
       .map((serviceIndex) => config.services[serviceIndex])
       .filter((service): service is UiServiceConfig => Boolean(service));
-    if (services.length === 0) {
+    const localApp =
+      app.localAppIndex == null ? null : config.local_apps[app.localAppIndex] ?? null;
+    if (services.length === 0 && !localApp) {
       return null;
     }
     const lifecycle = localAppLifecycle(app);
@@ -4746,6 +4848,18 @@ function App() {
             </div>
           );
         })}
+        {localApp ? (
+          <div className="local-app-runtime-row" key={localApp.connectorId}>
+            <div>
+              <strong>{localApp.name}</strong>
+              <p>
+                {localApp.healthCheck
+                  ? "按应用级 healthCheck 检查运行状态"
+                  : "应用未声明 healthCheck"}
+              </p>
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -5179,8 +5293,13 @@ function App() {
     const embeddedUi = app.connector?.ui?.type === "embedded" ? app.connector.ui : null;
     const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);
     const canConfigureCapabilities =
-      !isManagedTool && (showAdvancedSettings || app.kind === "custom" || hasShellCapability);
-    const canShowDeveloperConfig = !isManagedTool && (showAdvancedSettings || app.kind === "custom");
+      !isManagedTool &&
+      app.kind !== "connector" &&
+      (showAdvancedSettings || app.kind === "custom" || hasShellCapability);
+    const canShowDeveloperConfig =
+      !isManagedTool &&
+      app.kind !== "connector" &&
+      (showAdvancedSettings || app.kind === "custom");
     const marketApp = marketAppForLocalApp(app);
     const updateStatus = localAppUpdateStatus(app);
     const updateBusy = connectorUpdateBusy === app.id || (isManagedTool && managedToolBusy);
@@ -5425,12 +5544,18 @@ function App() {
     if (!config) {
       return false;
     }
+    if (app.localAppIndex != null) {
+      return Boolean(config.local_apps[app.localAppIndex]?.startCommand);
+    }
     return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.start_command));
   }
 
   function hasLocalAppStopCommand(app: LocalAppItem) {
     if (!config) {
       return false;
+    }
+    if (app.localAppIndex != null) {
+      return Boolean(config.local_apps[app.localAppIndex]?.stopCommand);
     }
     return app.serviceIndexes.some((serviceIndex) => Boolean(config.services[serviceIndex]?.stop_command));
   }
@@ -5452,6 +5577,34 @@ function App() {
     }
 
     const override = localAppLifecycleOverrides[app.id];
+    if (app.localAppIndex != null) {
+      const localApp = config.local_apps[app.localAppIndex];
+      if (!localApp) {
+        return formatLocalAppLifecycle("broken", "安装记录与本地应用配置不一致");
+      }
+      if (override && ["starting", "stopping", "start_failed", "stopped"].includes(override.state)) {
+        return formatLocalAppLifecycle(override.state, override.detail);
+      }
+      const status = localAppRuntimeStatuses.find(
+        (candidate) => candidate.connectorId === localApp.connectorId
+      );
+      if (status?.status === "healthy") {
+        return formatLocalAppLifecycle("running", "healthCheck 已通过");
+      }
+      if (override?.state === "running") {
+        return formatLocalAppLifecycle("running", override.detail ?? "启动命令已执行");
+      }
+      if (status?.status === "unhealthy") {
+        return formatLocalAppLifecycle("stopped", "healthCheck 未通过");
+      }
+      if (status?.status === "unknown") {
+        return formatLocalAppLifecycle("unknown", "等待运行状态检查");
+      }
+      return hasLocalAppStartCommand(app)
+        ? formatLocalAppLifecycle("installed", "已安装，等待启动")
+        : formatLocalAppLifecycle("installed", "已安装");
+    }
+
     if (override && ["starting", "stopping", "start_failed", "stopped"].includes(override.state)) {
       return formatLocalAppLifecycle(override.state, override.detail);
     }
@@ -5489,6 +5642,10 @@ function App() {
   }
 
   function countLocalAppCapabilities(app: LocalAppItem, agentConfig: UiAgentConfig) {
+    if (app.localAppIndex != null) {
+      const localApp = agentConfig.local_apps[app.localAppIndex];
+      return localApp ? localApp.methods.length + localApp.events.length : 0;
+    }
     return app.serviceIndexes.reduce((count, serviceIndex) => {
       const service = agentConfig.services[serviceIndex];
       return service ? count + service.methods.length + service.events.length : count;
@@ -6424,6 +6581,7 @@ export function toUiConfig(config: AgentConfig): UiAgentConfig {
     },
     runtime: config.runtime,
     services: config.services.map(toUiService),
+    local_apps: config.local_apps ?? [],
     credential_status: {
       relay_token_configured:
         config.credential_status?.relay_token_configured === true || Boolean(config.relay.token.trim())
@@ -6449,7 +6607,8 @@ export function fromUiConfig(config: UiAgentConfig): AgentConfig {
       tags: splitCommaList(config.device.tags_text)
     },
     runtime: config.runtime,
-    services: config.services.map(fromUiService)
+    services: config.services.map(fromUiService),
+    local_apps: config.local_apps
   };
 }
 
@@ -7003,9 +7162,9 @@ function compareVersions(left: string, right: string): number {
   return leftVersion.prerelease.localeCompare(rightVersion.prerelease);
 }
 
-function formatConnectorServiceFailures(services: ConnectorServiceStartResult[]): string {
-  return services
-    .map((service) => `${service.service}${service.stderr.trim() ? ` ${service.stderr.trim()}` : ""}`)
+function formatConnectorServiceFailures(results: ConnectorLifecycleResult[]): string {
+  return results
+    .map((result) => `${result.connectorId}${result.stderr.trim() ? ` ${result.stderr.trim()}` : ""}`)
     .join("；");
 }
 

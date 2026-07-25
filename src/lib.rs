@@ -1,5 +1,6 @@
 pub mod config;
 pub mod connector;
+mod event_outbox;
 mod event_server;
 pub mod logging;
 mod power;
@@ -15,10 +16,10 @@ pub use config::{
     browser_auth_manifest_json, clear_relay_credentials, default_config_path,
     ensure_browser_auth_agent_id, ensure_config_exists, load_config, manifest_preview_json,
     reset_invalid_config, save_config, windows_service_config_path, AgentConfig, ComputerUseAction,
-    ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig,
-    PlatformConfig, RegistrationHealthCheck, RegistrationMethod, RegistrationTransport,
-    RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration,
-    ServiceStartCommand, UploadConfig,
+    ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding,
+    MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
+    RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
+    ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use connector::inspect_python_runtime;
 pub use connector::{
@@ -29,9 +30,10 @@ pub use connector::{
     resolve_connector_ui_entry, show_connector, start_connector, stop_connector,
     sync_installed_connector, sync_installed_connectors, sync_installed_connectors_report,
     uninstall_connector, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorManagement, ConnectorManagementOperation, ConnectorManifest,
-    ConnectorServiceStartResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure,
-    ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi, PythonRuntimeStatus,
+    ConnectorInstallResult, ConnectorLifecycleResult, ConnectorManagement,
+    ConnectorManagementOperation, ConnectorManifest, ConnectorStartResult, ConnectorSummary,
+    ConnectorSyncFailure, ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi,
+    PythonRuntimeStatus,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

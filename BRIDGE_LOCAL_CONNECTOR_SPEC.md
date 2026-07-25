@@ -6,12 +6,13 @@
 
 - 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。它可以是官方托管工具、内置应用、市场 Connector，也可以是用户手动注册的自定义应用。
 - 官方托管工具：由百积木维护、在应用页独立显示并按版本安装、升级和回滚的本机工具。它不必注册远程服务，例如 Baijimu CLI。
-- Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、服务注册信息和能力。
+- Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、方法和设备事件。
 - 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
 - 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
-- 服务：百积木协议内部的能力组，例如 `wechatLocal`、`computer`、`shell`。
-- 方法：服务下的可调用动作，例如 `wechatLocal.searchMessages`。
-- 事件：服务上报给外部订阅方的消息，例如 `wechatLocal.messageReceived`。
+- 服务：内置能力和 legacy 自定义能力的协议对象，例如 `computer`、`shell`。
+- 方法：本地应用下的可调用动作，例如 `wechat.searchMessages`。
+- 设备事件：由某台设备上的某个 Connector 安装实例产生的事件，例如
+  `com.baijimu.connector.wechat + messageReceived`。
 
 ## 分类
 
@@ -62,7 +63,6 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 ```text
 connector-root/
   connector.json
-  service-registration.json
 ```
 
 可以包含：
@@ -117,7 +117,8 @@ connector-root/
 
 ## connector.json
 
-`connector.json` 是 Connector 的主清单。当前 schema 版本为 `1.2`；`1.0` 和 `1.1` 清单继续兼容。
+`connector.json` 是 Connector 的主清单。当前 schema 版本为 `2.0`；`1.0`、`1.1`
+和 `1.2` 的 service-registration 模型只做兼容。
 
 必填字段：
 
@@ -125,7 +126,9 @@ connector-root/
 - `id`
 - `name`
 - `version`
-- `services` 或 `serviceRegistrationFiles` 至少一个
+- `runtime`
+- `transport`
+- `methods` 或 `events` 至少一个
 
 推荐字段：
 
@@ -144,7 +147,7 @@ connector-root/
 
 ```json
 {
-  "schemaVersion": "1.2",
+  "schemaVersion": "2.0",
   "id": "com.baijimu.connector.wechat",
   "name": "WeChat Connector",
   "version": "0.2.3",
@@ -162,17 +165,43 @@ connector-root/
     "type": "process",
     "startPolicy": "automatic",
     "command": "wechat-bridge-collector",
-    "args": ["start"]
+    "args": ["start"],
+    "stopArgs": ["stop"],
+    "healthCheck": {
+      "type": "http",
+      "path": "/health",
+      "timeoutSecs": 2,
+      "expectStatus": 200
+    }
   },
+  "transport": {
+    "type": "http",
+    "baseUrl": "http://127.0.0.1:18082"
+  },
+  "methods": [
+    {
+      "name": "searchMessages",
+      "description": "Search local WeChat messages.",
+      "path": "/invoke/searchMessages",
+      "httpMethod": "POST",
+      "timeoutSecs": 30,
+      "input_schema": {"type": "object"}
+    }
+  ],
+  "events": [
+    {
+      "name": "messageReceived",
+      "description": "A local WeChat message was received.",
+      "enabled": true,
+      "payload_schema": {"type": "object"}
+    }
+  ],
   "ui": {
     "type": "embedded",
     "entry": "ui/index.html",
     "title": "个性化设置",
     "defaultView": true
   },
-  "serviceRegistrationFiles": [
-    "service-registration.json"
-  ],
   "remoteCapabilities": [
     {
       "name": "wechat.events.messageReceived",
@@ -185,8 +214,11 @@ connector-root/
 
 `runtime.startPolicy` 支持：
 
-- `automatic`（默认）：健康检查失败时，Bridge Agent 可执行 `startCommand` 恢复服务。
-- `manual`：仅允许用户从本机应用页显式启动。运行时重建、重连和健康检查都不会在后台执行 `startCommand`。访问 macOS 受保护数据的 Connector 必须使用该策略，避免在用户未完成系统授权时触发 TCC 提示。
+- `automatic`（默认）：健康检查失败时，Bridge Agent 可执行 `runtime.command + args[]`
+  恢复应用。
+- `manual`：仅允许用户从本机应用页显式启动。运行时重建、重连和健康检查都不会在后台
+  执行启动命令。访问 macOS 受保护数据的 Connector 必须使用该策略，避免在用户未完成
+  系统授权时触发 TCC 提示。
 
 需要系统权限的 Connector 应在 manifest 顶层声明：
 
@@ -253,35 +285,17 @@ await window.baijimuLocalApp.invoke("saveSettings", {
 - `name` 是展示名，可以变化。
 - `version` 应使用 SemVer。市场版本和 Connector 包版本必须一致。
 
-## 服务注册
+## 本地应用能力声明
 
-Connector 通过 `services` 内联声明服务，或通过 `serviceRegistrationFiles` 指向一个或多个服务注册文件。
-
-推荐使用独立 `service-registration.json`：
+Schema `2.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` 和 `events`，
+一个 Connector 安装实例就是一个本地应用，不再为了远程调用或事件订阅创建 service。
+以下字段直接放在 `connector.json`：
 
 ```json
 {
-  "name": "wechatLocal",
-  "description": "Local WeChat capability service.",
   "transport": {
     "type": "http",
     "baseUrl": "http://127.0.0.1:18082"
-  },
-  "healthCheck": {
-    "type": "http",
-    "path": "/health",
-    "timeoutSecs": 2,
-    "expectStatus": 200
-  },
-  "startCommand": {
-    "type": "shell_command",
-    "command": ["wechat-bridge-collector", "start", "--daemon"],
-    "timeoutSecs": 15
-  },
-  "stopCommand": {
-    "type": "shell_command",
-    "command": ["wechat-bridge-collector", "stop"],
-    "timeoutSecs": 10
   },
   "methods": [
     {
@@ -312,13 +326,16 @@ Connector 通过 `services` 内联声明服务，或通过 `serviceRegistrationF
 
 要求：
 
-- `name` 是对外协议里的服务名，必须稳定。
 - `methods[].name` 和 `events[].name` 必须稳定；删除或改名属于破坏性变更。
 - `transport.baseUrl` 默认应绑定 `127.0.0.1`，不要要求用户暴露公网端口。
-- `healthCheck` 应能快速判断本地服务是否可用。
-- `startCommand` 应是触发启动后退出的命令，不应是永久阻塞的前台进程。
-- `stopCommand` 应尽量幂等；服务未运行时也应安全退出。
+- `runtime.healthCheck` 应能快速判断本地应用是否可用。
+- `runtime.command + args[]` 应是触发启动后退出的命令，不应是永久阻塞的前台进程。
+- `runtime.command + stopArgs[]` 应尽量幂等；应用未运行时也应安全退出。
 - `input_schema` 应尽量收紧，不要长期使用完全开放的 `additionalProperties: true` 作为正式能力接口。
+
+安装时 Bridge Agent 为本地应用生成稳定 `installationId`。同一 Connector 卸载后重新
+安装会获得新的安装身份；升级和同步保留原安装身份。Relay 使用
+`connectorId + installationId` 校验事件来源。
 
 ## 市场元数据
 
@@ -392,14 +409,14 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 3. 百积木下载 `latestVersion.source`，如果有 `revision` 则 checkout 对应分支或 tag。
 4. 百积木读取 `connector.json` 并校验。
 5. 百积木安装 Connector 包到本机 connectors 目录。
-6. 百积木把服务注册写入本机 `agent-config.json`。
+6. 百积木把本地应用定义写入 `agent-config.json.localApps[]`。
 7. 百积木刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
 
 更新规则：
 
 - 用市场 `connectorId` 找到本机已安装 Connector。
 - 比较本机 `connector.json.version` 与市场 `latestVersion.version`。
-- 更新时重新安装同一个 `connectorId`，并替换该 Connector 管理的服务。
+- 更新时重新安装同一个 `connectorId`，并替换该 Connector 的本地应用定义。
 - 更新不得悄悄迁移到另一个 `connectorId`。
 - 如果服务名、方法名、事件名发生破坏性变更，必须升级主版本，并在市场风险说明中写清楚。
 
@@ -413,7 +430,7 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 
 卸载规则：
 
-- 卸载 Connector 时，删除安装记录和该 Connector 注册的服务。
+- 卸载 Connector 时，删除安装记录和该 Connector 的本地应用定义。
 - 不得删除用户手动创建的自定义服务。
 - 不得删除其他 Connector 的服务。
 
@@ -445,11 +462,35 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 
 正确流程：
 
-1. Connector 本地服务声明 `events[]`。
-2. Connector 运行时向百积木本机事件入口发送事件。
-3. 百积木校验 `service.event` 已声明且启用。
-4. 百积木通过已有 agent WebSocket 上报 relay。
-5. relay 再按订阅关系投递给外部 app / agent。
+1. Connector 在 schema `2.0` 清单顶层声明 `events[]`。
+2. Bridge Agent 启动 Connector 时注入
+   `BAIJIMU_CONNECTOR_EVENT_ENDPOINT` 和
+   `BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE`。
+3. Connector 读取独立事件凭证，调用
+   `POST /v1/local-app-events`，传入 `connectorId`、`event`、`payload`，可选
+   `eventId` 和 `occurredAt`。
+4. Bridge Agent 校验凭证、安装实例和事件声明，先持久化本地 outbox，再返回
+   `202 Accepted`。
+5. Bridge Agent 通过 WebSocket 发送 `local_app_event_emitted`；Relay 校验设备和
+   capability 后写入 Event Center。
+6. Event Center 在一个事务中完成事件去重和投递任务持久化后，Relay 才返回
+   `event_ack`；Bridge Agent 收到 ACK 后删除 outbox。
+7. 订阅、指定设备范围、Webhook 重试和投递记录全部由 Event Center 维护，Relay
+   不保存设备事件订阅表，也不直接触发 Webhook。
+
+调用示例：
+
+```bash
+curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
+  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE")" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connectorId": "com.baijimu.connector.wechat",
+    "event": "messageReceived",
+    "eventId": "evt-01J...",
+    "payload": {"conversationId": "c-1"}
+  }'
+```
 
 事件 payload 应保持结构化，并避免发送无边界的大对象。需要传大文件时，应走文件引用或上传协议。
 
@@ -459,7 +500,7 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 
 - `connector.json.id`
 - `connector.json.version`
-- 服务名
+- Connector ID 和安装实例语义
 - 方法名
 - 事件名
 - 方法输入 schema
@@ -475,7 +516,7 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 
 破坏性变更：
 
-- 改名或删除服务、方法、事件。
+- 改名或删除 Connector、方法、事件。
 - 收紧输入 schema 导致旧调用失败。
 - 改变事件 payload 必填字段。
 - 改变权限边界，例如从只读查询变成消息监听。
@@ -510,12 +551,12 @@ Connector 发布到市场前至少确认：
 - `connector.json.id` 与市场 `connectorId` 一致。
 - `connector.json.version` 与市场 `latestVersion.version` 一致。
 - Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
-- 安装后服务能写入 `agent-config.json`。
+- 安装后本地应用定义能写入 `agent-config.json.localApps[]`，不会写入 runtime service。
 - `startCommand` 可执行，且不会永久阻塞。
 - `healthCheck` 通过。
 - 方法能通过百积木调用。
 - 事件能通过百积木本机事件入口上报。
-- 卸载只删除该 Connector 管理的服务。
+- 卸载只删除该 Connector 的本地应用定义。
 - `risk`、`riskLevel`、`platforms` 与真实行为一致。
 
 ## 当前实现约束

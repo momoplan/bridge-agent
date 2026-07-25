@@ -2,8 +2,11 @@ use crate::config::{
     load_config, resolve_config_base_dir, save_config, RuntimeConfig, ServiceConfig,
     ServiceRegistration,
 };
+use crate::connector::authorize_connector_event;
+use crate::event_outbox::EventOutbox;
 use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
+use crate::protocol::LocalAppEventEmitted;
 use crate::runtime::{RuntimeAuditLog, RuntimeRegistryUpdate};
 use crate::services::ServiceRegistry;
 use anyhow::{Context, Result};
@@ -30,12 +33,15 @@ const PORT_RECLAIM_BIND_RETRIES: usize = 20;
 const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone)]
-pub(crate) struct LocalEventEmitRequest {
-    pub event_id: String,
-    pub service: String,
-    pub event: String,
-    pub payload: Value,
-    pub occurred_at: Option<String>,
+pub(crate) enum LocalEventEmitRequest {
+    Service {
+        event_id: String,
+        service: String,
+        event: String,
+        payload: Value,
+        occurred_at: Option<String>,
+    },
+    LocalApp(LocalAppEventEmitted),
 }
 
 pub(crate) struct LocalEventServer {
@@ -51,6 +57,7 @@ struct EventServerState {
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
+    outbox: EventOutbox,
     event_enabled: bool,
     event_token: Option<String>,
     service_registration_enabled: bool,
@@ -69,12 +76,36 @@ struct EmitEventRequest {
     occurred_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmitLocalAppEventRequest {
+    connector_id: String,
+    event: String,
+    #[serde(default)]
+    payload: Value,
+    #[serde(default)]
+    event_id: Option<String>,
+    #[serde(default)]
+    occurred_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EmitEventResponse {
     accepted: bool,
     event_id: String,
     service: String,
+    event: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmitLocalAppEventResponse {
+    accepted: bool,
+    durable: bool,
+    event_id: String,
+    connector_id: String,
+    installation_id: String,
     event: String,
 }
 
@@ -152,6 +183,7 @@ impl LocalEventServer {
             .await
             .with_context(|| format!("failed to bind local event server on {bind}"))?;
         let bind = listener.local_addr()?;
+        let outbox = EventOutbox::new(&resolve_config_base_dir(&config_path))?;
         let token = config
             .event_server_token
             .as_deref()
@@ -168,6 +200,7 @@ impl LocalEventServer {
                 apply_tx,
                 audit_tx,
                 config_path,
+                outbox,
                 event_enabled: config.event_server_enabled,
                 event_token: token,
                 service_registration_enabled: config.service_registration_enabled,
@@ -190,6 +223,7 @@ impl LocalEventServer {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/events", post(emit_event))
+            .route("/v1/local-app-events", post(emit_local_app_event))
             .route("/v1/services", get(list_services).post(register_service))
             .route(
                 "/v1/services/{service}",
@@ -608,7 +642,7 @@ async fn emit_event(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let emit_request = LocalEventEmitRequest {
+    let emit_request = LocalEventEmitRequest::Service {
         event_id: event_id.clone(),
         service: service.to_string(),
         event: event.to_string(),
@@ -653,6 +687,85 @@ async fn emit_event(
             event_id,
             service: service.to_string(),
             event: event.to_string(),
+        }),
+    ))
+}
+
+async fn emit_local_app_event(
+    State(state): State<EventServerState>,
+    headers: HeaderMap,
+    Json(request): Json<EmitLocalAppEventRequest>,
+) -> Result<(StatusCode, Json<EmitLocalAppEventResponse>), EventApiError> {
+    if !state.event_enabled {
+        return Err(EventApiError::new(
+            StatusCode::NOT_FOUND,
+            "local event API is disabled",
+        ));
+    }
+    let connector_id = request.connector_id.trim();
+    let event_name = request.event.trim();
+    if connector_id.is_empty() || event_name.is_empty() {
+        return Err(EventApiError::new(
+            StatusCode::BAD_REQUEST,
+            "connectorId and event are required",
+        ));
+    }
+    let token = bearer_token(&headers).ok_or_else(|| {
+        EventApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "connector event credential is required",
+        )
+    })?;
+    let installation_id =
+        authorize_connector_event(&state.config_path, connector_id, event_name, &token)
+            .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    let event_id = request
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let event = LocalAppEventEmitted {
+        event_id: event_id.clone(),
+        connector_id: connector_id.to_string(),
+        installation_id: installation_id.clone(),
+        event: event_name.to_string(),
+        payload: request.payload,
+        occurred_at: request
+            .occurred_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    };
+    state.outbox.enqueue(&event).map_err(internal_error)?;
+    match state
+        .event_tx
+        .try_send(LocalEventEmitRequest::LocalApp(event))
+    {
+        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {}
+    }
+
+    emit_audit_log(
+        &state,
+        "info",
+        format!("local app event {connector_id}.{event_name} accepted durably"),
+        LogMetadata::category("local_app_event")
+            .event(event_name.to_string())
+            .event_id(event_id.clone())
+            .outcome("accepted"),
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EmitLocalAppEventResponse {
+            accepted: true,
+            durable: true,
+            event_id,
+            connector_id: connector_id.to_string(),
+            installation_id,
+            event: event_name.to_string(),
         }),
     ))
 }
@@ -824,6 +937,7 @@ async fn apply_config_update(
         .await
         .map_err(bad_request)?;
     let services = relay_registry.definitions();
+    let local_apps = relay_registry.local_app_definitions();
     {
         let mut current = state.registry.write().await;
         *current = registry;
@@ -833,6 +947,7 @@ async fn apply_config_update(
         .send(RuntimeRegistryUpdate {
             registry: relay_registry,
             services,
+            local_apps,
         })
         .map_err(|_| {
             EventApiError::new(
@@ -924,7 +1039,7 @@ fn emit_audit_log(
 mod tests {
     use super::{
         local_endpoint_covers_bind, parse_listening_pid, parse_lsof_listening_owner,
-        parse_tasklist_image_name, LocalEventServer,
+        parse_tasklist_image_name, LocalEventEmitRequest, LocalEventServer,
     };
     use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
     use crate::services::ServiceRegistry;
@@ -992,10 +1107,21 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 202);
         let event = event_rx.recv().await.unwrap();
-        assert_eq!(event.service, "asyncJob");
-        assert_eq!(event.event, "finished");
-        assert_eq!(event.payload["jobId"], "job-1");
-        assert!(!event.event_id.is_empty());
+        match event {
+            LocalEventEmitRequest::Service {
+                event_id,
+                service,
+                event,
+                payload,
+                ..
+            } => {
+                assert_eq!(service, "asyncJob");
+                assert_eq!(event, "finished");
+                assert_eq!(payload["jobId"], "job-1");
+                assert!(!event_id.is_empty());
+            }
+            LocalEventEmitRequest::LocalApp(_) => panic!("expected service event"),
+        }
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();

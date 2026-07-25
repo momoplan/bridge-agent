@@ -1,4 +1,5 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::event_outbox::EventOutbox;
 use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
@@ -6,8 +7,9 @@ use crate::process_identity::is_bridge_agent_process_name;
 #[cfg(windows)]
 use crate::process_identity::process_file_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, EventEmitted, AGENT_PROTOCOL_FEATURE_REGISTERED_ACK,
-    AGENT_PROTOCOL_VERSION,
+    AgentCapabilities, AgentMessage, EventEmitted,
+    AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1,
+    AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
 use crate::services::ServiceRegistry;
 use anyhow::{bail, Context, Result};
@@ -35,6 +37,7 @@ const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const RELAY_CONNECT_TIMEOUT_SECS: u64 = 15;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
+const LOCAL_APP_EVENT_RETRY_INTERVAL_SECS: u64 = 30;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
@@ -143,6 +146,7 @@ struct ManagedState {
 pub(crate) struct RuntimeRegistryUpdate {
     pub(crate) registry: ServiceRegistry,
     pub(crate) services: Vec<crate::protocol::ServiceDefinition>,
+    pub(crate) local_apps: Vec<crate::protocol::LocalAppDefinition>,
 }
 
 pub(crate) struct RuntimeAuditLog {
@@ -226,6 +230,7 @@ impl AgentRuntimeManager {
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
+        let event_outbox = EventOutbox::new(&config_base_dir)?;
         let event_server = LocalEventServer::bind(
             &config.runtime,
             config_path.to_path_buf(),
@@ -327,6 +332,7 @@ impl AgentRuntimeManager {
                 config_path: config_path_string,
                 ws_url,
                 registry,
+                event_outbox,
             };
             if let Err(err) = runner
                 .run(shutdown_rx, &mut apply_rx, &mut event_rx, &mut audit_rx)
@@ -378,7 +384,12 @@ impl AgentRuntimeManager {
         let config_base_dir = resolve_config_base_dir(path);
         let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir).await?;
         let services = registry.definitions();
-        let update = RuntimeRegistryUpdate { registry, services };
+        let local_apps = registry.local_app_definitions();
+        let update = RuntimeRegistryUpdate {
+            registry,
+            services,
+            local_apps,
+        };
 
         let snapshot = {
             let mut state = self.inner.state.lock().await;
@@ -582,6 +593,7 @@ struct RuntimeRunner {
     config_path: String,
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
+    event_outbox: EventOutbox,
 }
 
 impl RuntimeRunner {
@@ -700,11 +712,16 @@ impl RuntimeRunner {
         let (mut write, mut read) = stream.split();
         let capabilities = self.current_capabilities().await;
         write_json(&mut write, &capabilities).await?;
+        self.send_pending_local_app_events(&mut write).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
         let heartbeat_timeout = Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS);
         let mut keepalive = interval_at(
             tokio::time::Instant::now() + keepalive_interval,
             keepalive_interval,
+        );
+        let mut local_app_event_retry = interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(LOCAL_APP_EVENT_RETRY_INTERVAL_SECS),
+            Duration::from_secs(LOCAL_APP_EVENT_RETRY_INTERVAL_SECS),
         );
         let mut last_relay_seen = tokio::time::Instant::now();
 
@@ -720,27 +737,52 @@ impl RuntimeRunner {
                     self.push_log("info", "runtime capabilities updated and sent to relay").await;
                 }
                 Some(event) = event_rx.recv() => {
-                    let service = event.service.clone();
-                    let event_name = event.event.clone();
-                    let event_id = event.event_id.clone();
-                    let message = AgentMessage::EventEmitted(EventEmitted {
-                        event_id: Some(event.event_id),
-                        service: event.service,
-                        event: event.event,
-                        payload: event.payload,
-                        occurred_at: event.occurred_at,
-                    });
-                    write_json(&mut write, &message).await?;
-                    self.push_log_with_metadata(
-                        "info",
-                        &format!("event {service}.{event_name} sent to relay"),
-                        LogMetadata::category("event")
-                            .service(service)
-                            .event(event_name)
-                            .event_id(event_id)
-                            .outcome("sent"),
-                    )
-                    .await;
+                    match event {
+                        LocalEventEmitRequest::Service {
+                            event_id,
+                            service,
+                            event,
+                            payload,
+                            occurred_at,
+                        } => {
+                            let message = AgentMessage::EventEmitted(EventEmitted {
+                                event_id: Some(event_id.clone()),
+                                service: service.clone(),
+                                event: event.clone(),
+                                payload,
+                                occurred_at,
+                            });
+                            write_json(&mut write, &message).await?;
+                            self.push_log_with_metadata(
+                                "info",
+                                &format!("event {service}.{event} sent to relay"),
+                                LogMetadata::category("event")
+                                    .service(service)
+                                    .event(event)
+                                    .event_id(event_id)
+                                    .outcome("sent"),
+                            )
+                            .await;
+                        }
+                        LocalEventEmitRequest::LocalApp(event) => {
+                            let event_id = event.event_id.clone();
+                            let connector_id = event.connector_id.clone();
+                            let event_name = event.event.clone();
+                            write_json(&mut write, &AgentMessage::LocalAppEventEmitted(event)).await?;
+                            self.push_log_with_metadata(
+                                "info",
+                                &format!("local app event {connector_id}.{event_name} sent to relay"),
+                                LogMetadata::category("local_app_event")
+                                    .event(event_name)
+                                    .event_id(event_id)
+                                    .outcome("sent"),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                _ = local_app_event_retry.tick() => {
+                    self.send_pending_local_app_events(&mut write).await?;
                 }
                 Some(audit) = audit_rx.recv() => {
                     self.push_audit_log(audit).await;
@@ -780,6 +822,28 @@ impl RuntimeRunner {
                                         ),
                                     )
                                     .await;
+                                }
+                                AgentMessage::EventAck(ack) => {
+                                    match self.event_outbox.acknowledge(&ack.event_id) {
+                                        Ok(true) => {
+                                            self.push_log_with_metadata(
+                                                "info",
+                                                &format!("local app event {} acknowledged by relay", ack.event_id),
+                                                LogMetadata::category("local_app_event")
+                                                    .event_id(ack.event_id)
+                                                    .outcome(if ack.duplicate { "deduplicated" } else { "acknowledged" }),
+                                            )
+                                            .await;
+                                        }
+                                        Ok(false) => {}
+                                        Err(err) => {
+                                            self.push_log(
+                                                "warn",
+                                                &format!("failed to remove acknowledged local app event from outbox: {err:#}"),
+                                            )
+                                            .await;
+                                        }
+                                    }
                                 }
                                 AgentMessage::InvokeRequest(request) => {
                                     let service = request.service.clone();
@@ -848,13 +912,63 @@ impl RuntimeRunner {
                                     let response = AgentMessage::InvokeResult(result);
                                     write_json(&mut write, &response).await?;
                                 }
+                                AgentMessage::LocalAppInvokeRequest(request) => {
+                                    let connector_id = request.connector_id.clone();
+                                    let method = request.method.clone();
+                                    let request_id = request.request_id.clone();
+                                    self.push_log_with_metadata(
+                                        "info",
+                                        &format!(
+                                            "local app invoke {connector_id}.{method} started"
+                                        ),
+                                        LogMetadata::category("local_app_invoke")
+                                            .method(method.clone())
+                                            .request_id(request_id.clone())
+                                            .outcome("started"),
+                                    )
+                                    .await;
+                                    let result = self
+                                        .registry
+                                        .read()
+                                        .await
+                                        .invoke_local_app(
+                                            request.request_id,
+                                            &connector_id,
+                                            &method,
+                                            request.arguments,
+                                            request.timeout_secs,
+                                        )
+                                        .await;
+                                    let outcome =
+                                        if result.success { "succeeded" } else { "failed" };
+                                    self.push_log_with_metadata(
+                                        if result.success { "info" } else { "warn" },
+                                        &format!(
+                                            "local app invoke {connector_id}.{method} {outcome} in {}ms",
+                                            result.duration_ms
+                                        ),
+                                        LogMetadata::category("local_app_invoke")
+                                            .method(method)
+                                            .request_id(request_id)
+                                            .outcome(outcome)
+                                            .duration_ms(result.duration_ms),
+                                    )
+                                    .await;
+                                    write_json(
+                                        &mut write,
+                                        &AgentMessage::LocalAppInvokeResult(result),
+                                    )
+                                    .await?;
+                                }
                                 AgentMessage::Error(err) => {
                                     self.push_log("warn", &format!("relay error: {}", err.message))
                                         .await;
                                 }
                                 AgentMessage::Capabilities(_)
                                 | AgentMessage::InvokeResult(_)
-                                | AgentMessage::EventEmitted(_) => {}
+                                | AgentMessage::LocalAppInvokeResult(_)
+                                | AgentMessage::EventEmitted(_)
+                                | AgentMessage::LocalAppEventEmitted(_) => {}
                             }
                         }
                         Message::Ping(payload) => {
@@ -878,11 +992,17 @@ impl RuntimeRunner {
     }
 
     async fn current_capabilities(&self) -> AgentMessage {
+        let registry = self.registry.read().await;
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
             protocol_version: AGENT_PROTOCOL_VERSION,
-            protocol_features: vec![AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string()],
-            services: self.registry.read().await.definitions(),
+            protocol_features: vec![
+                AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2.to_string(),
+            ],
+            services: registry.definitions(),
+            local_apps: registry.local_app_definitions(),
         })
     }
 
@@ -894,9 +1014,24 @@ impl RuntimeRunner {
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
             protocol_version: AGENT_PROTOCOL_VERSION,
-            protocol_features: vec![AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string()],
+            protocol_features: vec![
+                AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2.to_string(),
+            ],
             services: update.services,
+            local_apps: update.local_apps,
         })
+    }
+
+    async fn send_pending_local_app_events<S>(&self, sink: &mut S) -> Result<()>
+    where
+        S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    {
+        for event in self.event_outbox.pending()? {
+            write_json(sink, &AgentMessage::LocalAppEventEmitted(event)).await?;
+        }
+        Ok(())
     }
 
     async fn update_snapshot(
