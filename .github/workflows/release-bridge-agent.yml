@@ -10,6 +10,11 @@ on:
         description: Existing release tag to retry or repair, for example bridge-agent-v0.1.110
         required: true
         type: string
+      repair_assets_only:
+        description: Reuse the existing signed GitHub Release assets and repair only Gitee distribution and updater metadata
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -212,6 +217,7 @@ jobs:
 
   quality-gate:
     name: Release quality gate
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -263,6 +269,7 @@ jobs:
 
   windows-quality-gate:
     name: Windows release quality gate
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: windows-latest
 
     steps:
@@ -305,6 +312,7 @@ jobs:
   release:
     name: ${{ matrix.name }}
     needs: [prepare-domestic-release, quality-gate, windows-quality-gate]
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -1088,7 +1096,20 @@ jobs:
   mirror-domestic-release:
     name: Mirror release bundles to Gitee
     runs-on: ubuntu-22.04
-    needs: release
+    needs: [prepare-domestic-release, release]
+    if: >-
+      ${{
+        always()
+        && needs.prepare-domestic-release.result == 'success'
+        && (
+          needs.release.result == 'success'
+          || (
+            github.event_name == 'workflow_dispatch'
+            && inputs.repair_assets_only
+            && needs.release.result == 'skipped'
+          )
+        )
+      }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
