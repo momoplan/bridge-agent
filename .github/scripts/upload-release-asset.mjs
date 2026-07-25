@@ -24,6 +24,8 @@ const giteeApiBase = "https://gitee.com/api/v5";
 const owner = "zxflimit_admin";
 const repository = "bridge-agent";
 const maximumAttachmentBytes = 100_000_000;
+const apiRequestTimeoutMs = 60_000;
+const publicDownloadTimeoutMs = 120_000;
 
 const assetName = basename(filePath);
 if (!isAllowedReleaseAsset(assetName, target)) {
@@ -201,6 +203,7 @@ async function giteeJson(path, options = {}) {
     const { query: _query, ...fetchOptions } = options;
     const response = await fetch(url, {
       ...fetchOptions,
+      signal: AbortSignal.timeout(apiRequestTimeoutMs),
       headers: {
         Authorization: `Bearer ${giteeToken}`,
         ...fetchOptions.headers,
@@ -220,6 +223,7 @@ async function postReleaseServiceJson(url, payload) {
   return retry(async () => {
     const response = await fetch(url, {
       method: "POST",
+      signal: AbortSignal.timeout(apiRequestTimeoutMs),
       headers: {
         Authorization: `Bearer ${releaseServiceToken}`,
         "content-type": "application/json",
@@ -252,6 +256,7 @@ async function verifyPublicDownload(url, expectedSize, name) {
       const response = await fetch(url, {
         headers: { Range: "bytes=0-0" },
         redirect: "follow",
+        signal: AbortSignal.timeout(publicDownloadTimeoutMs),
       });
       try {
         if (response.status !== 200 && response.status !== 206) {
