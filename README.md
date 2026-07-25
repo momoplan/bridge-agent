@@ -43,25 +43,26 @@
 
 - 百积木（内部工程名 `bridge-agent`）
   - 安装在用户自己的机器上
-  - 管理“我这台机器对外开放哪些服务和方法”
+  - 管理“我这台机器对外开放哪些系统服务、本地应用、方法和事件”
 - `relay`
   - 负责转发和鉴权
   - 不直接执行本地命令
 - 外部 agent / app
-  - 通过 `relay` 调用某个设备上的 `service.method`
+  - 通过 `relay` 调用某个设备上的系统 `service.method`，或某个
+    `connectorId + method`
 
 调用链路：
 
 1. 用户在本机安装并启动百积木
 2. 百积木打开授权页面，用户确认授权
 3. 百积木获取 `agent token`，主动连接 `relay`
-4. 用户把某个设备服务授权给外部 app / agent
+4. 用户把某个系统服务或本地应用授权给外部 app / agent
 5. 外部 app / agent 拿到 `client token`
-6. 外部 app / agent 通过 `relay` 调用本机暴露的 `service.method`
+6. 外部 app / agent 通过 `relay` 调用本机暴露的系统服务或本地应用方法
 
 ## 谁需要安装
 
-- 如果你只是调用别人已经开放出来的服务：不需要安装 `bridge-agent`
+- 如果你只是调用别人已经开放出来的设备能力：不需要安装 `bridge-agent`
 - 如果你想让外部 agent 使用你自己电脑上的能力：需要安装百积木
 - 如果你是平台运营方：需要部署 `relay`
 
@@ -73,21 +74,22 @@
 
 它包含三层：
 
-- Rust core library：负责配置、服务注册、WebSocket 长连、调用转发、日志和本地安全策略
+- Rust core library：负责系统服务、本地应用目录、WebSocket 长连、调用转发、事件 outbox、日志和本地安全策略
 - CLI：适合服务器、脚本或纯命令行场景
-- Tauri desktop app：适合最终用户安装、管理本地服务并打包分发
+- Tauri desktop app：适合最终用户安装、管理本地应用并打包分发
 
 ## 当前能力
 
 - 通过 WebSocket 主动连接 relay
-- 上报最小协议 `agent_id + services[]`
-- 按 `service + method + arguments` 接收调用
+- 上报 `agent_id + services[] + local_apps[]`
+- 系统服务按 `service + method + arguments` 调用；本地应用按
+  `connectorId + method + arguments` 调用
 - 大截图支持先申请上传槽位、再直传对象存储/文件服务、最后只返回文件引用
 - 本地配置里支持三种方法绑定
   - `computer_use`
   - `shell_command`
   - `http`
-- 本地管理端可编辑服务、方法、超时、allowlist、日志保留等配置
+- 本地管理端可管理本地应用生命周期；内置系统服务仍可编辑方法、超时、allowlist 和日志保留等配置
 - 已接浏览器授权启动和轮询，授权成功后会把 `agent token` 自动写回本地配置
 - 可打包为桌面应用分发
 
