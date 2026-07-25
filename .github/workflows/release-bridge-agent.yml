@@ -1196,6 +1196,7 @@ jobs:
     name: Publish update service metadata
     runs-on: ubuntu-22.04
     needs: mirror-domestic-release
+    if: ${{ always() && needs.mirror-domestic-release.result == 'success' }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
