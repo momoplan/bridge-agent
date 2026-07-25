@@ -92,7 +92,6 @@ mod tests {
         let event = LocalAppEventEmitted {
             event_id: "evt-1".to_string(),
             connector_id: "com.baijimu.connector.test".to_string(),
-            installation_id: "lai-test".to_string(),
             event: "message.received".to_string(),
             payload: json!({"ok": true}),
             occurred_at: None,
@@ -100,7 +99,12 @@ mod tests {
 
         outbox.enqueue(&event).unwrap();
         outbox.enqueue(&event).unwrap();
-        assert_eq!(outbox.pending().unwrap().len(), 1);
+        let pending = outbox.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(serde_json::to_value(&pending[0])
+            .unwrap()
+            .get("installation_id")
+            .is_none());
         assert!(outbox.acknowledge("evt-1").unwrap());
         assert!(!outbox.acknowledge("evt-1").unwrap());
         assert!(outbox.pending().unwrap().is_empty());

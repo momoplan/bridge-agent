@@ -179,7 +179,8 @@ runtime `businessId`。
 
 - `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
 - relay 同时看到 `services[]` 和 `local_apps[]`；本地应用定义包含稳定
-  `connectorId + installationId + methods[] + events[]`
+  `connectorId + methods[] + events[]`。同一设备上一个 `connectorId` 只允许一个实例，
+  平台用 `deviceId + connectorId` 唯一识别本地应用
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
 - Connector 发送事件时不直接连 relay；它使用安装时生成的独立事件凭证请求
   Bridge Agent 本机入口。事件先写本地 outbox，再通过现有 WebSocket 上报；只有

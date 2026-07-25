@@ -105,7 +105,6 @@ struct EmitLocalAppEventResponse {
     durable: bool,
     event_id: String,
     connector_id: String,
-    installation_id: String,
     event: String,
 }
 
@@ -716,9 +715,8 @@ async fn emit_local_app_event(
             "connector event credential is required",
         )
     })?;
-    let installation_id =
-        authorize_connector_event(&state.config_path, connector_id, event_name, &token)
-            .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    authorize_connector_event(&state.config_path, connector_id, event_name, &token)
+        .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
     let event_id = request
         .event_id
         .as_deref()
@@ -729,7 +727,6 @@ async fn emit_local_app_event(
     let event = LocalAppEventEmitted {
         event_id: event_id.clone(),
         connector_id: connector_id.to_string(),
-        installation_id: installation_id.clone(),
         event: event_name.to_string(),
         payload: request.payload,
         occurred_at: request
@@ -764,7 +761,6 @@ async fn emit_local_app_event(
             durable: true,
             event_id,
             connector_id: connector_id.to_string(),
-            installation_id,
             event: event_name.to_string(),
         }),
     ))

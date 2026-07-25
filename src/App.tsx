@@ -222,7 +222,6 @@ interface AgentConfig {
 
 interface LocalAppConfig {
   connectorId: string;
-  installationId: string;
   name: string;
   version: string;
   description: string;
@@ -476,7 +475,6 @@ interface ConnectorSummary {
   ui?: ConnectorUi | null;
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
-  installationId: string;
   methodNames: string[];
   eventNames: string[];
   installedAtEpochMs: number;
@@ -508,7 +506,6 @@ interface ConnectorInstallResult {
   name: string;
   version: string;
   packagePath: string;
-  installationId: string;
   methodNames: string[];
   eventNames: string[];
 }

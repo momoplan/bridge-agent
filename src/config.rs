@@ -133,7 +133,6 @@ pub struct ServiceConfig {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAppConfig {
     pub connector_id: String,
-    pub installation_id: String,
     pub name: String,
     pub version: String,
     #[serde(default)]
@@ -276,7 +275,6 @@ pub struct BrowserAuthManifestPreview {
 #[serde(rename_all = "camelCase")]
 pub struct BrowserAuthLocalAppDefinition {
     pub connector_id: String,
-    pub installation_id: String,
     pub name: String,
     pub version: String,
     pub description: String,
@@ -527,25 +525,12 @@ impl AgentConfig {
         }
 
         let mut connector_ids = BTreeSet::new();
-        let mut installation_ids = BTreeSet::new();
         for app in &self.local_apps {
             if app.connector_id.trim().is_empty() {
                 bail!("local app connectorId cannot be empty");
             }
             if !connector_ids.insert(app.connector_id.as_str()) {
                 bail!("duplicate local app connectorId `{}`", app.connector_id);
-            }
-            if app.installation_id.trim().is_empty() {
-                bail!(
-                    "local app installationId cannot be empty for `{}`",
-                    app.connector_id
-                );
-            }
-            if !installation_ids.insert(app.installation_id.as_str()) {
-                bail!(
-                    "duplicate local app installationId `{}`",
-                    app.installation_id
-                );
             }
             if app.name.trim().is_empty() || app.version.trim().is_empty() {
                 bail!(
@@ -603,7 +588,6 @@ impl AgentConfig {
             .filter(|app| app.enabled)
             .map(|app| LocalAppDefinition {
                 connector_id: app.connector_id.clone(),
-                installation_id: app.installation_id.clone(),
                 name: app.name.clone(),
                 version: app.version.clone(),
                 description: app.description.clone(),
@@ -677,7 +661,6 @@ impl AgentConfig {
                 .filter(|app| app.enabled)
                 .map(|app| BrowserAuthLocalAppDefinition {
                     connector_id: app.connector_id.clone(),
-                    installation_id: app.installation_id.clone(),
                     name: app.name.clone(),
                     version: app.version.clone(),
                     description: app.description.clone(),

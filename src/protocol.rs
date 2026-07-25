@@ -74,7 +74,6 @@ pub struct EventDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAppDefinition {
     pub connector_id: String,
-    pub installation_id: String,
     pub name: String,
     pub version: String,
     pub description: String,
@@ -99,7 +98,6 @@ pub struct EventEmitted {
 pub struct LocalAppEventEmitted {
     pub event_id: String,
     pub connector_id: String,
-    pub installation_id: String,
     pub event: String,
     #[serde(default)]
     pub payload: Value,

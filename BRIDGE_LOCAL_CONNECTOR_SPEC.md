@@ -333,9 +333,9 @@ Schema `2.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` 和
 - `runtime.command + stopArgs[]` 应尽量幂等；应用未运行时也应安全退出。
 - `input_schema` 应尽量收紧，不要长期使用完全开放的 `additionalProperties: true` 作为正式能力接口。
 
-安装时 Bridge Agent 为本地应用生成稳定 `installationId`。同一 Connector 卸载后重新
-安装会获得新的安装身份；升级和同步保留原安装身份。Relay 使用
-`connectorId + installationId` 校验事件来源。
+同一设备上一个 `connectorId` 只允许一个实例。Bridge Agent 以 Connector 独立事件凭证
+校验本机事件来源，Relay 和平台以 `deviceId + connectorId` 唯一识别本地应用，不再维护
+额外的安装实例身份。
 
 ## 市场元数据
 

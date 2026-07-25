@@ -199,8 +199,6 @@ pub struct ConnectorInstallRecord {
     pub package_checksum: Option<String>,
     #[serde(default, alias = "serviceNames", skip_serializing_if = "Vec::is_empty")]
     pub legacy_service_names: Vec<String>,
-    #[serde(default)]
-    pub installation_id: Option<String>,
     pub installed_at_epoch_ms: u64,
     #[serde(default)]
     pub last_synced_at_epoch_ms: u64,
@@ -256,7 +254,6 @@ pub struct ConnectorInstallResult {
     pub name: String,
     pub version: String,
     pub package_path: String,
-    pub installation_id: String,
     pub method_names: Vec<String>,
     pub event_names: Vec<String>,
 }
@@ -277,7 +274,6 @@ pub struct ConnectorSummary {
     pub ui: Option<ConnectorUi>,
     pub permissions: Vec<ConnectorPermission>,
     pub start_policy: String,
-    pub installation_id: String,
     pub method_names: Vec<String>,
     pub event_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
@@ -345,24 +341,13 @@ pub fn connector_event_token_path(connector_id: &str) -> Result<PathBuf> {
     Ok(connector_data_dir(connector_id)?.join(CONNECTOR_EVENT_TOKEN_FILE))
 }
 
-pub fn connector_installation_id(record: &ConnectorInstallRecord) -> String {
-    record.installation_id.clone().unwrap_or_else(|| {
-        let mut digest = Sha256::new();
-        digest.update(b"bridge-agent-local-app-installation-v1\0");
-        digest.update(record.manifest.id.as_bytes());
-        digest.update(b"\0");
-        digest.update(record.installed_at_epoch_ms.to_string().as_bytes());
-        format!("lai_{:x}", digest.finalize())
-    })
-}
-
 pub fn authorize_connector_event(
     config_path: &Path,
     connector_id: &str,
     event_name: &str,
     token: &str,
-) -> Result<String> {
-    let record = load_install_record(connector_id)?;
+) -> Result<()> {
+    load_install_record(connector_id)?;
     let expected_token_path = connector_event_token_path(connector_id)?;
     let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
         format!(
@@ -381,16 +366,14 @@ pub fn authorize_connector_event(
         .iter()
         .find(|app| app.connector_id == connector_id && app.enabled)
         .is_some_and(|app| {
-            app.installation_id == connector_installation_id(&record)
-                && app
-                    .events
-                    .iter()
-                    .any(|event| event.enabled && event.name == event_name)
+            app.events
+                .iter()
+                .any(|event| event.enabled && event.name == event_name)
         });
     if !declared {
         bail!("local app event `{event_name}` is not declared by connector `{connector_id}`");
     }
-    Ok(connector_installation_id(&record))
+    Ok(())
 }
 
 pub fn load_connector_manifest(source: &Path) -> Result<ConnectorManifest> {
@@ -523,11 +506,7 @@ pub fn install_connector_from_path_with_provenance(
     resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
     cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
-    let installation_id = load_install_record(&manifest.id)
-        .ok()
-        .map(|record| connector_installation_id(&record))
-        .unwrap_or_else(|| format!("lai_{}", Uuid::new_v4().simple()));
-    let local_app = local_app_from_services(&manifest, &installation_id, &services)?;
+    let local_app = local_app_from_services(&manifest, &services)?;
     let method_names = local_app
         .methods
         .iter()
@@ -556,10 +535,6 @@ pub fn install_connector_from_path_with_provenance(
         .as_ref()
         .map(|record| record.installed_at_epoch_ms)
         .unwrap_or(now);
-    let installation_id = previous_record
-        .as_ref()
-        .map(connector_installation_id)
-        .unwrap_or(installation_id);
     let record = ConnectorInstallRecord {
         manifest: manifest.clone(),
         package_path: package_path.display().to_string(),
@@ -570,7 +545,6 @@ pub fn install_connector_from_path_with_provenance(
         source_checksum: provenance.source_checksum,
         package_checksum: Some(package_checksum),
         legacy_service_names,
-        installation_id: Some(installation_id.clone()),
         installed_at_epoch_ms,
         last_synced_at_epoch_ms: now,
     };
@@ -581,7 +555,6 @@ pub fn install_connector_from_path_with_provenance(
         name: manifest.name,
         version: manifest.version,
         package_path: package_path.display().to_string(),
-        installation_id,
         method_names,
         event_names,
     })
@@ -762,8 +735,7 @@ fn sync_installed_connector_record(
             .iter()
             .any(|service_name| service_name == &service.name)
     });
-    let installation_id = connector_installation_id(&record);
-    let local_app = local_app_from_services(&record.manifest, &installation_id, &services)?;
+    let local_app = local_app_from_services(&record.manifest, &services)?;
     upsert_synced_local_app(&mut config.local_apps, local_app);
 
     record.last_synced_at_epoch_ms = now;
@@ -2259,7 +2231,6 @@ fn python_bin_dir(env_path: &Path) -> PathBuf {
 
 fn local_app_from_services(
     manifest: &ConnectorManifest,
-    installation_id: &str,
     services: &[ServiceConfig],
 ) -> Result<LocalAppConfig> {
     let mut method_names = BTreeSet::new();
@@ -2299,7 +2270,6 @@ fn local_app_from_services(
 
     Ok(LocalAppConfig {
         connector_id: manifest.id.clone(),
-        installation_id: installation_id.to_string(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         description: manifest.description.clone(),
@@ -2510,7 +2480,6 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .as_ref()
         .map(|runtime| runtime.start_policy.clone())
         .unwrap_or_else(default_connector_start_policy);
-    let installation_id = connector_installation_id(&record);
     let registrations =
         load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)
             .unwrap_or_default();
@@ -2538,7 +2507,6 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         ui: record.manifest.ui,
         permissions: record.manifest.permissions,
         start_policy,
-        installation_id,
         method_names,
         event_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
@@ -3790,7 +3758,6 @@ bad-python-connector = "bad_python_connector.app:main"
             source_checksum: None,
             package_checksum: None,
             legacy_service_names: vec!["badPythonService".to_string()],
-            installation_id: None,
             installed_at_epoch_ms: 1,
             last_synced_at_epoch_ms: 1,
         })

@@ -625,7 +625,6 @@ fn local_app_runtime_config(app: &LocalAppConfig) -> ServiceConfig {
 fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
     LocalAppDefinition {
         connector_id: app.connector_id.clone(),
-        installation_id: app.installation_id.clone(),
         name: app.name.clone(),
         version: app.version.clone(),
         description: app.description.clone(),
