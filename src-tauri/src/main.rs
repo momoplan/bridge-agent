@@ -25,8 +25,8 @@ use bridge_agent::{
     sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
     AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig, ServiceHealthCheck,
-    ServiceStartCommand,
+    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
+    ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -1758,8 +1758,7 @@ async fn local_app_control_show_handler(
     }
     let result = async {
         let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
-        let status =
-            connector_local_app_status(&state.config_path, &record.manifest.id).await?;
+        let status = connector_local_app_status(&state.config_path, &record.manifest.id).await?;
         Ok::<_, String>(serde_json::json!({
             "app": record,
             "status": status,
@@ -1806,8 +1805,7 @@ async fn local_app_control_install_handler(
             let result = start_connector(&document.install.connector_id, &state.config_path)
                 .map_err(|err| err.to_string())?;
             ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-            wait_for_connector_health(&state.config_path, &result.connector_id, true)
-            .await?;
+            wait_for_connector_health(&state.config_path, &result.connector_id, true).await?;
             state.registered_services.request_refresh();
             Some(result)
         } else {
@@ -1838,8 +1836,7 @@ async fn local_app_control_start_handler(
         let result = start_connector(connector_id.trim(), &state.config_path)
             .map_err(|err| err.to_string())?;
         ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-        wait_for_connector_health(&state.config_path, &result.connector_id, true)
-        .await?;
+        wait_for_connector_health(&state.config_path, &result.connector_id, true).await?;
         state.registered_services.request_refresh();
         Ok::<_, String>(result)
     }
@@ -1859,8 +1856,7 @@ async fn local_app_control_stop_handler(
         let result = stop_connector(connector_id.trim(), &state.config_path)
             .map_err(|err| err.to_string())?;
         ensure_connector_lifecycle_command_succeeded("停止应用", &result)?;
-        wait_for_connector_health(&state.config_path, &result.connector_id, false)
-        .await?;
+        wait_for_connector_health(&state.config_path, &result.connector_id, false).await?;
         state.registered_services.request_refresh();
         Ok::<_, String>(result)
     }
@@ -2515,8 +2511,7 @@ async fn install_connector_app_with_context(
         let stopped = stop_connector(&candidate_manifest.id, config_path)
             .map_err(|err| format!("升级前停止旧版应用失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("停止旧版应用", &stopped)?;
-        wait_for_connector_health(config_path, &stopped.connector_id, false)
-        .await?;
+        wait_for_connector_health(config_path, &stopped.connector_id, false).await?;
     }
 
     let provenance = match market_app.as_ref() {
@@ -2551,8 +2546,7 @@ async fn install_connector_app_with_context(
         let started = start_connector(&install.connector_id, config_path)
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
-        wait_for_connector_health(config_path, &started.connector_id, true)
-        .await?;
+        wait_for_connector_health(config_path, &started.connector_id, true).await?;
     }
 
     let runtime = runtime_manager
@@ -2626,11 +2620,9 @@ async fn wait_for_connector_health(
     loop {
         let status = connector_local_app_status(config_path, connector_id).await?;
         let matches = if expected_healthy {
-            !status.health_check_configured
-                || status.status == RegisteredServiceState::Healthy
+            !status.health_check_configured || status.status == RegisteredServiceState::Healthy
         } else {
-            !status.health_check_configured
-                || status.status != RegisteredServiceState::Healthy
+            !status.health_check_configured || status.status != RegisteredServiceState::Healthy
         };
         if matches {
             return Ok(());
