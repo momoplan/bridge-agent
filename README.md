@@ -832,7 +832,9 @@ npm run tauri:build:macos-universal -- --debug
 - `tools/baijimu-cli/VERSION`
 
 版本提交合入 GitHub `main` 后，再按“发布与国内分发”一节创建并推送正式 tag；
-工作流会拒绝版本不一致、tag 不属于 `main`、内置 CLI tag 不存在或既有 tag 被移动的发布。
+工作流会拒绝版本不一致、tag 不属于 `main`、内置 CLI tag 不存在、内置 CLI 不是本地应用
+市场当前稳定版或既有 tag 被移动的发布。修复既有不可变版本的 `workflow_dispatch` 不重新要求
+历史内置 CLI 等于当前市场版本，避免后续 CLI 发布阻断同版本制品恢复。
 
 调试打包：
 

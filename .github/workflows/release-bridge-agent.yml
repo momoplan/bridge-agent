@@ -130,6 +130,30 @@ jobs:
             exit 1
           fi
 
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            for target in \
+              "macos&arch=aarch64" \
+              "windows&arch=x86_64" \
+              "linux&arch=x86_64"; do
+              market_cli_version="$(
+                curl -fsSL --retry 3 --retry-delay 2 \
+                  "https://www.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
+                  | jq -er '
+                    .[]
+                    | select(
+                        .connectorId == "com.baijimu.cli"
+                        and .latestVersion.manifest.applicationType == "managed_tool"
+                      )
+                    | .latestVersion.version
+                  '
+              )"
+              if [ "$market_cli_version" != "$cli_version" ]; then
+                echo "Bundled Baijimu CLI $cli_version is not the latest market version $market_cli_version for $target" >&2
+                exit 1
+              fi
+            done
+          fi
+
       - name: Mirror immutable release tag to Gitee
         if: github.event_name == 'push'
         shell: bash
