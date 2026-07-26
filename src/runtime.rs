@@ -1195,6 +1195,10 @@ fn relay_message_type_is_supported(message_type: &str) -> bool {
             | "invoke_request"
             | "invoke_result"
             | "event_emitted"
+            | "local_app_invoke_request"
+            | "local_app_invoke_result"
+            | "local_app_event_emitted"
+            | "event_ack"
             | "error"
     )
 }
@@ -1928,6 +1932,32 @@ mod tests {
                 assert_eq!(ack.connection_id, "conn_1");
             }
             other => panic!("expected registered_ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_decoder_accepts_device_event_ack() {
+        let message = r#"{"type":"event_ack","event_id":"evt-1","duplicate":true}"#;
+
+        match decode_relay_message(message).unwrap().unwrap() {
+            AgentMessage::EventAck(ack) => {
+                assert_eq!(ack.event_id, "evt-1");
+                assert!(ack.duplicate);
+            }
+            other => panic!("expected event_ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_decoder_accepts_local_app_invoke_request() {
+        let message = r#"{"type":"local_app_invoke_request","request_id":"req-1","connector_id":"camera","method":"capture","arguments":{}}"#;
+
+        match decode_relay_message(message).unwrap().unwrap() {
+            AgentMessage::LocalAppInvokeRequest(request) => {
+                assert_eq!(request.connector_id, "camera");
+                assert_eq!(request.method, "capture");
+            }
+            other => panic!("expected local_app_invoke_request, got {other:?}"),
         }
     }
 
