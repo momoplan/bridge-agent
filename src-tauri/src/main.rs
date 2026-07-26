@@ -2,6 +2,7 @@
 
 mod managed_tool;
 
+use anyhow::Context as _;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State as AxumState},
@@ -2945,6 +2946,20 @@ fn write_shared_cli_auth(
     }
 
     let path = shared_cli_auth_path();
+    write_shared_cli_auth_at(&path, config, authorized)?;
+    Ok(Some(SharedCliAuthWriteResult { path }))
+}
+
+fn write_shared_cli_auth_at(
+    path: &Path,
+    config: &AgentConfig,
+    authorized: &AuthorizedPayload,
+) -> anyhow::Result<()> {
+    let local_client_token = authorized
+        .local_client_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("authorized payload is missing local client token"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2960,6 +2975,7 @@ fn write_shared_cli_auth(
     }
 
     document["currentEnvironment"] = serde_json::json!("prod");
+    document["currentWorkspaceId"] = serde_json::json!(authorized.workspace_id);
     if !document
         .get("environments")
         .map(|value| value.is_object())
@@ -2991,14 +3007,23 @@ fn write_shared_cli_auth(
     }));
     document["machineCredentials"] = Value::Array(credentials);
 
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, serde_json::to_vec_pretty(&document)?)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid shared CLI auth path: {}", path.display()))?;
+    let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
+    temp_file.write_all(&serde_json::to_vec_pretty(&document)?)?;
     #[cfg(unix)]
-    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&tmp_path, &path)?;
+    temp_file
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temp_file.as_file().sync_all()?;
+    temp_file
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to atomically replace {}", path.display()))?;
     #[cfg(unix)]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    Ok(Some(SharedCliAuthWriteResult { path }))
+    Ok(())
 }
 
 fn shared_cli_auth_path() -> PathBuf {
@@ -5211,6 +5236,60 @@ mod tests {
 
         assert!(path.ends_with(Path::new(".config").join("baijimu").join("auth.json")));
         assert!(path.is_absolute() || std::env::var_os("HOME").is_none());
+    }
+
+    #[test]
+    fn shared_cli_auth_sets_authorized_workspace_as_current_and_preserves_other_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "currentEnvironment": "prod",
+                "currentWorkspaceId": 1201,
+                "environments": {
+                    "prod": {"baseUrl": "https://baijimu.com"}
+                },
+                "machineCredentials": [{
+                    "workspaceId": 1201,
+                    "clientId": "old-device",
+                    "token": "old-token",
+                    "tokenType": "workspace_user_api_key",
+                    "issuedAtEpochSeconds": 1
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let config = AgentConfig::example();
+        let authorized = AuthorizedPayload {
+            workspace_id: 1082,
+            device_id: "wenya".to_string(),
+            relay_ws_url: "wss://relay.example.test".to_string(),
+            agent_token: "agent-token".to_string(),
+            local_client_token: Some("workspace-1082-token".to_string()),
+            local_client_token_type: Some("workspace_user_api_key".to_string()),
+            local_client_key_id: Some("key-1082".to_string()),
+        };
+
+        write_shared_cli_auth_at(&path, &config, &authorized).unwrap();
+
+        let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["currentWorkspaceId"], 1082);
+        assert_eq!(document["machineCredentials"].as_array().unwrap().len(), 2);
+        assert_eq!(document["machineCredentials"][0]["workspaceId"], 1201);
+        assert_eq!(document["machineCredentials"][1]["workspaceId"], 1082);
+        assert_eq!(
+            document["machineCredentials"][1]["issuedAtEpochSeconds"]
+                .as_u64()
+                .is_some(),
+            true
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
