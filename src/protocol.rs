@@ -84,6 +84,7 @@ pub struct EventDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAppDefinition {
+    #[serde(rename = "connectorId", alias = "connector_id")]
     pub connector_id: String,
     pub name: String,
     pub version: String,
@@ -192,5 +193,22 @@ mod tests {
         .unwrap();
         assert_eq!(serialized["responseMode"], "passthrough");
         assert!(serialized.get("response_mode").is_none());
+    }
+
+    #[test]
+    fn local_app_definition_accepts_legacy_identity_and_serializes_canonical_identity() {
+        let definition: LocalAppDefinition = serde_json::from_value(json!({
+            "connector_id": "com.baijimu.connector.test",
+            "name": "Test",
+            "version": "1.0.0",
+            "description": "",
+            "methods": [],
+            "events": []
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(definition).unwrap();
+        assert_eq!(serialized["connectorId"], "com.baijimu.connector.test");
+        assert!(serialized.get("connector_id").is_none());
     }
 }
