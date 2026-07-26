@@ -5,8 +5,7 @@ use crate::config::{
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::{ComputerUseAction, UploadConfig};
 use crate::protocol::{
-    EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode,
-    ServiceDefinition,
+    EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode, ServiceDefinition,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -3657,7 +3656,7 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{sleep, Duration, Instant};
 
     #[test]
     fn allowlist_accepts_basename() {
@@ -4082,7 +4081,8 @@ mod tests {
         let mut data = result.data.unwrap();
         if data["status"].as_str() == Some("RUNNING") {
             let execution_id = data["executionId"].as_str().unwrap().to_string();
-            for _ in 0..20 {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
                 let polled = registry
                     .invoke(
                         "req-shell-quick-poll".to_string(),

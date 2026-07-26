@@ -2965,7 +2965,7 @@ fn write_shared_cli_auth_at(
     }
 
     let mut document = if path.exists() {
-        let content = fs::read_to_string(&path)?;
+        let content = fs::read_to_string(path)?;
         serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -3022,7 +3022,7 @@ fn write_shared_cli_auth_at(
         .map_err(|error| error.error)
         .with_context(|| format!("failed to atomically replace {}", path.display()))?;
     #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -5279,12 +5279,9 @@ mod tests {
         assert_eq!(document["machineCredentials"].as_array().unwrap().len(), 2);
         assert_eq!(document["machineCredentials"][0]["workspaceId"], 1201);
         assert_eq!(document["machineCredentials"][1]["workspaceId"], 1082);
-        assert_eq!(
-            document["machineCredentials"][1]["issuedAtEpochSeconds"]
-                .as_u64()
-                .is_some(),
-            true
-        );
+        assert!(document["machineCredentials"][1]["issuedAtEpochSeconds"]
+            .as_u64()
+            .is_some());
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
