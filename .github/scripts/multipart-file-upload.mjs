@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 
 const defaultInactivityTimeoutMs = 5 * 60 * 1_000;
 const defaultTotalTimeoutMs = 20 * 60 * 1_000;
+const defaultResponseTimeoutMs = 2 * 60 * 1_000;
 const maximumResponseBytes = 1_000_000;
 
 export async function uploadMultipartFile({
@@ -16,6 +17,7 @@ export async function uploadMultipartFile({
   contentType,
   inactivityTimeoutMs = defaultInactivityTimeoutMs,
   totalTimeoutMs = defaultTotalTimeoutMs,
+  responseTimeoutMs = defaultResponseTimeoutMs,
 }) {
   const url = new URL(inputUrl);
   const requestImpl = requestImplementation(url);
@@ -34,6 +36,7 @@ export async function uploadMultipartFile({
   const { size } = await stat(filePath);
 
   let totalTimeout;
+  let responseTimeout;
   const responsePromise = new Promise((resolve, reject) => {
     const request = requestImpl(
       url,
@@ -61,6 +64,7 @@ export async function uploadMultipartFile({
           chunks.push(chunk);
         });
         response.once("end", () => {
+          clearTimeout(responseTimeout);
           const body = Buffer.concat(chunks).toString("utf8");
           resolve({
             ok: response.statusCode >= 200 && response.statusCode < 300,
@@ -72,6 +76,15 @@ export async function uploadMultipartFile({
       },
     );
 
+    request.once("finish", () => {
+      responseTimeout = setTimeout(() => {
+        request.destroy(
+          new Error(
+            `Gitee upload response exceeded ${responseTimeoutMs} ms after the request body finished`,
+          ),
+        );
+      }, responseTimeoutMs);
+    });
     request.setTimeout(inactivityTimeoutMs, () => {
       request.destroy(
         new Error(
@@ -95,7 +108,10 @@ export async function uploadMultipartFile({
     file.pipe(request, { end: false });
   });
 
-  return responsePromise.finally(() => clearTimeout(totalTimeout));
+  return responsePromise.finally(() => {
+    clearTimeout(totalTimeout);
+    clearTimeout(responseTimeout);
+  });
 }
 
 function requestImplementation(url) {

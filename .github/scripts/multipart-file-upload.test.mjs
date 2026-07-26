@@ -102,4 +102,37 @@ describe("uploadMultipartFile", () => {
       }),
     ).rejects.toThrow("exceeded total timeout");
   });
+
+  it("aborts when the server does not finish its response after receiving the body", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "bridge-agent-upload-response-timeout-test-"),
+    );
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const filePath = join(directory, "Baijimu_0.2.6_universal.app.tar.gz");
+    await writeFile(filePath, "signed macOS updater bundle");
+
+    let bodyReceived = false;
+    const server = createServer((request, _response) => {
+      request.on("data", () => {});
+      request.on("end", () => {
+        bodyReceived = true;
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const address = server.address();
+
+    await expect(
+      uploadMultipartFile({
+        url: `http://127.0.0.1:${address.port}/release-assets`,
+        filePath,
+        fileName: "Baijimu_0.2.6_universal.app.tar.gz",
+        contentType: "application/gzip",
+        inactivityTimeoutMs: 5_000,
+        totalTimeoutMs: 5_000,
+        responseTimeoutMs: 50,
+      }),
+    ).rejects.toThrow("upload response exceeded 50 ms");
+    expect(bodyReceived).toBe(true);
+  });
 });
