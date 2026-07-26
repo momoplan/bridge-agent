@@ -5,10 +5,10 @@ use crate::config::{
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::{ComputerUseAction, UploadConfig};
 use crate::protocol::{
-    EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ServiceDefinition,
+    EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode,
+    ServiceDefinition,
 };
 use anyhow::{anyhow, bail, Context, Result};
-#[cfg(any(target_os = "macos", windows))]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
 use image::GenericImageView;
@@ -107,6 +107,7 @@ struct HttpMethod {
     http_method: Method,
     headers: BTreeMap<String, String>,
     timeout_secs: u64,
+    response_mode: ResponseMode,
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -636,6 +637,7 @@ fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
                 name: method.name.clone(),
                 description: method.description.clone(),
                 input_schema: method.input_schema.clone(),
+                response_mode: method.response_mode,
             })
             .collect(),
         events: app
@@ -1498,7 +1500,22 @@ impl HttpMethod {
             .unwrap_or("")
             .to_string();
         let bytes = response.bytes().await?;
+        if self.response_mode == ResponseMode::Passthrough {
+            return Ok(passthrough_http_outcome(
+                status.as_u16(),
+                headers,
+                bytes.as_ref(),
+            ));
+        }
+
         let body = decode_response_body(&bytes, &content_type);
+        if self.response_mode == ResponseMode::Plain {
+            return Ok(ServiceOutcome {
+                success: true,
+                data: Some(body),
+                error: None,
+            });
+        }
 
         if let Some(outcome) =
             normalize_local_http_outcome(status.is_success(), status.as_u16(), &body)
@@ -1579,6 +1596,27 @@ fn normalize_local_http_outcome(
             })
         },
     })
+}
+
+fn passthrough_http_outcome(
+    status: u16,
+    headers: BTreeMap<String, String>,
+    bytes: &[u8],
+) -> ServiceOutcome {
+    let (body, body_encoding) = match std::str::from_utf8(bytes) {
+        Ok(text) => (text.to_string(), "utf8"),
+        Err(_) => (BASE64_STANDARD.encode(bytes), "base64"),
+    };
+    ServiceOutcome {
+        success: true,
+        data: Some(json!({
+            "status": status,
+            "headers": headers,
+            "body": body,
+            "bodyEncoding": body_encoding,
+        })),
+        error: None,
+    }
 }
 
 fn extract_invoke_error(body: &Value) -> Option<InvokeError> {
@@ -1672,6 +1710,7 @@ fn build_runtime_service(
             name: method.name.clone(),
             description: method.description.clone(),
             input_schema: method.input_schema.clone(),
+            response_mode: method.response_mode,
         });
     }
 
@@ -1783,6 +1822,7 @@ fn build_http_method(
         timeout_secs: binding
             .timeout_secs
             .unwrap_or(config.runtime.default_timeout_secs),
+        response_mode: method.response_mode,
     })
 }
 
@@ -3598,13 +3638,15 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_command_allowed, resolve_cwd, sanitize_env, shell_exec_path, PrepareUploadRequest,
-        ServiceRegistry, ShellCommand, ShellExecArgs, CONNECTOR_START_POLICY_ENV,
+        is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env, shell_exec_path,
+        PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
+        CONNECTOR_START_POLICY_ENV,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
         ServiceHealthCheck, ServiceStartCommand,
     };
+    use crate::protocol::ResponseMode;
     use axum::{
         routing::{get, post},
         Json, Router,
@@ -4168,6 +4210,7 @@ mod tests {
                 description: "Recent sessions.".to_string(),
                 enabled: true,
                 input_schema: json!({"type": "object"}),
+                response_mode: ResponseMode::Cmodel,
                 binding: MethodBinding::Http(HttpBinding {
                     url: "http://127.0.0.1:1/invoke/getRecentSessions".to_string(),
                     http_method: "POST".to_string(),
@@ -4518,6 +4561,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_binding_plain_mode_returns_json_without_cmodel_unwrapping() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/invoke",
+                    post(|| async {
+                        Json(json!({
+                            "errorCode": "0",
+                            "value": "OK",
+                            "data": {"ok": true}
+                        }))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.services.push(http_test_service_with_mode(
+            &format!("http://{addr}/invoke"),
+            ResponseMode::Plain,
+        ));
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+        let result = registry
+            .invoke(
+                "req-http-plain".to_string(),
+                "localTool",
+                "fetch",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["errorCode"], "0");
+        server.abort();
+    }
+
+    #[test]
+    fn passthrough_outcome_preserves_utf8_and_binary_response_bytes() {
+        let utf8 = passthrough_http_outcome(
+            202,
+            BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
+            b"data: first\n\ndata: [DONE]\n\n",
+        );
+        assert!(utf8.success);
+        let utf8 = utf8.data.unwrap();
+        assert_eq!(utf8["status"], 202);
+        assert_eq!(utf8["bodyEncoding"], "utf8");
+        assert_eq!(utf8["body"], "data: first\n\ndata: [DONE]\n\n");
+
+        let binary = passthrough_http_outcome(200, BTreeMap::new(), &[0, 159, 146, 150]);
+        let binary = binary.data.unwrap();
+        assert_eq!(binary["bodyEncoding"], "base64");
+        assert_eq!(binary["body"], "AJ+Slg==");
+    }
+
+    #[tokio::test]
     async fn unknown_service_returns_error() {
         let current_dir = std::env::current_dir().unwrap();
         let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
@@ -4529,6 +4635,10 @@ mod tests {
     }
 
     fn http_test_service(url: &str) -> ServiceConfig {
+        http_test_service_with_mode(url, ResponseMode::Cmodel)
+    }
+
+    fn http_test_service_with_mode(url: &str, response_mode: ResponseMode) -> ServiceConfig {
         ServiceConfig {
             name: "localTool".to_string(),
             description: "Local HTTP tool.".to_string(),
@@ -4541,6 +4651,7 @@ mod tests {
                 description: "Fetch data.".to_string(),
                 enabled: true,
                 input_schema: json!({"type": "object"}),
+                response_mode,
                 binding: MethodBinding::Http(HttpBinding {
                     url: url.to_string(),
                     http_method: "POST".to_string(),

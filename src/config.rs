@@ -1,4 +1,6 @@
-use crate::protocol::{EventDefinition, LocalAppDefinition, MethodDefinition, ServiceDefinition};
+use crate::protocol::{
+    EventDefinition, LocalAppDefinition, MethodDefinition, ResponseMode, ServiceDefinition,
+};
 use crate::secret_store::{delete_relay_token, load_relay_token, store_relay_token};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
@@ -159,6 +161,8 @@ pub struct MethodConfig {
     pub enabled: bool,
     #[serde(default = "default_object_schema")]
     pub input_schema: Value,
+    #[serde(default, rename = "responseMode", alias = "response_mode")]
+    pub response_mode: ResponseMode,
     pub binding: MethodBinding,
 }
 
@@ -565,6 +569,7 @@ impl AgentConfig {
                         name: method.name.clone(),
                         description: method.description.clone(),
                         input_schema: method.input_schema.clone(),
+                        response_mode: method.response_mode,
                     })
                     .collect(),
                 events: service
@@ -599,6 +604,7 @@ impl AgentConfig {
                         name: method.name.clone(),
                         description: method.description.clone(),
                         input_schema: method.input_schema.clone(),
+                        response_mode: method.response_mode,
                     })
                     .collect(),
                 events: app
@@ -804,6 +810,8 @@ pub struct RegistrationMethod {
     pub enabled: bool,
     #[serde(default = "default_object_schema")]
     pub input_schema: Value,
+    #[serde(default, rename = "responseMode", alias = "response_mode")]
+    pub response_mode: ResponseMode,
     #[serde(default, alias = "path")]
     pub path: String,
     #[serde(default = "default_http_method", alias = "httpMethod")]
@@ -908,6 +916,7 @@ impl RegistrationMethod {
             description: self.description.trim().to_string(),
             enabled: self.enabled,
             input_schema: self.input_schema,
+            response_mode: self.response_mode,
             binding: MethodBinding::Http(HttpBinding {
                 url: join_registration_url(base_url, &self.path)?,
                 http_method: self.http_method.trim().to_uppercase(),
@@ -1530,6 +1539,7 @@ fn computer_method(name: &str, description: &str, action: ComputerUseAction) -> 
         description: description.to_string(),
         enabled: true,
         input_schema: computer_action_input_schema(&action),
+        response_mode: ResponseMode::Cmodel,
         binding: MethodBinding::ComputerUse(ComputerUseBinding {
             action,
             display_id: None,
@@ -1626,6 +1636,7 @@ fn default_shell_exec_method(name: &str) -> MethodConfig {
                 .to_string(),
         enabled: true,
         input_schema: shell_input_schema(),
+        response_mode: ResponseMode::Cmodel,
         binding: MethodBinding::ShellCommand(ShellCommandBinding {
             root_dir: ".".to_string(),
             allow_commands: default_shell_exec_allow_commands(),
@@ -1643,6 +1654,7 @@ fn default_shell_start_execution_method() -> MethodConfig {
                 .to_string(),
         enabled: true,
         input_schema: shell_input_schema(),
+        response_mode: ResponseMode::Cmodel,
         binding: MethodBinding::ShellCommand(ShellCommandBinding {
             root_dir: ".".to_string(),
             allow_commands: default_shell_exec_allow_commands(),
@@ -1660,6 +1672,7 @@ fn default_shell_query_execution_method(name: &str) -> MethodConfig {
             .to_string(),
         enabled: true,
         input_schema: shell_execution_id_schema(),
+        response_mode: ResponseMode::Cmodel,
         binding: MethodBinding::ShellCommand(ShellCommandBinding {
             root_dir: ".".to_string(),
             allow_commands: default_shell_exec_allow_commands(),
@@ -1675,6 +1688,7 @@ fn default_shell_cancel_execution_method() -> MethodConfig {
         description: "Request cancellation for a running shell executionId.".to_string(),
         enabled: true,
         input_schema: shell_execution_id_schema(),
+        response_mode: ResponseMode::Cmodel,
         binding: MethodBinding::ShellCommand(ShellCommandBinding {
             root_dir: ".".to_string(),
             allow_commands: default_shell_exec_allow_commands(),
@@ -2013,6 +2027,7 @@ mod tests {
         HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
         ServiceRegistration, ServiceStartCommand,
     };
+    use crate::protocol::ResponseMode;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
@@ -2292,6 +2307,7 @@ mod tests {
                 description: "Forward invocation arguments to a local HTTP service.".to_string(),
                 enabled: true,
                 input_schema: super::default_object_schema(),
+                response_mode: ResponseMode::Cmodel,
                 binding: MethodBinding::Http(HttpBinding {
                     url: "http://127.0.0.1:8081/api/invoke".to_string(),
                     http_method: "POST".to_string(),
@@ -2359,6 +2375,7 @@ mod tests {
                         }
                     }
                 }),
+                response_mode: ResponseMode::Cmodel,
                 binding: MethodBinding::Http(HttpBinding {
                     url: "http://127.0.0.1:18000/do-thing".to_string(),
                     http_method: "POST".to_string(),

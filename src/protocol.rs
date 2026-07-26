@@ -61,6 +61,17 @@ pub struct MethodDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(default, rename = "responseMode", alias = "response_mode")]
+    pub response_mode: ResponseMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseMode {
+    #[default]
+    Cmodel,
+    Plain,
+    Passthrough,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,4 +166,31 @@ pub struct InvokeError {
 pub struct ProtocolError {
     pub request_id: Option<String>,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn method_response_mode_defaults_to_cmodel_and_serializes_as_camel_case() {
+        let defaulted: MethodDefinition = serde_json::from_value(json!({
+            "name": "invoke",
+            "description": "",
+            "input_schema": {}
+        }))
+        .unwrap();
+        assert_eq!(defaulted.response_mode, ResponseMode::Cmodel);
+
+        let serialized = serde_json::to_value(MethodDefinition {
+            name: "invoke".to_string(),
+            description: String::new(),
+            input_schema: json!({}),
+            response_mode: ResponseMode::Passthrough,
+        })
+        .unwrap();
+        assert_eq!(serialized["responseMode"], "passthrough");
+        assert!(serialized.get("response_mode").is_none());
+    }
 }

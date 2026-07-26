@@ -358,6 +358,7 @@ curl -X POST http://127.0.0.1:18081/v1/services \
       {
         "name": "generate",
         "description": "Generate a report.",
+        "responseMode": "plain",
         "path": "/invoke/generate",
         "httpMethod": "POST",
         "timeoutSecs": 60,
@@ -378,6 +379,8 @@ curl -X POST http://127.0.0.1:18081/v1/services \
 ```
 
 注册成功后，bridge-agent 会把服务写入 `agent-config.json`，刷新正在运行的 runtime registry，并通过现有 WebSocket 重新上报 capabilities。外部 agent 看到的是普通的 `reportTool.generate`，不会看到本机 HTTP binding 细节。
+
+`methods[].responseMode` 是方法响应契约，支持 `cmodel`、`plain`、`passthrough`，缺失时为 `cmodel`。Bridge Agent 会把该字段随 capabilities 上报；调用请求不携带也不能覆盖它。`plain` 返回本机 HTTP JSON，`passthrough` 保留本机 HTTP 状态、响应头和原始响应字节，由 Relay 恢复为最终 HTTP 响应。
 
 `healthCheck` 和 `startCommand` 是本机客户端使用的注册服务运行信息，不会上报给 relay capabilities：
 
