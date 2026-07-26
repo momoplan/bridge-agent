@@ -4102,7 +4102,11 @@ mod tests {
         }
         assert!(data["executionId"].as_str().is_some());
         assert_eq!(data["status"].as_str(), Some("SUCCEEDED"));
-        assert_eq!(data["exit_code"].as_i64(), Some(0));
+        let exit_code = data
+            .get("exit_code")
+            .or_else(|| data.get("exitCode"))
+            .and_then(Value::as_i64);
+        assert_eq!(exit_code, Some(0));
         assert!(data["stdout"]
             .as_str()
             .unwrap_or_default()
