@@ -5,7 +5,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { uploadMultipartFile } from "./multipart-file-upload.mjs";
+import {
+  defaultTotalTimeoutForSize,
+  uploadMultipartFile,
+} from "./multipart-file-upload.mjs";
 
 const cleanups = [];
 
@@ -14,6 +17,17 @@ afterEach(async () => {
 });
 
 describe("uploadMultipartFile", () => {
+  it("scales the total deadline for large release bundles", () => {
+    expect(defaultTotalTimeoutForSize(14_708_736)).toBe(1_590_874);
+    expect(defaultTotalTimeoutForSize(89_188_856)).toBe(9_038_886);
+    expect(defaultTotalTimeoutForSize(200_000_000)).toBe(
+      3 * 60 * 60 * 1_000,
+    );
+    expect(() => defaultTotalTimeoutForSize(-1)).toThrow(
+      "Invalid upload size",
+    );
+  });
+
   it("streams a multipart file with an exact content length and returns the response", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "bridge-agent-upload-test-"),

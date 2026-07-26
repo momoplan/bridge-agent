@@ -5,7 +5,9 @@ import { request as httpsRequest } from "node:https";
 import { randomBytes } from "node:crypto";
 
 const defaultInactivityTimeoutMs = 5 * 60 * 1_000;
-const defaultTotalTimeoutMs = 20 * 60 * 1_000;
+const minimumTotalTimeoutMs = 20 * 60 * 1_000;
+const maximumTotalTimeoutMs = 3 * 60 * 60 * 1_000;
+const minimumSustainedUploadBytesPerSecond = 10_000;
 const defaultResponseTimeoutMs = 2 * 60 * 1_000;
 const maximumResponseBytes = 1_000_000;
 
@@ -16,7 +18,7 @@ export async function uploadMultipartFile({
   fileName,
   contentType,
   inactivityTimeoutMs = defaultInactivityTimeoutMs,
-  totalTimeoutMs = defaultTotalTimeoutMs,
+  totalTimeoutMs,
   responseTimeoutMs = defaultResponseTimeoutMs,
 }) {
   const url = new URL(inputUrl);
@@ -34,6 +36,8 @@ export async function uploadMultipartFile({
   );
   const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
   const { size } = await stat(filePath);
+  const resolvedTotalTimeoutMs =
+    totalTimeoutMs ?? defaultTotalTimeoutForSize(size, responseTimeoutMs);
 
   let totalTimeout;
   let responseTimeout;
@@ -95,10 +99,10 @@ export async function uploadMultipartFile({
     totalTimeout = setTimeout(() => {
       request.destroy(
         new Error(
-          `Gitee upload exceeded total timeout of ${totalTimeoutMs} ms`,
-        ),
-      );
-    }, totalTimeoutMs);
+            `Gitee upload exceeded total timeout of ${resolvedTotalTimeoutMs} ms`,
+          ),
+        );
+    }, resolvedTotalTimeoutMs);
     request.once("error", reject);
 
     request.write(prefix);
@@ -112,6 +116,25 @@ export async function uploadMultipartFile({
     clearTimeout(totalTimeout);
     clearTimeout(responseTimeout);
   });
+}
+
+export function defaultTotalTimeoutForSize(
+  size,
+  responseTimeoutMs = defaultResponseTimeoutMs,
+) {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`Invalid upload size: ${size}`);
+  }
+  const transferBudgetMs = Math.ceil(
+    (size / minimumSustainedUploadBytesPerSecond) * 1_000,
+  );
+  return Math.min(
+    maximumTotalTimeoutMs,
+    Math.max(
+      minimumTotalTimeoutMs,
+      transferBudgetMs + responseTimeoutMs,
+    ),
+  );
 }
 
 function requestImplementation(url) {
