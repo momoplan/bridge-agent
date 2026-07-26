@@ -99,9 +99,9 @@ export async function uploadMultipartFile({
     totalTimeout = setTimeout(() => {
       request.destroy(
         new Error(
-            `Gitee upload exceeded total timeout of ${resolvedTotalTimeoutMs} ms`,
-          ),
-        );
+          `Gitee upload exceeded total timeout of ${resolvedTotalTimeoutMs} ms`,
+        ),
+      );
     }, resolvedTotalTimeoutMs);
     request.once("error", reject);
 
