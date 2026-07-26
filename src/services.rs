@@ -202,27 +202,23 @@ fn platform_shell_command(line: String) -> Vec<String> {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ShellExecData {
-    #[serde(rename = "executionId")]
     execution_id: String,
     status: ShellExecutionStatus,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
     timed_out: bool,
-    #[serde(rename = "timeoutSeconds")]
     timeout_secs: Option<u64>,
-    #[serde(rename = "startedAtEpochMs")]
     started_at_epoch_ms: u64,
-    #[serde(rename = "completedAtEpochMs")]
     completed_at_epoch_ms: Option<u64>,
-    #[serde(rename = "durationMs")]
     duration_ms: Option<u64>,
-    #[serde(rename = "recommendedAction", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<&'static str>,
-    #[serde(rename = "recommendedService", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     recommended_service: Option<String>,
-    #[serde(rename = "recommendedMethod", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     recommended_method: Option<&'static str>,
 }
 
@@ -4102,11 +4098,7 @@ mod tests {
         }
         assert!(data["executionId"].as_str().is_some());
         assert_eq!(data["status"].as_str(), Some("SUCCEEDED"));
-        let exit_code = data
-            .get("exit_code")
-            .or_else(|| data.get("exitCode"))
-            .and_then(Value::as_i64);
-        assert_eq!(exit_code, Some(0));
+        assert_eq!(data["exitCode"].as_i64(), Some(0));
         assert!(data["stdout"]
             .as_str()
             .unwrap_or_default()
@@ -4135,7 +4127,7 @@ mod tests {
         assert_eq!(data["recommendedAction"].as_str(), Some("queryExecution"));
         assert_eq!(data["recommendedService"].as_str(), Some("shell"));
         assert_eq!(data["recommendedMethod"].as_str(), Some("queryExecution"));
-        assert_eq!(data["exit_code"], Value::Null);
+        assert_eq!(data["exitCode"], Value::Null);
 
         let mut status = String::new();
         let mut stdout = String::new();
