@@ -356,14 +356,25 @@ fn extract_binary(bytes: &[u8], source: &str, archive_path: Option<&str>) -> Res
     if lower.ends_with(".zip") {
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
         if let Some(path) = archive_path.map(str::trim).filter(|path| !path.is_empty()) {
-            let mut file = archive
-                .by_name(path)
+            let expected = normalize_archive_entry_name(path);
+            let mut matching_index = None;
+            for index in 0..archive.len() {
+                let file = archive.by_index(index)?;
+                if normalize_archive_entry_name(file.name()) != expected {
+                    continue;
+                }
+                if matching_index.replace(index).is_some() {
+                    bail!("managed tool archive contains multiple entries matching {path}");
+                }
+            }
+            let index = matching_index
                 .with_context(|| format!("managed tool archive does not contain {path}"))?;
+            let mut file = archive.by_index(index)?;
             return read_archive_entry(&mut file);
         }
         for index in 0..archive.len() {
             let mut file = archive.by_index(index)?;
-            let name = file.name().replace('\\', "/");
+            let name = normalize_archive_entry_name(file.name());
             if name == binary_name() || name.ends_with(&format!("/{}", binary_name())) {
                 return read_archive_entry(&mut file);
             }
@@ -373,11 +384,15 @@ fn extract_binary(bytes: &[u8], source: &str, archive_path: Option<&str>) -> Res
     if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
         let mut archive = tar::Archive::new(decoder);
-        let expected = archive_path.map(str::trim).filter(|path| !path.is_empty());
+        let expected = archive_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(normalize_archive_entry_name);
         for entry in archive.entries()? {
             let mut entry = entry?;
-            let path = entry.path()?.to_string_lossy().replace('\\', "/");
+            let path = normalize_archive_entry_name(&entry.path()?.to_string_lossy());
             let matches = expected
+                .as_deref()
                 .map(|expected| path == expected)
                 .unwrap_or_else(|| {
                     path == binary_name() || path.ends_with(&format!("/{}", binary_name()))
@@ -389,6 +404,10 @@ fn extract_binary(bytes: &[u8], source: &str, archive_path: Option<&str>) -> Res
         bail!("managed tool archive does not contain {}", binary_name());
     }
     Ok(bytes.to_vec())
+}
+
+fn normalize_archive_entry_name(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn read_archive_entry(reader: &mut impl Read) -> Result<Vec<u8>> {
@@ -614,16 +633,7 @@ mod tests {
 
     #[test]
     fn zip_extracts_explicit_cli_path() {
-        let cursor = Cursor::new(Vec::new());
-        let mut writer = zip::ZipWriter::new(cursor);
-        writer
-            .start_file::<_, ()>(
-                format!("bin/{}", binary_name()),
-                zip::write::SimpleFileOptions::default(),
-            )
-            .unwrap();
-        writer.write_all(b"test-cli").unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
+        let bytes = zip_with_entry(&format!("bin/{}", binary_name()), b"test-cli");
         assert_eq!(
             extract_binary(
                 &bytes,
@@ -633,6 +643,54 @@ mod tests {
             .unwrap(),
             b"test-cli"
         );
+    }
+
+    #[test]
+    fn zip_extracts_windows_separator_entry_with_portable_explicit_path() {
+        let bytes = zip_with_entry(r"bin\baijimu.exe", b"windows-cli");
+        assert_eq!(
+            extract_binary(
+                &bytes,
+                "https://example.test/baijimu-windows.zip",
+                Some("bin/baijimu.exe")
+            )
+            .unwrap(),
+            b"windows-cli"
+        );
+    }
+
+    #[test]
+    fn zip_rejects_ambiguous_normalized_explicit_path() {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file::<_, ()>("bin/baijimu.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"portable-cli").unwrap();
+        writer
+            .start_file::<_, ()>(r"bin\baijimu.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"windows-cli").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let error = extract_binary(
+            &bytes,
+            "https://example.test/baijimu-windows.zip",
+            Some("bin/baijimu.exe"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple entries matching bin/baijimu.exe"));
+    }
+
+    fn zip_with_entry(path: &str, contents: &[u8]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file::<_, ()>(path, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(contents).unwrap();
+        writer.finish().unwrap().into_inner()
     }
 
     #[cfg(unix)]
