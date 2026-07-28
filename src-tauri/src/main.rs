@@ -49,7 +49,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
-#[cfg(not(debug_assertions))]
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_updater::UpdaterExt;
 use tokio::process::Command as AsyncCommand;
@@ -244,15 +243,26 @@ struct StartupHealthManager {
 }
 
 impl StartupHealthManager {
-    fn begin(
-        config_path: &Path,
-        diagnostics: StartupDiagnostics,
-        forced_safe_mode: bool,
-        bootstrap_failure: Option<String>,
-    ) -> Self {
+    fn new(config_path: &Path, diagnostics: StartupDiagnostics) -> Self {
         let base_dir = resolve_config_base_dir(config_path);
-        let state_path = base_dir.join(STARTUP_STATE_FILE_NAME);
-        let previous = fs::read(&state_path)
+        Self {
+            inner: Arc::new(Mutex::new(StartupHealthSnapshot {
+                revision: 0,
+                safe_mode: false,
+                forced_safe_mode: false,
+                consecutive_failures: 0,
+                frontend_ready: false,
+                startup_log_path: diagnostics.primary_path.display().to_string(),
+                components: Vec::new(),
+            })),
+            event_app: Arc::new(Mutex::new(None)),
+            state_path: base_dir.join(STARTUP_STATE_FILE_NAME),
+            diagnostics,
+        }
+    }
+
+    fn begin_primary(&self, forced_safe_mode: bool, bootstrap_failure: Option<String>) {
+        let previous = fs::read(&self.state_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PersistentStartupState>(&bytes).ok())
             .unwrap_or_default();
@@ -264,34 +274,33 @@ impl StartupHealthManager {
         let safe_mode = forced_safe_mode
             || bootstrap_failure.is_some()
             || consecutive_failures >= SAFE_MODE_FAILURE_THRESHOLD;
-        let startup_log_path = diagnostics.primary_path.display().to_string();
-        let manager = Self {
-            inner: Arc::new(Mutex::new(StartupHealthSnapshot {
+        {
+            let mut health = match self.inner.lock() {
+                Ok(health) => health,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *health = StartupHealthSnapshot {
                 revision: 0,
                 safe_mode,
                 forced_safe_mode,
                 consecutive_failures,
                 frontend_ready: false,
-                startup_log_path,
+                startup_log_path: self.diagnostics.primary_path.display().to_string(),
                 components: Vec::new(),
-            })),
-            event_app: Arc::new(Mutex::new(None)),
-            state_path,
-            diagnostics,
-        };
-        manager.set_component("desktop_shell", "桌面基础壳", "starting", None);
+            };
+        }
+        self.set_component("desktop_shell", "桌面基础壳", "starting", None);
         if let Some(detail) = bootstrap_failure {
-            manager.set_component("configuration_path", "配置目录", "degraded", Some(detail));
+            self.set_component("configuration_path", "配置目录", "degraded", Some(detail));
         } else {
-            manager.set_component("configuration_path", "配置目录", "ready", None);
+            self.set_component("configuration_path", "配置目录", "ready", None);
         }
         if safe_mode {
-            manager.diagnostics.warn(format!(
+            self.diagnostics.warn(format!(
                 "safe mode enabled: forced={forced_safe_mode} consecutive_failures={consecutive_failures}"
             ));
         }
-        manager.write_pending_state();
-        manager
+        self.write_pending_state();
     }
 
     fn snapshot(&self) -> StartupHealthSnapshot {
@@ -416,6 +425,110 @@ impl StartupHealthManager {
                 ready_at_ms: Some(now_ms()),
             },
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopAutostartPolicy {
+    SkipDevelopmentBuild,
+    DisableForWindowsService,
+    EnableForDesktop,
+}
+
+fn desktop_autostart_policy(target_os: &str, debug_assertions: bool) -> DesktopAutostartPolicy {
+    if debug_assertions {
+        DesktopAutostartPolicy::SkipDevelopmentBuild
+    } else if target_os == "windows" {
+        DesktopAutostartPolicy::DisableForWindowsService
+    } else {
+        DesktopAutostartPolicy::EnableForDesktop
+    }
+}
+
+fn configure_desktop_autostart(
+    app: &tauri::App,
+    startup_health: &StartupHealthManager,
+    diagnostics: &StartupDiagnostics,
+) {
+    match desktop_autostart_policy(std::env::consts::OS, cfg!(debug_assertions)) {
+        DesktopAutostartPolicy::SkipDevelopmentBuild => startup_health.set_component(
+            "autostart",
+            "开机启动",
+            "skipped",
+            Some("开发构建不注册系统登录项".to_string()),
+        ),
+        DesktopAutostartPolicy::DisableForWindowsService => match app.autolaunch().is_enabled() {
+            Ok(true) => match app.autolaunch().disable() {
+                Ok(()) => {
+                    diagnostics.info(
+                        "removed desktop autostart integration; Windows service owns session startup",
+                    );
+                    startup_health.set_component(
+                        "autostart",
+                        "开机启动",
+                        "ready",
+                        Some("由 Windows 服务托管登录启动，已清理旧版用户启动项".to_string()),
+                    );
+                }
+                Err(err) => {
+                    diagnostics.error(format!(
+                        "failed to remove desktop autostart owned by Windows service: {err:#}"
+                    ));
+                    startup_health.set_component(
+                        "autostart",
+                        "开机启动",
+                        "degraded",
+                        Some(format!(
+                            "Windows 服务已托管启动，但旧版用户启动项清理失败: {err}"
+                        )),
+                    );
+                }
+            },
+            Ok(false) => startup_health.set_component(
+                "autostart",
+                "开机启动",
+                "ready",
+                Some("由 Windows 服务托管登录启动".to_string()),
+            ),
+            Err(err) => {
+                diagnostics.error(format!(
+                    "failed to inspect desktop autostart owned by Windows service: {err:#}"
+                ));
+                startup_health.set_component(
+                    "autostart",
+                    "开机启动",
+                    "degraded",
+                    Some(format!("Windows 服务已托管启动，用户启动项检查失败: {err}")),
+                );
+            }
+        },
+        DesktopAutostartPolicy::EnableForDesktop => match app.autolaunch().is_enabled() {
+            Ok(true) => startup_health.set_component("autostart", "开机启动", "ready", None),
+            Ok(false) => match app.autolaunch().enable() {
+                Ok(()) => {
+                    diagnostics.info("official autostart integration enabled");
+                    startup_health.set_component("autostart", "开机启动", "ready", None);
+                }
+                Err(err) => {
+                    diagnostics.error(format!("failed to enable autostart: {err:#}"));
+                    startup_health.set_component(
+                        "autostart",
+                        "开机启动",
+                        "degraded",
+                        Some(err.to_string()),
+                    );
+                }
+            },
+            Err(err) => {
+                diagnostics.error(format!("failed to inspect autostart: {err:#}"));
+                startup_health.set_component(
+                    "autostart",
+                    "开机启动",
+                    "degraded",
+                    Some(err.to_string()),
+                );
+            }
+        },
     }
 }
 
@@ -4774,17 +4887,10 @@ fn main() {
     install_panic_diagnostics(diagnostics.clone());
     log_startup_environment(&diagnostics, &config_path);
     let forced_safe_mode = std::env::args().any(|arg| arg == "--safe-mode");
-    let startup_health = StartupHealthManager::begin(
-        &config_path,
-        diagnostics.clone(),
-        forced_safe_mode,
-        config_path_failure,
-    );
-    if let Some(detail) = crypto_provider_failure {
-        startup_health.set_component("crypto_provider", "网络加密组件", "degraded", Some(detail));
-    } else {
-        startup_health.set_component("crypto_provider", "网络加密组件", "ready", None);
-    }
+    // The single-instance plugin runs before the application setup callback. Keep startup
+    // health persistence deferred until setup so a secondary process can notify the primary
+    // instance and exit without turning a healthy startup into a recorded failure.
+    let startup_health = StartupHealthManager::new(&config_path, diagnostics.clone());
 
     let runtime = AgentRuntimeManager::new();
     let (registered_service_request_tx, registered_service_request_rx) =
@@ -4856,6 +4962,17 @@ fn main() {
         })
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
+            setup_health.begin_primary(forced_safe_mode, config_path_failure);
+            if let Some(detail) = crypto_provider_failure {
+                setup_health.set_component(
+                    "crypto_provider",
+                    "网络加密组件",
+                    "degraded",
+                    Some(detail),
+                );
+            } else {
+                setup_health.set_component("crypto_provider", "网络加密组件", "ready", None);
+            }
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
             forward_runtime_events(
@@ -4875,41 +4992,7 @@ fn main() {
                 }
             }
             setup_health.set_component("updater", "官方更新器", "ready", None);
-            #[cfg(not(debug_assertions))]
-            match app.autolaunch().is_enabled() {
-                Ok(true) => setup_health.set_component("autostart", "开机启动", "ready", None),
-                Ok(false) => match app.autolaunch().enable() {
-                    Ok(()) => {
-                        setup_diagnostics.info("official autostart integration enabled");
-                        setup_health.set_component("autostart", "开机启动", "ready", None);
-                    }
-                    Err(err) => {
-                        setup_diagnostics.error(format!("failed to enable autostart: {err:#}"));
-                        setup_health.set_component(
-                            "autostart",
-                            "开机启动",
-                            "degraded",
-                            Some(err.to_string()),
-                        );
-                    }
-                },
-                Err(err) => {
-                    setup_diagnostics.error(format!("failed to inspect autostart: {err:#}"));
-                    setup_health.set_component(
-                        "autostart",
-                        "开机启动",
-                        "degraded",
-                        Some(err.to_string()),
-                    );
-                }
-            }
-            #[cfg(debug_assertions)]
-            setup_health.set_component(
-                "autostart",
-                "开机启动",
-                "skipped",
-                Some("开发构建不注册系统登录项".to_string()),
-            );
+            configure_desktop_autostart(app, &setup_health, &setup_diagnostics);
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"
@@ -5479,17 +5562,61 @@ mod tests {
         )
         .unwrap();
 
-        let health = StartupHealthManager::begin(
+        let health = StartupHealthManager::new(
             &config_path,
             StartupDiagnostics::for_config_path(&config_path),
-            false,
-            None,
         );
+        health.begin_primary(false, None);
 
         assert!(health.safe_mode());
         assert_eq!(
             health.snapshot().consecutive_failures,
             SAFE_MODE_FAILURE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn secondary_instance_construction_does_not_mutate_startup_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        let state_path = directory.path().join(STARTUP_STATE_FILE_NAME);
+        let previous = PersistentStartupState {
+            pending: true,
+            consecutive_failures: 1,
+            version: Some("0.2.9".to_string()),
+            started_at_ms: Some(123),
+            ready_at_ms: None,
+        };
+        write_startup_state(&state_path, &previous).unwrap();
+        let before = fs::read(&state_path).unwrap();
+
+        let health = StartupHealthManager::new(
+            &config_path,
+            StartupDiagnostics::for_config_path(&config_path),
+        );
+
+        assert!(!health.safe_mode());
+        assert_eq!(health.snapshot().consecutive_failures, 0);
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+    }
+
+    #[test]
+    fn windows_service_is_the_only_release_autostart_owner() {
+        assert_eq!(
+            desktop_autostart_policy("windows", false),
+            DesktopAutostartPolicy::DisableForWindowsService
+        );
+        assert_eq!(
+            desktop_autostart_policy("macos", false),
+            DesktopAutostartPolicy::EnableForDesktop
+        );
+        assert_eq!(
+            desktop_autostart_policy("linux", false),
+            DesktopAutostartPolicy::EnableForDesktop
+        );
+        assert_eq!(
+            desktop_autostart_policy("windows", true),
+            DesktopAutostartPolicy::SkipDevelopmentBuild
         );
     }
 }

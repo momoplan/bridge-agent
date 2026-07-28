@@ -594,7 +594,8 @@ Windows MSI 会安装固定服务名 `BridgeAgent`，并把配置文件放到共
 - MSI 会给 `C:\ProgramData\Baijimu\BridgeAgent` 配置共享 ACL，让 LocalSystem 服务和交互用户都能读写同一份设备配置
 - 未授权时服务保持运行但不连接 relay；授权配置写入后会自动加载，不需要重启服务
 - 用户登录后，LocalSystem 服务会识别活动的 Windows 用户会话并在该会话中启动桌面客户端；桌面进程启动后服务主动让出 runtime，由桌面进程接管，桌面进程退出后服务自动恢复后台连接
-- 桌面客户端使用 Tauri 官方 Autostart 插件注册当前用户登录启动项；Windows Service 的活动会话启动机制负责首次安装和后台恢复，确保需要 GUI、屏幕或用户配置目录的能力不会落到 Session 0
+- Windows 只由 `BridgeAgent` 服务负责在活动用户会话中启动桌面客户端；桌面端不会再注册第二份当前用户登录启动项，并会在升级时清理旧版本遗留的 Tauri Autostart 项，确保同一登录会话只有一个启动所有者
+- macOS / Linux 桌面客户端继续使用 Tauri 官方 Autostart 插件注册当前用户登录启动项
 - `bridge-agent-service.exe`、桌面端 exe、安装器和后续升级器都要做正式代码签名
 
 ## 桌面应用开发
@@ -631,7 +632,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ### 启动恢复与安全模式
 
-桌面端采用“基础壳先启动、业务组件后启动”的顺序。系统托盘、本地应用 UI 服务、内置 CLI 或 Agent runtime 启动失败时，只把对应组件标记为降级，不再终止 Tauri 主进程。前端完成 IPC 握手后会清除本次未完成启动标记；连续两次未完成握手时，下一次自动进入安全模式。
+桌面端采用“基础壳先启动、业务组件后启动”的顺序。系统托盘、本地应用 UI 服务、内置 CLI 或 Agent runtime 启动失败时，只把对应组件标记为降级，不再终止 Tauri 主进程。单实例插件确认当前进程是主实例后才会写入本次启动记录；重复启动只唤醒已有窗口，不会累计启动失败。前端完成 IPC 握手后会清除本次未完成启动标记；连续两次真正未完成握手时，下一次自动进入安全模式。
 
 安全模式不自动启动本地 UI、CLI 和 Agent runtime，但仍保留官方签名更新、启动日志、配置归档恢复和普通模式重启。也可以显式执行：
 
