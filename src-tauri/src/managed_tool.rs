@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -62,25 +63,51 @@ struct CliVersionOutput {
 pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
     fs::create_dir_all(versions_dir())?;
 
-    if let Some(mut state) = load_state()? {
-        if let Ok(version) = validate_cli(&version_binary_path(&state.active_version), None) {
-            if version != state.active_version {
-                state.active_version = version;
-                state.updated_at_epoch_ms = now_ms();
-                save_state(&state)?;
+    if let Some(state) = load_state()? {
+        if validate_cli(
+            &version_binary_path(&state.active_version),
+            Some(&state.active_version),
+        )
+        .is_ok()
+        {
+            let launcher = launcher_path();
+            if launcher.is_file() {
+                if let Ok(version) = validate_cli(&launcher, None) {
+                    if version_is_newer(&version, &state.active_version)? {
+                        import_binary(&launcher, &version, "newer-stable-launcher", None)?;
+                        return bootstrap_bundled(source);
+                    }
+                }
+            }
+            if let Some(bundled) = source {
+                if let Ok(version) = validate_cli(bundled, None) {
+                    if version_is_newer(&version, &state.active_version)? {
+                        import_binary(bundled, &version, "bundled-upgrade", None)?;
+                        return inspect(Some(bundled));
+                    }
+                }
             }
             repair_launcher(&version_binary_path(&state.active_version))?;
             return inspect(source);
         }
+        let launcher = launcher_path();
+        if launcher.is_file() {
+            if let Ok(version) = validate_cli(&launcher, None) {
+                import_binary(&launcher, &version, "recovered-stable-launcher", None)?;
+                return bootstrap_bundled(source);
+            }
+        }
         if let Some(previous) = state.previous_version.clone() {
             if validate_cli(&version_binary_path(&previous), Some(&previous)).is_ok() {
-                state.active_version = previous;
-                state.previous_version = None;
-                state.source = "automatic-recovery".to_string();
-                state.updated_at_epoch_ms = now_ms();
-                save_state(&state)?;
-                repair_launcher(&version_binary_path(&state.active_version))?;
-                return inspect(source);
+                let current = state.active_version.clone();
+                let mut recovered = state;
+                recovered.active_version = previous;
+                recovered.previous_version = Some(current);
+                recovered.source = "automatic-recovery".to_string();
+                recovered.updated_at_epoch_ms = now_ms();
+                save_state(&recovered)?;
+                repair_launcher(&version_binary_path(&recovered.active_version))?;
+                return bootstrap_bundled(source);
             }
         }
     }
@@ -89,7 +116,7 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
     if launcher.is_file() {
         if let Ok(version) = validate_cli(&launcher, None) {
             import_binary(&launcher, &version, "legacy-launcher", None)?;
-            return inspect(source);
+            return bootstrap_bundled(source);
         }
     }
 
@@ -98,6 +125,14 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
         .with_context(|| format!("bundled baijimu CLI is invalid: {}", source.display()))?;
     import_binary(source, &version, "bundled", None)?;
     inspect(Some(source))
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> Result<bool> {
+    let candidate = Version::parse(candidate)
+        .with_context(|| format!("invalid managed CLI version: {candidate}"))?;
+    let current = Version::parse(current)
+        .with_context(|| format!("invalid managed CLI version: {current}"))?;
+    Ok(candidate > current)
 }
 
 pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
@@ -719,6 +754,38 @@ mod tests {
         let rolled_back = rollback().unwrap();
         assert_eq!(rolled_back.installed_version.as_deref(), Some("0.1.0"));
         assert_eq!(rolled_back.previous_version.as_deref(), Some("0.2.0"));
+
+        std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
+        std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_bootstrap_adopts_newer_launcher_and_bundled_cli() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("managed");
+        let bin = temp.path().join("bin");
+        std::env::set_var("BAIJIMU_MANAGED_TOOL_ROOT", &root);
+        std::env::set_var("BAIJIMU_MANAGED_BIN_DIR", &bin);
+
+        let initial = temp.path().join("baijimu-initial");
+        let launcher = bin.join(binary_name());
+        let bundled = temp.path().join("baijimu-bundled");
+        write_fake_cli(&initial, "0.1.17");
+        write_fake_cli(&bundled, "0.1.23");
+
+        let first = bootstrap_bundled(Some(&initial)).unwrap();
+        assert_eq!(first.installed_version.as_deref(), Some("0.1.17"));
+        write_fake_cli(&launcher, "0.1.22");
+
+        let upgraded = bootstrap_bundled(Some(&bundled)).unwrap();
+        assert_eq!(upgraded.installed_version.as_deref(), Some("0.1.23"));
+        assert_eq!(
+            validate_cli(&launcher, None).unwrap(),
+            upgraded.installed_version.unwrap()
+        );
+        assert_eq!(upgraded.previous_version.as_deref(), Some("0.1.22"));
 
         std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
         std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");

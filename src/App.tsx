@@ -849,6 +849,8 @@ function App() {
   const [localAppRuntimeStatuses, setLocalAppRuntimeStatuses] = useState<LocalAppRuntimeStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const localAppsChangeRevisionRef = useRef(0);
+  const localAppUpdateRefreshRef = useRef<Promise<void> | null>(null);
+  const previousActivePageRef = useRef<AppPage>("apps");
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [baijimuCli, setBaijimuCli] = useState<ManagedToolStatus | null>(null);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
@@ -989,6 +991,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const previousPage = previousActivePageRef.current;
+    previousActivePageRef.current = activePage;
+    if (activePage === "apps" && previousPage !== "apps") {
+      void refreshLocalAppUpdateData();
+    }
+  }, [activePage]);
+
+  useEffect(() => {
     void loadAppVersion();
     void checkAppUpdate();
   }, []);
@@ -1077,10 +1087,16 @@ function App() {
   useEffect(() => {
     const handleWindowFocus = () => {
       void refreshDesktopPermissions();
+      if (activePage === "apps") {
+        void refreshLocalAppUpdateData();
+      }
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         void refreshDesktopPermissions();
+        if (activePage === "apps") {
+          void refreshLocalAppUpdateData();
+        }
       }
     };
 
@@ -1090,7 +1106,7 @@ function App() {
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, []);
+  }, [activePage]);
 
   useEffect(() => {
     if (
@@ -1502,9 +1518,7 @@ function App() {
       const document = await invoke<ConfigDocument>("load_config");
       applyConfigDocument(document);
       await refreshPythonRuntime(document.config.runtime.python_path);
-      await refreshMarketConnectorApps();
-      await refreshConnectorApps();
-      await refreshBaijimuCli();
+      await Promise.all([refreshLocalAppUpdateData(), refreshConnectorApps()]);
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
@@ -1624,6 +1638,21 @@ function App() {
       clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
     }
+  }
+
+  function refreshLocalAppUpdateData(): Promise<void> {
+    if (localAppUpdateRefreshRef.current) {
+      return localAppUpdateRefreshRef.current;
+    }
+    const refresh = Promise.all([refreshMarketConnectorApps(), refreshBaijimuCli()])
+      .then(() => undefined)
+      .finally(() => {
+        if (localAppUpdateRefreshRef.current === refresh) {
+          localAppUpdateRefreshRef.current = null;
+        }
+      });
+    localAppUpdateRefreshRef.current = refresh;
+    return refresh;
   }
 
   async function startRegisteredService(serviceName: string): Promise<boolean> {
@@ -1785,7 +1814,7 @@ function App() {
   }
 
   async function checkLocalAppVersion(app: LocalAppItem) {
-    await refreshMarketConnectorApps();
+    await refreshLocalAppUpdateData();
     if (app.connector) {
       await checkLocalAppUpdate(app);
       return;
