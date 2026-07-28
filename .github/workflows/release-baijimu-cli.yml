@@ -281,7 +281,35 @@ jobs:
           output="$RUNNER_TEMP/baijimu-cli-${CLI_VERSION}-${{ matrix.name }}.zip"
           cd "$RUNNER_TEMP/baijimu-cli-package"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            powershell -NoProfile -Command "Compress-Archive -Force -Path 'bin' -DestinationPath '$output'"
+            seven_zip="$(command -v 7z || true)"
+            if [ -z "$seven_zip" ] && [ -x "/c/Program Files/7-Zip/7z.exe" ]; then
+              seven_zip="/c/Program Files/7-Zip/7z.exe"
+            fi
+            if [ -z "$seven_zip" ]; then
+              echo "7-Zip is required to create canonical Windows CLI archives" >&2
+              exit 1
+            fi
+            "$seven_zip" a -tzip "$output" bin
+            BAIJIMU_CLI_ARCHIVE="$output" \
+              BAIJIMU_CLI_EXPECTED_ENTRY="bin/$binary_name" \
+              powershell -NoProfile -Command '
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $archive = [System.IO.Compression.ZipFile]::OpenRead($env:BAIJIMU_CLI_ARCHIVE)
+                try {
+                  $entryNames = @($archive.Entries | ForEach-Object { $_.FullName })
+                  $fileNames = @($archive.Entries |
+                    Where-Object { -not $_.FullName.EndsWith("/") } |
+                    ForEach-Object { $_.FullName })
+                  if ($entryNames | Where-Object { $_.Contains("\") }) {
+                    throw "Windows CLI archive contains non-canonical backslash entry: $($entryNames -join ", ")"
+                  }
+                  if ($fileNames.Count -ne 1 -or $fileNames[0] -cne $env:BAIJIMU_CLI_EXPECTED_ENTRY) {
+                    throw "Windows CLI archive must contain exactly $env:BAIJIMU_CLI_EXPECTED_ENTRY; got $($fileNames -join ", ")"
+                  }
+                } finally {
+                  $archive.Dispose()
+                }
+              '
             checksum="$(powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '$output').Hash.ToLowerInvariant()")"
           else
             zip -r "$output" bin
