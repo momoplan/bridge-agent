@@ -959,24 +959,44 @@ jobs:
             if (-not (Test-Path -LiteralPath $desktopExecutable)) {
               throw "Installed desktop executable was not found: $desktopExecutable"
             }
+
+            $userRunSubKey = "Software\Microsoft\Windows\CurrentVersion\Run"
+            $userRunKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
+            try {
+              $userRunKey.SetValue(
+                "BaijimuBridgeAgent",
+                "$desktopExecutable ",
+                [Microsoft.Win32.RegistryValueKind]::String
+              )
+            } finally {
+              $userRunKey.Dispose()
+            }
+            $seededUserRunValue = Get-OptionalRegistryValue `
+              -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
+              -SubKey $userRunSubKey `
+              -Name "BaijimuBridgeAgent"
+            if ($seededUserRunValue -notlike "*bridge-agent-desktop.exe*") {
+              throw "Failed to seed legacy per-user autostart for migration smoke test"
+            }
+
             $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
 
             $deadline = (Get-Date).AddSeconds(20)
             do {
               $userRunValue = Get-OptionalRegistryValue `
                 -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
-                -SubKey "Software\Microsoft\Windows\CurrentVersion\Run" `
+                -SubKey $userRunSubKey `
                 -Name "BaijimuBridgeAgent"
-              if ($userRunValue -like "*bridge-agent-desktop.exe*") {
+              if ($null -eq $userRunValue) {
                 break
               }
               Start-Sleep -Milliseconds 500
             } while ((Get-Date) -lt $deadline)
-            if ($userRunValue -notlike "*bridge-agent-desktop.exe*") {
-              throw "Official Tauri per-user autostart was not registered: $userRunValue"
+            if ($null -ne $userRunValue) {
+              throw "Legacy per-user desktop autostart was not removed: $userRunValue"
             }
 
-            Write-Host "Verified Windows MSI install lifecycle and official per-user autostart"
+            Write-Host "Verified Windows MSI lifecycle, service ownership and legacy user autostart cleanup"
           } finally {
             Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
