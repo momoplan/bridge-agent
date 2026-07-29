@@ -424,6 +424,9 @@ jobs:
 
           Invoke-WebRequest `
             -Uri "https://ssl.com/wp-content/uploads/2024/10/CodeSignTool-v1.3.1-windows.zip" `
+            -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GitHub-Actions" `
+            -MaximumRetryCount 3 `
+            -RetryIntervalSec 5 `
             -OutFile $zipPath
           $expectedSha256 = "e45a9e6c2aac4cae16c114eb590a2196406681357eb587507c65cd3646b5330d"
           $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
