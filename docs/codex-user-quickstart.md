@@ -11,7 +11,7 @@ ChatGPT desktop app 和 Codex 终端能力都由平台 Agent 通过百积木的�
 1. 打开公共下载页：
 
 ```text
-https://baijimu.com/bridge-agent/download
+https://downloads.baijimu.com/
 ```
 
 2. 下载适合自己电脑系统的安装包。

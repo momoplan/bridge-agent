@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       repair_assets_only:
-        description: Reuse the existing signed GitHub Release assets and repair only Gitee distribution and updater metadata
+        description: Reuse the existing signed GitHub Release assets and repair OSS distribution and updater metadata
         required: false
         default: false
         type: boolean
@@ -42,6 +42,7 @@ jobs:
         env:
           GITEE_USER: zxflimit_admin
           GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          REPAIR_ASSETS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_assets_only || false }}
         run: |
           set -euo pipefail
           if [ -z "$GITEE_ACCESS_TOKEN" ]; then
@@ -71,10 +72,12 @@ jobs:
             fi
           }
 
-          assert_version package.json "$(node -p 'require("./package.json").version')"
-          assert_version src-tauri/tauri.conf.json "$(node -p 'require("./src-tauri/tauri.conf.json").version')"
-          assert_version Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-          assert_version src-tauri/Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+          if [ "$REPAIR_ASSETS_ONLY" != "true" ]; then
+            assert_version package.json "$(node -p 'require("./package.json").version')"
+            assert_version src-tauri/tauri.conf.json "$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+            assert_version Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+            assert_version src-tauri/Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+          fi
 
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           tag_commit="$(git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}" || true)"
@@ -1160,7 +1163,7 @@ jobs:
             --dir release-assets \
             --pattern 'Baijimu_*'
 
-      - name: Upload release bundles to Gitee and register metadata
+      - name: Upload release bundles to OSS, mirror to Gitee, and register metadata
         shell: bash
         env:
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
@@ -1193,8 +1196,12 @@ jobs:
             if [ -s "$signature" ]; then
               node .github/scripts/upload-release-asset.mjs \
                 "$api" "$RELEASE_TAG" "$version" "$target" "$asset" "$signature"
+              node .github/scripts/upload-oss-release-asset.mjs \
+                "$api" "$RELEASE_TAG" "$version" "$target" "$asset" "$signature"
             else
               node .github/scripts/upload-release-asset.mjs \
+                "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
+              node .github/scripts/upload-oss-release-asset.mjs \
                 "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
             fi
           }
@@ -1290,8 +1297,9 @@ jobs:
             .version == $version
             and (.assets | length == 5)
             and all(.assets[];
-              .downloadUrl
-              | startswith("https://gitee.com/zxflimit_admin/bridge-agent/")
+              .provider == "baijimu-oss"
+              and (.downloadUrl
+                | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))
             )
           ' <<<"$latest_payload" >/dev/null
 
@@ -1304,7 +1312,7 @@ jobs:
               select(.version == $version)
               | select(.signature | length > 0)
               | .url
-              | select(startswith("https://gitee.com/zxflimit_admin/bridge-agent/"))
+              | select(startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))
             ' <<<"$updater_payload")"
             curl -fsSL --retry 6 --retry-delay 5 --range 0-0 --max-time 120 \
               --output /dev/null "$updater_url"

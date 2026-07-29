@@ -15,7 +15,11 @@ if (!apiBaseArg || !tagName || !version || !target || !filePath) {
   process.exit(2);
 }
 
-const releaseServiceToken = requiredEnv("BRIDGE_AGENT_RELEASE_API_TOKEN");
+const registerGiteeAsset =
+  process.env.GITEE_REGISTER_RELEASE_ASSET?.trim() === "true";
+const releaseServiceToken = registerGiteeAsset
+  ? requiredEnv("BRIDGE_AGENT_RELEASE_API_TOKEN")
+  : undefined;
 const giteeToken = requiredEnv("GITEE_ACCESS_TOKEN");
 const apiBase = apiBaseArg
   .replace(/^http:\/\//, "https://")
@@ -107,24 +111,26 @@ if (!downloadUrl) {
 validateGiteeDownloadUrl(downloadUrl);
 await verifyPublicDownload(downloadUrl, size, assetName);
 
-await postReleaseServiceJson(
-  `${apiBase}/releases/${encodeURIComponent(tagName)}/assets/register`,
-  {
-    tagName,
-    version,
-    target,
-    name: assetName,
-    sha256,
-    contentType,
-    sizeBytes: size,
-    provider: "gitee-release",
-    externalAssetId: String(uploadedAsset.id),
-    downloadUrl,
-    signature,
-  },
-);
+if (registerGiteeAsset) {
+  await postReleaseServiceJson(
+    `${apiBase}/releases/${encodeURIComponent(tagName)}/assets/register`,
+    {
+      tagName,
+      version,
+      target,
+      name: assetName,
+      sha256,
+      contentType,
+      sizeBytes: size,
+      provider: "gitee-release",
+      externalAssetId: String(uploadedAsset.id),
+      downloadUrl,
+      signature,
+    },
+  );
+}
 
-console.log(`Registered ${assetName} (${size} bytes, sha256:${sha256})`);
+console.log(`Mirrored ${assetName} to Gitee (${size} bytes, sha256:${sha256})`);
 
 async function uploadGiteeAttachment(releaseId, file) {
   return retry(

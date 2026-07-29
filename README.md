@@ -653,12 +653,12 @@ open -a "百积木" --args --safe-mode
 3. GitHub Actions 校验 tag、精确提交、`main` 归属、桌面版本和内置 CLI tag，并串行执行发布
 4. GitHub Actions 把同一个不可变 tag 镜像到 Gitee，然后执行前端、Rust 和 Windows 质量门禁
 5. GitHub Actions 负责 macOS、Windows、Linux 构建、代码签名、公证，并用 Tauri updater 私钥生成更新包签名
-6. GitHub Actions 把安装包和 updater 签名上传到 GitHub Release 与 Gitee Release
-7. 每个附件通过匿名下载冒烟后，把 Gitee 固定公开 URL、附件 ID、sha256 与 minisign 签名登记到 release service
+6. GitHub Actions 从 release service 获取短时 OSS PUT 地址，把安装包上传到百积木公共 OSS；GitHub/Gitee Release 只保留归档镜像
+7. 每个 OSS 对象通过匿名完整下载和 SHA-256 校验后，把永久 OSS URL、对象键、sha256 与 minisign 签名登记到 release service
 8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口与下载地址
 9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
-Gitee Release 是国内二进制下载源，但不承担版本策略。客户端仍只向 `updates.baijimu.com` 查询最新版本；更新服务只返回元数据和 Gitee 固定公开 URL，不上传文件、不申请 OSS token，也不依赖 lowcode 运行服务。Gitee Release 只保留最近 5 个版本以控制附件配额，删除 Release 时保留 Git tag；GitHub Release 保留完整历史。
+百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`downloads.baijimu.com` 提供面向用户的下载页和稳定版本化路径；Gitee Release 仅作为国内归档镜像，不参与客户端更新决策。
 
 独立 Baijimu CLI 的 `baijimu-cli-vX.Y.Z` GitHub Release 也遵循相同的国内制品原则，
 但其版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，不登记到桌面端
@@ -702,7 +702,7 @@ macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置�
   - 客户端检查更新的正式公开接口：`https://updates.baijimu.com/api/bridge-agent/releases/latest`
   - 旧版客户端仍会访问 `https://relay.baijimu.com/api/bridge-agent/releases/latest`，该入口只作为 OpenResty 兼容转发保留
 - `BRIDGE_AGENT_RELEASE_PAGE_URL`
-  - 可选，展示给用户手动打开的下载页，例如 `https://baijimu.com/bridge-agent/download`
+  - 展示给用户手动打开的下载页：`https://downloads.baijimu.com/`
 - `BRIDGE_AGENT_RELEASE_API_URL`
   - 发布流程调用的 release service 地址：`https://updates.baijimu.com/api/bridge-agent`
 - `BRIDGE_AGENT_RELEASE_API_TOKEN`
@@ -781,7 +781,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
 ```json
 {
   "version": "0.1.105",
-  "url": "https://gitee.com/zxflimit_admin/bridge-agent/attach_files/123/download/Baijimu_0.1.105_universal.app.tar.gz",
+  "url": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.105_universal.app.tar.gz",
   "signature": "<minisign signature>",
   "notes": "百积木 bridge-agent-v0.1.105",
   "pub_date": "2026-07-19T10:00:00Z"
@@ -806,29 +806,32 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
   "forceUpdate": false,
   "minimumSupportedVersion": "0.1.20",
   "releaseName": "百积木 bridge-agent-v0.1.28",
-  "releaseUrl": "https://baijimu.com/bridge-agent/download",
+  "releaseUrl": "https://downloads.baijimu.com/",
   "publishedAt": "2026-05-22T10:00:00Z",
   "assets": [
     {
       "name": "百积木_0.1.28_universal.dmg",
-      "downloadUrl": "https://gitee.com/zxflimit_admin/bridge-agent/attach_files/123/download/Baijimu_0.1.28_universal.dmg",
+      "provider": "baijimu-oss",
+      "downloadUrl": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
       "sha256": "..."
     }
   ]
 }
 ```
 
-`updateAvailable` 由自有更新服务决定；如果省略，客户端会按 `version > currentVersion` 判断。这样服务端可以做灰度、暂停发布、按平台返回不同最新版，而附件下载直接使用国内 Gitee Release。
+`updateAvailable` 由自有更新服务决定；如果省略，客户端会按 `version > currentVersion` 判断。这样服务端可以做灰度、暂停发布、按平台返回不同最新版，二进制由百积木公共 OSS 提供。
 
 `forceUpdate` 为 `true` 时，客户端会显示不可关闭的强制更新界面，只允许安装更新或打开下载页；也可以只返回 `minimumSupportedVersion`，客户端会在 `currentVersion < minimumSupportedVersion` 时自动进入强制更新。可选返回 `forceUpdateMessage` 覆盖默认提示文案。
 
 发布流程调用内部 release service：
 
 - `POST /releases/{tag}`：创建或更新待发布版本
-- `POST /releases/{tag}/assets/register`：附件已上传并通过匿名下载验证后，登记 Gitee 固定公开 `downloadUrl`、附件 ID、`sha256`、`sizeBytes`，updater 产物同时登记 `signature`
+- `POST /releases/{tag}/assets/prepare`：由 release service 向 project-service 申请单对象短时 OSS PUT 地址
+- `POST /releases/{tag}/assets/complete`：匿名完整下载与 SHA-256 校验通过后，登记永久 OSS URL、对象键和 updater 签名
+- `POST /releases/{tag}/assets/register`：仅用于受控迁移已有永久 OSS/Gitee 资产，不是新版本发布主链
 - `POST /releases/{tag}/publish`：在所有平台产物上传完成后，把这个版本设为可被客户端检查到的最新版本
 
-`assets/register` 请求体示例：
+`assets/complete` 请求体示例：
 
 ```json
 {
@@ -839,13 +842,12 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
   "sha256": "...",
   "contentType": "application/x-apple-diskimage",
   "sizeBytes": 90000000,
-  "provider": "gitee-release",
-  "externalAssetId": "123",
-  "downloadUrl": "https://gitee.com/zxflimit_admin/bridge-agent/attach_files/123/download/Baijimu_0.1.28_universal.dmg"
+  "objectKey": "lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
+  "downloadUrl": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg"
 }
 ```
 
-`downloadUrl` 必须属于 `zxflimit_admin/bridge-agent` 的 Gitee Release 固定公开地址，不能包含 token、签名查询参数或其他临时凭证。release service 不提供上传接口，也不持有 Gitee token。
+`downloadUrl` 必须是 `lowcode-common` 公共 OSS 中与 `objectKey` 精确一致的永久公开地址，不能包含 token、签名查询参数或其他临时凭证。release service 和 GitHub Actions 都不持有 OSS 长期凭据。
 
 ## 本地打包验证
 
