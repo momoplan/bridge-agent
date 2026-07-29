@@ -15,9 +15,9 @@ describe("OSS release asset contract", () => {
       validatePrepareResponse(
         {
           uploadUrl:
-            "https://lowcode-common.oss-cn-beijing.aliyuncs.com/object?Expires=1&Signature=x",
+            "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
           objectKey,
-          downloadUrl: `https://lowcode-common.oss-cn-beijing.aliyuncs.com/${objectKey}`,
+          downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
           uploadReceipt: "payload.signature",
         },
         "Baijimu_0.2.11_amd64.AppImage",
@@ -28,14 +28,27 @@ describe("OSS release asset contract", () => {
       validatePrepareResponse(
         {
           uploadUrl:
-            "https://lowcode-common.oss-cn-beijing.aliyuncs.com/object?Expires=1&Signature=x",
+            "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
           objectKey,
           downloadUrl: `https://example.com/${objectKey}`,
           uploadReceipt: "payload.signature",
         },
         "Baijimu_0.2.11_amd64.AppImage",
       ),
-    ).toThrow(/non-canonical OSS/);
+    ).toThrow(/non-canonical public OSS/);
+
+    expect(() =>
+      validatePrepareResponse(
+        {
+          uploadUrl:
+            "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
+          objectKey,
+          downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/${objectKey}`,
+          uploadReceipt: "payload.signature",
+        },
+        "Baijimu_0.2.11_amd64.AppImage",
+      ),
+    ).toThrow(/non-canonical public OSS/);
   });
 
   test("maps every supported release bundle to a stable content type", () => {
@@ -68,7 +81,7 @@ describe("OSS release asset contract", () => {
     };
     const payload = completionPayload(metadata, {
       objectKey,
-      downloadUrl: `https://lowcode-common.oss-cn-beijing.aliyuncs.com/${objectKey}`,
+      downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
       resourceUrl: "https://downloads.baijimu.com/bridge-agent/linux",
       uploadReceipt: "payload.signature",
     });
@@ -76,7 +89,7 @@ describe("OSS release asset contract", () => {
     expect(payload).toEqual({
       ...metadata,
       objectKey,
-      downloadUrl: `https://lowcode-common.oss-cn-beijing.aliyuncs.com/${objectKey}`,
+      downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
       uploadReceipt: "payload.signature",
     });
     expect(payload).not.toHaveProperty("resourceUrl");

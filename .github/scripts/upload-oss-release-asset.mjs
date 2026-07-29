@@ -96,11 +96,13 @@ export function validatePrepareResponse(prepared, expectedName) {
   const downloadUrl = new URL(prepared.downloadUrl);
   if (
     downloadUrl.protocol !== "https:" ||
-    downloadUrl.hostname !== "lowcode-common.oss-cn-beijing.aliyuncs.com" ||
+    !isPublicAliyunOssObjectHost(downloadUrl.hostname) ||
     downloadUrl.search ||
     downloadUrl.hash
   ) {
-    throw new Error("release service returned a non-canonical OSS download URL");
+    throw new Error(
+      "release service returned a non-canonical public OSS download URL",
+    );
   }
   if (
     !prepared.objectKey?.startsWith(
@@ -121,6 +123,14 @@ export function validatePrepareResponse(prepared, expectedName) {
   if (uploadUrl.protocol !== "https:" || !uploadUrl.hostname.endsWith(".aliyuncs.com")) {
     throw new Error("release service returned an invalid OSS upload URL");
   }
+}
+
+function isPublicAliyunOssObjectHost(hostname) {
+  return (
+    /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?\.oss-[a-z0-9-]+\.aliyuncs\.com$/.test(
+      hostname,
+    ) && !hostname.includes("-internal.aliyuncs.com")
+  );
 }
 
 export function completionPayload(metadata, prepared) {

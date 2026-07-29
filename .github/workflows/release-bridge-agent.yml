@@ -1299,7 +1299,8 @@ jobs:
             and all(.assets[];
               .provider == "baijimu-oss"
               and (.downloadUrl
-                | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))
+                | test("^https://[a-z0-9][a-z0-9-]*\\.oss-[a-z0-9-]+\\.aliyuncs\\.com/lowcode/direct-uploads/bridge-agent-release/")
+                  and (contains("-internal.aliyuncs.com") | not))
             )
           ' <<<"$latest_payload" >/dev/null
 
@@ -1312,7 +1313,8 @@ jobs:
               select(.version == $version)
               | select(.signature | length > 0)
               | .url
-              | select(startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))
+              | select(test("^https://[a-z0-9][a-z0-9-]*\\.oss-[a-z0-9-]+\\.aliyuncs\\.com/lowcode/direct-uploads/bridge-agent-release/"))
+              | select(contains("-internal.aliyuncs.com") | not)
             ' <<<"$updater_payload")"
             curl -fsSL --retry 6 --retry-delay 5 --range 0-0 --max-time 120 \
               --output /dev/null "$updater_url"
