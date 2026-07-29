@@ -34,6 +34,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -760,6 +761,14 @@ struct AuthorizedPayload {
     local_client_token_type: Option<String>,
     #[serde(rename = "localClientKeyId")]
     local_client_key_id: Option<String>,
+    #[serde(rename = "localClientUserId")]
+    local_client_user_id: Option<u64>,
+    #[serde(default, rename = "localClientScopes")]
+    local_client_scopes: Vec<String>,
+    #[serde(rename = "localClientIssuedAt")]
+    local_client_issued_at: Option<String>,
+    #[serde(rename = "localClientExpiresAt")]
+    local_client_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3073,6 +3082,16 @@ fn write_shared_cli_auth_at(
         .as_deref()
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("authorized payload is missing local client token"))?;
+    if !local_client_token.starts_with("lc_pat_") {
+        anyhow::bail!("authorized payload local client token is not a Baijimu PAT");
+    }
+    if authorized
+        .local_client_token_type
+        .as_deref()
+        .is_some_and(|token_type| !matches!(token_type, "pat" | "workspace_user_api_key"))
+    {
+        anyhow::bail!("authorized payload local client token type is not a PAT");
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -3101,24 +3120,66 @@ fn write_shared_cli_auth_at(
     });
 
     let mut credentials = document
-        .get("machineCredentials")
+        .get("credentials")
         .and_then(|value| value.as_array())
         .cloned()
         .unwrap_or_default();
+    if let Some(legacy_credentials) = document
+        .get("machineCredentials")
+        .and_then(|value| value.as_array())
+    {
+        credentials.extend(legacy_credentials.iter().cloned());
+    }
+    credentials = credentials
+        .into_iter()
+        .filter_map(normalize_shared_pat_credential)
+        .collect();
+    let mut seen_credentials = HashSet::new();
+    credentials.retain(|credential| {
+        let identity = credential
+            .get("credentialId")
+            .and_then(Value::as_str)
+            .map(|value| format!("id:{value}"))
+            .or_else(|| {
+                credential
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .map(|value| format!("token:{value}"))
+            });
+        identity.is_none_or(|value| seen_credentials.insert(value))
+    });
     credentials.retain(|item| {
-        item.get("workspaceId").and_then(|value| value.as_u64()) != Some(authorized.workspace_id)
+        !credential_has_workspace(item, authorized.workspace_id)
             || item.get("clientId").and_then(|value| value.as_str())
                 != Some(authorized.device_id.as_str())
     });
     credentials.push(serde_json::json!({
-        "workspaceId": authorized.workspace_id,
+        "credentialId": authorized.local_client_key_id,
+        "userId": authorized.local_client_user_id,
+        "workspaceIds": [authorized.workspace_id],
         "clientId": authorized.device_id,
-        "keyId": authorized.local_client_key_id,
         "token": local_client_token,
-        "tokenType": authorized.local_client_token_type.as_deref().unwrap_or("workspace_user_api_key"),
+        "tokenType": "pat",
+        "subjectType": "user",
+        "source": "bridge-agent",
+        "scopes": if authorized.local_client_scopes.is_empty() {
+            vec![
+                "baijimu:agent-cli".to_string(),
+                "partner:api".to_string(),
+                format!("workspace:{}", authorized.workspace_id),
+            ]
+        } else {
+            authorized.local_client_scopes.clone()
+        },
+        "issuedAt": authorized.local_client_issued_at,
         "issuedAtEpochSeconds": now_epoch_seconds(),
+        "expiresAt": authorized.local_client_expires_at,
     }));
-    document["machineCredentials"] = Value::Array(credentials);
+    document["schemaVersion"] = serde_json::json!(2);
+    document["credentials"] = Value::Array(credentials);
+    if let Some(object) = document.as_object_mut() {
+        object.remove("machineCredentials");
+    }
 
     let parent = path
         .parent()
@@ -3137,6 +3198,56 @@ fn write_shared_cli_auth_at(
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+fn normalize_shared_pat_credential(mut credential: Value) -> Option<Value> {
+    let object = credential.as_object_mut()?;
+    if !object
+        .get("token")
+        .and_then(Value::as_str)
+        .is_some_and(|token| token.starts_with("lc_pat_"))
+    {
+        return None;
+    }
+    let workspace_ids = object
+        .get("workspaceIds")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| {
+            object
+                .get("workspaceId")
+                .and_then(Value::as_u64)
+                .map(|workspace_id| vec![Value::from(workspace_id)])
+        })
+        .unwrap_or_default();
+    if object.get("credentialId").is_none() {
+        if let Some(key_id) = object.get("keyId").cloned() {
+            object.insert("credentialId".to_string(), key_id);
+        }
+    }
+    object.insert("workspaceIds".to_string(), Value::Array(workspace_ids));
+    object.insert("tokenType".to_string(), Value::String("pat".to_string()));
+    object.insert("subjectType".to_string(), Value::String("user".to_string()));
+    if object.get("source").is_none() {
+        object.insert(
+            "source".to_string(),
+            Value::String("bridge-agent".to_string()),
+        );
+    }
+    object.remove("workspaceId");
+    object.remove("keyId");
+    Some(credential)
+}
+
+fn credential_has_workspace(credential: &Value, workspace_id: u64) -> bool {
+    credential
+        .get("workspaceIds")
+        .and_then(Value::as_array)
+        .is_some_and(|workspace_ids| {
+            workspace_ids
+                .iter()
+                .any(|value| value.as_u64() == Some(workspace_id))
+        })
 }
 
 fn shared_cli_auth_path() -> PathBuf {
@@ -5336,7 +5447,7 @@ mod tests {
                 "machineCredentials": [{
                     "workspaceId": 1201,
                     "clientId": "old-device",
-                    "token": "old-token",
+                    "token": "lc_pat_old",
                     "tokenType": "workspace_user_api_key",
                     "issuedAtEpochSeconds": 1
                 }]
@@ -5350,19 +5461,36 @@ mod tests {
             device_id: "wenya".to_string(),
             relay_ws_url: "wss://relay.example.test".to_string(),
             agent_token: "agent-token".to_string(),
-            local_client_token: Some("workspace-1082-token".to_string()),
+            local_client_token: Some("lc_pat_workspace_1082".to_string()),
             local_client_token_type: Some("workspace_user_api_key".to_string()),
             local_client_key_id: Some("key-1082".to_string()),
+            local_client_user_id: Some(433),
+            local_client_scopes: vec![
+                "baijimu:agent-cli".to_string(),
+                "partner:api".to_string(),
+                "workspace:1082".to_string(),
+            ],
+            local_client_issued_at: Some("2026-07-29 10:00:00".to_string()),
+            local_client_expires_at: Some("2026-10-27 10:00:00".to_string()),
         };
 
         write_shared_cli_auth_at(&path, &config, &authorized).unwrap();
 
         let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(document["currentWorkspaceId"], 1082);
-        assert_eq!(document["machineCredentials"].as_array().unwrap().len(), 2);
-        assert_eq!(document["machineCredentials"][0]["workspaceId"], 1201);
-        assert_eq!(document["machineCredentials"][1]["workspaceId"], 1082);
-        assert!(document["machineCredentials"][1]["issuedAtEpochSeconds"]
+        assert_eq!(document["schemaVersion"], 2);
+        assert!(document.get("machineCredentials").is_none());
+        assert_eq!(document["credentials"].as_array().unwrap().len(), 2);
+        assert_eq!(document["credentials"][0]["workspaceIds"][0], 1201);
+        assert_eq!(document["credentials"][0]["tokenType"], "pat");
+        assert_eq!(document["credentials"][1]["workspaceIds"][0], 1082);
+        assert_eq!(document["credentials"][1]["userId"], 433);
+        assert_eq!(document["credentials"][1]["source"], "bridge-agent");
+        assert_eq!(
+            document["credentials"][1]["expiresAt"],
+            "2026-10-27 10:00:00"
+        );
+        assert!(document["credentials"][1]["issuedAtEpochSeconds"]
             .as_u64()
             .is_some());
         #[cfg(unix)]
