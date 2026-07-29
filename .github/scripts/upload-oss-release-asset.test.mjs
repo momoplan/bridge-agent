@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  completionPayload,
   contentTypeFor,
   validatePrepareResponse,
 } from "./upload-oss-release-asset.mjs";
@@ -53,5 +54,31 @@ describe("OSS release asset contract", () => {
     expect(contentTypeFor("Baijimu_0.2.11_universal.app.tar.gz")).toBe(
       "application/gzip",
     );
+  });
+
+  test("completes with the signed permanent identity only", () => {
+    const metadata = {
+      tagName: "bridge-agent-v0.2.11",
+      version: "0.2.11",
+      target: "Linux x64",
+      name: "Baijimu_0.2.11_amd64.AppImage",
+      sha256: "a".repeat(64),
+      contentType: "application/octet-stream",
+      sizeBytes: 42,
+    };
+    const payload = completionPayload(metadata, {
+      objectKey,
+      downloadUrl: `https://lowcode-common.oss-cn-beijing.aliyuncs.com/${objectKey}`,
+      resourceUrl: "https://downloads.baijimu.com/bridge-agent/linux",
+      uploadReceipt: "payload.signature",
+    });
+
+    expect(payload).toEqual({
+      ...metadata,
+      objectKey,
+      downloadUrl: `https://lowcode-common.oss-cn-beijing.aliyuncs.com/${objectKey}`,
+      uploadReceipt: "payload.signature",
+    });
+    expect(payload).not.toHaveProperty("resourceUrl");
   });
 });

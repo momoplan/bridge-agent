@@ -64,13 +64,7 @@ async function main() {
   );
   await releaseServiceJson(
     `${apiBase}/releases/${encodeURIComponent(tagName)}/assets/complete`,
-    {
-      ...metadata,
-      objectKey: prepared.objectKey,
-      downloadUrl: prepared.downloadUrl,
-      resourceUrl: prepared.resourceUrl,
-      uploadReceipt: prepared.uploadReceipt,
-    },
+    completionPayload(metadata, prepared),
   );
   console.log(
     `Registered immutable OSS asset ${assetName} (${fileStat.size} bytes, sha256:${sha256})`,
@@ -127,6 +121,15 @@ export function validatePrepareResponse(prepared, expectedName) {
   if (uploadUrl.protocol !== "https:" || !uploadUrl.hostname.endsWith(".aliyuncs.com")) {
     throw new Error("release service returned an invalid OSS upload URL");
   }
+}
+
+export function completionPayload(metadata, prepared) {
+  return {
+    ...metadata,
+    objectKey: prepared.objectKey,
+    downloadUrl: prepared.downloadUrl,
+    uploadReceipt: prepared.uploadReceipt,
+  };
 }
 
 async function verifyPublicObject(url, expectedSize, expectedSha256, name) {
