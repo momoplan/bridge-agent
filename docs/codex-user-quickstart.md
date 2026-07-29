@@ -33,7 +33,7 @@ https://downloads.baijimu.com/
 
 ```text
 请打开并阅读这个文档：
-https://www.baijimu.com/docs/features/codex-device-install/index.html
+https://docs.baijimu.com/features/codex-device-install/index.html
 
 严格按照文档里的 Codex 设备安装流程，
 为当前工作区已连接的设备完整安装并验证 Codex。

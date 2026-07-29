@@ -41,12 +41,12 @@ jobs:
         shell: bash
         env:
           GITEE_USER: zxflimit_admin
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
           REPAIR_ASSETS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_assets_only || false }}
         run: |
           set -euo pipefail
-          if [ -z "$GITEE_ACCESS_TOKEN" ]; then
-            echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
+          if [ -z "$BAIJIMU_CLI_RS_GIT_TOKEN" ]; then
+            echo "Missing required secret: BAIJIMU_CLI_RS_GIT_TOKEN" >&2
             exit 1
           fi
           case "$RELEASE_TAG" in
@@ -121,7 +121,7 @@ jobs:
           #!/bin/sh
           case "$1" in
             *Username*) printf '%s\n' "$GITEE_USER" ;;
-            *Password*) printf '%s\n' "$GITEE_ACCESS_TOKEN" ;;
+            *Password*) printf '%s\n' "$BAIJIMU_CLI_RS_GIT_TOKEN" ;;
             *) exit 1 ;;
           esac
           ASKPASS
@@ -161,29 +161,6 @@ jobs:
               fi
             done
           fi
-
-      - name: Mirror immutable release tag to Gitee
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          GITEE_USER: zxflimit_admin
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
-        run: |
-          set -euo pipefail
-          tools/release/publish-gitee-tag.sh "$RELEASE_TAG" "$GITHUB_SHA"
-
-      - name: Prepare domestic Gitee Release
-        shell: bash
-        env:
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$GITEE_ACCESS_TOKEN" ]; then
-            echo "Missing required secret: GITEE_ACCESS_TOKEN" >&2
-            exit 1
-          fi
-          version="${RELEASE_TAG#bridge-agent-v}"
-          node .github/scripts/prepare-gitee-release.mjs "$RELEASE_TAG" "$version"
 
       - name: Upsert domestic release
         shell: bash
@@ -535,10 +512,9 @@ jobs:
           BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
           BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
-          for name in BRIDGE_AGENT_UPDATE_API_URL BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN GITEE_ACCESS_TOKEN; do
+          for name in BRIDGE_AGENT_UPDATE_API_URL BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
             if [ -z "${!name}" ]; then
               echo "Missing required secret: $name" >&2
               exit 1
@@ -1144,16 +1120,15 @@ jobs:
             --dir release-assets \
             --pattern 'Baijimu_*'
 
-      - name: Upload release bundles to OSS, mirror to Gitee, and register metadata
+      - name: Upload release bundles to OSS and register metadata
         shell: bash
         env:
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
           BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
-          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
 
-          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN GITEE_ACCESS_TOKEN; do
+          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
             if [ -z "${!name}" ]; then
               echo "Missing required secret: $name" >&2
               exit 1
@@ -1172,13 +1147,9 @@ jobs:
               exit 1
             fi
             if [ -s "$signature" ]; then
-              node .github/scripts/upload-release-asset.mjs \
-                "$api" "$RELEASE_TAG" "$version" "$target" "$asset" "$signature"
               node .github/scripts/upload-oss-release-asset.mjs \
                 "$api" "$RELEASE_TAG" "$version" "$target" "$asset" "$signature"
             else
-              node .github/scripts/upload-release-asset.mjs \
-                "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
               node .github/scripts/upload-oss-release-asset.mjs \
                 "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
             fi

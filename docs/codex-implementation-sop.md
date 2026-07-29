@@ -9,13 +9,13 @@
 用户入口：
 
 ```text
-https://www.baijimu.com/docs/features/codex-user-install/
+https://docs.baijimu.com/features/codex-user-install/
 ```
 
 Agent 执行入口：
 
 ```text
-https://www.baijimu.com/docs/features/codex-device-install/index.html
+https://docs.baijimu.com/features/codex-device-install/index.html
 ```
 
 责任边界：
@@ -96,10 +96,10 @@ Agent 读取公开执行文档后：
 
 ```text
 macOS:
-https://www.baijimu.com/docs/scripts/codex-device-install/macos-configure-terminal-and-login.sh
+https://docs.baijimu.com/scripts/codex-device-install/macos-configure-terminal-and-login.sh
 
 Windows:
-https://www.baijimu.com/docs/scripts/codex-device-install/windows-configure-terminal-and-login.ps1
+https://docs.baijimu.com/scripts/codex-device-install/windows-configure-terminal-and-login.ps1
 ```
 
 Windows 多行 PowerShell 通过 `stdin` 传给 `powershell -File -`，不得把完整脚本拼进 `-Command`。

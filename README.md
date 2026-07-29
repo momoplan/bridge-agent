@@ -651,14 +651,14 @@ open -a "百积木" --args --safe-mode
 1. 发布提交先合入并推送到 GitHub `main`，四处桌面版本号和内置 CLI 固定版本保持一致
 2. 在该提交上创建不可变 `bridge-agent-vX.Y.Z` tag，并只把 tag 推送到 GitHub
 3. GitHub Actions 校验 tag、精确提交、`main` 归属、桌面版本和内置 CLI tag，并串行执行发布
-4. GitHub Actions 把同一个不可变 tag 镜像到 Gitee，然后执行前端、Rust 和 Windows 质量门禁
+4. GitHub Actions 执行前端、Rust 和 Windows 质量门禁
 5. GitHub Actions 负责 macOS、Windows、Linux 构建、代码签名、公证，并用 Tauri updater 私钥生成更新包签名
-6. GitHub Actions 从 release service 获取短时 OSS PUT 地址，把安装包上传到百积木公共 OSS；GitHub/Gitee Release 只保留归档镜像
+6. GitHub Actions 从 release service 获取短时 OSS PUT 地址，把安装包上传到百积木公共 OSS；GitHub Release 只保留完整历史和构建摘要
 7. 每个 OSS 对象通过匿名完整下载和 SHA-256 校验后，把永久 OSS URL、对象键、sha256 与 minisign 签名登记到 release service
 8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口与下载地址
 9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
-百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`downloads.baijimu.com` 提供面向用户的下载页和稳定版本化路径；Gitee Release 仅作为国内归档镜像，不参与客户端更新决策。
+百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`downloads.baijimu.com` 提供面向用户的下载页和稳定版本化路径；Gitee 不参与 Bridge Agent 客户端安装包分发。
 
 独立 Baijimu CLI 的 `baijimu-cli-vX.Y.Z` GitHub Release 也遵循相同的国内制品原则，
 但其版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，不登记到桌面端
@@ -694,7 +694,7 @@ gh workflow run release-bridge-agent.yml \
 ```
 
 修复发布要求新提交是原 tag 提交的后代，且版本号不变；工作流不会移动或覆盖既有
-GitHub/Gitee tag。普通正式发布不要使用 `workflow_dispatch`，直接推送新 tag。
+GitHub tag。普通正式发布不要使用 `workflow_dispatch`，直接推送新 tag。
 
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
 
@@ -707,8 +707,8 @@ macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置�
   - 发布流程调用的 release service 地址：`https://updates.baijimu.com/api/bridge-agent`
 - `BRIDGE_AGENT_RELEASE_API_TOKEN`
   - 发布流程调用 release service 的 Bearer token
-- `GITEE_ACCESS_TOKEN`
-  - 仅授予 `zxflimit_admin/bridge-agent` Release 创建、附件上传和旧 Release 清理所需权限
+- `BAIJIMU_CLI_RS_GIT_TOKEN`
+  - 只用于校验和拉取内置 Baijimu CLI 源码 tag
 - `TAURI_SIGNING_PRIVATE_KEY`
   - Tauri updater minisign 私钥，只在 release runner 中使用
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
@@ -746,7 +746,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 - 用 `Developer ID Application: Xiaofeng Zhang (H82D8SYZ94)` 给 Tauri 的 macOS 产物签名
 - 用 App Store Connect API key 提交 notarization
 - 等待公证通过后生成构建产物
-- 把构建产物与 updater 签名上传到 Gitee Release，验证匿名下载后登记到 release service
+- 把构建产物上传到百积木公共 OSS，验证匿名下载后登记到 release service
 - 所有平台上传完成后发布最新版本元数据
 
 工作流在 Windows runner 上会自动完成这些事情：
@@ -756,7 +756,7 @@ openssl base64 -A -in /path/to/developer-id-application.p12 -out certificate-bas
 - 下载并解压 SSL.com eSigner CodeSignTool
 - 在 Tauri 打包过程中签名桌面端 exe 和 MSI 安装包
 - 用 `Get-AuthenticodeSignature` 校验 Windows 产物签名有效
-- 上传 GitHub Release 与 Gitee Release，并登记国内更新元数据
+- 上传 GitHub Release 与百积木公共 OSS，并登记国内更新元数据
 
 Windows 对外发布必须完成代码签名。如果这些 secrets 没配齐，Windows release 会直接失败，不会生成或上传未签名安装包。
 
