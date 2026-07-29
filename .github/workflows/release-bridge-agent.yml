@@ -199,16 +199,7 @@ jobs:
             fi
           done
 
-          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
-          case "$api" in
-            http://*) api="https://${api#http://}" ;;
-          esac
-          case "$api" in
-            *://relay.baijimu.com/*)
-              echo "BRIDGE_AGENT_RELEASE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
-              exit 1
-              ;;
-          esac
+          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
 
           curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
@@ -553,18 +544,8 @@ jobs:
               exit 1
             fi
           done
-          case "$BRIDGE_AGENT_UPDATE_API_URL" in
-            *://relay.baijimu.com/*)
-              echo "BRIDGE_AGENT_UPDATE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
-              exit 1
-              ;;
-          esac
-          case "$BRIDGE_AGENT_RELEASE_API_URL" in
-            *://relay.baijimu.com/*)
-              echo "BRIDGE_AGENT_RELEASE_API_URL must use updates.baijimu.com for new releases; relay.baijimu.com is legacy compatibility only." >&2
-              exit 1
-              ;;
-          esac
+          node .github/scripts/release-service-url.mjs update "$BRIDGE_AGENT_UPDATE_API_URL" >/dev/null
+          node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL" >/dev/null
 
       - name: Build release bundles
         id: build_release_bundles
@@ -1179,10 +1160,7 @@ jobs:
             fi
           done
 
-          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
-          case "$api" in
-            http://*) api="https://${api#http://}" ;;
-          esac
+          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
 
           upload_asset() {
@@ -1262,10 +1240,7 @@ jobs:
             fi
           done
 
-          api="${BRIDGE_AGENT_RELEASE_API_URL%/}"
-          case "$api" in
-            http://*) api="https://${api#http://}" ;;
-          esac
+          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
 
           curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
@@ -1285,10 +1260,7 @@ jobs:
             echo "Missing required secret: BRIDGE_AGENT_UPDATE_API_URL" >&2
             exit 1
           fi
-          latest_api="${BRIDGE_AGENT_UPDATE_API_URL%/}"
-          case "$latest_api" in
-            http://*) latest_api="https://${latest_api#http://}" ;;
-          esac
+          latest_api="$(node .github/scripts/release-service-url.mjs update "$BRIDGE_AGENT_UPDATE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
 
           latest_payload="$(curl -fsSL --retry 6 --retry-delay 5 \

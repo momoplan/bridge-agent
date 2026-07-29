@@ -4,6 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
 import { uploadMultipartFile } from "./multipart-file-upload.mjs";
+import { normalizeReleaseApiBase } from "./release-service-url.mjs";
 
 const [apiBaseArg, tagName, version, target, filePath, signaturePath] =
   process.argv.slice(2);
@@ -21,9 +22,7 @@ const releaseServiceToken = registerGiteeAsset
   ? requiredEnv("BRIDGE_AGENT_RELEASE_API_TOKEN")
   : undefined;
 const giteeToken = requiredEnv("GITEE_ACCESS_TOKEN");
-const apiBase = apiBaseArg
-  .replace(/^http:\/\//, "https://")
-  .replace(/\/+$/, "");
+const apiBase = normalizeReleaseApiBase(apiBaseArg);
 const giteeApiBase = "https://gitee.com/api/v5";
 const owner = "zxflimit_admin";
 const repository = "bridge-agent";

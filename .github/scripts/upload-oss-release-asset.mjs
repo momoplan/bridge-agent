@@ -4,6 +4,8 @@ import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { normalizeReleaseApiBase } from "./release-service-url.mjs";
+
 async function main() {
   const [apiBaseArg, tagName, version, target, filePath, signaturePath] =
     process.argv.slice(2);
@@ -15,9 +17,7 @@ async function main() {
     return;
   }
 
-  const apiBase = apiBaseArg
-    .replace(/^http:\/\//, "https://")
-    .replace(/\/+$/, "");
+  const apiBase = normalizeReleaseApiBase(apiBaseArg);
   const assetName = basename(filePath);
   const fileStat = await stat(filePath);
   const sha256 = await sha256File(filePath);
