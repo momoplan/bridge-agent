@@ -6,6 +6,11 @@ import { pathToFileURL } from "node:url";
 
 import { normalizeReleaseApiBase } from "./release-service-url.mjs";
 
+const transferResponseTimeoutMs = 2 * 60_000;
+const minimumTransferTimeoutMs = 20 * 60_000;
+const maximumTransferTimeoutMs = 3 * 60 * 60_000;
+const minimumSustainedTransferBytesPerSecond = 10_000;
+
 async function main() {
   const [apiBaseArg, tagName, version, target, filePath, signaturePath] =
     process.argv.slice(2);
@@ -45,13 +50,23 @@ async function main() {
   );
   validatePrepareResponse(prepared, assetName);
 
-  const uploadResponse = await fetch(prepared.uploadUrl, {
-    method: prepared.method || "PUT",
-    headers: prepared.headers,
-    body: createReadStream(filePath),
-    duplex: "half",
-    signal: AbortSignal.timeout(15 * 60_000),
-  });
+  const transferTimeoutMs = transferTimeoutMsForSize(fileStat.size);
+  console.log(
+    `Uploading ${assetName} to OSS (${fileStat.size} bytes, timeout ${Math.ceil(
+      transferTimeoutMs / 60_000,
+    )} minutes)`,
+  );
+  const uploadResponse = await fetchWithTimeout(
+    prepared.uploadUrl,
+    {
+      method: prepared.method || "PUT",
+      headers: prepared.headers,
+      body: createReadStream(filePath),
+      duplex: "half",
+    },
+    transferTimeoutMs,
+    `OSS upload for ${assetName}`,
+  );
   if (!uploadResponse.ok) {
     throw new Error(`OSS upload failed with HTTP ${uploadResponse.status}`);
   }
@@ -61,6 +76,7 @@ async function main() {
     fileStat.size,
     sha256,
     assetName,
+    transferTimeoutMs,
   );
   await releaseServiceJson(
     `${apiBase}/releases/${encodeURIComponent(tagName)}/assets/complete`,
@@ -69,6 +85,36 @@ async function main() {
   console.log(
     `Registered immutable OSS asset ${assetName} (${fileStat.size} bytes, sha256:${sha256})`,
   );
+}
+
+export function transferTimeoutMsForSize(sizeBytes) {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    throw new Error(`Invalid transfer size: ${sizeBytes}`);
+  }
+  const transferBudgetMs = Math.ceil(
+    (sizeBytes / minimumSustainedTransferBytesPerSecond) * 1_000,
+  );
+  return Math.min(
+    maximumTransferTimeoutMs,
+    Math.max(
+      minimumTransferTimeoutMs,
+      transferBudgetMs + transferResponseTimeoutMs,
+    ),
+  );
+}
+
+async function fetchWithTimeout(url, options, timeoutMs, label) {
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs} ms`);
+    }
+    throw error;
+  }
 }
 
 async function releaseServiceJson(url, body) {
@@ -142,11 +188,19 @@ export function completionPayload(metadata, prepared) {
   };
 }
 
-async function verifyPublicObject(url, expectedSize, expectedSha256, name) {
-  const response = await fetch(url, {
-    headers: { "Accept-Encoding": "identity" },
-    signal: AbortSignal.timeout(15 * 60_000),
-  });
+async function verifyPublicObject(
+  url,
+  expectedSize,
+  expectedSha256,
+  name,
+  timeoutMs,
+) {
+  const response = await fetchWithTimeout(
+    url,
+    { headers: { "Accept-Encoding": "identity" } },
+    timeoutMs,
+    `anonymous OSS download for ${name}`,
+  );
   if (!response.ok || !response.body) {
     throw new Error(`anonymous OSS download returned HTTP ${response.status}`);
   }

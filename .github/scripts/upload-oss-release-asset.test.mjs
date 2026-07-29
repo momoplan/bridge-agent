@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   completionPayload,
   contentTypeFor,
+  transferTimeoutMsForSize,
   validatePrepareResponse,
 } from "./upload-oss-release-asset.mjs";
 
@@ -93,5 +94,14 @@ describe("OSS release asset contract", () => {
       uploadReceipt: "payload.signature",
     });
     expect(payload).not.toHaveProperty("resourceUrl");
+  });
+
+  test("scales OSS transfer timeouts for large release bundles", () => {
+    expect(transferTimeoutMsForSize(0)).toBe(20 * 60_000);
+    expect(transferTimeoutMsForSize(10_000_000)).toBe(20 * 60_000);
+    expect(transferTimeoutMsForSize(89_364_984)).toBe(9_056_499);
+    expect(transferTimeoutMsForSize(2_000_000_000)).toBe(3 * 60 * 60_000);
+
+    expect(() => transferTimeoutMsForSize(-1)).toThrow(/Invalid transfer size/);
   });
 });
