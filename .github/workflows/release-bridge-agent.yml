@@ -142,7 +142,7 @@ jobs:
               "linux&arch=x86_64"; do
               market_cli_version="$(
                 curl -fsSL --retry 3 --retry-delay 2 \
-                  "https://www.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
+                  "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
                   | jq -er '
                     .[]
                     | select(

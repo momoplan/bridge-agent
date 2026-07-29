@@ -166,7 +166,7 @@ for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
   verified=false
   for attempt in $(seq 1 20); do
     payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
-      "https://www.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}")"
+      "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}")"
     if printf '%s' "$payload" | jq -e --arg version "$version" \
       '(if type == "array" then . elif type == "object" and (.data | type) == "array" then .data else [] end)
        | any(.connectorId == "com.baijimu.connector.codex" and .latestVersion.version == $version)' \
