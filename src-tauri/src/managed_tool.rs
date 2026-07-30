@@ -157,6 +157,26 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
 
     let active = version_binary_path(&state.active_version);
     let active_result = validate_cli(&active, Some(&state.active_version));
+    let launcher_detected = validate_cli(&launcher, None);
+    if let Ok(launcher_version) = &launcher_detected {
+        if active_result.is_err() || version_is_newer(launcher_version, &state.active_version)? {
+            import_binary(
+                &launcher,
+                launcher_version,
+                "external-stable-launcher",
+                None,
+            )?;
+            return inspect(bundled_source);
+        }
+        if launcher_version != &state.active_version {
+            repair_launcher(&active)?;
+            return inspect(bundled_source);
+        }
+    } else if active_result.is_ok() {
+        repair_launcher(&active)?;
+        return inspect(bundled_source);
+    }
+
     let launcher_result = validate_cli(&launcher, Some(&state.active_version));
     let previous_valid = state
         .previous_version
@@ -786,6 +806,64 @@ mod tests {
             upgraded.installed_version.unwrap()
         );
         assert_eq!(upgraded.previous_version.as_deref(), Some("0.1.22"));
+
+        std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
+        std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_inspect_adopts_externally_updated_launcher() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("managed");
+        let bin = temp.path().join("bin");
+        std::env::set_var("BAIJIMU_MANAGED_TOOL_ROOT", &root);
+        std::env::set_var("BAIJIMU_MANAGED_BIN_DIR", &bin);
+
+        let initial = temp.path().join("baijimu-initial");
+        let launcher = bin.join(binary_name());
+        write_fake_cli(&initial, "0.1.26");
+
+        let first = bootstrap_bundled(Some(&initial)).unwrap();
+        assert_eq!(first.installed_version.as_deref(), Some("0.1.26"));
+
+        write_fake_cli(&launcher, "0.1.31");
+        let inspected = inspect(Some(&initial)).unwrap();
+        assert_eq!(inspected.state, "ready");
+        assert_eq!(inspected.installed_version.as_deref(), Some("0.1.31"));
+        assert_eq!(inspected.previous_version.as_deref(), Some("0.1.26"));
+        assert_eq!(
+            validate_cli(&version_binary_path("0.1.31"), None).unwrap(),
+            "0.1.31"
+        );
+
+        std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
+        std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_inspect_repairs_stale_launcher_from_active_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("managed");
+        let bin = temp.path().join("bin");
+        std::env::set_var("BAIJIMU_MANAGED_TOOL_ROOT", &root);
+        std::env::set_var("BAIJIMU_MANAGED_BIN_DIR", &bin);
+
+        let initial = temp.path().join("baijimu-initial");
+        let launcher = bin.join(binary_name());
+        write_fake_cli(&initial, "0.1.26");
+
+        let first = bootstrap_bundled(Some(&initial)).unwrap();
+        assert_eq!(first.installed_version.as_deref(), Some("0.1.26"));
+
+        write_fake_cli(&launcher, "0.1.20");
+        let inspected = inspect(Some(&initial)).unwrap();
+        assert_eq!(inspected.state, "ready");
+        assert_eq!(inspected.installed_version.as_deref(), Some("0.1.26"));
+        assert_eq!(validate_cli(&launcher, None).unwrap(), "0.1.26");
 
         std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
         std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
