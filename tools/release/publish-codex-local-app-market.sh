@@ -68,6 +68,8 @@ manifest="$(jq -nc \
     command: "baijimu-connector-codex",
     args: ["start", "--daemon"],
     management: true,
+    setup: true,
+    setupTimeoutSecs: 1800,
     artifacts: [
       {platform: "macos", arch: "universal", source: ($base + "/" + $mac_asset), checksum: $mac_sha},
       {platform: "windows", arch: "x86_64", source: ($base + "/" + $win_asset), checksum: $win_sha},
@@ -114,9 +116,9 @@ b64() {
 }
 
 name_b64="$(b64 'Codex')"
-description_b64="$(b64 '统一管理本机 Codex 会话、工作区、项目和百积木 LLM credential。')"
-risk_b64="$(b64 '需要访问本机 Codex CLI、Codex 私有配置和用户授权的工作区。')"
-capability_b64="$(b64 '读取和管理本机 Codex 会话，并在本机安全切换限定到工作区和项目的 LLM credential。')"
+description_b64="$(b64 '在当前电脑自动安装并配置 Codex，使用客户端当前授权工作区管理本机 Codex 会话。')"
+risk_b64="$(b64 '需要安装和启动本机 Codex、写入 Codex 私有配置，并使用客户端当前工作区授权创建模型凭证。')"
+capability_b64="$(b64 '自动完成 Codex 安装、配置和验证，并读取和管理本机 Codex 会话。')"
 platforms_b64="$(b64 '["macos","windows","linux"]')"
 source_b64="$(b64 "${release_base}/${assets[macos]}")"
 repo_b64="$(b64 'zxflimit_admin/baijimu-connector-codex')"

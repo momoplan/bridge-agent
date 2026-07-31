@@ -61,6 +61,8 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub management: Option<ConnectorManagement>,
     #[serde(default)]
+    pub setup: Option<ConnectorSetup>,
+    #[serde(default)]
     pub ui: Option<ConnectorUi>,
     #[serde(default)]
     pub config_schema: Option<Value>,
@@ -170,6 +172,19 @@ pub struct ConnectorManagementAuth {
 pub struct ConnectorManagementOperation {
     pub method: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorSetup {
+    pub operation: String,
+    pub status_operation: String,
+    #[serde(default = "default_connector_setup_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_connector_setup_timeout_secs() -> u64 {
+    1_800
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -932,6 +947,16 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     if let Some(management) = manifest.management.as_ref() {
         validate_management(management)?;
     }
+    if let Some(setup) = manifest.setup.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector setup requires schemaVersion 2.0");
+        }
+        let management = manifest
+            .management
+            .as_ref()
+            .context("connector setup requires management")?;
+        validate_setup(setup, management)?;
+    }
     if let Some(ui) = manifest.ui.as_ref() {
         if manifest.schema_version == "1.0" {
             bail!("connector ui requires schemaVersion 1.1 or newer");
@@ -1063,6 +1088,37 @@ fn validate_management(management: &ConnectorManagement) -> Result<()> {
         {
             bail!("connector management operation `{name}` path is invalid");
         }
+    }
+    Ok(())
+}
+
+fn validate_setup(setup: &ConnectorSetup, management: &ConnectorManagement) -> Result<()> {
+    if !(30..=3_600).contains(&setup.timeout_secs) {
+        bail!("connector setup.timeoutSecs must be between 30 and 3600");
+    }
+    let operation = management
+        .operations
+        .get(&setup.operation)
+        .with_context(|| {
+            format!(
+                "connector setup.operation `{}` is not declared by management.operations",
+                setup.operation
+            )
+        })?;
+    if operation.method != "POST" {
+        bail!("connector setup.operation must use POST");
+    }
+    let status_operation = management
+        .operations
+        .get(&setup.status_operation)
+        .with_context(|| {
+            format!(
+                "connector setup.statusOperation `{}` is not declared by management.operations",
+                setup.status_operation
+            )
+        })?;
+    if status_operation.method != "GET" {
+        bail!("connector setup.statusOperation must use GET");
     }
     Ok(())
 }
@@ -2997,6 +3053,77 @@ mod tests {
     }
 
     #[test]
+    fn connector_manifest_accepts_one_click_setup_contract() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.setup",
+                "name": "Setup Connector",
+                "version": "1.0.0",
+                "runtime": {
+                    "type": "process",
+                    "command": "setup-connector"
+                },
+                "management": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18110",
+                    "auth": { "type": "connector_token" },
+                    "operations": {
+                        "setupRetry": { "method": "POST", "path": "/management/v1/setup/retry" },
+                        "setupState": { "method": "GET", "path": "/management/v1/setup/state" }
+                    }
+                },
+                "setup": {
+                    "operation": "setupRetry",
+                    "statusOperation": "setupState",
+                    "timeoutSecs": 900
+                },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = load_connector_manifest(dir.path()).unwrap();
+        let setup = manifest.setup.unwrap();
+        assert_eq!(setup.operation, "setupRetry");
+        assert_eq!(setup.status_operation, "setupState");
+        assert_eq!(setup.timeout_secs, 900);
+    }
+
+    #[test]
+    fn connector_manifest_rejects_setup_without_declared_status_operation() {
+        let manifest: ConnectorManifest = serde_json::from_value(json!({
+            "schemaVersion": "2.0",
+            "id": "com.baijimu.connector.bad-setup",
+            "name": "Bad Setup Connector",
+            "version": "1.0.0",
+            "runtime": { "type": "process", "command": "bad-setup" },
+            "management": {
+                "type": "http",
+                "baseUrl": "http://127.0.0.1:18110",
+                "auth": { "type": "connector_token" },
+                "operations": {
+                    "setupRetry": { "method": "POST", "path": "/management/v1/setup/retry" }
+                }
+            },
+            "setup": {
+                "operation": "setupRetry",
+                "statusOperation": "setupState"
+            },
+            "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+            "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+        }))
+        .unwrap();
+
+        let error = validate_manifest(&manifest).unwrap_err();
+        assert!(error.to_string().contains("setup.statusOperation"));
+    }
+
+    #[test]
     fn connector_manifest_accepts_embedded_ui_and_resolves_only_ui_assets() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("ui/assets")).unwrap();
@@ -4183,6 +4310,7 @@ bad-python-connector = "bad_python_connector.app:main"
             source: None,
             runtime: None,
             management: None,
+            setup: None,
             ui: None,
             config_schema: None,
             remote_capabilities: Vec::new(),

@@ -31,8 +31,8 @@ pub use connector::{
     sync_installed_connector, sync_installed_connectors, sync_installed_connectors_report,
     uninstall_connector, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorLifecycleResult, ConnectorManagement,
-    ConnectorManagementOperation, ConnectorManifest, ConnectorStartResult, ConnectorSummary,
-    ConnectorSyncFailure, ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi,
+    ConnectorManagementOperation, ConnectorManifest, ConnectorSetup, ConnectorStartResult,
+    ConnectorSummary, ConnectorSyncFailure, ConnectorSyncReport, ConnectorTrustLevel, ConnectorUi,
     PythonRuntimeStatus,
 };
 pub use logging::{LogEntry, LogMetadata};

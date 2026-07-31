@@ -47,7 +47,7 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责 `codex app-server` 的 session、thread、turn 和 event 能力，以及限定到 `workspaceId + projectId` 的 LLM credential 签发、本机 Codex 配置更新和“账户与工作区”界面。Bridge Agent 只加载其 `ui/` 静态资源并代理它声明的 `credentialState`、`listWorkspaceProjects` 和 `switchCredential` 管理操作；凭证切换不是 `codexSession` 的远程能力。
+Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责官方 Codex 安装、`codex app-server` 的 session、thread、turn 和 event 能力，以及当前授权工作区的 LLM credential 签发和本机 Codex 配置。平台项目不参与安装和凭证归属。Bridge Agent 只传入客户端当前授权的 `workspaceId`、等待 setup 生命周期完成、加载 `ui/` 静态资源并代理清单声明的管理操作；LLM credential 不经过 Bridge Agent。
 
 管理接口必须满足：
 
@@ -55,6 +55,24 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 - `management.auth.type` 必须为 `connector_token`；token 由应用首次启动时写入宿主为该 Connector 分配的私有数据目录，文件权限在 Unix 上必须为 `0600`。
 - `operations` 只能声明 `GET` 或 `POST`，路径必须位于 `/management/` 下；宿主不得接受前端传入任意 URL、方法或路径。
 - 宿主启动应用时通过 `BAIJIMU_CONNECTOR_DATA_DIR` 传入独立数据目录。应用包升级不得覆盖该目录，卸载是否清理业务配置必须由用户确认。
+
+需要在市场安装后自动完成本机初始化的 Connector 可以声明 `setup`：
+
+```json
+{
+  "setup": {
+    "operation": "setupRetry",
+    "statusOperation": "setupState",
+    "timeoutSecs": 1800
+  }
+}
+```
+
+- `setup` 仅允许用于 `schemaVersion: "2.0"`，并要求同时声明 `management`。
+- `operation` 必须引用一个 `POST` management operation；宿主传入 `{ "workspaceId": 当前授权工作区 }`，操作应立即返回并在应用内部启动幂等后台任务。
+- `statusOperation` 必须引用一个 `GET` management operation，返回 `status`：`pending`、`running`、`succeeded` 或 `failed`。失败时可返回脱敏 `error`。
+- `timeoutSecs` 范围为 30–3600，默认 1800。市场 UI 安装会自动启动应用并等待 setup 成功，成功前不得显示“安装完成”。
+- setup 不得要求用户再次选择本机设备、工作区或与能力无关的业务项目；需要凭证时由应用使用宿主传入的当前工作区上下文，并精确校验本机授权。
 
 ## Connector 包结构
 
@@ -136,6 +154,8 @@ connector-root/
 - `publisher`
 - `source`
 - `runtime`
+- `management`
+- `setup`
 - `ui`
 - `configSchema`
 - `remoteCapabilities`

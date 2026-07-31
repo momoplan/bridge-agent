@@ -511,6 +511,8 @@ interface ConnectorInstallResult {
 
 interface ConnectorAppInstallDocument {
   install: ConnectorInstallResult;
+  start?: ConnectorStartResult | null;
+  setup?: Record<string, unknown> | null;
   config: ConfigDocument;
 }
 
@@ -1750,7 +1752,11 @@ function App() {
       setActivePage("apps");
       setInstallPanelOpen(false);
       setCustomInstallConfirmed(false);
-      setMessage(`应用 ${document.install.name} ${document.install.version} 已安装`);
+      setMessage(
+        document.setup
+          ? `应用 ${document.install.name} ${document.install.version} 已安装并配置完成`
+          : `应用 ${document.install.name} ${document.install.version} 已安装`
+      );
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -1965,7 +1971,11 @@ function App() {
         }
       }));
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
-      setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
+      setMessage(
+        document.setup
+          ? `应用 ${document.install.name} 已升级到 ${document.install.version} 并配置完成`
+          : `应用 ${document.install.name} 已升级到 ${document.install.version}`
+      );
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -2015,7 +2025,11 @@ function App() {
         return next;
       });
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
-      setMessage(`应用 ${document.install.name} 已重新同步到 ${document.install.version}`);
+      setMessage(
+        document.setup
+          ? `应用 ${document.install.name} 已重新同步到 ${document.install.version} 并配置完成`
+          : `应用 ${document.install.name} 已重新同步到 ${document.install.version}`
+      );
     } catch (err) {
       handleCommandError(err);
     } finally {

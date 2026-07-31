@@ -26,7 +26,7 @@ use bridge_agent::{
     sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
     AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
+    ConnectorSetup, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
     ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
@@ -595,6 +595,7 @@ struct ConnectorInstallOptions {
     checksum: Option<String>,
     allow_git: Option<bool>,
     market_app_id: Option<String>,
+    start: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -935,6 +936,8 @@ struct RawMarketConnectorVersion {
 #[serde(rename_all = "camelCase")]
 struct ConnectorAppInstallDocument {
     install: ConnectorInstallResult,
+    start: Option<ConnectorStartResult>,
+    setup: Option<Value>,
     config: ConfigDocument,
 }
 
@@ -1920,27 +1923,15 @@ async fn local_app_control_install_handler(
                 checksum: request.checksum,
                 allow_git: request.allow_git,
                 market_app_id: request.market_app_id,
+                start: request.start,
             },
         )
         .await?;
-        let started = if request.start {
-            let result = start_connector(&document.install.connector_id, &state.config_path)
-                .map_err(|err| err.to_string())?;
-            ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-            wait_for_connector_health(&state.config_path, &result.connector_id, true).await?;
-            state.registered_services.request_refresh();
-            Some(result)
-        } else {
-            None
-        };
         state.local_apps.notify(
             LocalAppsChangeOperation::Install,
             &document.install.connector_id,
         );
-        Ok::<_, String>(serde_json::json!({
-            "install": document,
-            "start": started
-        }))
+        Ok::<_, String>(document)
     }
     .await;
     local_app_control_result(result)
@@ -2010,6 +2001,7 @@ async fn local_app_control_sync_handler(
                 checksum: record.source_checksum,
                 allow_git: Some(true),
                 market_app_id: record.market_app_id,
+                start: true,
             },
         )
         .await?;
@@ -2545,6 +2537,7 @@ async fn install_connector_app(
             checksum,
             allow_git,
             market_app_id,
+            start: true,
         },
     )
     .await?;
@@ -2657,12 +2650,25 @@ async fn install_connector_app_with_context(
         }
     };
 
-    if restart_after_replace {
+    let should_start = options.start || restart_after_replace;
+    let started = if should_start {
         let started = start_connector(&install.connector_id, config_path)
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
         wait_for_connector_health(config_path, &started.connector_id, true).await?;
-    }
+        Some(started)
+    } else {
+        None
+    };
+
+    let setup = if should_start {
+        match candidate_manifest.setup.as_ref() {
+            Some(setup) => Some(run_connector_setup(config_path, &install.connector_id, setup).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let runtime = runtime_manager
         .apply_capabilities_from_path(config_path)
@@ -2673,6 +2679,8 @@ async fn install_connector_app_with_context(
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConnectorAppInstallDocument {
         install,
+        start: started,
+        setup,
         config: ConfigDocument {
             config_path: config_path.display().to_string(),
             manifest_preview,
@@ -2680,6 +2688,63 @@ async fn install_connector_app_with_context(
             runtime,
         },
     })
+}
+
+async fn run_connector_setup(
+    config_path: &Path,
+    connector_id: &str,
+    setup: &ConnectorSetup,
+) -> Result<Value, String> {
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+    if !config_is_authorized(&config) {
+        return Err("客户端尚未完成工作区授权，无法初始化应用".to_string());
+    }
+    let workspace_id = config
+        .platform
+        .workspace_id
+        .ok_or_else(|| "客户端当前授权中缺少工作区信息".to_string())?;
+
+    invoke_connector_management(
+        connector_id.to_string(),
+        setup.operation.clone(),
+        Some(serde_json::json!({ "workspaceId": workspace_id })),
+    )
+    .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(setup.timeout_secs);
+    loop {
+        let state = invoke_connector_management(
+            connector_id.to_string(),
+            setup.status_operation.clone(),
+            None,
+        )
+        .await?;
+        let status = state
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match status {
+            "succeeded" | "ready" => return Ok(state),
+            "failed" => {
+                let detail = state
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .or_else(|| state.get("message").and_then(Value::as_str))
+                    .unwrap_or("连接器初始化失败");
+                return Err(format!("应用已安装，但初始化失败：{detail}"));
+            }
+            "pending" | "running" => {}
+            "" => return Err("应用初始化状态缺少 status 字段".to_string()),
+            other => return Err(format!("应用返回了未知的初始化状态：{other}")),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "应用已安装，但初始化在 {} 秒内未完成，可在应用页面重试",
+                setup.timeout_secs
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn ensure_connector_lifecycle_command_succeeded(
