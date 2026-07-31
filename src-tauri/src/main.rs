@@ -25,9 +25,9 @@ use bridge_agent::{
     save_config as save_agent_config, show_connector, start_connector, stop_connector,
     sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
     AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    ConnectorSetup, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, ServiceConfig,
-    ServiceHealthCheck, ServiceStartCommand,
+    ConnectorInstallResult, ConnectorSetup, ConnectorStartResult, ConnectorSummary,
+    ConnectorTrustLevel, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
+    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -2663,7 +2663,9 @@ async fn install_connector_app_with_context(
 
     let setup = if should_start {
         match candidate_manifest.setup.as_ref() {
-            Some(setup) => Some(run_connector_setup(config_path, &install.connector_id, setup).await?),
+            Some(setup) => {
+                Some(run_connector_setup(config_path, &install.connector_id, setup).await?)
+            }
             None => None,
         }
     } else {
