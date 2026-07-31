@@ -1341,7 +1341,7 @@ fn describe_upstream_http_failure(
         || lower_body_start.starts_with("<html")
     {
         return format!(
-            "HTTP {status}: 平台授权接口返回了 HTML 错误页，可能是网关路由、服务异常或请求体超过平台限制。请确认 Base URL 为 https://baijimu.com/lowcode3，并检查平台授权服务日志。"
+            "HTTP {status}: 平台授权接口返回了 HTML 错误页，可能是网关路由、服务异常或请求体超过平台限制。请确认 Base URL 为 https://api.baijimu.com/lowcode3，并检查平台授权服务日志。"
         );
     }
 

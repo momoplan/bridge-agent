@@ -759,7 +759,8 @@ const COMPUTER_DRAG_SCHEMA = {
   }
 };
 
-const DEFAULT_PLATFORM_BASE_URL = "https://baijimu.com/lowcode3";
+const DEFAULT_PLATFORM_BASE_URL = "https://api.baijimu.com/lowcode3";
+const DEFAULT_CONSOLE_BASE_URL = "https://console.baijimu.com";
 const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls, git";
 const FULL_ACCESS_COMMAND = "*";
 const FULL_ACCESS_ROOT_DIR = "/";
@@ -6752,7 +6753,7 @@ function fromUiEvent(eventConfig: UiEventConfig): EventConfig {
   };
 }
 
-function normalizePlatformBaseUrl(value: string): string {
+export function normalizePlatformBaseUrl(value: string): string {
   const normalized = value.trim();
   if (!normalized) {
     return DEFAULT_PLATFORM_BASE_URL;
@@ -6762,8 +6763,10 @@ function normalizePlatformBaseUrl(value: string): string {
     const host = url.hostname.replace(/^www\./, "");
     const path = url.pathname.replace(/\/+$/, "");
     if (
-      host === "baijimu.com" &&
-      (path === "" || path === "/lowcode" || path === "/manager" || path === "/lowcode3")
+      (url.hostname === "api.baijimu.com" &&
+        (path === "" || path === "/lowcode3")) ||
+      (host === "baijimu.com" &&
+        (path === "" || path === "/lowcode" || path === "/manager" || path === "/lowcode3"))
     ) {
       return DEFAULT_PLATFORM_BASE_URL;
     }
@@ -6773,11 +6776,15 @@ function normalizePlatformBaseUrl(value: string): string {
   return normalized.replace(/\/+$/, "");
 }
 
-function buildConsoleUrl(config: UiAgentConfig): string {
+export function buildConsoleUrl(config: UiAgentConfig): string {
+  const platformBaseUrl = normalizePlatformBaseUrl(config.platform.base_url);
+  if (platformBaseUrl === DEFAULT_PLATFORM_BASE_URL) {
+    return DEFAULT_CONSOLE_BASE_URL;
+  }
   try {
-    return new URL("/manager", normalizePlatformBaseUrl(config.platform.base_url)).toString();
+    return new URL("/manager", platformBaseUrl).toString();
   } catch {
-    return new URL("/manager", DEFAULT_PLATFORM_BASE_URL).toString();
+    return DEFAULT_CONSOLE_BASE_URL;
   }
 }
 

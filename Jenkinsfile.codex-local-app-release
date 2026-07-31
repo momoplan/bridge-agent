@@ -196,7 +196,7 @@ curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/code
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-macos-universal.zip") != null) and
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-windows-x64.zip") != null) and
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-linux-x64.zip") != null)'
-curl -fsS "https://www.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=macos&arch=aarch64" \
+curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=macos&arch=aarch64" \
   | jq -e --arg version "$CONNECTOR_VERSION" '(.data // .).latestVersion.version == $version'
 '''
             }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fromUiConfig, needsBrowserAuthorization, toUiConfig } from "./App";
+import {
+  buildConsoleUrl,
+  fromUiConfig,
+  needsBrowserAuthorization,
+  normalizePlatformBaseUrl,
+  toUiConfig
+} from "./App";
 
 function agentConfig(token = "relay-secret") {
   return {
@@ -39,5 +45,31 @@ describe("desktop credential boundary", () => {
 
     authorized.credential_status.relay_token_configured = false;
     expect(needsBrowserAuthorization(authorized)).toBe(true);
+  });
+});
+
+describe("production platform endpoints", () => {
+  it.each([
+    "https://baijimu.com",
+    "https://www.baijimu.com/",
+    "https://baijimu.com/lowcode3",
+    "https://www.baijimu.com/lowcode3/",
+    "https://api.baijimu.com",
+    "https://api.baijimu.com/lowcode3/"
+  ])("migrates the legacy SaaS endpoint %s to the canonical API endpoint", (value) => {
+    expect(normalizePlatformBaseUrl(value)).toBe("https://api.baijimu.com/lowcode3");
+  });
+
+  it("opens the canonical SaaS console independently from the API origin", () => {
+    const uiConfig = toUiConfig(agentConfig() as never);
+
+    expect(buildConsoleUrl(uiConfig)).toBe("https://console.baijimu.com");
+  });
+
+  it("keeps private deployment console navigation on the private origin", () => {
+    const uiConfig = toUiConfig(agentConfig() as never);
+    uiConfig.platform.base_url = "https://customer.example.com/lowcode3";
+
+    expect(buildConsoleUrl(uiConfig)).toBe("https://customer.example.com/manager");
   });
 });

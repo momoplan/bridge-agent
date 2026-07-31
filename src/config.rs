@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
 const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
-const DEFAULT_PLATFORM_BASE_URL: &str = "https://baijimu.com/lowcode3";
+const DEFAULT_PLATFORM_BASE_URL: &str = "https://api.baijimu.com/lowcode3";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const LEGACY_DEFAULT_DEVICE_NAME: &str = "我的百积木";
@@ -1933,8 +1933,8 @@ fn normalize_default_platform_base_url(value: &str) -> Option<String> {
         return None;
     };
     let host = url.host_str()?;
-    let host = host.trim_start_matches("www.");
-    if host != "baijimu.com" {
+    let normalized_host = host.trim_start_matches("www.");
+    if normalized_host != "baijimu.com" && host != "api.baijimu.com" {
         return None;
     }
     if !matches!(url.scheme(), "https" | "http") {
@@ -1942,9 +1942,11 @@ fn normalize_default_platform_base_url(value: &str) -> Option<String> {
     }
 
     let path = url.path().trim_end_matches('/');
-    match path {
-        "" | "/" | "/lowcode" | "/manager" => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
-        "/lowcode3" => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
+    match (host, path) {
+        ("api.baijimu.com", "" | "/" | "/lowcode3") => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
+        (_, "" | "/" | "/lowcode" | "/manager" | "/lowcode3") => {
+            Some(DEFAULT_PLATFORM_BASE_URL.to_string())
+        }
         _ => None,
     }
 }
@@ -2601,7 +2603,7 @@ mod tests {
         .unwrap();
 
         let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.platform.base_url, "https://baijimu.com/lowcode3");
+        assert_eq!(loaded.platform.base_url, "https://api.baijimu.com/lowcode3");
         assert_eq!(loaded.platform.workspace_id, None);
         assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
         assert_eq!(loaded.upload.inline_limit_bytes, 256 * 1024);
@@ -2633,6 +2635,8 @@ mod tests {
             "https://baijimu.com/lowcode",
             "https://baijimu.com/manager",
             "https://www.baijimu.com/lowcode3/",
+            "https://api.baijimu.com",
+            "https://api.baijimu.com/lowcode3/",
         ] {
             let dir = tempdir().unwrap();
             let path = dir.path().join("agent-config.json");
@@ -2642,7 +2646,7 @@ mod tests {
 
             let loaded = load_config(&path).unwrap();
             assert_eq!(
-                loaded.platform.base_url, "https://baijimu.com/lowcode3",
+                loaded.platform.base_url, "https://api.baijimu.com/lowcode3",
                 "legacy url {legacy_url} should normalize to the production API prefix"
             );
         }
