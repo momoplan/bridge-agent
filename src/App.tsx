@@ -286,7 +286,7 @@ interface AppUpdateStatus {
   forceUpdateRequired: boolean;
   minimumSupportedVersion: string | null;
   forceUpdateMessage: string | null;
-  releaseUrl: string;
+  releaseUrl: string | null;
   releaseName: string | null;
   publishedAt: string | null;
   currentTarget: string;
@@ -306,7 +306,6 @@ interface AppUpdateInstallResult {
   version: string;
   assetName: string | null;
   downloadedPath: string | null;
-  releaseUrl: string;
 }
 
 type AppUpdateProgressPhase =
@@ -2591,6 +2590,14 @@ function App() {
     } catch (err) {
       setError(readError(err));
     }
+  }
+
+  async function openAppUpdateReleasePage(update: AppUpdateStatus) {
+    if (!update.releaseUrl) {
+      setError("更新服务未提供下载页地址。");
+      return;
+    }
+    await openExternalUrl(update.releaseUrl);
   }
 
   async function openConsole() {
@@ -5118,11 +5125,11 @@ function App() {
               <button className="secondary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
                 {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "安装更新"}
               </button>
-            ) : (
-              <button className="secondary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+            ) : appUpdate.releaseUrl ? (
+              <button className="secondary" onClick={() => void openAppUpdateReleasePage(appUpdate)}>
                 打开下载页
               </button>
-            )}
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -5832,11 +5839,11 @@ function App() {
                 <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
                   {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : `升级到 ${appUpdate.latestVersion}`}
                 </button>
-              ) : (
-                <button className="primary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+              ) : appUpdate.releaseUrl ? (
+                <button className="primary" onClick={() => void openAppUpdateReleasePage(appUpdate)}>
                   打开下载页
                 </button>
-              )
+              ) : null
             ) : null}
             <button
               className="secondary"
@@ -6122,8 +6129,8 @@ function App() {
               <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
                 {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "通过官方更新器检查并安装"}
               </button>
-            ) : appUpdate?.updateAvailable ? (
-              <button className="primary" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+            ) : appUpdate?.updateAvailable && appUpdate.releaseUrl ? (
+              <button className="primary" onClick={() => void openAppUpdateReleasePage(appUpdate)}>
                 打开下载页
               </button>
             ) : null}
@@ -6218,10 +6225,12 @@ function App() {
               <button className="primary danger" onClick={() => void installAppUpdate()} disabled={updateBusy}>
                 {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "立即更新"}
               </button>
-            ) : (
-              <button className="primary danger" onClick={() => void openExternalUrl(appUpdate.releaseUrl)}>
+            ) : appUpdate.releaseUrl ? (
+              <button className="primary danger" onClick={() => void openAppUpdateReleasePage(appUpdate)}>
                 打开下载页
               </button>
+            ) : (
+              <span className="danger-text">更新服务未提供可用安装包或下载页。</span>
             )}
             <button
               className="secondary"

@@ -787,7 +787,7 @@ struct AppUpdateStatus {
     force_update_required: bool,
     minimum_supported_version: Option<String>,
     force_update_message: Option<String>,
-    release_url: String,
+    release_url: Option<String>,
     release_name: Option<String>,
     published_at: Option<String>,
     current_target: String,
@@ -802,7 +802,6 @@ struct AppUpdateInstallResult {
     version: String,
     asset_name: Option<String>,
     downloaded_path: Option<String>,
-    release_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3424,7 +3423,6 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         },
     );
 
-    let release_url = configured_release_page_url().unwrap_or_default();
     let updater = app
         .updater()
         .map_err(|err| format!("初始化官方更新器失败: {err}"))?;
@@ -3438,7 +3436,6 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
             version: env!("CARGO_PKG_VERSION").to_string(),
             asset_name: None,
             downloaded_path: None,
-            release_url,
         });
     };
     let update_version = update.version.to_string();
@@ -3535,7 +3532,6 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
         version: update_version,
         asset_name,
         downloaded_path: None,
-        release_url,
     })
 }
 
@@ -3562,22 +3558,13 @@ fn configured_update_api_url() -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn configured_release_page_url() -> Option<String> {
-    option_env!("BRIDGE_AGENT_RELEASE_PAGE_URL")
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn release_page_url(release: &UpdateReleaseResponse) -> String {
+fn release_page_url(release: &UpdateReleaseResponse) -> Option<String> {
     release
         .release_url
         .as_deref()
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(configured_release_page_url)
-        .unwrap_or_default()
 }
 
 fn release_version(release: &UpdateReleaseResponse) -> Result<Version, String> {

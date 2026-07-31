@@ -14,7 +14,7 @@
 
 给最终用户分发时，使用平台自己的下载页或更新服务返回的国内下载地址：
 
-- 最新版本页：由 `BRIDGE_AGENT_RELEASE_PAGE_URL` 指向平台下载页
+- 最新版本页：由更新服务的 `releaseUrl` 发布数据指向平台下载页
 - macOS：优先下载 universal `.dmg`
 - Windows：下载 `.msi` 安装包；安装时会检测 WebView2，缺失时自动下载并安装
 - Linux：下载 `.AppImage` / `.deb`
@@ -701,8 +701,6 @@ macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置�
 - `BRIDGE_AGENT_UPDATE_API_URL`
   - 客户端检查更新的正式公开接口：`https://updates.baijimu.com/api/bridge-agent/releases/latest`
   - 旧版客户端仍会访问 `https://relay.baijimu.com/api/bridge-agent/releases/latest`，该入口只作为 OpenResty 兼容转发保留
-- `BRIDGE_AGENT_RELEASE_PAGE_URL`
-  - 展示给用户手动打开的下载页：`https://downloads.baijimu.com/`
 - `BRIDGE_AGENT_RELEASE_API_URL`
   - 发布流程调用的 release service 地址：`https://updates.baijimu.com/api/bridge-agent`
 - `BRIDGE_AGENT_RELEASE_API_TOKEN`
