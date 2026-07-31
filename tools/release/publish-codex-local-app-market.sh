@@ -155,7 +155,12 @@ INSERT INTO local_app_version (
   '${checksums[macos]}',
   CONVERT(FROM_BASE64('${capabilities_b64}') USING utf8mb4),
   CONVERT(FROM_BASE64('${manifest_b64}') USING utf8mb4),
-  400, '${published_at}'
+  (
+    SELECT next_rank FROM (
+      SELECT COALESCE(MAX(rank_order), 0) + 1 AS next_rank
+      FROM local_app_version WHERE app_id='codex'
+    ) AS ranks
+  ), '${published_at}'
 ) ON DUPLICATE KEY UPDATE
   status='PUBLISHED', source_type=VALUES(source_type), source=VALUES(source),
   repo=VALUES(repo), revision=VALUES(revision), checksum=VALUES(checksum),
