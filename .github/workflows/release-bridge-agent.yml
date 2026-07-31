@@ -349,13 +349,11 @@ jobs:
       - name: Prepare bundled Baijimu CLI
         shell: bash
         env:
-          BAIJIMU_CLI_RS_GIT_URL: https://gitee.com/zxflimit_admin/baijimu-cli-rs.git
-          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
+          BAIJIMU_CLI_USE_RELEASE_ASSET: "true"
+          BAIJIMU_CLI_RELEASE_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            export BAIJIMU_CLI_RS_MACOS_UNIVERSAL=true
-          fi
           ./tools/baijimu-cli/prepare-bundled-cli.sh
 
       - name: Configure Windows signing
@@ -788,6 +786,25 @@ jobs:
               throw "Invalid Authenticode signature for $($file.FullName): $($signature.Status)"
             }
           }
+
+      - name: Scan signed Windows release with Microsoft Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cli = Resolve-Path "src-tauri/resources/bin/baijimu.exe"
+          $msi = Get-ChildItem `
+            -Path "src-tauri/target/release/bundle/msi" `
+            -Filter "*.msi" `
+            -File `
+            -ErrorAction Stop |
+            Select-Object -First 1
+          if (-not $msi) {
+            throw "Windows MSI artifact was not found for Defender scan"
+          }
+          $files = @($cli.Path, $msi.FullName)
+          & "src-tauri/scripts/verify-windows-defender.ps1" `
+            -FilePath $files
 
       - name: Verify Windows executables are self-contained
         if: runner.os == 'Windows'
