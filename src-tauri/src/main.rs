@@ -2630,13 +2630,6 @@ async fn install_connector_app_with_context(
         false
     };
 
-    if restart_after_replace {
-        let stopped = stop_connector(&candidate_manifest.id, config_path)
-            .map_err(|err| format!("升级前停止旧版应用失败: {err}"))?;
-        ensure_connector_lifecycle_command_succeeded("停止旧版应用", &stopped)?;
-        wait_for_connector_health(config_path, &stopped.connector_id, false).await?;
-    }
-
     let provenance = match market_app.as_ref() {
         Some(market_app) => ConnectorInstallProvenance::platform_trusted(
             &resolved_source_text,

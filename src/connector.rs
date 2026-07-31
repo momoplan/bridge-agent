@@ -475,6 +475,7 @@ pub fn install_connector_from_path_with_provenance(
 ) -> Result<ConnectorInstallResult> {
     ensure_config_exists(config_path)?;
     let mut config = load_config(config_path)?;
+    let original_config = config.clone();
     let source = source
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
@@ -498,66 +499,127 @@ pub fn install_connector_from_path_with_provenance(
         .collect::<Result<Vec<_>>>()?;
 
     let package_path = installed_connector_package_path(&manifest)?;
-    if package_path.exists() {
-        prepare_connector_package_destination(&package_path, replace)?;
+    if source == package_path || source.starts_with(&package_path) {
+        bail!(
+            "connector source {} cannot be inside its installed package {}",
+            source.display(),
+            package_path.display()
+        );
     }
-    copy_connector_package(&source, &package_path)?;
-    let package_checksum = connector_package_sha256(&package_path)?;
-    resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
-    cleanup_legacy_connector_autostarts_for_manifest(&manifest);
-
-    let local_app = local_app_from_services(&manifest, &services)?;
-    let method_names = local_app
-        .methods
-        .iter()
-        .map(|method| method.name.clone())
-        .collect::<Vec<_>>();
-    let event_names = local_app
-        .events
-        .iter()
-        .map(|event| event.name.clone())
-        .collect::<Vec<_>>();
-    let previous_service_names = load_install_record(&manifest.id)
-        .ok()
-        .map(|record| record.legacy_service_names)
-        .unwrap_or_default();
-    config.services.retain(|service| {
-        !previous_service_names
-            .iter()
-            .any(|service_name| service_name == &service.name)
-    });
-    upsert_local_app(&mut config.local_apps, local_app, replace)?;
-    save_config(config_path, &config)?;
-
-    let now = now_ms();
+    if package_path.exists() && !replace {
+        bail!(
+            "connector package already exists at {}; pass replace to overwrite it",
+            package_path.display()
+        );
+    }
     let previous_record = load_install_record(&manifest.id).ok();
-    let installed_at_epoch_ms = previous_record
-        .as_ref()
-        .map(|record| record.installed_at_epoch_ms)
-        .unwrap_or(now);
-    let record = ConnectorInstallRecord {
-        manifest: manifest.clone(),
-        package_path: package_path.display().to_string(),
-        source_path: source.display().to_string(),
-        source_reference: provenance.source_reference,
-        trust_level: provenance.trust_level,
-        market_app_id: provenance.market_app_id,
-        source_checksum: provenance.source_checksum,
-        package_checksum: Some(package_checksum),
-        legacy_service_names,
-        installed_at_epoch_ms,
-        last_synced_at_epoch_ms: now,
+    if package_path.exists() && previous_record.is_some() {
+        stop_connector_for_package_change(&manifest.id, &config)?;
+    }
+    let replaced_package = if package_path.exists() {
+        Some(prepare_connector_package_destination(
+            &package_path,
+            replace,
+        )?)
+    } else {
+        None
     };
-    save_install_record(&record)?;
+    let mut config_saved = false;
+    let install_result = (|| -> Result<ConnectorInstallResult> {
+        copy_connector_package(&source, &package_path)?;
+        let package_checksum = connector_package_sha256(&package_path)?;
+        resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
+        cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
-    Ok(ConnectorInstallResult {
-        connector_id: manifest.id,
-        name: manifest.name,
-        version: manifest.version,
-        package_path: package_path.display().to_string(),
-        method_names,
-        event_names,
-    })
+        let local_app = local_app_from_services(&manifest, &services)?;
+        let method_names = local_app
+            .methods
+            .iter()
+            .map(|method| method.name.clone())
+            .collect::<Vec<_>>();
+        let event_names = local_app
+            .events
+            .iter()
+            .map(|event| event.name.clone())
+            .collect::<Vec<_>>();
+        let previous_service_names = previous_record
+            .as_ref()
+            .map(|record| record.legacy_service_names.clone())
+            .unwrap_or_default();
+        config.services.retain(|service| {
+            !previous_service_names
+                .iter()
+                .any(|service_name| service_name == &service.name)
+        });
+        upsert_local_app(&mut config.local_apps, local_app, replace)?;
+        save_config(config_path, &config)?;
+        config_saved = true;
+
+        let now = now_ms();
+        let installed_at_epoch_ms = previous_record
+            .as_ref()
+            .map(|record| record.installed_at_epoch_ms)
+            .unwrap_or(now);
+        let record = ConnectorInstallRecord {
+            manifest: manifest.clone(),
+            package_path: package_path.display().to_string(),
+            source_path: source.display().to_string(),
+            source_reference: provenance.source_reference.clone(),
+            trust_level: provenance.trust_level,
+            market_app_id: provenance.market_app_id.clone(),
+            source_checksum: provenance.source_checksum.clone(),
+            package_checksum: Some(package_checksum),
+            legacy_service_names: legacy_service_names.clone(),
+            installed_at_epoch_ms,
+            last_synced_at_epoch_ms: now,
+        };
+        save_install_record(&record)?;
+
+        Ok(ConnectorInstallResult {
+            connector_id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            package_path: package_path.display().to_string(),
+            method_names,
+            event_names,
+        })
+    })();
+
+    match install_result {
+        Ok(result) => {
+            if let Some(replaced_package) = replaced_package {
+                if let Err(err) = fs::remove_dir_all(&replaced_package) {
+                    tracing::warn!(
+                        "installed connector {} but failed to remove replaced package {}: {err:#}",
+                        manifest.id,
+                        replaced_package.display()
+                    );
+                }
+            }
+            Ok(result)
+        }
+        Err(install_err) => {
+            let mut rollback_failures = Vec::new();
+            if config_saved {
+                if let Err(err) = save_config(config_path, &original_config) {
+                    rollback_failures.push(format!("restore connector config: {err:#}"));
+                }
+            }
+            if let Err(err) =
+                restore_replaced_connector_package(&package_path, replaced_package.as_deref())
+            {
+                rollback_failures.push(format!("restore connector package: {err:#}"));
+            }
+            if rollback_failures.is_empty() {
+                Err(install_err)
+            } else {
+                bail!(
+                    "{install_err:#}; connector replacement rollback also failed: {}",
+                    rollback_failures.join("; ")
+                )
+            }
+        }
+    }
 }
 
 fn normalized_optional_text(value: Option<&str>) -> Option<String> {
@@ -578,10 +640,12 @@ fn normalize_sha256_checksum(value: &str) -> Result<String> {
 pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
     let record = load_install_record(connector_id)?;
-    let _ = stop_connector(connector_id, config_path);
+    let summary = summary_from_record(record.clone());
+    let mut config = load_config(config_path)?;
+    stop_connector_for_package_change(connector_id, &config)?;
+    release_connector_package_processes(Path::new(&record.package_path))?;
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
 
-    let mut config = load_config(config_path)?;
     config.services.retain(|service| {
         !record
             .legacy_service_names
@@ -591,22 +655,37 @@ pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<Con
     config
         .local_apps
         .retain(|app| app.connector_id != record.manifest.id);
-    save_config(config_path, &config)?;
 
     let install_root = install_record_path(connector_id)?
         .parent()
         .with_context(|| format!("connector `{connector_id}` install root is missing"))?
         .to_path_buf();
-    if install_root.exists() {
-        fs::remove_dir_all(&install_root).with_context(|| {
-            format!(
-                "failed to remove connector installation {}",
-                install_root.display()
-            )
-        })?;
+    let uninstalling_root = if install_root.exists() {
+        Some(quarantine_connector_install_root(&install_root)?)
+    } else {
+        None
+    };
+    if let Err(config_err) = save_config(config_path, &config) {
+        if let Some(uninstalling_root) = uninstalling_root.as_deref() {
+            if let Err(restore_err) = fs::rename(uninstalling_root, &install_root) {
+                bail!(
+                    "failed to update config while uninstalling connector `{connector_id}`: {config_err:#}; failed to restore installation {}: {restore_err}",
+                    install_root.display()
+                );
+            }
+        }
+        return Err(config_err);
+    }
+    if let Some(uninstalling_root) = uninstalling_root {
+        if let Err(err) = fs::remove_dir_all(&uninstalling_root) {
+            tracing::warn!(
+                "uninstalled connector {connector_id} but failed to remove quarantined installation {}: {err:#}",
+                uninstalling_root.display()
+            );
+        }
     }
 
-    Ok(summary_from_record(record))
+    Ok(summary)
 }
 
 pub fn list_connectors() -> Result<Vec<ConnectorSummary>> {
@@ -1079,16 +1158,61 @@ fn save_install_record(record: &ConnectorInstallRecord) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create connector dir {}", parent.display()))?;
     }
-    fs::write(
-        &path,
+    let temporary_path = path.with_file_name(format!(
+        ".{CONNECTOR_INSTALL_RECORD_FILE}.{}.tmp",
+        Uuid::new_v4()
+    ));
+    let backup_path = path.with_file_name(format!(
+        ".{CONNECTOR_INSTALL_RECORD_FILE}.{}.backup",
+        Uuid::new_v4()
+    ));
+    let write_result = fs::write(
+        &temporary_path,
         format!("{}\n", serde_json::to_string_pretty(record)?),
     )
     .with_context(|| {
         format!(
-            "failed to write connector install record {}",
-            path.display()
+            "failed to write temporary connector install record {}",
+            temporary_path.display()
         )
-    })?;
+    });
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(err);
+    }
+    let had_previous = path.exists();
+    if had_previous {
+        if let Err(err) = fs::rename(&path, &backup_path) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to preserve connector install record {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    if let Err(err) = fs::rename(&temporary_path, &path) {
+        let _ = fs::remove_file(&temporary_path);
+        if had_previous {
+            let _ = fs::rename(&backup_path, &path);
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "failed to replace connector install record {}",
+                path.display()
+            )
+        });
+    }
+    if had_previous {
+        if let Err(err) = fs::remove_file(&backup_path) {
+            tracing::warn!(
+                "saved connector install record {} but failed to remove backup {}: {err:#}",
+                path.display(),
+                backup_path.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1104,6 +1228,9 @@ fn load_install_records() -> Result<Vec<ConnectorInstallRecord>> {
             continue;
         }
         let id = entry.file_name().to_string_lossy().to_string();
+        if id.starts_with('.') && id.contains(".uninstalling-") {
+            continue;
+        }
         match load_install_record(&id) {
             Ok(record) => records.push(record),
             Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
@@ -1125,31 +1252,20 @@ fn load_install_record(connector_id: &str) -> Result<ConnectorInstallRecord> {
     })
 }
 
-fn prepare_connector_package_destination(package_path: &Path, replace: bool) -> Result<()> {
+fn prepare_connector_package_destination(package_path: &Path, replace: bool) -> Result<PathBuf> {
     if !replace {
         bail!(
             "connector package already exists at {}; pass replace to overwrite it",
             package_path.display()
         );
     }
-    match fs::remove_dir_all(package_path) {
-        Ok(()) => Ok(()),
-        Err(remove_err) => {
-            let quarantine_path =
-                quarantine_connector_package_path(package_path).with_context(|| {
-                    format!(
-                        "failed to replace connector {}; also failed to move aside the existing package after remove failed: {remove_err}",
-                        package_path.display()
-                    )
-                })?;
-            tracing::warn!(
-                "moved undeletable connector package {} to {} after remove failed: {remove_err}",
-                package_path.display(),
-                quarantine_path.display()
-            );
-            Ok(())
-        }
-    }
+    release_connector_package_processes(package_path)?;
+    quarantine_connector_package_path(package_path).with_context(|| {
+        format!(
+            "failed to move aside existing connector package {} before replacement",
+            package_path.display()
+        )
+    })
 }
 
 fn quarantine_connector_package_path(package_path: &Path) -> Result<PathBuf> {
@@ -1170,19 +1286,201 @@ fn quarantine_connector_package_path(package_path: &Path) -> Result<PathBuf> {
         if quarantine_path.exists() {
             continue;
         }
-        fs::rename(package_path, &quarantine_path).with_context(|| {
+        let mut last_error = None;
+        for _ in 0..20 {
+            match fs::rename(package_path, &quarantine_path) {
+                Ok(()) => return Ok(quarantine_path),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    last_error = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "failed to move {} to {}",
+                            package_path.display(),
+                            quarantine_path.display()
+                        )
+                    });
+                }
+            }
+        }
+        let err = last_error.context("connector package rename failed without an error")?;
+        return Err(err).with_context(|| {
             format!(
-                "failed to move {} to {}",
+                "failed to move {} to {} after waiting for process handles to close",
                 package_path.display(),
+                quarantine_path.display()
+            )
+        });
+    }
+    bail!(
+        "failed to choose replacement path for existing connector package {}",
+        package_path.display()
+    )
+}
+
+fn restore_replaced_connector_package(
+    package_path: &Path,
+    replaced_package: Option<&Path>,
+) -> Result<()> {
+    if package_path.exists() {
+        fs::remove_dir_all(package_path).with_context(|| {
+            format!(
+                "failed to remove incomplete connector package {}",
+                package_path.display()
+            )
+        })?;
+    }
+    if let Some(replaced_package) = replaced_package {
+        fs::rename(replaced_package, package_path).with_context(|| {
+            format!(
+                "failed to restore {} to {}",
+                replaced_package.display(),
+                package_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn quarantine_connector_install_root(install_root: &Path) -> Result<PathBuf> {
+    let parent = install_root
+        .parent()
+        .with_context(|| format!("failed to resolve parent for {}", install_root.display()))?;
+    let name = install_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("connector");
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let quarantine_path = parent.join(format!(".{name}.uninstalling-{}{}", now_ms(), suffix));
+        if quarantine_path.exists() {
+            continue;
+        }
+        fs::rename(install_root, &quarantine_path).with_context(|| {
+            format!(
+                "failed to move connector installation {} to {} before uninstall",
+                install_root.display(),
                 quarantine_path.display()
             )
         })?;
         return Ok(quarantine_path);
     }
     bail!(
-        "failed to choose replacement path for existing connector package {}",
-        package_path.display()
+        "failed to choose uninstall path for connector installation {}",
+        install_root.display()
     )
+}
+
+fn stop_connector_for_package_change(
+    connector_id: &str,
+    config: &crate::config::AgentConfig,
+) -> Result<()> {
+    let Some(app) = config
+        .local_apps
+        .iter()
+        .find(|app| app.connector_id == connector_id)
+    else {
+        return Ok(());
+    };
+    match (&app.start_command, &app.stop_command) {
+        (_, Some(command)) => {
+            let result = run_start_command(connector_id, command)?;
+            if result.exit_code != Some(0) {
+                let detail = if !result.stderr.trim().is_empty() {
+                    result.stderr.trim().to_string()
+                } else {
+                    format!("exit code {:?}", result.exit_code)
+                };
+                bail!("failed to stop connector `{connector_id}` before package change: {detail}");
+            }
+            Ok(())
+        }
+        (Some(_), None) => bail!(
+            "connector `{connector_id}` has a start command but no stop command; refusing to change a package that may still be running"
+        ),
+        (None, None) => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+fn release_connector_package_processes(package_path: &Path) -> Result<()> {
+    let package_path = package_path
+        .canonicalize()
+        .unwrap_or_else(|_| package_path.to_path_buf());
+    let script = r#"
+$prefix = [System.IO.Path]::GetFullPath(
+  $env:BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE
+).TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+  [System.IO.Path]::DirectorySeparatorChar
+Get-CimInstance Win32_Process -ErrorAction Stop |
+  Where-Object {
+    $_.ExecutablePath -and
+    [System.IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
+      $prefix,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )
+  } |
+  Select-Object -ExpandProperty ProcessId
+"#;
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .env(
+            "BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE",
+            package_path.as_os_str(),
+        )
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect Windows processes using connector package {}",
+                package_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect Windows processes using connector package {}\nstdout:\n{}\nstderr:\n{}",
+            package_path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut pids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
+        let taskkill = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
+        if !taskkill.status.success() {
+            bail!(
+                "failed to terminate connector process tree {pid}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&taskkill.stdout),
+                String::from_utf8_lossy(&taskkill.stderr)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn release_connector_package_processes(_package_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
@@ -3123,6 +3421,96 @@ mod tests {
             .local_apps
             .iter()
             .any(|app| app.connector_id == "com.baijimu.connector.uninstall-test"));
+    }
+
+    #[test]
+    fn replacement_refuses_running_capable_connector_without_stop_command() {
+        let dir = tempdir().unwrap();
+        let connectors_dir = dir.path().join("connectors");
+        let _env = connector_test_env(connectors_dir.clone());
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        let manifest_path = source.join(CONNECTOR_MANIFEST_FILE);
+        let manifest = |version: &str| {
+            json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.lifecycle-test",
+                "name": "Lifecycle Test Connector",
+                "version": version,
+                "services": [{
+                    "name": "lifecycleTestService",
+                    "description": "Lifecycle test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18122"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["connector-test", "start"]
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            })
+        };
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest("1.0.0")).unwrap(),
+        )
+        .unwrap();
+        install_connector_from_path(&source, &config_path, false).unwrap();
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest("1.0.1")).unwrap(),
+        )
+        .unwrap();
+        let error = install_connector_from_path(&source, &config_path, true).unwrap_err();
+
+        assert!(error.to_string().contains("no stop command"));
+        assert_eq!(
+            show_connector("com.baijimu.connector.lifecycle-test")
+                .unwrap()
+                .manifest
+                .version,
+            "1.0.0"
+        );
+        let installed_manifest: ConnectorManifest = serde_json::from_str(
+            &fs::read_to_string(
+                connectors_dir
+                    .join("com.baijimu.connector.lifecycle-test")
+                    .join("package")
+                    .join(CONNECTOR_MANIFEST_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(installed_manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn replacement_rollback_restores_previous_package() {
+        let dir = tempdir().unwrap();
+        let package_path = dir.path().join("package");
+        let replaced_path = dir.path().join("package.replaced");
+        fs::create_dir_all(&package_path).unwrap();
+        fs::write(package_path.join("state"), "old").unwrap();
+        fs::rename(&package_path, &replaced_path).unwrap();
+        fs::create_dir_all(&package_path).unwrap();
+        fs::write(package_path.join("state"), "incomplete-new").unwrap();
+
+        restore_replaced_connector_package(&package_path, Some(&replaced_path)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(package_path.join("state")).unwrap(),
+            "old"
+        );
+        assert!(!replaced_path.exists());
     }
 
     #[test]
