@@ -958,7 +958,11 @@ jobs:
               throw "Installed desktop executable was not found: $desktopExecutable"
             }
 
-            $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            $desktopProcess = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $desktopProcess) {
+              $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            }
 
             $deadline = (Get-Date).AddSeconds(20)
             do {
@@ -975,7 +979,30 @@ jobs:
               throw "Legacy per-user desktop autostart was not removed: $userRunValue"
             }
 
-            Write-Host "Verified Windows MSI lifecycle, service ownership and legacy user autostart cleanup"
+            Start-Sleep -Seconds 6
+            Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction Stop
+
+            $deadline = (Get-Date).AddSeconds(15)
+            do {
+              $service = Get-Service -Name "BridgeAgent" -ErrorAction Stop
+              if ($service.Status -eq "Stopped") {
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            if ($service.Status -ne "Stopped") {
+              throw "BridgeAgent service did not stop after the desktop exited: $($service.Status)"
+            }
+
+            Start-Sleep -Seconds 2
+            $relaunchedDesktop = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($relaunchedDesktop) {
+              throw "BridgeAgent service relaunched the desktop after it exited"
+            }
+
+            Write-Host "Verified Windows MSI lifecycle, exit shutdown, and legacy user autostart cleanup"
           } finally {
             Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue

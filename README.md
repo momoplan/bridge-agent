@@ -593,7 +593,8 @@ Windows MSI 会安装固定服务名 `BridgeAgent`，并把配置文件放到共
 - MSI 负责注册服务、升级时先停服务再替换文件、完成后重新拉起，卸载时停止并删除服务
 - MSI 会给 `C:\ProgramData\Baijimu\BridgeAgent` 配置共享 ACL，让 LocalSystem 服务和交互用户都能读写同一份设备配置
 - 未授权时服务保持运行但不连接 relay；授权配置写入后会自动加载，不需要重启服务
-- 用户登录后，LocalSystem 服务会识别活动的 Windows 用户会话并在该会话中启动桌面客户端；桌面进程启动后服务主动让出 runtime，由桌面进程接管，桌面进程退出后服务自动恢复后台连接
+- 用户登录后，LocalSystem 服务会识别活动的 Windows 用户会话并在该会话中启动桌面客户端；桌面进程启动后服务主动让出 runtime，由桌面进程接管
+- 桌面进程无论正常退出还是异常结束，服务都不会重新拉起桌面端；服务会正常停止自身及后台 runtime，只有用户再次手动启动客户端或 Windows 下次启动服务时才会重新运行
 - Windows 只由 `BridgeAgent` 服务负责在活动用户会话中启动桌面客户端；桌面端不会再注册第二份当前用户登录启动项，并会在升级时清理旧版本遗留的 Tauri Autostart 项，确保同一登录会话只有一个启动所有者
 - macOS / Linux 桌面客户端继续使用 Tauri 官方 Autostart 插件注册当前用户登录启动项
 - `bridge-agent-service.exe`、桌面端 exe、安装器和后续升级器都要做正式代码签名

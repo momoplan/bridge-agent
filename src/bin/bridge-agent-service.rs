@@ -268,8 +268,11 @@ async fn run_runtime_supervisor(
             match find_desktop_process() {
                 Ok(found) => {
                     desktop = found;
-                    if desktop_was_running && desktop.is_none() {
-                        config_check_requested = true;
+                    if desktop_transition_stops_service(desktop_was_running, desktop.is_some()) {
+                        tracing::info!(
+                            "bridge-agent desktop exited; stopping the Windows service and background runtime"
+                        );
+                        break;
                     }
                 }
                 Err(err) => {
@@ -453,15 +456,21 @@ async fn run_runtime_supervisor(
                 }
             }
             SupervisorEvent::DesktopExited => {
-                desktop = None;
-                next_desktop_scan = Instant::now();
-                config_check_requested = true;
+                tracing::info!(
+                    "bridge-agent desktop exited; stopping the Windows service and background runtime"
+                );
+                break;
             }
             SupervisorEvent::Timeout => {}
         }
     }
 
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn desktop_transition_stops_service(was_running: bool, is_running: bool) -> bool {
+    was_running && !is_running
 }
 
 #[cfg(windows)]
@@ -896,7 +905,9 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_is_authorized, select_active_user_session_id};
+    use super::{
+        config_is_authorized, desktop_transition_stops_service, select_active_user_session_id,
+    };
     use bridge_agent::AgentConfig;
 
     #[test]
@@ -918,5 +929,13 @@ mod tests {
             Some(3)
         );
         assert_eq!(select_active_user_session_id([(0, true), (2, false)]), None);
+    }
+
+    #[test]
+    fn desktop_exit_is_a_service_stop_transition() {
+        assert!(desktop_transition_stops_service(true, false));
+        assert!(!desktop_transition_stops_service(false, false));
+        assert!(!desktop_transition_stops_service(false, true));
+        assert!(!desktop_transition_stops_service(true, true));
     }
 }

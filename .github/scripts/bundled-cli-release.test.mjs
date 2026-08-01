@@ -31,7 +31,7 @@ function createFixture() {
 
   const platform =
     process.platform === "darwin" ? "macos-universal" : "linux-x64";
-  const assetName = `baijimu-cli-0.1.31-${platform}.zip`;
+  const assetName = `baijimu-cli-0.1.32-${platform}.zip`;
   const binaryPath = join(packageBinDirectory, "baijimu");
   writeFileSync(
     binaryPath,
@@ -39,7 +39,7 @@ function createFixture() {
       "#!/usr/bin/env bash",
       'test "$1" = "--version"',
       'test "$2" = "--json"',
-      'printf \'{"version":"0.1.31"}\\n\'',
+      'printf \'{"version":"0.1.32"}\\n\'',
       "",
     ].join("\n"),
   );
@@ -97,7 +97,7 @@ describe("bundled Baijimu CLI release provenance", () => {
       const result = runPrepare(fixture);
 
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('"version":"0.1.31"');
+      expect(result.stdout).toContain('"version":"0.1.32"');
       expect(result.stdout).toContain(
         "Prepared pinned Baijimu CLI release asset",
       );
