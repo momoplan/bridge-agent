@@ -17,7 +17,7 @@
           Id="BridgeAgentServiceInstall"
           Name="BridgeAgent"
           DisplayName="Baijimu Bridge Agent"
-          Description="Keeps authorized Baijimu device capabilities connected when the desktop client is not running."
+          Description="Starts Baijimu device capabilities at boot and stops when the desktop client exits."
           Type="ownProcess"
           Start="auto"
           ErrorControl="normal"
