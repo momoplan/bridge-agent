@@ -539,6 +539,20 @@ cargo run -- run
 
 这样可以避免继续把 relay 的 WebSocket 单消息上限打爆。
 
+## Connector 私有资源上传
+
+声明 `assets.upload` 权限并要求宿主能力 `connector.asset-upload.v1` 的 Connector，
+会获得 Connector 专属的本机上传端点与凭证文件：
+
+- `BAIJIMU_CONNECTOR_ASSET_UPLOAD_ENDPOINT`
+- `BAIJIMU_CONNECTOR_ASSET_UPLOAD_TOKEN_FILE`
+
+Connector 向 `POST /v1/local-app-assets` 提交其专属数据目录内的图片路径。Bridge Agent
+校验 Connector 安装状态、启用状态、权限、独立凭证、文件真实路径、图片魔数和 5 MB
+上限后，使用宿主自己的 relay token 申请私有 OSS 上传槽位并完成直传。Connector 从不
+获得 relay token。接口返回 `assetId`、`objectKey`、短期 `downloadUrl`、`expiresAt`、
+`sha256` 等统一 `asset_ref` 字段。
+
 ## CLI
 
 初始化配置：

@@ -232,7 +232,7 @@ impl AgentRuntimeManager {
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
         let event_outbox = EventOutbox::new(&config_base_dir)?;
         let event_server = LocalEventServer::bind(
-            &config.runtime,
+            &config,
             config_path.to_path_buf(),
             Arc::clone(&registry),
             event_tx,

@@ -23,8 +23,8 @@ pub use config::{
 };
 pub use connector::inspect_python_runtime;
 pub use connector::{
-    connector_data_dir, connector_management_token_path, connectors_dir,
-    format_connector_sync_failures, install_connector_from_path,
+    connector_asset_upload_token_path, connector_data_dir, connector_management_token_path,
+    connectors_dir, format_connector_sync_failures, install_connector_from_path,
     install_connector_from_path_with_provenance, install_connector_from_path_with_source_reference,
     list_connectors, load_connector_manifest, resolve_connector_ui_asset,
     resolve_connector_ui_entry, show_connector, start_connector, stop_connector,

@@ -1,8 +1,10 @@
 use crate::config::{
-    load_config, resolve_config_base_dir, save_config, RuntimeConfig, ServiceConfig,
+    load_config, resolve_config_base_dir, save_config, AgentConfig, ServiceConfig,
     ServiceRegistration,
 };
-use crate::connector::authorize_connector_event;
+use crate::connector::{
+    authorize_connector_asset_upload, authorize_connector_event, connector_declares_asset_upload,
+};
 use crate::event_outbox::EventOutbox;
 use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
@@ -16,8 +18,11 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,6 +36,7 @@ use uuid::Uuid;
 
 const PORT_RECLAIM_BIND_RETRIES: usize = 20;
 const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
+const MAX_CONNECTOR_ASSET_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) enum LocalEventEmitRequest {
@@ -62,6 +68,60 @@ struct EventServerState {
     event_token: Option<String>,
     service_registration_enabled: bool,
     service_registration_token: Option<String>,
+    upload_prepare_url: Option<String>,
+    upload_timeout_secs: u64,
+    relay_token: String,
+    agent_id: String,
+    workspace_id: Option<u64>,
+    http_client: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadLocalAppAssetRequest {
+    connector_id: String,
+    local_path: String,
+    purpose: String,
+    content_type: String,
+    #[serde(default)]
+    file_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadLocalAppAssetResponse {
+    result_type: &'static str,
+    asset_id: String,
+    object_key: Option<String>,
+    download_url: Option<String>,
+    expires_at: Option<String>,
+    mime_type: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareAssetUploadRequest {
+    agent_id: String,
+    workspace_id: Option<u64>,
+    purpose: String,
+    content_type: String,
+    file_name: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareAssetUploadResponse {
+    file_id: String,
+    upload_url: String,
+    method: Option<String>,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    object_key: Option<String>,
+    download_url: Option<String>,
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,18 +223,27 @@ impl IntoResponse for EventApiError {
 
 impl LocalEventServer {
     pub(crate) async fn bind(
-        config: &RuntimeConfig,
+        config: &AgentConfig,
         config_path: PathBuf,
         registry: Arc<RwLock<ServiceRegistry>>,
         event_tx: mpsc::Sender<LocalEventEmitRequest>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {
-        if !config.event_server_enabled && !config.service_registration_enabled {
-            return Ok(None);
+        if !config.runtime.event_server_enabled && !config.runtime.service_registration_enabled {
+            let asset_upload_enabled = config
+                .local_apps
+                .iter()
+                .filter(|app| app.enabled)
+                .filter_map(|app| connector_declares_asset_upload(&app.connector_id).ok())
+                .any(|declared| declared);
+            if !asset_upload_enabled {
+                return Ok(None);
+            }
         }
 
         let bind: SocketAddr = config
+            .runtime
             .event_server_bind
             .parse()
             .with_context(|| "runtime.event_server_bind must be a socket address")?;
@@ -184,6 +253,7 @@ impl LocalEventServer {
         let bind = listener.local_addr()?;
         let outbox = EventOutbox::new(&resolve_config_base_dir(&config_path))?;
         let token = config
+            .runtime
             .event_server_token
             .as_deref()
             .map(str::trim)
@@ -200,15 +270,22 @@ impl LocalEventServer {
                 audit_tx,
                 config_path,
                 outbox,
-                event_enabled: config.event_server_enabled,
+                event_enabled: config.runtime.event_server_enabled,
                 event_token: token,
-                service_registration_enabled: config.service_registration_enabled,
+                service_registration_enabled: config.runtime.service_registration_enabled,
                 service_registration_token: config
+                    .runtime
                     .service_registration_token
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned),
+                upload_prepare_url: config.upload.prepare_url(&config.relay),
+                upload_timeout_secs: config.upload.timeout_secs,
+                relay_token: config.relay.token.clone(),
+                agent_id: config.relay.agent_id.clone(),
+                workspace_id: config.platform.workspace_id,
+                http_client: reqwest::Client::new(),
             },
         }))
     }
@@ -223,6 +300,7 @@ impl LocalEventServer {
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/events", post(emit_event))
             .route("/v1/local-app-events", post(emit_local_app_event))
+            .route("/v1/local-app-assets", post(upload_local_app_asset))
             .route("/v1/services", get(list_services).post(register_service))
             .route(
                 "/v1/services/{service}",
@@ -766,6 +844,187 @@ async fn emit_local_app_event(
     ))
 }
 
+async fn upload_local_app_asset(
+    State(state): State<EventServerState>,
+    headers: HeaderMap,
+    Json(request): Json<UploadLocalAppAssetRequest>,
+) -> Result<Json<UploadLocalAppAssetResponse>, EventApiError> {
+    let connector_id = request.connector_id.trim();
+    let purpose = request.purpose.trim();
+    let content_type = request.content_type.trim();
+    if connector_id.is_empty() || purpose.is_empty() || request.local_path.trim().is_empty() {
+        return Err(EventApiError::new(
+            StatusCode::BAD_REQUEST,
+            "connectorId, localPath and purpose are required",
+        ));
+    }
+    if purpose.len() > 64
+        || !purpose
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(EventApiError::new(
+            StatusCode::BAD_REQUEST,
+            "purpose must contain at most 64 ASCII letters, digits, dot, dash or underscore",
+        ));
+    }
+    if !matches!(content_type, "image/png" | "image/jpeg" | "image/webp") {
+        return Err(EventApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "contentType must be image/png, image/jpeg or image/webp",
+        ));
+    }
+    let token = bearer_token(&headers).ok_or_else(|| {
+        EventApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "connector asset upload credential is required",
+        )
+    })?;
+    let data_dir = authorize_connector_asset_upload(&state.config_path, connector_id, &token)
+        .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
+
+    let canonical_data_dir = fs::canonicalize(&data_dir).map_err(internal_error)?;
+    let canonical_path = fs::canonicalize(request.local_path.trim()).map_err(|err| {
+        EventApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("cannot read localPath: {err}"),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_data_dir) || !canonical_path.is_file() {
+        return Err(EventApiError::new(
+            StatusCode::FORBIDDEN,
+            "localPath must be a regular file inside the connector data directory",
+        ));
+    }
+    let bytes = fs::read(&canonical_path).map_err(internal_error)?;
+    let size_bytes = bytes.len() as u64;
+    if size_bytes == 0 || size_bytes > MAX_CONNECTOR_ASSET_BYTES {
+        return Err(EventApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("asset must contain 1 to {MAX_CONNECTOR_ASSET_BYTES} bytes"),
+        ));
+    }
+    if !content_type_matches_bytes(content_type, &bytes) {
+        return Err(EventApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "contentType does not match the image bytes",
+        ));
+    }
+    let prepare_url = state.upload_prepare_url.as_deref().ok_or_else(|| {
+        EventApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Bridge Agent upload prepare URL is not configured",
+        )
+    })?;
+    let requested_file_name = request
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| canonical_path.file_name().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("connector-asset.bin"));
+    let file_name = requested_file_name
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .unwrap_or("connector-asset.bin")
+        .to_string();
+    let scoped_purpose = format!(
+        "connector_{}_{}",
+        connector_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>(),
+        purpose
+    );
+    let prepare = state
+        .http_client
+        .post(prepare_url)
+        .timeout(Duration::from_secs(state.upload_timeout_secs))
+        .bearer_auth(&state.relay_token)
+        .json(&PrepareAssetUploadRequest {
+            agent_id: state.agent_id.clone(),
+            workspace_id: state.workspace_id,
+            purpose: scoped_purpose,
+            content_type: content_type.to_string(),
+            file_name,
+            size_bytes,
+        })
+        .send()
+        .await
+        .map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, err.to_string()))?;
+    if !prepare.status().is_success() {
+        let status = prepare.status();
+        let body = prepare.text().await.unwrap_or_default();
+        return Err(EventApiError::new(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "prepare upload returned {status}: {}",
+                body.chars().take(240).collect::<String>()
+            ),
+        ));
+    }
+    let slot: PrepareAssetUploadResponse = prepare.json().await.map_err(internal_error)?;
+    let method = slot
+        .method
+        .as_deref()
+        .unwrap_or("PUT")
+        .parse::<Method>()
+        .map_err(internal_error)?;
+    let mut upload = state
+        .http_client
+        .request(method, &slot.upload_url)
+        .timeout(Duration::from_secs(state.upload_timeout_secs))
+        .body(bytes.clone());
+    for (name, value) in &slot.headers {
+        upload = upload.header(name, value);
+    }
+    if !slot
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("content-type"))
+    {
+        upload = upload.header(reqwest::header::CONTENT_TYPE, content_type);
+    }
+    let uploaded = upload
+        .send()
+        .await
+        .map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, err.to_string()))?;
+    if !uploaded.status().is_success() {
+        return Err(EventApiError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("asset upload returned {}", uploaded.status()),
+        ));
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    emit_audit_log(
+        &state,
+        "info",
+        format!("connector asset {connector_id}.{purpose} uploaded"),
+        LogMetadata::category("local_app_asset").outcome("uploaded"),
+    );
+    Ok(Json(UploadLocalAppAssetResponse {
+        result_type: "asset_ref",
+        asset_id: slot.file_id,
+        object_key: slot.object_key,
+        download_url: slot.download_url,
+        expires_at: slot.expires_at,
+        mime_type: content_type.to_string(),
+        size_bytes,
+        sha256,
+    }))
+}
+
+fn content_type_matches_bytes(content_type: &str, bytes: &[u8]) -> bool {
+    match content_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 async fn list_services(
     State(state): State<EventServerState>,
     headers: HeaderMap,
@@ -1034,8 +1293,9 @@ fn emit_audit_log(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_endpoint_covers_bind, parse_listening_pid, parse_lsof_listening_owner,
-        parse_tasklist_image_name, LocalEventEmitRequest, LocalEventServer,
+        content_type_matches_bytes, local_endpoint_covers_bind, parse_listening_pid,
+        parse_lsof_listening_owner, parse_tasklist_image_name, LocalEventEmitRequest,
+        LocalEventServer,
     };
     use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
     use crate::services::ServiceRegistry;
@@ -1044,6 +1304,27 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::{mpsc, watch, RwLock};
+
+    #[test]
+    fn connector_asset_content_type_requires_matching_magic_bytes() {
+        assert!(content_type_matches_bytes(
+            "image/png",
+            b"\x89PNG\r\n\x1a\nrest"
+        ));
+        assert!(content_type_matches_bytes(
+            "image/jpeg",
+            &[0xff, 0xd8, 0xff, 0xe0]
+        ));
+        assert!(content_type_matches_bytes(
+            "image/webp",
+            b"RIFF\x04\x00\x00\x00WEBP"
+        ));
+        assert!(!content_type_matches_bytes("image/png", b"not an image"));
+        assert!(!content_type_matches_bytes(
+            "image/jpeg",
+            b"\x89PNG\r\n\x1a\n"
+        ));
+    }
 
     #[tokio::test]
     async fn event_server_accepts_declared_event() {
@@ -1073,17 +1354,11 @@ mod tests {
         let (apply_tx, _apply_rx) = mpsc::unbounded_channel();
         let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
         let config_path = current_dir.join("agent-config.json");
-        let server = LocalEventServer::bind(
-            &config.runtime,
-            config_path,
-            registry,
-            event_tx,
-            apply_tx,
-            audit_tx,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let server =
+            LocalEventServer::bind(&config, config_path, registry, event_tx, apply_tx, audit_tx)
+                .await
+                .unwrap()
+                .unwrap();
         let addr = server.bind_addr();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(server.serve(shutdown_rx));
@@ -1222,7 +1497,7 @@ n*:18081
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
         let server = LocalEventServer::bind(
-            &config.runtime,
+            &config,
             config_path.clone(),
             registry,
             event_tx,

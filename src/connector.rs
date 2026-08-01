@@ -28,10 +28,15 @@ const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
 const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 const CONNECTOR_MANAGEMENT_TOKEN_FILE: &str = "management-token";
 const CONNECTOR_EVENT_TOKEN_FILE: &str = "event-publisher-token";
+const CONNECTOR_ASSET_UPLOAD_TOKEN_FILE: &str = "asset-upload-token";
 const CONNECTOR_EVENT_TOKEN_FILE_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE";
 const CONNECTOR_EVENT_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_ENDPOINT";
+const CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV: &str = "BAIJIMU_CONNECTOR_ASSET_UPLOAD_TOKEN_FILE";
+const CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_ASSET_UPLOAD_ENDPOINT";
 const DEFAULT_LOCAL_APP_EVENT_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-events";
-const CONNECTOR_HOST_CAPABILITIES: &[&str] = &["connector.setup.v1"];
+const DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-assets";
+pub(crate) const CONNECTOR_ASSET_UPLOAD_PERMISSION: &str = "assets.upload";
+const CONNECTOR_HOST_CAPABILITIES: &[&str] = &["connector.setup.v1", "connector.asset-upload.v1"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -366,6 +371,59 @@ pub fn connector_management_token_path(connector_id: &str) -> Result<PathBuf> {
 
 pub fn connector_event_token_path(connector_id: &str) -> Result<PathBuf> {
     Ok(connector_data_dir(connector_id)?.join(CONNECTOR_EVENT_TOKEN_FILE))
+}
+
+pub fn connector_asset_upload_token_path(connector_id: &str) -> Result<PathBuf> {
+    Ok(connector_data_dir(connector_id)?.join(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE))
+}
+
+pub(crate) fn connector_declares_asset_upload(connector_id: &str) -> Result<bool> {
+    let record = load_install_record(connector_id)?;
+    Ok(connector_permission_is_active(
+        &record.manifest,
+        CONNECTOR_ASSET_UPLOAD_PERMISSION,
+    ))
+}
+
+pub fn authorize_connector_asset_upload(
+    config_path: &Path,
+    connector_id: &str,
+    token: &str,
+) -> Result<PathBuf> {
+    let record = load_install_record(connector_id)?;
+    if !connector_permission_is_active(&record.manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION) {
+        bail!("connector `{connector_id}` does not declare assets.upload permission");
+    }
+    let expected_token_path = connector_asset_upload_token_path(connector_id)?;
+    let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
+        format!(
+            "failed to read connector asset upload credential {}",
+            expected_token_path.display()
+        )
+    })?;
+    if !constant_time_text_eq(expected_token.trim(), token.trim()) {
+        bail!("invalid connector asset upload credential");
+    }
+    let config = load_config(config_path)?;
+    if !config
+        .local_apps
+        .iter()
+        .any(|app| app.connector_id == connector_id && app.enabled)
+    {
+        bail!("connector `{connector_id}` is not enabled");
+    }
+    connector_data_dir(connector_id)
+}
+
+fn connector_permission_is_active(manifest: &ConnectorManifest, permission_id: &str) -> bool {
+    manifest.permissions.iter().any(|permission| {
+        permission.id == permission_id
+            && (permission.platforms.is_empty()
+                || permission
+                    .platforms
+                    .iter()
+                    .any(|platform| platform == std::env::consts::OS))
+    })
 }
 
 pub fn authorize_connector_event(
@@ -970,8 +1028,8 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         validate_setup(setup, management)?;
     }
     if let Some(requirements) = manifest.host_requirements.as_ref() {
-        if manifest.schema_version != "2.0" {
-            bail!("connector hostRequirements requires schemaVersion 2.0");
+        if !matches!(manifest.schema_version.as_str(), "1.2" | "2.0") {
+            bail!("connector hostRequirements requires schemaVersion 1.2 or 2.0");
         }
         if requirements.minimum_version.is_none() && requirements.capabilities.is_empty() {
             bail!("connector hostRequirements must declare minimumVersion or capabilities");
@@ -1035,9 +1093,20 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
             "connector permissions, legacyAutostartLabels and manual startPolicy require schemaVersion 1.2"
         );
     }
+    let mut permission_ids = BTreeSet::new();
     for permission in &manifest.permissions {
         if permission.id.trim().is_empty() || permission.title.trim().is_empty() {
             bail!("connector permission id and title cannot be empty");
+        }
+        if permission.id.trim() != permission.id
+            || !permission.id.chars().all(|ch| {
+                ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '-' | '_')
+            })
+        {
+            bail!("connector permission id must use lowercase ASCII letters, digits, dot, dash or underscore");
+        }
+        if !permission_ids.insert(permission.id.as_str()) {
+            bail!("connector permission id `{}` is duplicated", permission.id);
         }
     }
     Ok(())
@@ -1739,6 +1808,10 @@ fn resolve_installed_start_commands(
     #[cfg(unix)]
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
     let event_token_path = ensure_connector_event_token(&manifest.id)?;
+    let asset_upload_token_path =
+        connector_permission_is_active(manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION)
+            .then(|| ensure_connector_asset_upload_token(&manifest.id))
+            .transpose()?;
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
     let python_env =
@@ -1780,6 +1853,16 @@ fn resolve_installed_start_commands(
                 CONNECTOR_EVENT_ENDPOINT_ENV.to_string(),
                 DEFAULT_LOCAL_APP_EVENT_ENDPOINT.to_string(),
             );
+            if let Some(asset_upload_token_path) = asset_upload_token_path.as_ref() {
+                env.insert(
+                    CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV.to_string(),
+                    asset_upload_token_path.display().to_string(),
+                );
+                env.insert(
+                    CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV.to_string(),
+                    DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT.to_string(),
+                );
+            }
             resolve_installed_shell_command(command, cwd, env, &command_runtime);
         }
     }
@@ -2944,6 +3027,31 @@ fn ensure_connector_event_token(connector_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn ensure_connector_asset_upload_token(connector_id: &str) -> Result<PathBuf> {
+    let path = connector_asset_upload_token_path(connector_id)?;
+    if path.exists() {
+        return Ok(path);
+    }
+    let parent = path
+        .parent()
+        .context("connector asset upload token path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let token = format!(
+        "bjm_asset_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    fs::write(&path, format!("{token}\n")).with_context(|| {
+        format!(
+            "failed to write connector asset upload token {}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    Ok(path)
+}
+
 fn constant_time_text_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
@@ -3489,16 +3597,28 @@ mod tests {
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "1.0",
+                "schemaVersion": "1.2",
                 "id": "com.baijimu.connector.inline",
                 "name": "Inline Connector",
                 "version": "0.1.0",
+                "hostRequirements": {
+                    "minimumVersion": env!("CARGO_PKG_VERSION"),
+                    "capabilities": ["connector.asset-upload.v1"]
+                },
+                "permissions": [{
+                    "id": "assets.upload",
+                    "title": "Upload assets"
+                }],
                 "services": [{
                     "name": "inlineService",
                     "description": "Inline service.",
                     "transport": {
                         "type": "http",
                         "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["connector-test", "start"]
                     },
                     "methods": [{
                         "name": "invoke",
@@ -3519,6 +3639,23 @@ mod tests {
             .local_apps
             .iter()
             .any(|app| app.connector_id == "com.baijimu.connector.inline"));
+        let app = config
+            .local_apps
+            .iter()
+            .find(|app| app.connector_id == "com.baijimu.connector.inline")
+            .unwrap();
+        let crate::config::ServiceStartCommand::ShellCommand { env, .. } =
+            app.start_command.as_ref().unwrap();
+        assert_eq!(
+            env.get(CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV)
+                .map(String::as_str),
+            Some(DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT)
+        );
+        let token_path = env
+            .get(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV)
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(token_path.is_file());
         assert!(!config
             .services
             .iter()
