@@ -727,7 +727,7 @@ fn ensure_windows_user_path_in_registry(environment: &RegKey, launcher_dir: &Pat
         None => String::new(),
     };
     let merged =
-        merge_windows_user_path_with(&existing, &launcher_dir, |name| std::env::var(name).ok());
+        merge_windows_user_path_with(&existing, launcher_dir, |name| std::env::var(name).ok());
     if merged != existing {
         let value_type = existing_raw
             .as_ref()
