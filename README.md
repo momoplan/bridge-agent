@@ -105,12 +105,18 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 
 Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端内置一个首次安装基线版本，后续版本由本地应用管理器独立升级和回滚，不跟随客户端覆盖或降级。CLI 不注册远程能力，也不经过 relay。
 
-客户端安装或修复 Baijimu CLI 时，会同时把官方文档发现 Skill 幂等安装到当前用户的
-`~/.agents/skills/baijimu-docs/SKILL.md`。Codex 在新任务中遇到百积木、Bundle、模块、
-运行时、平台应用、Connector 或 Partner API 需求时，会先通过本机
-`baijimu capabilities --offline --json` 取得版本固定的官方文档入口，再查询
-`www.baijimu.com` 文档；不需要用户手工提供百积木规范。CLI 升级、回滚或客户端重启
-都会修复缺失或被修改的托管 Skill。
+客户端安装或修复 Baijimu CLI 时，会同时把 Codex、WorkBuddy 和钉钉悟空共用的
+`baijimu-platform` Skill 幂等安装到当前用户的
+`~/.agents/skills/baijimu-platform/SKILL.md`。其唯一上游是
+[`momoplan/baijimu-platform-skill`](https://github.com/momoplan/baijimu-platform-skill) 的
+固定发行版本，Bridge 内置文件必须通过版本和 SHA-256 校验，不再维护独立的
+`baijimu-docs` 副本。安装时会把旧 `baijimu-docs` 以及旧 Codex 专属目录里的同名技能
+迁移到 `~/.agents/skill-backups/`，避免重复发现。
+
+Agent 在新任务中遇到百积木、Bundle、模块、运行时、平台应用、Connector 或 Partner
+API 需求时，会先通过本机 `baijimu capabilities --offline --json` 取得版本固定的官方
+文档入口，再查询 `https://docs.baijimu.com/`；不需要用户手工提供百积木规范。CLI
+升级、回滚或客户端重启都会修复缺失或被修改的托管 Skill。
 
 稳定命令在 macOS/Linux 安装到 `~/.local/bin/baijimu`，在 Windows 安装到
 `%LOCALAPPDATA%\Baijimu\bin\baijimu.exe`。Windows 客户端会把该目录幂等置于当前用户
