@@ -1074,17 +1074,18 @@ jobs:
           This release is built automatically by GitHub Actions from the tagged source.
           NOTES
 
-          prerelease_flag=()
+          release_create_args=(
+            "$RELEASE_TAG"
+            --verify-tag
+            --title "百积木 $RELEASE_TAG"
+            --notes-file "$release_notes"
+          )
           case "$RELEASE_TAG" in
-            *-alpha*|*-beta*|*-rc*) prerelease_flag=(--prerelease) ;;
+            *-alpha*|*-beta*|*-rc*) release_create_args+=(--prerelease) ;;
           esac
 
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            retry_gh gh release create "$RELEASE_TAG" \
-              --verify-tag \
-              --title "百积木 $RELEASE_TAG" \
-              --notes-file "$release_notes" \
-              "${prerelease_flag[@]}" \
+            retry_gh gh release create "${release_create_args[@]}" \
               || retry_gh gh release view "$RELEASE_TAG" >/dev/null
           fi
 

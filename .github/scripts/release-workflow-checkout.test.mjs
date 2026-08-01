@@ -39,4 +39,12 @@ describe("release workflow repository script availability", () => {
     );
     expect(helperIndex).toBeGreaterThan(checkoutIndex);
   });
+
+  test("release upload never expands an empty array under Bash nounset", () => {
+    expect(workflow).not.toContain("prerelease_flag=()");
+    expect(workflow).toContain("release_create_args=(");
+    expect(workflow).toContain(
+      'retry_gh gh release create "${release_create_args[@]}"',
+    );
+  });
 });
