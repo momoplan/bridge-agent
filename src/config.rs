@@ -1010,7 +1010,7 @@ pub fn default_config_path() -> Result<PathBuf> {
     }
 
     #[cfg(windows)]
-    if let Some(path) = windows_service_config_path() {
+    if let Some(path) = windows_shared_config_path() {
         return Ok(path);
     }
 
@@ -1018,7 +1018,7 @@ pub fn default_config_path() -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-pub fn windows_service_config_path() -> Option<PathBuf> {
+pub fn windows_shared_config_path() -> Option<PathBuf> {
     let program_data = env::var_os("ProgramData")?;
     Some(
         PathBuf::from(program_data)
@@ -1029,7 +1029,7 @@ pub fn windows_service_config_path() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-pub fn windows_service_config_path() -> Option<PathBuf> {
+pub fn windows_shared_config_path() -> Option<PathBuf> {
     None
 }
 

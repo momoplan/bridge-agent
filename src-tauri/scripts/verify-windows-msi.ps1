@@ -70,6 +70,23 @@ function Read-MsiRows {
     }
 }
 
+function Test-MsiTable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Database,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $tables = Read-MsiRows `
+        -Database $Database `
+        -Query 'SELECT `Name` FROM `_Tables`' `
+        -ColumnCount 1
+    return $null -ne ($tables |
+        Where-Object { $_.Values[0] -ieq $Name } |
+        Select-Object -First 1)
+}
+
 $resolvedMsi = Resolve-Path -LiteralPath $FilePath
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.GetType().InvokeMember(
@@ -88,29 +105,22 @@ $serviceFile = $fileRows |
     ForEach-Object { ($_.Values[0] -split '\|')[-1] } |
     Where-Object { $_ -ieq "bridge-agent-service.exe" } |
     Select-Object -First 1
-if (-not $serviceFile) {
-    throw "MSI does not contain bridge-agent-service.exe"
+if ($serviceFile) {
+    throw "MSI still contains the retired bridge-agent-service.exe"
 }
 
-$serviceInstallRows = Read-MsiRows `
-    -Database $database `
-    -Query 'SELECT `Name`, `ServiceType`, `StartType`, `ErrorControl`, `Arguments` FROM `ServiceInstall`' `
-    -ColumnCount 5
+$serviceInstallRows = @()
+if (Test-MsiTable -Database $database -Name "ServiceInstall") {
+    $serviceInstallRows = Read-MsiRows `
+        -Database $database `
+        -Query 'SELECT `Name`, `ServiceType`, `StartType`, `ErrorControl`, `Arguments` FROM `ServiceInstall`' `
+        -ColumnCount 5
+}
 $bridgeServiceRow = $serviceInstallRows |
     Where-Object { $_.Values[0] -ieq "BridgeAgent" } |
     Select-Object -First 1
-if (-not $bridgeServiceRow) {
-    throw "MSI ServiceInstall table does not register BridgeAgent"
-}
-$bridgeService = $bridgeServiceRow.Values
-if ([int]$bridgeService[1] -ne 16) {
-    throw "BridgeAgent ServiceType must be own-process (16), got $($bridgeService[1])"
-}
-if ([int]$bridgeService[2] -ne 2) {
-    throw "BridgeAgent StartType must be automatic (2), got $($bridgeService[2])"
-}
-if ($bridgeService[4] -notlike "*agent-config.json*") {
-    throw "BridgeAgent service arguments do not target the shared agent config"
+if ($bridgeServiceRow) {
+    throw "MSI still registers the retired BridgeAgent Windows service"
 }
 
 $serviceControlRows = Read-MsiRows `
@@ -121,12 +131,15 @@ $bridgeControlRow = $serviceControlRows |
     Where-Object { $_.Values[0] -ieq "BridgeAgent" } |
     Select-Object -First 1
 if (-not $bridgeControlRow) {
-    throw "MSI ServiceControl table does not manage BridgeAgent"
+    throw "MSI does not clean up the legacy BridgeAgent service"
 }
 $bridgeControl = $bridgeControlRow.Values
-$requiredEvents = 1 + 2 + 32 + 128
+$requiredEvents = 2 + 8
 if (([int]$bridgeControl[1] -band $requiredEvents) -ne $requiredEvents) {
-    throw "BridgeAgent ServiceControl must start on install and stop/remove during servicing"
+    throw "BridgeAgent ServiceControl must stop and remove the legacy service during install"
+}
+if (([int]$bridgeControl[1] -band 1) -ne 0) {
+    throw "BridgeAgent ServiceControl must not start the retired service"
 }
 if ([int]$bridgeControl[2] -ne 1) {
     throw "BridgeAgent ServiceControl must wait for transitions"
@@ -146,4 +159,4 @@ if ($autoStart) {
     throw "MSI still contains the legacy machine-wide desktop autostart entry"
 }
 
-Write-Host "Verified Windows MSI service contract and absence of legacy autostart: $($resolvedMsi.Path)"
+Write-Host "Verified Windows MSI desktop-owned runtime contract and legacy service cleanup: $($resolvedMsi.Path)"

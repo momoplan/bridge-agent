@@ -1,6 +1,6 @@
 const FALLBACK_DESKTOP_BINARY_NAME: &str = "bridge-agent-desktop";
 const FALLBACK_PRODUCT_NAME: &str = "百积木";
-const FALLBACK_SERVICE_BINARY_NAME: &str = "bridge-agent-service";
+const LEGACY_SERVICE_BINARY_NAME: &str = "bridge-agent-service";
 const WINDOWS_SERVICE_NAME: &str = "BridgeAgent";
 
 pub(crate) fn is_bridge_agent_process_name(image_name: &str) -> bool {
@@ -27,7 +27,7 @@ fn bridge_agent_process_name_candidates() -> [&'static str; 5] {
         option_env!("BRIDGE_AGENT_CLI_BIN_NAME").unwrap_or(env!("CARGO_PKG_NAME")),
         option_env!("BRIDGE_AGENT_DESKTOP_BIN_NAME").unwrap_or(FALLBACK_DESKTOP_BINARY_NAME),
         option_env!("BRIDGE_AGENT_PRODUCT_NAME").unwrap_or(FALLBACK_PRODUCT_NAME),
-        option_env!("BRIDGE_AGENT_SERVICE_BIN_NAME").unwrap_or(FALLBACK_SERVICE_BINARY_NAME),
+        LEGACY_SERVICE_BINARY_NAME,
         WINDOWS_SERVICE_NAME,
     ]
 }
@@ -53,7 +53,7 @@ mod tests {
     use super::{bridge_agent_process_name_candidates, is_bridge_agent_process_name};
 
     #[test]
-    fn generated_candidates_include_all_packaged_hosts() {
+    fn generated_candidates_include_packaged_and_legacy_hosts() {
         let candidates = bridge_agent_process_name_candidates();
 
         assert!(candidates.contains(&"bridge-agent"));
