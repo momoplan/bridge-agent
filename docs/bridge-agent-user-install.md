@@ -7,7 +7,7 @@
 1. 打开公共下载页：
 
 ```text
-https://downloads.baijimu.com/
+https://www.baijimu.com/download/
 ```
 
 2. 下载适合自己电脑系统的安装包：

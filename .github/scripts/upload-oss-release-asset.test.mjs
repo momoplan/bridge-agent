@@ -83,7 +83,7 @@ describe("OSS release asset contract", () => {
     const payload = completionPayload(metadata, {
       objectKey,
       downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
-      resourceUrl: "https://downloads.baijimu.com/bridge-agent/linux",
+      resourceUrl: "https://www.baijimu.com/download/",
       uploadReceipt: "payload.signature",
     });
 

@@ -672,7 +672,7 @@ open -a "百积木" --args --safe-mode
 8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口与下载地址
 9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
-百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`downloads.baijimu.com` 提供面向用户的下载页和稳定版本化路径；Gitee 不参与 Bridge Agent 客户端安装包分发。
+百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`www.baijimu.com/download/` 是面向用户的官网客户端下载页；二进制仍由 OSS/CDN 分发，Gitee 不参与 Bridge Agent 客户端安装包分发。
 
 独立 Baijimu CLI 的 `baijimu-cli-vX.Y.Z` GitHub Release 也遵循相同的国内制品原则，
 但其版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，不登记到桌面端
@@ -818,7 +818,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
   "forceUpdate": false,
   "minimumSupportedVersion": "0.1.20",
   "releaseName": "百积木 bridge-agent-v0.1.28",
-  "releaseUrl": "https://downloads.baijimu.com/",
+  "releaseUrl": "https://www.baijimu.com/download/",
   "publishedAt": "2026-05-22T10:00:00Z",
   "assets": [
     {

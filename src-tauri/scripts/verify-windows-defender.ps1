@@ -51,8 +51,8 @@ try {
         $zoneIdentifier = @"
 [ZoneTransfer]
 ZoneId=3
-HostUrl=https://downloads.baijimu.com/
-ReferrerUrl=https://downloads.baijimu.com/
+HostUrl=https://www.baijimu.com/download/
+ReferrerUrl=https://www.baijimu.com/download/
 "@
         Set-Content `
             -LiteralPath $scanFile `
