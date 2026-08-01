@@ -972,10 +972,11 @@ jobs:
             if ($legacyListener.OwningProcess -ne $service.ProcessId) {
               throw "Port 18081 is not owned by the legacy service process"
             }
+            $legacyServicePid = [int]$service.ProcessId
 
             $upgrade = Start-Process `
               -FilePath "msiexec.exe" `
-              -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=False", "/L*v", "`"$upgradeLog`"") `
+              -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=True", "/L*v", "`"$upgradeLog`"") `
               -Wait `
               -PassThru
             if ($upgrade.ExitCode -notin @(0, 3010)) {
@@ -989,8 +990,8 @@ jobs:
             $deadline = (Get-Date).AddSeconds(20)
             do {
               $service = Get-CimInstance Win32_Service -Filter "Name='BridgeAgent'" -ErrorAction SilentlyContinue
-              $legacyListener = Get-NetTCPConnection -LocalPort 18081 -State Listen -ErrorAction SilentlyContinue
-              if (-not $service -and -not $legacyListener) {
+              $legacyServiceProcess = Get-Process -Id $legacyServicePid -ErrorAction SilentlyContinue
+              if (-not $service -and -not $legacyServiceProcess) {
                 break
               }
               Start-Sleep -Milliseconds 500
@@ -998,8 +999,8 @@ jobs:
             if ($service) {
               throw "The legacy BridgeAgent service remains after the upgrade"
             }
-            if ($legacyListener) {
-              throw "Port 18081 remains occupied after the legacy service was removed"
+            if ($legacyServiceProcess) {
+              throw "The legacy BridgeAgent service process remains after the upgrade"
             }
             if (Test-Path -LiteralPath $legacyServiceExecutable) {
               throw "The legacy service executable remains after the upgrade"
@@ -1008,7 +1009,27 @@ jobs:
               throw "The upgraded desktop executable was not found"
             }
 
-            $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            $upgradeListener = Get-NetTCPConnection `
+              -LocalAddress "127.0.0.1" `
+              -LocalPort 18081 `
+              -State Listen `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($upgradeListener) {
+              if ($upgradeListener.OwningProcess -eq $legacyServicePid) {
+                throw "Port 18081 is still owned by the retired service process"
+              }
+              $upgradeOwner = Get-Process -Id $upgradeListener.OwningProcess -ErrorAction SilentlyContinue
+              if (-not $upgradeOwner -or $upgradeOwner.ProcessName -ne "bridge-agent-desktop") {
+                throw "Port 18081 is owned by an unexpected process after the upgrade"
+              }
+            }
+
+            $desktopProcess = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $desktopProcess) {
+              $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            }
             $deadline = (Get-Date).AddSeconds(30)
             do {
               $userRunValue = Get-OptionalRegistryValue `
