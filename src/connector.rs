@@ -31,6 +31,7 @@ const CONNECTOR_EVENT_TOKEN_FILE: &str = "event-publisher-token";
 const CONNECTOR_EVENT_TOKEN_FILE_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE";
 const CONNECTOR_EVENT_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_ENDPOINT";
 const DEFAULT_LOCAL_APP_EVENT_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-events";
+const CONNECTOR_HOST_CAPABILITIES: &[&str] = &["connector.setup.v1"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +63,8 @@ pub struct ConnectorManifest {
     pub management: Option<ConnectorManagement>,
     #[serde(default)]
     pub setup: Option<ConnectorSetup>,
+    #[serde(default)]
+    pub host_requirements: Option<ConnectorHostRequirements>,
     #[serde(default)]
     pub ui: Option<ConnectorUi>,
     #[serde(default)]
@@ -181,6 +184,15 @@ pub struct ConnectorSetup {
     pub status_operation: String,
     #[serde(default = "default_connector_setup_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorHostRequirements {
+    #[serde(default)]
+    pub minimum_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 fn default_connector_setup_timeout_secs() -> u64 {
@@ -956,6 +968,49 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
             .as_ref()
             .context("connector setup requires management")?;
         validate_setup(setup, management)?;
+    }
+    if let Some(requirements) = manifest.host_requirements.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector hostRequirements requires schemaVersion 2.0");
+        }
+        if requirements.minimum_version.is_none() && requirements.capabilities.is_empty() {
+            bail!("connector hostRequirements must declare minimumVersion or capabilities");
+        }
+        if let Some(version) = requirements.minimum_version.as_deref() {
+            let minimum_version = semver::Version::parse(version)
+                .with_context(|| "connector hostRequirements.minimumVersion must be semver")?;
+            let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .context("bridge-agent package version must be semver")?;
+            if current_version < minimum_version {
+                bail!(
+                    "Connector 要求百积木客户端 {version} 或更高版本，当前版本为 {}，请先升级客户端",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+        }
+        if requirements
+            .capabilities
+            .iter()
+            .any(|capability| capability.trim().is_empty() || capability.trim() != capability)
+        {
+            bail!("connector hostRequirements.capabilities must contain non-empty names");
+        }
+        let supported_capabilities = CONNECTOR_HOST_CAPABILITIES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let missing_capabilities = requirements
+            .capabilities
+            .iter()
+            .filter(|capability| !supported_capabilities.contains(capability.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_capabilities.is_empty() {
+            bail!(
+                "当前百积木客户端缺少 Connector 所需能力：{}，请先升级客户端",
+                missing_capabilities.join("、")
+            );
+        }
     }
     if let Some(ui) = manifest.ui.as_ref() {
         if manifest.schema_version == "1.0" {
@@ -3124,6 +3179,41 @@ mod tests {
     }
 
     #[test]
+    fn connector_manifest_enforces_host_version_and_capabilities() {
+        let manifest = |requirements: Value| {
+            serde_json::from_value::<ConnectorManifest>(json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-requirements",
+                "name": "Host Requirements Connector",
+                "version": "1.0.0",
+                "runtime": { "type": "process", "command": "example" },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "hostRequirements": requirements
+            }))
+            .unwrap()
+        };
+
+        let compatible = manifest(json!({
+            "minimumVersion": env!("CARGO_PKG_VERSION"),
+            "capabilities": ["connector.setup.v1"]
+        }));
+        validate_manifest(&compatible).unwrap();
+
+        let future = manifest(json!({ "minimumVersion": "99.0.0" }));
+        assert!(validate_manifest(&future)
+            .unwrap_err()
+            .to_string()
+            .contains("请先升级客户端"));
+
+        let missing = manifest(json!({ "capabilities": ["connector.unknown.v1"] }));
+        assert!(validate_manifest(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("connector.unknown.v1"));
+    }
+
+    #[test]
     fn connector_manifest_accepts_embedded_ui_and_resolves_only_ui_assets() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("ui/assets")).unwrap();
@@ -4311,6 +4401,7 @@ bad-python-connector = "bad_python_connector.app:main"
             runtime: None,
             management: None,
             setup: None,
+            host_requirements: None,
             ui: None,
             config_schema: None,
             remote_capabilities: Vec::new(),

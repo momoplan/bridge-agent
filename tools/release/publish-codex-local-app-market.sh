@@ -70,6 +70,10 @@ manifest="$(jq -nc \
     management: true,
     setup: true,
     setupTimeoutSecs: 1800,
+    hostRequirements: {
+      minimumVersion: "0.2.21",
+      capabilities: ["connector.setup.v1"]
+    },
     artifacts: [
       {platform: "macos", arch: "universal", source: ($base + "/" + $mac_asset), checksum: $mac_sha},
       {platform: "windows", arch: "x86_64", source: ($base + "/" + $win_asset), checksum: $win_sha},
@@ -173,10 +177,15 @@ for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
   verified=false
   for attempt in $(seq 1 20); do
     payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
-      "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}")"
+      "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}&hostVersion=0.2.21&hostCapabilities=connector.setup.v1")"
     if printf '%s' "$payload" | jq -e --arg version "$version" \
       '(if type == "array" then . elif type == "object" and (.data | type) == "array" then .data else [] end)
-       | any(.connectorId == "com.baijimu.connector.codex" and .latestVersion.version == $version)' \
+       | any(
+           .connectorId == "com.baijimu.connector.codex"
+           and .latestVersion.version == $version
+           and .latestVersion.compatibility.compatible == true
+           and (.latestVersion.source | length) > 0
+         )' \
       >/dev/null; then
       verified=true
       break

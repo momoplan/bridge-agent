@@ -13,4 +13,12 @@ describe("Codex local app market publisher", () => {
     expect(publisher).toContain("rank_order=VALUES(rank_order)");
     expect(publisher).not.toMatch(/\n\s*400, '\$\{published_at\}'/);
   });
+
+  test("publishes and verifies the Codex host compatibility contract", () => {
+    expect(publisher).toContain('minimumVersion: "0.2.21"');
+    expect(publisher).toContain('capabilities: ["connector.setup.v1"]');
+    expect(publisher).toContain("hostVersion=0.2.21");
+    expect(publisher).toContain("hostCapabilities=connector.setup.v1");
+    expect(publisher).toContain(".latestVersion.compatibility.compatible == true");
+  });
 });

@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "axum",
@@ -348,6 +348,7 @@ dependencies = [
  "keyring",
  "reqwest",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

@@ -627,6 +627,11 @@ interface MarketConnector {
   riskLevel: string;
   capability: string;
   version: string;
+  compatible: boolean;
+  compatibilityMessage?: string | null;
+  minimumHostVersion?: string | null;
+  requiredHostCapabilities: string[];
+  missingHostCapabilities: string[];
 }
 
 interface ManagedToolStatus {
@@ -1719,6 +1724,13 @@ function App() {
 
   async function installLocalApp() {
     const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
+    if (installSourceMode === "market" && selectedMarket?.compatible === false) {
+      setError(
+        selectedMarket.compatibilityMessage ||
+          "当前百积木客户端不支持该应用版本，请先升级客户端"
+      );
+      return;
+    }
     const source =
       installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
     if (!source) {
@@ -1834,6 +1846,13 @@ function App() {
       setError(`工具 ${app.name} 没有关联的官方更新源`);
       return;
     }
+    if (!marketApp.compatible) {
+      setError(
+        marketApp.compatibilityMessage ||
+          `当前百积木客户端不支持 ${marketApp.name} ${marketApp.version}，请先升级客户端`
+      );
+      return;
+    }
     if (!marketApp.source || !marketApp.checksum) {
       setError(`工具 ${app.name} 的市场版本缺少下载地址或 SHA-256 校验值`);
       return;
@@ -1909,6 +1928,13 @@ function App() {
       setError(`应用 ${app.name} 没有关联的市场更新源`);
       return null;
     }
+    if (!marketApp.compatible) {
+      setError(
+        marketApp.compatibilityMessage ||
+          `当前百积木客户端不支持 ${marketApp.name} ${marketApp.version}，请先升级客户端`
+      );
+      return null;
+    }
     try {
       setConnectorUpdateBusy(app.id);
       setMessage("");
@@ -1942,6 +1968,13 @@ function App() {
     const marketApp = marketConnectorForLocalApp(app);
     if (!app.connector || !marketApp) {
       setError(`应用 ${app.name} 没有关联的市场更新源`);
+      return;
+    }
+    if (!marketApp.compatible) {
+      setError(
+        marketApp.compatibilityMessage ||
+          `当前百积木客户端不支持 ${marketApp.name} ${marketApp.version}，请先升级客户端`
+      );
       return;
     }
     try {
@@ -4917,6 +4950,7 @@ function App() {
       return null;
     }
     const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
+    const selectedMarketIncompatible = selectedMarket?.compatible === false;
     const closeInstallPanel = () => {
       if (installBusy) {
         return;
@@ -4972,22 +5006,32 @@ function App() {
             <div className="market-app-grid">
               {installableMarketConnectors.map((app) => (
                 <button
-                  className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""}`}
+                  className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
                   key={app.id}
                   onClick={() => setSelectedMarketAppId(app.id)}
                 >
                   <strong>{app.name}</strong>
                   <span>{app.description}</span>
-                  <small>{app.capability} · {app.version}</small>
+                  <small>
+                    {app.capability} · {app.version}
+                    {!app.compatible
+                      ? ` · 需要百积木 ${app.minimumHostVersion ?? "更高版本"}`
+                      : ""}
+                  </small>
                 </button>
               ))}
               {installableMarketConnectors.length === 0 ? (
                 <div className="empty-state">暂时没有可安装的市场应用。</div>
               ) : null}
               {selectedMarket ? (
-                <div className="install-risk-note">
-                  <strong>权限提示</strong>
-                  <span>{selectedMarket.risk}</span>
+                <div className={`install-risk-note ${selectedMarketIncompatible ? "incompatible" : ""}`}>
+                  <strong>{selectedMarketIncompatible ? "需要升级客户端" : "权限提示"}</strong>
+                  <span>
+                    {selectedMarketIncompatible
+                      ? selectedMarket.compatibilityMessage ||
+                        "当前百积木客户端不支持该应用版本，请先升级客户端。"
+                      : selectedMarket.risk}
+                  </span>
                 </div>
               ) : null}
             </div>
@@ -5030,9 +5074,17 @@ function App() {
                 <button
                   className="primary"
                   onClick={() => void installLocalApp()}
-                  disabled={installBusy || (installSourceMode === "custom" && !customInstallConfirmed)}
+                  disabled={
+                    installBusy ||
+                    selectedMarketIncompatible ||
+                    (installSourceMode === "custom" && !customInstallConfirmed)
+                  }
                 >
-                  {installBusy ? "安装中" : "安装应用"}
+                  {installBusy
+                    ? "安装中"
+                    : selectedMarketIncompatible
+                      ? "请先升级客户端"
+                      : "安装应用"}
                 </button>
               </>
             )}

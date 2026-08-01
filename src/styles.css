@@ -1043,6 +1043,11 @@ select:focus {
   background: rgba(22, 163, 167, 0.08);
 }
 
+.market-app-card.incompatible {
+  border-color: #e5b95c;
+  background: #fffaf0;
+}
+
 .market-app-card span,
 .market-app-card small,
 .install-risk-note span {
@@ -1057,6 +1062,11 @@ select:focus {
   border-radius: 8px;
   background: rgba(155, 103, 0, 0.08);
   border: 1px solid rgba(155, 103, 0, 0.14);
+}
+
+.install-risk-note.incompatible {
+  border-color: #e5b95c;
+  background: #fff7e6;
 }
 
 .check-row {

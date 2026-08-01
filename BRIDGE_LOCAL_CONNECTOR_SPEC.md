@@ -68,7 +68,24 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 }
 ```
 
+依赖特定宿主协议的 Connector 还必须声明宿主要求：
+
+```json
+{
+  "hostRequirements": {
+    "minimumVersion": "0.2.21",
+    "capabilities": ["connector.setup.v1"]
+  }
+}
+```
+
+- `minimumVersion` 是可安装该版本 Connector 的最低百积木客户端语义版本。
+- `capabilities` 是宿主必须具备的协议能力；当前 setup 生命周期对应 `connector.setup.v1`。
+- 市场必须返回兼容判断；不兼容版本仍可展示，但不得下发安装源，客户端必须提示先升级。
+- 客户端必须在 UI 和安装命令两层校验，不能依赖前端禁用按钮作为唯一保护。
+
 - `setup` 仅允许用于 `schemaVersion: "2.0"`，并要求同时声明 `management`。
+- 新发布且声明 `setup` 的 Connector 必须同时声明 `hostRequirements.minimumVersion >= 0.2.21` 和 `connector.setup.v1`；`0.2.21` 是首个会上报宿主版本/能力并展示升级提示的客户端版本。
 - `operation` 必须引用一个 `POST` management operation；宿主传入 `{ "workspaceId": 当前授权工作区 }`，操作应立即返回并在应用内部启动幂等后台任务。
 - `statusOperation` 必须引用一个 `GET` management operation，返回 `status`：`pending`、`running`、`succeeded` 或 `failed`。失败时可返回脱敏 `error`。
 - `timeoutSecs` 范围为 30–3600，默认 1800。市场 UI 安装会自动启动应用并等待 setup 成功，成功前不得显示“安装完成”。

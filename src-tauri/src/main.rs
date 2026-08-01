@@ -81,6 +81,8 @@ const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
 const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
 const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
 const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
+const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
+const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[HOST_CAPABILITY_CONNECTOR_SETUP_V1];
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
@@ -897,6 +899,11 @@ struct MarketConnectorApp {
     risk_level: String,
     capability: String,
     version: String,
+    compatible: bool,
+    compatibility_message: Option<String>,
+    minimum_host_version: Option<String>,
+    required_host_capabilities: Vec<String>,
+    missing_host_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -930,6 +937,20 @@ struct RawMarketConnectorVersion {
     checksum: Option<String>,
     #[serde(default)]
     manifest: Value,
+    #[serde(default)]
+    compatibility: Option<RawMarketHostCompatibility>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMarketHostCompatibility {
+    compatible: bool,
+    message: Option<String>,
+    minimum_host_version: Option<String>,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
+    #[serde(default)]
+    missing_capabilities: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -2299,7 +2320,13 @@ async fn fetch_market_connector_apps(
     let base_url = config.platform.base_url.trim_end_matches('/');
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
-    let url = format!("{base_url}/api/local-app-market/apps?platform={platform}&arch={arch}");
+    let mut url = reqwest::Url::parse(&format!("{base_url}/api/local-app-market/apps"))
+        .map_err(|err| format!("localApp 市场地址无效: {err}"))?;
+    url.query_pairs_mut()
+        .append_pair("platform", platform)
+        .append_pair("arch", arch)
+        .append_pair("hostVersion", env!("CARGO_PKG_VERSION"))
+        .append_pair("hostCapabilities", &LOCAL_APP_HOST_CAPABILITIES.join(","));
     let response = Client::new()
         .get(url)
         .send()
@@ -2486,6 +2513,7 @@ async fn check_connector_app_update(
         .into_iter()
         .find(|app| app.id == market_app_id.trim())
         .ok_or_else(|| "市场中找不到该应用".to_string())?;
+    validate_market_host_compatibility(&market_app)?;
     validate_market_connector_identity(&market_app, connector_id)?;
     let checksum = required_market_checksum(&market_app)?;
     let resolved_source =
@@ -2577,6 +2605,7 @@ async fn install_connector_app_with_context(
     };
     let (resolved_source_text, resolved_checksum, resolved_allow_git) =
         if let Some(market_app) = market_app.as_ref() {
+            validate_market_host_compatibility(market_app)?;
             if market_app.application_type != "connector" {
                 return Err("该市场条目不是 Connector 应用".to_string());
             }
@@ -4010,6 +4039,10 @@ async fn resolve_connector_source(
 
 impl From<RawMarketConnectorApp> for MarketConnectorApp {
     fn from(value: RawMarketConnectorApp) -> Self {
+        let host_compatibility = market_host_compatibility(
+            &value.latest_version.manifest,
+            value.latest_version.compatibility.as_ref(),
+        );
         let application_type = value
             .latest_version
             .manifest
@@ -4056,8 +4089,115 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             risk_level: value.risk_level.unwrap_or_else(|| "medium".to_string()),
             capability: value.capability,
             version: value.latest_version.version,
+            compatible: host_compatibility.compatible,
+            compatibility_message: host_compatibility.message,
+            minimum_host_version: host_compatibility.minimum_host_version,
+            required_host_capabilities: host_compatibility.required_capabilities,
+            missing_host_capabilities: host_compatibility.missing_capabilities,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct MarketHostCompatibility {
+    compatible: bool,
+    message: Option<String>,
+    minimum_host_version: Option<String>,
+    required_capabilities: Vec<String>,
+    missing_capabilities: Vec<String>,
+}
+
+fn market_host_compatibility(
+    manifest: &Value,
+    server: Option<&RawMarketHostCompatibility>,
+) -> MarketHostCompatibility {
+    let requirements = manifest.get("hostRequirements").and_then(Value::as_object);
+    let minimum_host_version = requirements
+        .and_then(|value| value.get("minimumVersion"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| server.and_then(|value| value.minimum_host_version.clone()));
+    let required_capabilities = requirements
+        .and_then(|value| value.get("capabilities"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .or_else(|| server.map(|value| value.required_capabilities.clone()))
+        .unwrap_or_default();
+    let current_version = Version::parse(env!("CARGO_PKG_VERSION")).ok();
+    let required_version = minimum_host_version
+        .as_deref()
+        .and_then(|value| Version::parse(value).ok());
+    let version_compatible = match (required_version.as_ref(), current_version.as_ref()) {
+        (Some(required), Some(current)) => current >= required,
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
+    let supported_capabilities = LOCAL_APP_HOST_CAPABILITIES
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let missing_host_capabilities = required_capabilities
+        .iter()
+        .filter(|capability| !supported_capabilities.contains(capability.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let locally_compatible = version_compatible && missing_host_capabilities.is_empty();
+    let compatible = locally_compatible && server.is_none_or(|value| value.compatible);
+    let message = if compatible {
+        None
+    } else {
+        server
+            .and_then(|value| value.message.clone())
+            .or_else(|| {
+                (!version_compatible).then(|| {
+                    format!(
+                        "需要百积木客户端 {} 或更高版本，当前版本为 {}，请先升级客户端",
+                        minimum_host_version.as_deref().unwrap_or("最新"),
+                        env!("CARGO_PKG_VERSION")
+                    )
+                })
+            })
+            .or_else(|| {
+                (!missing_host_capabilities.is_empty()).then(|| {
+                    format!(
+                        "当前百积木客户端缺少所需能力：{}，请先升级客户端",
+                        missing_host_capabilities.join("、")
+                    )
+                })
+            })
+            .or_else(|| Some("当前百积木客户端不支持该应用版本，请先升级客户端".to_string()))
+    };
+    MarketHostCompatibility {
+        compatible,
+        message,
+        minimum_host_version,
+        required_capabilities,
+        missing_capabilities: server
+            .map(|value| value.missing_capabilities.clone())
+            .filter(|values| !values.is_empty())
+            .unwrap_or(missing_host_capabilities),
+    }
+}
+
+fn validate_market_host_compatibility(market_app: &MarketConnectorApp) -> Result<(), String> {
+    if market_app.compatible {
+        return Ok(());
+    }
+    Err(market_app
+        .compatibility_message
+        .clone()
+        .unwrap_or_else(|| "当前百积木客户端不支持该应用版本，请先升级客户端".to_string()))
 }
 
 fn validate_market_connector_identity(
@@ -5313,6 +5453,11 @@ mod tests {
             risk_level: "medium".to_string(),
             capability: String::new(),
             version: "1.0.0".to_string(),
+            compatible: true,
+            compatibility_message: None,
+            minimum_host_version: None,
+            required_host_capabilities: Vec::new(),
+            missing_host_capabilities: Vec::new(),
         }
     }
 
@@ -5334,6 +5479,29 @@ mod tests {
         assert!(
             validate_market_connector_identity(&insecure, "com.baijimu.connector.test").is_err()
         );
+    }
+
+    #[test]
+    fn market_host_compatibility_checks_version_and_capabilities() {
+        let setup = serde_json::json!({
+            "hostRequirements": {
+                "minimumVersion": env!("CARGO_PKG_VERSION"),
+                "capabilities": ["connector.setup.v1"]
+            }
+        });
+        assert!(market_host_compatibility(&setup, None).compatible);
+
+        let future = serde_json::json!({
+            "hostRequirements": {"minimumVersion": "99.0.0"}
+        });
+        let incompatible = market_host_compatibility(&future, None);
+        assert!(!incompatible.compatible);
+        assert!(incompatible.message.unwrap().contains("请先升级客户端"));
+
+        let missing = serde_json::json!({
+            "hostRequirements": {"capabilities": ["connector.unknown.v1"]}
+        });
+        assert!(!market_host_compatibility(&missing, None).compatible);
     }
 
     #[test]
