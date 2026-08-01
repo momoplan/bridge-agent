@@ -23,8 +23,6 @@ fn main() {
     let product_name =
         tauri_product_name_from_json(&tauri_config).unwrap_or_else(|| "百积木".to_string());
     set_rustc_env("BRIDGE_AGENT_PRODUCT_NAME", &product_name);
-
-    set_rustc_env("BRIDGE_AGENT_SERVICE_BIN_NAME", "bridge-agent-service");
 }
 
 fn read_to_string(path: impl AsRef<std::path::Path>) -> String {

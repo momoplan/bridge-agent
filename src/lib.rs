@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 pub use config::{
     browser_auth_manifest_json, clear_relay_credentials, default_config_path,
     ensure_browser_auth_agent_id, ensure_config_exists, load_config, manifest_preview_json,
-    reset_invalid_config, save_config, windows_service_config_path, AgentConfig, ComputerUseAction,
+    reset_invalid_config, save_config, windows_shared_config_path, AgentConfig, ComputerUseAction,
     ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding,
     MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
     RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,

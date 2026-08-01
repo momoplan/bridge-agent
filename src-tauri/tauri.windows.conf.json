@@ -9,10 +9,9 @@
       },
       "wix": {
         "fragmentPaths": [
-          "wix/bridge-agent-service.wxs"
+          "wix/bridge-agent-windows-runtime.wxs"
         ],
         "componentRefs": [
-          "BridgeAgentServiceComponent",
           "BridgeAgentDataDirectoryComponent"
         ]
       },

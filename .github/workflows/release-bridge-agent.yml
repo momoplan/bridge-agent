@@ -575,7 +575,7 @@ jobs:
             -nologo `
             -arch x64 `
             -ext $utilExtension.FullName `
-            "src-tauri/wix/bridge-agent-service.wxs"
+            "src-tauri/wix/bridge-agent-windows-runtime.wxs"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows WiX fragment diagnostic failed with exit code $LASTEXITCODE"
           }
@@ -740,18 +740,11 @@ jobs:
               ;;
           esac
 
-      - name: Verify Windows MSI service contract
+      - name: Verify Windows MSI desktop-owned runtime contract
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $serviceExecutable = Resolve-Path "src-tauri/target/release/bridge-agent-service.exe"
-          $serviceSignature = Get-AuthenticodeSignature -LiteralPath $serviceExecutable.Path
-          Write-Host "$($serviceExecutable.Path): $($serviceSignature.Status)"
-          if ($serviceSignature.Status -ne "Valid") {
-            throw "Invalid bridge-agent-service.exe signature: $($serviceSignature.Status)"
-          }
-
           $msiFiles = Get-ChildItem `
             -Path "src-tauri/target/release/bundle/msi" `
             -Filter "*.msi" `
@@ -827,7 +820,6 @@ jobs:
           }
 
           $executables = @(
-            (Resolve-Path "src-tauri/target/release/bridge-agent-service.exe").Path,
             (Resolve-Path "src-tauri/target/release/bridge-agent-desktop.exe").Path
           )
           foreach ($executable in $executables) {
@@ -839,9 +831,11 @@ jobs:
           }
           Write-Host "Verified Windows executables do not require VCRUNTIME/MSVCP"
 
-      - name: Smoke test Windows MSI install lifecycle
+      - name: Smoke test Windows service-to-desktop upgrade lifecycle
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           $msi = Get-ChildItem `
@@ -853,10 +847,27 @@ jobs:
             throw "Windows MSI artifact was not found for install smoke test"
           }
 
-          $installLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-install.log"
+          $legacyDir = Join-Path $env:RUNNER_TEMP "baijimu-legacy-msi"
+          New-Item -ItemType Directory -Path $legacyDir -Force | Out-Null
+          & gh release download "bridge-agent-v0.2.22" `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern "Baijimu_0.2.22_x64_en-US.msi" `
+            --dir $legacyDir `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download the 0.2.22 service-owned MSI"
+          }
+          $legacyMsi = Get-ChildItem -Path $legacyDir -Filter "*.msi" -File |
+            Select-Object -First 1
+          if (-not $legacyMsi) {
+            throw "The 0.2.22 service-owned MSI was not downloaded"
+          }
+
+          $legacyInstallLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-legacy-install.log"
+          $upgradeLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-upgrade.log"
           $uninstallLog = Join-Path $env:RUNNER_TEMP "baijimu-msi-uninstall.log"
-          $installSucceeded = $false
-          $desktopProcess = $null
+          $legacyInstalled = $false
+          $upgradeInstalled = $false
           function Get-OptionalRegistryValue {
             param(
               [Parameter(Mandatory = $true)]
@@ -883,38 +894,24 @@ jobs:
           }
 
           $desktopExecutable = "C:\Program Files\Baijimu\bridge-agent-desktop.exe"
+          $legacyServiceExecutable = "C:\Program Files\Baijimu\bridge-agent-service.exe"
+          $legacyDesktopBackup = Join-Path $env:RUNNER_TEMP "bridge-agent-desktop-0.2.22.exe"
+          $configPath = "C:\ProgramData\Baijimu\BridgeAgent\agent-config.json"
           $userRunSubKey = "Software\Microsoft\Windows\CurrentVersion\Run"
-          $userRunKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
-          try {
-            $userRunKey.SetValue(
-              "BaijimuBridgeAgent",
-              "$desktopExecutable ",
-              [Microsoft.Win32.RegistryValueKind]::String
-            )
-          } finally {
-            $userRunKey.Dispose()
-          }
-          $seededUserRunValue = Get-OptionalRegistryValue `
-            -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
-            -SubKey $userRunSubKey `
-            -Name "BaijimuBridgeAgent"
-          if ($seededUserRunValue -notlike "*bridge-agent-desktop.exe*") {
-            throw "Failed to seed legacy per-user autostart before MSI upgrade smoke test"
-          }
 
           try {
-            $install = Start-Process `
+            $legacyInstall = Start-Process `
               -FilePath "msiexec.exe" `
-              -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "/L*v", "`"$installLog`"") `
+              -ArgumentList @("/i", "`"$($legacyMsi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=False", "/L*v", "`"$legacyInstallLog`"") `
               -Wait `
               -PassThru
-            if ($install.ExitCode -notin @(0, 3010)) {
-              if (Test-Path -LiteralPath $installLog) {
-                Get-Content -LiteralPath $installLog -Tail 180 | Write-Host
+            if ($legacyInstall.ExitCode -notin @(0, 3010)) {
+              if (Test-Path -LiteralPath $legacyInstallLog) {
+                Get-Content -LiteralPath $legacyInstallLog -Tail 180 | Write-Host
               }
-              throw "Windows MSI install smoke test failed with exit code $($install.ExitCode)"
+              throw "Windows 0.2.22 MSI install failed with exit code $($legacyInstall.ExitCode)"
             }
-            $installSucceeded = $true
+            $legacyInstalled = $true
 
             $deadline = (Get-Date).AddSeconds(15)
             do {
@@ -926,94 +923,156 @@ jobs:
             } while ((Get-Date) -lt $deadline)
 
             if (-not $service) {
-              throw "BridgeAgent service was not installed"
+              throw "The 0.2.22 BridgeAgent service was not installed"
             }
             if ($service.State -ne "Running") {
-              throw "BridgeAgent service is not running: $($service.State)"
-            }
-            if ($service.StartMode -ne "Auto") {
-              throw "BridgeAgent service is not automatic: $($service.StartMode)"
-            }
-            if ($service.StartName -ne "LocalSystem") {
-              throw "BridgeAgent service account is not LocalSystem: $($service.StartName)"
-            }
-            if ($service.PathName -notlike "*ProgramData*Baijimu*BridgeAgent*agent-config.json*") {
-              throw "BridgeAgent service does not use the shared config path: $($service.PathName)"
+              throw "The 0.2.22 BridgeAgent service is not running: $($service.State)"
             }
 
-            $configPath = "C:\ProgramData\Baijimu\BridgeAgent\agent-config.json"
-            if (-not (Test-Path -LiteralPath $configPath)) {
-              throw "BridgeAgent service did not initialize the shared config"
-            }
-            Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json | Out-Null
-
-            $machineRunValue = Get-OptionalRegistryValue `
-              -Hive ([Microsoft.Win32.Registry]::LocalMachine) `
-              -SubKey "Software\Microsoft\Windows\CurrentVersion\Run" `
-              -Name "BaijimuBridgeAgent"
-            if ($null -ne $machineRunValue) {
-              throw "Legacy machine-wide desktop autostart is still registered: $machineRunValue"
-            }
-
+            Stop-Service -Name "BridgeAgent" -Force -ErrorAction Stop
+            Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
             if (-not (Test-Path -LiteralPath $desktopExecutable)) {
-              throw "Installed desktop executable was not found: $desktopExecutable"
+              throw "The 0.2.22 desktop executable was not installed"
+            }
+            Move-Item `
+              -LiteralPath $desktopExecutable `
+              -Destination $legacyDesktopBackup `
+              -Force
+
+            if (-not (Test-Path -LiteralPath $configPath)) {
+              throw "The 0.2.22 service did not initialize the shared config"
+            }
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            $config.platform.workspace_id = 999999
+            $config.relay.url = "ws://127.0.0.1:9/ws/agent"
+            $config.relay.token = "windows-upgrade-smoke-token"
+            $config | ConvertTo-Json -Depth 100 |
+              Set-Content -LiteralPath $configPath -Encoding utf8
+
+            Start-Service -Name "BridgeAgent" -ErrorAction Stop
+
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+              $legacyListener = Get-NetTCPConnection `
+                -LocalAddress "127.0.0.1" `
+                -LocalPort 18081 `
+                -State Listen `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($legacyListener) {
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            if (-not $legacyListener) {
+              throw "The 0.2.22 service did not bind 127.0.0.1:18081"
+            }
+            $service = Get-CimInstance Win32_Service -Filter "Name='BridgeAgent'"
+            if ($legacyListener.OwningProcess -ne $service.ProcessId) {
+              throw "Port 18081 is not owned by the legacy service process"
             }
 
-            $desktopProcess = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if (-not $desktopProcess) {
-              $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            $upgrade = Start-Process `
+              -FilePath "msiexec.exe" `
+              -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=False", "/L*v", "`"$upgradeLog`"") `
+              -Wait `
+              -PassThru
+            if ($upgrade.ExitCode -notin @(0, 3010)) {
+              if (Test-Path -LiteralPath $upgradeLog) {
+                Get-Content -LiteralPath $upgradeLog -Tail 220 | Write-Host
+              }
+              throw "Windows desktop-owned MSI upgrade failed with exit code $($upgrade.ExitCode)"
             }
+            $upgradeInstalled = $true
 
             $deadline = (Get-Date).AddSeconds(20)
+            do {
+              $service = Get-CimInstance Win32_Service -Filter "Name='BridgeAgent'" -ErrorAction SilentlyContinue
+              $legacyListener = Get-NetTCPConnection -LocalPort 18081 -State Listen -ErrorAction SilentlyContinue
+              if (-not $service -and -not $legacyListener) {
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            if ($service) {
+              throw "The legacy BridgeAgent service remains after the upgrade"
+            }
+            if ($legacyListener) {
+              throw "Port 18081 remains occupied after the legacy service was removed"
+            }
+            if (Test-Path -LiteralPath $legacyServiceExecutable) {
+              throw "The legacy service executable remains after the upgrade"
+            }
+            if (-not (Test-Path -LiteralPath $desktopExecutable)) {
+              throw "The upgraded desktop executable was not found"
+            }
+
+            $desktopProcess = Start-Process -FilePath $desktopExecutable -PassThru
+            $deadline = (Get-Date).AddSeconds(30)
             do {
               $userRunValue = Get-OptionalRegistryValue `
                 -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
                 -SubKey $userRunSubKey `
                 -Name "BaijimuBridgeAgent"
-              if ($null -eq $userRunValue) {
+              $desktopListener = Get-NetTCPConnection `
+                -LocalAddress "127.0.0.1" `
+                -LocalPort 18081 `
+                -State Listen `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($userRunValue -and $desktopListener) {
                 break
               }
               Start-Sleep -Milliseconds 500
             } while ((Get-Date) -lt $deadline)
-            if ($null -ne $userRunValue) {
-              throw "Legacy per-user desktop autostart was not removed: $userRunValue"
+            if ($userRunValue -notlike "*bridge-agent-desktop.exe*") {
+              throw "The current-user desktop login startup entry was not registered: $userRunValue"
+            }
+            if (-not $desktopListener) {
+              throw "The desktop-owned runtime did not bind 127.0.0.1:18081"
+            }
+            if ($desktopListener.OwningProcess -ne $desktopProcess.Id) {
+              throw "Port 18081 is not owned by the desktop process"
             }
 
-            Start-Sleep -Seconds 6
-            Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
-              Stop-Process -Force -ErrorAction Stop
+            $desktopCount = @(Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue).Count
+            if ($desktopCount -ne 1) {
+              throw "Expected one desktop runtime owner, found $desktopCount"
+            }
 
-            $deadline = (Get-Date).AddSeconds(15)
+            $quitRequest = Start-Process `
+              -FilePath $desktopExecutable `
+              -ArgumentList "--quit-running-instance" `
+              -Wait `
+              -PassThru
+            if ($quitRequest.ExitCode -ne 0) {
+              throw "The desktop quit request failed with exit code $($quitRequest.ExitCode)"
+            }
+            $deadline = (Get-Date).AddSeconds(30)
             do {
-              $service = Get-Service -Name "BridgeAgent" -ErrorAction Stop
-              if ($service.Status -eq "Stopped") {
+              $desktopStillRunning = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue
+              $desktopListener = Get-NetTCPConnection -LocalPort 18081 -State Listen -ErrorAction SilentlyContinue
+              if (-not $desktopStillRunning -and -not $desktopListener) {
                 break
               }
               Start-Sleep -Milliseconds 500
             } while ((Get-Date) -lt $deadline)
-            if ($service.Status -ne "Stopped") {
-              throw "BridgeAgent service did not stop after the desktop exited: $($service.Status)"
+            if ($desktopStillRunning) {
+              throw "The desktop process did not exit through the shared tray quit path"
+            }
+            if ($desktopListener) {
+              throw "Port 18081 remains occupied after the desktop exited"
+            }
+            if (Get-Service -Name "BridgeAgent" -ErrorAction SilentlyContinue) {
+              throw "The retired service reappeared after the desktop exited"
             }
 
-            Start-Sleep -Seconds 2
-            $relaunchedDesktop = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if ($relaunchedDesktop) {
-              throw "BridgeAgent service relaunched the desktop after it exited"
-            }
-
-            Write-Host "Verified Windows MSI lifecycle, exit shutdown, and legacy user autostart cleanup"
+            Write-Host "Verified 0.2.22 service-to-desktop upgrade, login startup, single runtime ownership, and graceful exit"
           } finally {
             Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
-            $cleanupRunKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
-            try {
-              $cleanupRunKey.DeleteValue("BaijimuBridgeAgent", $false)
-            } finally {
-              $cleanupRunKey.Dispose()
-            }
-            if ($installSucceeded) {
+            if ($upgradeInstalled) {
               $uninstall = Start-Process `
                 -FilePath "msiexec.exe" `
                 -ArgumentList @("/x", "`"$($msi.FullName)`"", "/qn", "/norestart", "/L*v", "`"$uninstallLog`"") `
@@ -1025,7 +1084,20 @@ jobs:
                 }
                 throw "Windows MSI uninstall smoke test failed with exit code $($uninstall.ExitCode)"
               }
+            } elseif ($legacyInstalled) {
+              Start-Process `
+                -FilePath "msiexec.exe" `
+                -ArgumentList @("/x", "`"$($legacyMsi.FullName)`"", "/qn", "/norestart") `
+                -Wait `
+                -ErrorAction SilentlyContinue | Out-Null
             }
+            $cleanupRunKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
+            try {
+              $cleanupRunKey.DeleteValue("BaijimuBridgeAgent", $false)
+            } finally {
+              $cleanupRunKey.Dispose()
+            }
+            Remove-Item -LiteralPath $legacyDesktopBackup -Force -ErrorAction SilentlyContinue
           }
 
           if (Get-Service -Name "BridgeAgent" -ErrorAction SilentlyContinue) {
@@ -1034,7 +1106,7 @@ jobs:
           if (Test-Path -LiteralPath "C:\Program Files\Baijimu\bridge-agent-service.exe") {
             throw "BridgeAgent service executable remained after MSI uninstall"
           }
-          Write-Host "Verified Windows MSI uninstall lifecycle"
+          Write-Host "Verified Windows desktop-owned MSI uninstall lifecycle"
 
       - name: Upload bundles to GitHub release
         shell: bash

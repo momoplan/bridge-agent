@@ -565,52 +565,25 @@ cargo run -- run
 cargo run -- run --config /path/to/agent-config.json
 ```
 
-## Windows 后台服务
+## 桌面运行与登录启动
 
-如果需要安装后长期后台运行，并且不依赖用户登录，可以使用新增的 `bridge-agent-service` 二进制，把核心 runtime 作为 Windows Service 托管。
+Bridge Agent 当前只支持有用户会话的桌面运行模式，不提供开机后、用户登录前运行的无人值守模式。
 
-服务入口：
+所有平台都由 `bridge-agent-desktop` 独占 Agent Runtime：
 
-- `bridge-agent-service.exe`
+- 用户登录后，Tauri Autostart 当前用户登录项启动桌面宿主
+- 关闭主窗口只隐藏到系统托盘，桌面宿主和 Agent Runtime 继续运行
+- 在托盘选择“退出”时，桌面宿主先停止 Agent Runtime、释放 `127.0.0.1:18081`，再退出进程
+- 用户注销或系统关机后桌面宿主停止；下次用户登录时重新启动
+- Windows MSI 不安装 `BridgeAgent` Windows Service，也不包含 `bridge-agent-service.exe`
+- 从 0.2.22 及更早版本升级时，MSI 会在安装阶段停止并删除历史 `BridgeAgent` 服务，再由新版桌面宿主接管 Runtime
+- 应用内更新会先完成更新包下载和签名校验，再停止 Agent Runtime，随后启动安装器；安装器启动失败时会尝试恢复 Runtime
 
-调试运行：
-
-```bash
-cargo run --bin bridge-agent-service -- --console
-```
-
-也可以显式指定配置文件：
-
-```bash
-cargo run --bin bridge-agent-service -- --console --config /path/to/agent-config.json
-```
-
-Windows MSI 会安装固定服务名 `BridgeAgent`，并把配置文件放到共享路径：
+Windows 继续使用共享设备配置：
 
 - `C:\ProgramData\Baijimu\BridgeAgent\agent-config.json`
 
-当前默认行为：
-
-- Windows 桌面端 / CLI / Windows Service 默认读取同一份共享配置
-- Windows Service 在没有显式传入 `--config` 时，会默认使用上面的共享路径
-
-服务由 MSI 通过 Windows Installer 的 `ServiceInstall` / `ServiceControl` 表注册，不需要用户手工执行 `sc.exe`。等价的服务启动参数是：
-
-```powershell
-"C:\Program Files\Baijimu\bridge-agent-service.exe" --config "C:\ProgramData\Baijimu\BridgeAgent\agent-config.json"
-```
-
-当前安装与运行约束：
-
-- 不要把 Tauri 桌面程序直接改成服务，服务化的是 Rust runtime/CLI 这一层
-- MSI 负责注册服务、升级时先停服务再替换文件、完成后重新拉起，卸载时停止并删除服务
-- MSI 会给 `C:\ProgramData\Baijimu\BridgeAgent` 配置共享 ACL，让 LocalSystem 服务和交互用户都能读写同一份设备配置
-- 未授权时服务保持运行但不连接 relay；授权配置写入后会自动加载，不需要重启服务
-- 用户登录后，LocalSystem 服务会识别活动的 Windows 用户会话并在该会话中启动桌面客户端；桌面进程启动后服务主动让出 runtime，由桌面进程接管
-- 桌面进程无论正常退出还是异常结束，服务都不会重新拉起桌面端；服务会正常停止自身及后台 runtime，只有用户再次手动启动客户端或 Windows 下次启动服务时才会重新运行
-- Windows 只由 `BridgeAgent` 服务负责在活动用户会话中启动桌面客户端；桌面端不会再注册第二份当前用户登录启动项，并会在升级时清理旧版本遗留的 Tauri Autostart 项，确保同一登录会话只有一个启动所有者
-- macOS / Linux 桌面客户端继续使用 Tauri 官方 Autostart 插件注册当前用户登录启动项
-- `bridge-agent-service.exe`、桌面端 exe、安装器和后续升级器都要做正式代码签名
+“登录启动”和“无人值守”的边界不同：登录启动依赖交互用户会话，适合托盘、桌面控制和用户主动退出；无人值守则必须在没有任何用户登录时仍能在线，需要独立服务作为唯一 Runtime 所有者。当前产品只实现前者。
 
 ## 桌面应用开发
 

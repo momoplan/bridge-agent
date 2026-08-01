@@ -28,7 +28,7 @@ use bridge_agent::{
     AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorSetup, ConnectorStartResult, ConnectorSummary,
     ConnectorTrustLevel, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
-    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -92,17 +92,13 @@ const LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
+const QUIT_RUNNING_INSTANCE_ARG: &str = "--quit-running-instance";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-state.json";
 const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
 const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
-#[cfg(windows)]
-const WINDOWS_SERVICE_HANDOFF_RETRIES: usize = 40;
-#[cfg(windows)]
-const WINDOWS_SERVICE_HANDOFF_RETRY_DELAY: Duration = Duration::from_millis(250);
-
 struct DesktopState {
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
@@ -435,15 +431,12 @@ impl StartupHealthManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DesktopAutostartPolicy {
     SkipDevelopmentBuild,
-    DisableForWindowsService,
     EnableForDesktop,
 }
 
-fn desktop_autostart_policy(target_os: &str, debug_assertions: bool) -> DesktopAutostartPolicy {
+fn desktop_autostart_policy(debug_assertions: bool) -> DesktopAutostartPolicy {
     if debug_assertions {
         DesktopAutostartPolicy::SkipDevelopmentBuild
-    } else if target_os == "windows" {
-        DesktopAutostartPolicy::DisableForWindowsService
     } else {
         DesktopAutostartPolicy::EnableForDesktop
     }
@@ -454,70 +447,25 @@ fn configure_desktop_autostart(
     startup_health: &StartupHealthManager,
     diagnostics: &StartupDiagnostics,
 ) {
-    match desktop_autostart_policy(std::env::consts::OS, cfg!(debug_assertions)) {
+    match desktop_autostart_policy(cfg!(debug_assertions)) {
         DesktopAutostartPolicy::SkipDevelopmentBuild => startup_health.set_component(
             "autostart",
-            "开机启动",
+            "登录启动",
             "skipped",
             Some("开发构建不注册系统登录项".to_string()),
         ),
-        DesktopAutostartPolicy::DisableForWindowsService => match app.autolaunch().is_enabled() {
-            Ok(true) => match app.autolaunch().disable() {
-                Ok(()) => {
-                    diagnostics.info(
-                        "removed desktop autostart integration; Windows service owns session startup",
-                    );
-                    startup_health.set_component(
-                        "autostart",
-                        "开机启动",
-                        "ready",
-                        Some("由 Windows 服务托管登录启动，已清理旧版用户启动项".to_string()),
-                    );
-                }
-                Err(err) => {
-                    diagnostics.error(format!(
-                        "failed to remove desktop autostart owned by Windows service: {err:#}"
-                    ));
-                    startup_health.set_component(
-                        "autostart",
-                        "开机启动",
-                        "degraded",
-                        Some(format!(
-                            "Windows 服务已托管启动，但旧版用户启动项清理失败: {err}"
-                        )),
-                    );
-                }
-            },
-            Ok(false) => startup_health.set_component(
-                "autostart",
-                "开机启动",
-                "ready",
-                Some("由 Windows 服务托管登录启动".to_string()),
-            ),
-            Err(err) => {
-                diagnostics.error(format!(
-                    "failed to inspect desktop autostart owned by Windows service: {err:#}"
-                ));
-                startup_health.set_component(
-                    "autostart",
-                    "开机启动",
-                    "degraded",
-                    Some(format!("Windows 服务已托管启动，用户启动项检查失败: {err}")),
-                );
-            }
-        },
         DesktopAutostartPolicy::EnableForDesktop => match app.autolaunch().is_enabled() {
-            Ok(true) => startup_health.set_component("autostart", "开机启动", "ready", None),
+            Ok(true) => startup_health.set_component("autostart", "登录启动", "ready", None),
             Ok(false) => match app.autolaunch().enable() {
                 Ok(()) => {
                     diagnostics.info("official autostart integration enabled");
-                    startup_health.set_component("autostart", "开机启动", "ready", None);
+                    startup_health.set_component("autostart", "登录启动", "ready", None);
                 }
                 Err(err) => {
                     diagnostics.error(format!("failed to enable autostart: {err:#}"));
                     startup_health.set_component(
                         "autostart",
-                        "开机启动",
+                        "登录启动",
                         "degraded",
                         Some(err.to_string()),
                     );
@@ -527,7 +475,7 @@ fn configure_desktop_autostart(
                 diagnostics.error(format!("failed to inspect autostart: {err:#}"));
                 startup_health.set_component(
                     "autostart",
-                    "开机启动",
+                    "登录启动",
                     "degraded",
                     Some(err.to_string()),
                 );
@@ -3372,63 +3320,14 @@ async fn restart_agent_from_saved_config(
     state: &tauri::State<'_, DesktopState>,
 ) -> anyhow::Result<RuntimeSnapshot> {
     state.runtime.stop().await?;
-    start_runtime_after_windows_service_handoff(&state.runtime, &state.config_path).await
+    start_runtime_from_saved_config(&state.runtime, &state.config_path).await
 }
 
-async fn start_runtime_after_windows_service_handoff(
+async fn start_runtime_from_saved_config(
     runtime: &AgentRuntimeManager,
     config_path: &Path,
 ) -> anyhow::Result<RuntimeSnapshot> {
-    #[cfg(windows)]
-    {
-        for attempt in 0..=WINDOWS_SERVICE_HANDOFF_RETRIES {
-            match runtime.start_from_path(config_path).await {
-                Ok(snapshot) => return Ok(snapshot),
-                Err(err)
-                    if attempt < WINDOWS_SERVICE_HANDOFF_RETRIES
-                        && runtime_lock_is_owned_by_windows_service(&err) =>
-                {
-                    tokio::time::sleep(WINDOWS_SERVICE_HANDOFF_RETRY_DELAY).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        unreachable!("Windows service handoff loop must return")
-    }
-
-    #[cfg(not(windows))]
-    {
-        runtime.start_from_path(config_path).await
-    }
-}
-
-#[cfg(windows)]
-fn runtime_lock_is_owned_by_windows_service(err: &anyhow::Error) -> bool {
-    let Some(conflict) = err.downcast_ref::<RuntimeLockConflict>() else {
-        return false;
-    };
-
-    [
-        conflict.process.name.as_deref(),
-        conflict.process.executable_path.as_deref(),
-        conflict.process.command_line.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(process_value_is_windows_service)
-}
-
-#[cfg(any(windows, test))]
-fn process_value_is_windows_service(value: &str) -> bool {
-    value
-        .trim()
-        .trim_matches('"')
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case("bridge-agent-service.exe"))
-        || value
-            .to_ascii_lowercase()
-            .contains("bridge-agent-service.exe")
+    runtime.start_from_path(config_path).await
 }
 
 #[tauri::command]
@@ -3508,7 +3407,10 @@ async fn check_app_update() -> Result<AppUpdateStatus, String> {
 }
 
 #[tauri::command]
-async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallResult, String> {
+async fn install_app_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<AppUpdateInstallResult, String> {
     emit_app_update_progress(
         &app,
         AppUpdateProgress {
@@ -3565,11 +3467,8 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
     let mut last_progress_at = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
-    let install_app = app.clone();
-    let install_version = update_version.clone();
-    let install_asset_name = asset_name.clone();
-    update
-        .download_and_install(
+    let update_bytes = update
+        .download(
             move |chunk_length, total_bytes| {
                 downloaded_bytes = downloaded_bytes.saturating_add(chunk_length as u64);
                 if last_progress_at.elapsed() >= Duration::from_millis(250)
@@ -3590,23 +3489,43 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallRes
                     last_progress_at = Instant::now();
                 }
             },
-            move || {
-                emit_app_update_progress(
-                    &install_app,
-                    AppUpdateProgress {
-                        phase: "installing".to_string(),
-                        message: "更新包签名校验通过，正在安装".to_string(),
-                        version: Some(install_version),
-                        asset_name: install_asset_name,
-                        downloaded_bytes: None,
-                        total_bytes: None,
-                        downloaded_path: None,
-                    },
-                );
-            },
+            || {},
         )
         .await
-        .map_err(|err| format!("下载或安装官方更新失败: {err}"))?;
+        .map_err(|err| format!("下载或校验官方更新失败: {err}"))?;
+
+    emit_app_update_progress(
+        &app,
+        AppUpdateProgress {
+            phase: "installing".to_string(),
+            message: "更新包签名校验通过，正在停止 Agent 并安装".to_string(),
+            version: Some(update_version.clone()),
+            asset_name: asset_name.clone(),
+            downloaded_bytes: None,
+            total_bytes: None,
+            downloaded_path: None,
+        },
+    );
+
+    let runtime_was_active = state.runtime.snapshot().await.status != RuntimeStatus::Stopped;
+    state
+        .runtime
+        .stop()
+        .await
+        .map_err(|err| format!("安装更新前停止 Agent Runtime 失败: {err}"))?;
+
+    if let Err(install_err) = update.install(&update_bytes) {
+        if !runtime_was_active {
+            return Err(format!("安装官方更新失败: {install_err}"));
+        }
+        let recovery = start_runtime_from_saved_config(&state.runtime, &state.config_path).await;
+        return Err(match recovery {
+            Ok(_) => format!("安装官方更新失败，Agent Runtime 已恢复运行: {install_err}"),
+            Err(recovery_err) => format!(
+                "安装官方更新失败，且 Agent Runtime 恢复失败: install={install_err}; recovery={recovery_err}"
+            ),
+        });
+    }
 
     emit_app_update_progress(
         &app,
@@ -4982,6 +4901,10 @@ fn quit_app(app: &tauri::AppHandle) {
     });
 }
 
+fn quit_running_instance_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == QUIT_RUNNING_INSTANCE_ARG)
+}
+
 fn auto_start_agent(
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
@@ -5034,8 +4957,7 @@ fn auto_start_agent(
                 return;
             }
         }
-        if let Err(err) = start_runtime_after_windows_service_handoff(&runtime, &config_path).await
-        {
+        if let Err(err) = start_runtime_from_saved_config(&runtime, &config_path).await {
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
             ));
@@ -5230,8 +5152,13 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(
-            move |app, _argv, _cwd| {
+            move |app, argv, _cwd| {
                 let diagnostics = single_instance_diagnostics.clone();
+                if quit_running_instance_requested(&argv) {
+                    diagnostics.info("quit requested by a secondary desktop process");
+                    quit_app(app);
+                    return;
+                }
                 run_ui_action(&diagnostics, "single instance show main window", || {
                     show_main_window(app, Some(&diagnostics));
                 });
@@ -5634,17 +5561,6 @@ mod tests {
     }
 
     #[test]
-    fn windows_service_handoff_recognizes_process_probe_values() {
-        assert!(process_value_is_windows_service("bridge-agent-service.exe"));
-        assert!(process_value_is_windows_service(
-            r#"C:\Program Files\Baijimu\bridge-agent-service.exe" --config agent-config.json"#
-        ));
-        assert!(!process_value_is_windows_service(
-            "bridge-agent-desktop.exe"
-        ));
-    }
-
-    #[test]
     fn shared_cli_auth_path_should_live_under_home_config() {
         let path = shared_cli_auth_path();
 
@@ -5949,22 +5865,26 @@ mod tests {
     }
 
     #[test]
-    fn windows_service_is_the_only_release_autostart_owner() {
+    fn desktop_is_the_release_autostart_owner_on_every_supported_platform() {
         assert_eq!(
-            desktop_autostart_policy("windows", false),
-            DesktopAutostartPolicy::DisableForWindowsService
-        );
-        assert_eq!(
-            desktop_autostart_policy("macos", false),
+            desktop_autostart_policy(false),
             DesktopAutostartPolicy::EnableForDesktop
         );
         assert_eq!(
-            desktop_autostart_policy("linux", false),
-            DesktopAutostartPolicy::EnableForDesktop
-        );
-        assert_eq!(
-            desktop_autostart_policy("windows", true),
+            desktop_autostart_policy(true),
             DesktopAutostartPolicy::SkipDevelopmentBuild
         );
+    }
+
+    #[test]
+    fn quit_running_instance_flag_is_explicit() {
+        assert!(quit_running_instance_requested(&[
+            "bridge-agent-desktop.exe".to_string(),
+            QUIT_RUNNING_INSTANCE_ARG.to_string(),
+        ]));
+        assert!(!quit_running_instance_requested(&[
+            "bridge-agent-desktop.exe".to_string(),
+            "--safe-mode".to_string(),
+        ]));
     }
 }
