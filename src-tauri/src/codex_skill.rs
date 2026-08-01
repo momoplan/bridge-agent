@@ -112,7 +112,9 @@ fn validate_skill(contents: &[u8]) -> Result<()> {
         || !provenance
             .get("archiveSha256")
             .and_then(Value::as_str)
-            .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+            .is_some_and(|digest| {
+                digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit())
+            })
     {
         bail!("bundled skill provenance does not identify an immutable upstream release");
     }
@@ -149,8 +151,7 @@ fn migrate_legacy_skills(skills_root: &Path) -> Result<()> {
         move_to_backup(&skills_root.join(name), &backup_root, name)?;
     }
 
-    let legacy_codex_root = if let Some(root) =
-        std::env::var_os("BAIJIMU_LEGACY_CODEX_SKILLS_DIR")
+    let legacy_codex_root = if let Some(root) = std::env::var_os("BAIJIMU_LEGACY_CODEX_SKILLS_DIR")
     {
         PathBuf::from(root)
     } else {
@@ -175,8 +176,12 @@ fn move_to_backup(source: &Path, backup_root: &Path, label: &str) -> Result<()> 
     if !source.exists() {
         return Ok(());
     }
-    fs::create_dir_all(backup_root)
-        .with_context(|| format!("failed to create skill backup root {}", backup_root.display()))?;
+    fs::create_dir_all(backup_root).with_context(|| {
+        format!(
+            "failed to create skill backup root {}",
+            backup_root.display()
+        )
+    })?;
     let backup = backup_root.join(format!("{label}.backup-{}", now_nanos()));
     fs::rename(source, &backup).with_context(|| {
         format!(
@@ -274,9 +279,7 @@ mod tests {
         .unwrap();
         fs::create_dir_all(legacy_codex_root.join("baijimu-platform")).unwrap();
         fs::write(
-            legacy_codex_root
-                .join("baijimu-platform")
-                .join("SKILL.md"),
+            legacy_codex_root.join("baijimu-platform").join("SKILL.md"),
             b"legacy platform",
         )
         .unwrap();
