@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod codex_skill;
 mod managed_tool;
 
 use anyhow::Context as _;
@@ -978,6 +979,7 @@ async fn install_baijimu_cli_update(
     managed_tool::install_update(&source, &version, &checksum, archive_path.as_deref())
         .await
         .map_err(|err| err.to_string())?;
+    codex_skill::install_bundled().map_err(|err| err.to_string())?;
     let bundled = bundled_baijimu_cli_path();
     managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
 }
@@ -985,6 +987,7 @@ async fn install_baijimu_cli_update(
 #[tauri::command]
 async fn rollback_baijimu_cli() -> Result<managed_tool::ManagedToolStatus, String> {
     managed_tool::rollback().map_err(|err| err.to_string())?;
+    codex_skill::install_bundled().map_err(|err| err.to_string())?;
     let bundled = bundled_baijimu_cli_path();
     managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
 }
@@ -5056,11 +5059,13 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
 fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
     let source = bundled_baijimu_cli_path();
     let status = managed_tool::bootstrap_bundled(source.as_deref())?;
+    let skill_path = codex_skill::install_bundled()?;
     diagnostics.info(format!(
-        "managed baijimu CLI bootstrap completed: state={} version={} launcher={}",
+        "managed baijimu CLI bootstrap completed: state={} version={} launcher={} codex_skill={}",
         status.state,
         status.installed_version.as_deref().unwrap_or("unknown"),
-        status.launcher_path
+        status.launcher_path,
+        skill_path.display()
     ));
     Ok(())
 }

@@ -105,6 +105,13 @@ Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿
 
 Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端内置一个首次安装基线版本，后续版本由本地应用管理器独立升级和回滚，不跟随客户端覆盖或降级。CLI 不注册远程能力，也不经过 relay。
 
+客户端安装或修复 Baijimu CLI 时，会同时把官方文档发现 Skill 幂等安装到当前用户的
+`~/.agents/skills/baijimu-docs/SKILL.md`。Codex 在新任务中遇到百积木、Bundle、模块、
+运行时、平台应用、Connector 或 Partner API 需求时，会先通过本机
+`baijimu capabilities --offline --json` 取得版本固定的官方文档入口，再查询
+`www.baijimu.com` 文档；不需要用户手工提供百积木规范。CLI 升级、回滚或客户端重启
+都会修复缺失或被修改的托管 Skill。
+
 Baijimu CLI 的正式二进制同时保留在 GitHub Release，并同步到公开的
 `zxflimit_admin/bridge-agent` Gitee Release。GitHub Release 是完整历史和构建摘要来源，
 公开 Gitee Release 是桌面端官方工具升级使用的国内下载源；私有
