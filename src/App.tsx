@@ -644,6 +644,8 @@ interface ManagedToolStatus {
   previousVersion?: string | null;
   activePath: string;
   launcherPath: string;
+  pathConfigured: boolean;
+  restartRequired: boolean;
   canRollback: boolean;
   detail: string;
 }
@@ -5570,6 +5572,10 @@ function App() {
                 {app.managedTool ? (
                   <>
                     <InfoRow label="稳定命令" value={app.managedTool.launcherPath} />
+                    <InfoRow label="命令 PATH" value={app.managedTool.pathConfigured ? "已配置" : "未配置"} />
+                    {app.managedTool.restartRequired ? (
+                      <InfoRow label="生效提示" value="请重新启动已打开的 Codex 或终端" />
+                    ) : null}
                     <InfoRow label="随包基线" value={app.managedTool.bundledVersion ?? "无"} />
                     <InfoRow label="上一版本" value={app.managedTool.previousVersion ?? "无"} />
                     <InfoRow label="状态" value={app.managedTool.detail} />

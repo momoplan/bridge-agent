@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "anyhow",
  "axum",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "anyhow",
  "axum",
@@ -514,6 +514,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
+ "winreg 0.55.0",
  "zip 2.4.2",
 ]
 

@@ -47,4 +47,12 @@ describe("release workflow repository script availability", () => {
       'retry_gh gh release create "${release_create_args[@]}"',
     );
   });
+
+  test("Windows quality gate exercises real user PATH registry writes", () => {
+    const body = jobBody("windows-quality-gate", "release");
+    expect(body).toContain(
+      "managed_tool::tests::windows_registry_path_registration_round_trips",
+    );
+    expect(body).toContain("cargo test --locked --manifest-path src-tauri/Cargo.toml");
+  });
 });
