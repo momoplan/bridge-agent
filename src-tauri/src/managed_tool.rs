@@ -731,7 +731,7 @@ fn ensure_windows_user_path_in_registry(environment: &RegKey, launcher_dir: &Pat
     if merged != existing {
         let value_type = existing_raw
             .as_ref()
-            .map(|value| value.vtype)
+            .map(|value| value.vtype.clone())
             .filter(|value_type| *value_type == REG_SZ || *value_type == REG_EXPAND_SZ)
             .unwrap_or(REG_EXPAND_SZ);
         let value = RegValue {
