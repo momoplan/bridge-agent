@@ -279,6 +279,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets -- -D warnings
           cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml managed_tool::tests::windows_registry_path_registration_round_trips -- --exact
 
   release:
     name: ${{ matrix.name }}

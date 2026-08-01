@@ -112,6 +112,12 @@ Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端�
 `www.baijimu.com` 文档；不需要用户手工提供百积木规范。CLI 升级、回滚或客户端重启
 都会修复缺失或被修改的托管 Skill。
 
+稳定命令在 macOS/Linux 安装到 `~/.local/bin/baijimu`，在 Windows 安装到
+`%LOCALAPPDATA%\Baijimu\bin\baijimu.exe`。Windows 客户端会把该目录幂等置于当前用户
+`PATH` 首位并广播环境更新，不覆盖其他 PATH 项；安装前已经启动的 Codex 或终端无法被
+外部进程修改既有环境，文档发现 Skill 会在当次任务直接使用上述绝对路径，用户重启
+Codex/终端后即可直接调用 `baijimu`。
+
 Baijimu CLI 的正式二进制同时保留在 GitHub Release，并同步到公开的
 `zxflimit_admin/bridge-agent` Gitee Release。GitHub Release 是完整历史和构建摘要来源，
 公开 Gitee Release 是桌面端官方工具升级使用的国内下载源；私有

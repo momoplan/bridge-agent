@@ -12,6 +12,16 @@ use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+};
+#[cfg(windows)]
+use winreg::enums::{HKEY_CURRENT_USER, REG_EXPAND_SZ, REG_SZ};
+#[cfg(windows)]
+use winreg::types::FromRegValue;
+#[cfg(windows)]
+use winreg::{RegKey, RegValue};
 
 const TOOL_ID: &str = "com.baijimu.cli";
 const TOOL_NAME: &str = "Baijimu CLI";
@@ -34,6 +44,8 @@ pub struct ManagedToolStatus {
     pub previous_version: Option<String>,
     pub active_path: String,
     pub launcher_path: String,
+    pub path_configured: bool,
+    pub restart_required: bool,
     pub can_rollback: bool,
     pub detail: String,
 }
@@ -150,6 +162,8 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
             previous_version: None,
             active_path: fallback_active_path.display().to_string(),
             launcher_path: launcher.display().to_string(),
+            path_configured: false,
+            restart_required: false,
             can_rollback: false,
             detail: "CLI 尚未完成托管安装".to_string(),
         });
@@ -182,7 +196,8 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
         .previous_version
         .as_deref()
         .is_some_and(|version| validate_cli(&version_binary_path(version), Some(version)).is_ok());
-    let (status, detail) = match (active_result, launcher_result) {
+    let path_status = ensure_launcher_on_user_path()?;
+    let (status, mut detail) = match (active_result, launcher_result) {
         (Ok(_), Ok(_)) => (
             "ready",
             format!("CLI {} 已安装并可从稳定命令路径调用", state.active_version),
@@ -193,6 +208,9 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
         ),
         (Err(error), _) => ("broken", format!("当前 CLI 版本不可用：{error:#}")),
     };
+    if status == "ready" && path_status.restart_required {
+        detail.push_str("；稳定命令已写入当前用户 PATH，请重新启动已打开的 Codex 或终端");
+    }
 
     Ok(ManagedToolStatus {
         id: TOOL_ID.to_string(),
@@ -204,6 +222,8 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
         previous_version: state.previous_version,
         active_path: active.display().to_string(),
         launcher_path: launcher.display().to_string(),
+        path_configured: path_status.configured,
+        restart_required: path_status.restart_required,
         can_rollback: previous_valid,
         detail,
     })
@@ -656,6 +676,176 @@ fn launcher_path() -> PathBuf {
         .join(binary_name())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PathInstallationStatus {
+    configured: bool,
+    restart_required: bool,
+}
+
+#[cfg(not(windows))]
+fn ensure_launcher_on_user_path() -> Result<PathInstallationStatus> {
+    Ok(PathInstallationStatus {
+        configured: true,
+        restart_required: false,
+    })
+}
+
+#[cfg(windows)]
+fn ensure_launcher_on_user_path() -> Result<PathInstallationStatus> {
+    let launcher_dir = launcher_path()
+        .parent()
+        .context("managed CLI launcher has no parent directory")?
+        .to_path_buf();
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (environment, _) = hkcu
+        .create_subkey("Environment")
+        .context("failed to open current user environment registry key")?;
+
+    if ensure_windows_user_path_in_registry(&environment, &launcher_dir)? {
+        broadcast_environment_change();
+    }
+
+    let process_path = std::env::var("PATH").unwrap_or_default();
+    Ok(PathInstallationStatus {
+        configured: true,
+        restart_required: !windows_path_contains_with(&process_path, &launcher_dir, |name| {
+            std::env::var(name).ok()
+        }),
+    })
+}
+
+#[cfg(windows)]
+fn ensure_windows_user_path_in_registry(environment: &RegKey, launcher_dir: &Path) -> Result<bool> {
+    let existing_raw = match environment.get_raw_value("Path") {
+        Ok(value) => Some(value),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("failed to read current user PATH"),
+    };
+    let existing = match existing_raw.as_ref() {
+        Some(value) => String::from_reg_value(value)
+            .context("current user PATH is not a string registry value")?,
+        None => String::new(),
+    };
+    let merged =
+        merge_windows_user_path_with(&existing, &launcher_dir, |name| std::env::var(name).ok());
+    if merged != existing {
+        let value_type = existing_raw
+            .as_ref()
+            .map(|value| value.vtype)
+            .filter(|value_type| *value_type == REG_SZ || *value_type == REG_EXPAND_SZ)
+            .unwrap_or(REG_EXPAND_SZ);
+        let value = RegValue {
+            bytes: merged
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            vtype: value_type,
+        };
+        environment
+            .set_raw_value("Path", &value)
+            .context("failed to add Baijimu CLI to current user PATH")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn broadcast_environment_change() {
+    let environment = "Environment"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut result = 0usize;
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            environment.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            5_000,
+            &mut result,
+        );
+    }
+}
+
+#[cfg(any(windows, test))]
+fn merge_windows_user_path_with<F>(existing: &str, launcher_dir: &Path, lookup: F) -> String
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    let launcher = launcher_dir.to_string_lossy();
+    if existing.is_empty() {
+        return launcher.into_owned();
+    }
+    let mut entries = vec![launcher.into_owned()];
+    entries.extend(existing.split(';').filter_map(|entry| {
+        if windows_path_entries_equal_with(entry, launcher_dir, lookup) {
+            None
+        } else {
+            Some(entry.to_string())
+        }
+    }));
+    entries.join(";")
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_contains_with<F>(path: &str, expected: &Path, lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    path.split(';')
+        .any(|entry| windows_path_entries_equal_with(entry, expected, lookup))
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_entries_equal_with<F>(entry: &str, expected: &Path, lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    normalize_windows_path(&expand_windows_env_vars(entry, lookup))
+        == normalize_windows_path(&expected.to_string_lossy())
+}
+
+#[cfg(any(windows, test))]
+fn normalize_windows_path(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+#[cfg(any(windows, test))]
+fn expand_windows_env_vars<F>(value: &str, lookup: F) -> String
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    let mut output = String::with_capacity(value.len());
+    let mut remainder = value;
+    while let Some(start) = remainder.find('%') {
+        output.push_str(&remainder[..start]);
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            output.push_str(&remainder[start..]);
+            return output;
+        };
+        let name = &after_start[..end];
+        if let Some(replacement) = lookup(name) {
+            output.push_str(&replacement);
+        } else {
+            output.push('%');
+            output.push_str(name);
+            output.push('%');
+        }
+        remainder = &after_start[end + 1..];
+    }
+    output.push_str(remainder);
+    output
+}
+
 fn binary_name() -> &'static str {
     if cfg!(windows) {
         "baijimu.exe"
@@ -684,6 +874,113 @@ mod tests {
     fn checksum_accepts_prefixed_sha256() {
         let value = "a".repeat(64);
         assert_eq!(normalize_sha256(&format!("sha256:{value}")).unwrap(), value);
+    }
+
+    #[test]
+    fn windows_user_path_is_prepended_without_losing_existing_entries() {
+        let merged = merge_windows_user_path_with(
+            r"C:\Windows\System32;C:\Tools;",
+            Path::new(r"C:\Users\Ada\AppData\Local\Baijimu\bin"),
+            |_| None,
+        );
+        assert_eq!(
+            merged,
+            r"C:\Users\Ada\AppData\Local\Baijimu\bin;C:\Windows\System32;C:\Tools;"
+        );
+    }
+
+    #[test]
+    fn windows_user_path_is_idempotent_and_deduplicated_case_insensitively() {
+        let launcher = Path::new(r"C:\Users\Ada\AppData\Local\Baijimu\bin");
+        let merged = merge_windows_user_path_with(
+            r#"c:/users/ada/appdata/local/baijimu/bin/;C:\Tools;"C:\USERS\ADA\APPDATA\LOCAL\BAIJIMU\BIN""#,
+            launcher,
+            |_| None,
+        );
+        assert_eq!(merged, r"C:\Users\Ada\AppData\Local\Baijimu\bin;C:\Tools");
+        assert_eq!(
+            merge_windows_user_path_with(&merged, launcher, |_| None),
+            merged
+        );
+    }
+
+    #[test]
+    fn windows_user_path_recognizes_environment_variable_entries() {
+        let launcher = Path::new(r"C:\Users\Ada\AppData\Local\Baijimu\bin");
+        let lookup = |name: &str| match name.to_ascii_uppercase().as_str() {
+            "LOCALAPPDATA" => Some(r"C:\Users\Ada\AppData\Local".to_string()),
+            _ => None,
+        };
+        let merged = merge_windows_user_path_with(
+            r"%LOCALAPPDATA%\Baijimu\bin;C:\Windows\System32",
+            launcher,
+            lookup,
+        );
+        assert_eq!(
+            merged,
+            r"C:\Users\Ada\AppData\Local\Baijimu\bin;C:\Windows\System32"
+        );
+        assert!(windows_path_contains_with(
+            r"C:\Windows;%LOCALAPPDATA%\Baijimu\bin",
+            launcher,
+            lookup
+        ));
+    }
+
+    #[test]
+    fn empty_windows_user_path_becomes_only_the_launcher_directory() {
+        assert_eq!(
+            merge_windows_user_path_with("", Path::new(r"C:\Baijimu\bin"), |_| None),
+            r"C:\Baijimu\bin"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_registry_path_registration_round_trips() {
+        struct TestRegistryKey {
+            root: RegKey,
+            path: String,
+        }
+
+        impl Drop for TestRegistryKey {
+            fn drop(&mut self) {
+                let _ = self.root.delete_subkey_all(&self.path);
+            }
+        }
+
+        let root = RegKey::predef(HKEY_CURRENT_USER);
+        let test_key = TestRegistryKey {
+            root,
+            path: format!(
+                r"Software\Baijimu\BridgeAgentTests\{}",
+                uuid::Uuid::new_v4()
+            ),
+        };
+        let (environment, _) = test_key.root.create_subkey(&test_key.path).unwrap();
+        environment
+            .set_raw_value(
+                "Path",
+                &RegValue {
+                    bytes: r"C:\Windows\System32"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .flat_map(u16::to_le_bytes)
+                        .collect(),
+                    vtype: REG_EXPAND_SZ,
+                },
+            )
+            .unwrap();
+
+        let launcher = Path::new(r"C:\Users\Ada\AppData\Local\Baijimu\bin");
+        assert!(ensure_windows_user_path_in_registry(&environment, launcher).unwrap());
+        assert!(!ensure_windows_user_path_in_registry(&environment, launcher).unwrap());
+        let registered =
+            String::from_reg_value(&environment.get_raw_value("Path").unwrap()).unwrap();
+        assert_eq!(
+            registered,
+            r"C:\Users\Ada\AppData\Local\Baijimu\bin;C:\Windows\System32"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-desktop"
-version = "0.2.21"
+version = "0.2.22"
 description = "百积木本地连接客户端"
 edition = "2021"
 
@@ -34,6 +34,13 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.55"
 
 [features]
 default = ["custom-protocol"]
