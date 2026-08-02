@@ -700,6 +700,22 @@ gh workflow run release-bridge-agent.yml \
   -f release_tag=bridge-agent-v0.1.110
 ```
 
+已有版本需要重新同步签名制品、OSS 和更新元数据，并同时提升最低支持版本时，必须使用同一工作流的
+`repair_assets_only` 入口；工作流会通过 release service 的受支持策略 API 更新并回读策略，不直接修改数据库：
+
+```bash
+gh workflow run release-bridge-agent.yml \
+  --ref main \
+  -f release_tag=bridge-agent-v0.2.33 \
+  -f repair_assets_only=true \
+  -f minimum_supported_version=0.2.33 \
+  -f force_update_message='必须升级到 0.2.33 后继续使用。'
+```
+
+`minimum_supported_version` 必须是稳定的三段版本号，且不得高于 `release_tag`。策略保持
+`forceUpdate=false`，由服务端仅对低于最低支持版本的客户端返回强制更新；工作流会验证旧版本被强更、
+最低支持版本自身不被强更。
+
 修复发布要求新提交是原 tag 提交的后代，且版本号不变；工作流不会移动或覆盖既有
 GitHub tag。普通正式发布不要使用 `workflow_dispatch`，直接推送新 tag。
 

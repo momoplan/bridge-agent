@@ -55,4 +55,23 @@ describe("release workflow repository script availability", () => {
     );
     expect(body).toContain("cargo test --locked --manifest-path src-tauri/Cargo.toml");
   });
+
+  test("metadata repair can atomically raise the minimum supported client version", () => {
+    const body = jobBody("publish-update-service");
+
+    expect(workflow).toContain("minimum_supported_version:");
+    expect(workflow).toContain("force_update_message:");
+    expect(body).toContain("Update minimum supported client version");
+    expect(body).toContain("inputs.minimum_supported_version != ''");
+    expect(body).toContain('"$api/release-policy"');
+    expect(body).toContain("forceUpdate: false");
+    expect(body).toContain(
+      "Minimum supported version $minimum_version exceeds release version $version",
+    );
+    expect(body).toContain(".forceUpdate == true");
+    expect(body).toContain(".forceUpdate == false");
+    expect(body).toContain(
+      '"${latest_api}?currentVersion=${MINIMUM_SUPPORTED_VERSION}"',
+    );
+  });
 });
