@@ -1524,11 +1524,22 @@ jobs:
           if [ -z "$force_update_message" ]; then
             force_update_message="必须升级到 ${minimum_version} 后继续使用。"
           fi
+
+          current_policy="$(curl -fsSL --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
+            "$api/release-policy")"
+          release_page_url="$(jq -er '
+            .releasePageUrl
+            | strings
+            | select(length > 0)
+          ' <<<"$current_policy")"
           jq -n \
+            --arg releasePageUrl "$release_page_url" \
             --arg minimumSupportedVersion "$minimum_version" \
             --arg forceUpdateMessage "$force_update_message" \
             --arg updatedBy "github-actions:${GITHUB_RUN_ID}" \
             '{
+              releasePageUrl: $releasePageUrl,
               forceUpdate: false,
               minimumSupportedVersion: $minimumSupportedVersion,
               forceUpdateMessage: $forceUpdateMessage,
@@ -1541,7 +1552,11 @@ jobs:
             -H "Content-Type: application/json" \
             --data-binary @release-policy.json \
             "$api/release-policy" \
-            | jq -e --arg minimum_version "$minimum_version" '
+            | jq -e \
+                --arg release_page_url "$release_page_url" \
+                --arg minimum_version "$minimum_version" '
+                .releasePageUrl == $release_page_url
+                and
                 .forceUpdate == false
                 and .minimumSupportedVersion == $minimum_version
               ' >/dev/null
