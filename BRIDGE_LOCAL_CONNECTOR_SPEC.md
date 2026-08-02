@@ -319,6 +319,8 @@ await window.baijimuLocalApp.invoke("saveSettings", {
 
 - `id` 必须全局稳定，建议使用反域名格式，例如 `com.baijimu.connector.wechat`。
 - `id` 一旦发布，不得因为仓库迁移、展示名称变化或实现重写而改变。
+- `permissions[].id` 必须使用 ASCII 字母、数字、点、短横线或下划线；既有权限 ID
+  `macos.fullDiskAccess` 属于稳定协议标识，宿主必须保持兼容。
 - `name` 是展示名，可以变化。
 - `version` 应使用 SemVer。市场版本和 Connector 包版本必须一致。
 
