@@ -38,6 +38,10 @@ describe("Windows signing tool download", () => {
     expect(signingScript).toContain("& $javaExecutable.FullName");
     expect(signingScript).toContain("$stagedInputFile");
     expect(signingScript).toContain("bridge-agent-signing-input");
+    expect(signingScript).toContain("$unsignedBackupFile");
+    expect(signingScript).not.toContain(
+      "File]::Replace($replacementFile, $resolvedFile.Path, $null)",
+    );
     expect(signingScript).toContain("WINDOWS_SIGNING_LOG_PATH");
     expect(signingScript).not.toContain('& ".\\CodeSignTool.bat" @arguments');
   });

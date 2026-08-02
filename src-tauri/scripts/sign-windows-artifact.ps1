@@ -116,6 +116,7 @@ $stagedInputFile = Join-Path `
     $inputDirectory `
     "bridge-agent-signing-input$([System.IO.Path]::GetExtension($resolvedFile.Path))"
 $replacementFile = "$($resolvedFile.Path).signed.tmp"
+$unsignedBackupFile = "$($resolvedFile.Path).unsigned.bak"
 Copy-Item -Force -LiteralPath $resolvedFile.Path -Destination $stagedInputFile
 Write-SigningDiagnostic "start extension=$([System.IO.Path]::GetExtension($resolvedFile.Path)) ascii_staging=true"
 
@@ -173,7 +174,7 @@ try {
     }
 
     Copy-Item -Force -LiteralPath $signedFile -Destination $replacementFile
-    [System.IO.File]::Replace($replacementFile, $resolvedFile.Path, $null)
+    [System.IO.File]::Replace($replacementFile, $resolvedFile.Path, $unsignedBackupFile)
     Write-SigningDiagnostic "complete"
 } catch {
     Write-SigningDiagnostic "failure type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
@@ -184,5 +185,8 @@ try {
     }
     if (Test-Path -LiteralPath $replacementFile) {
         Remove-Item -Force -LiteralPath $replacementFile
+    }
+    if (Test-Path -LiteralPath $unsignedBackupFile) {
+        Remove-Item -Force -LiteralPath $unsignedBackupFile
     }
 }
