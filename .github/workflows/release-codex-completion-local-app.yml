@@ -153,8 +153,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$keychain_password" "$keychain_path"
           binary="$RUNNER_TEMP/codex-completion-local-app/bin/${{ matrix.platform_dir }}/baijimu-connector-codex-completion"
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
-          codesign --verify --strict --verbose=2 "$binary"
+          bash .github/scripts/sign-macos-with-retry.sh \
+            "$binary" \
+            "$APPLE_SIGNING_IDENTITY"
           lipo -info "$binary"
 
       - name: Build Windows binary

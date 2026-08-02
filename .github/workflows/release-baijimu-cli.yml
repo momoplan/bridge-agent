@@ -200,8 +200,9 @@ jobs:
           security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
-          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu"
+          bash .github/scripts/sign-macos-with-retry.sh \
+            "$RUNNER_TEMP/baijimu-cli-package/bin/baijimu" \
+            "$APPLE_SIGNING_IDENTITY"
 
       - name: Build Windows CLI
         if: runner.os == 'Windows' && env.REUSE_CLI_RELEASE_ASSET != 'true'

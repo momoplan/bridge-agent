@@ -529,13 +529,9 @@ jobs:
             -k "$keychain_password" \
             "$keychain_path"
 
-          codesign \
-            --force \
-            --options runtime \
-            --timestamp \
-            --sign "$APPLE_SIGNING_IDENTITY" \
-            "$cli_path"
-          codesign --verify --strict --verbose=2 "$cli_path"
+          bash .github/scripts/sign-macos-with-retry.sh \
+            "$cli_path" \
+            "$APPLE_SIGNING_IDENTITY"
           lipo -info "$cli_path"
 
       - name: Validate release tag
