@@ -118,6 +118,17 @@ if (-not $upgradeCodeRow -or $upgradeCodeRow.Values[0] -cne $expectedUpgradeCode
     throw "MSI UpgradeCode must preserve the existing Windows upgrade identity $expectedUpgradeCode, found: $actualUpgradeCode"
 }
 
+$productLanguageRow = Read-MsiRows `
+    -Database $database `
+    -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'ProductLanguage'" `
+    -ColumnCount 1 |
+    Select-Object -First 1
+$expectedProductLanguage = "2052"
+if (-not $productLanguageRow -or $productLanguageRow.Values[0] -cne $expectedProductLanguage) {
+    $actualProductLanguage = if ($productLanguageRow) { $productLanguageRow.Values[0] } else { "<missing>" }
+    throw "MSI ProductLanguage must be zh-CN ($expectedProductLanguage), found: $actualProductLanguage"
+}
+
 $fileRows = Read-MsiRows `
     -Database $database `
     -Query 'SELECT `FileName` FROM `File`' `
