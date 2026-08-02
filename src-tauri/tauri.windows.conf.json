@@ -1,5 +1,4 @@
 {
-  "productName": "Baijimu",
   "bundle": {
     "windows": {
       "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows-artifact.ps1 %1",
@@ -8,6 +7,7 @@
         "silent": true
       },
       "wix": {
+        "upgradeCode": "94895101-CD67-53B8-BB30-F95026802DF2",
         "fragmentPaths": [
           "wix/bridge-agent-windows-runtime.wxs"
         ],
