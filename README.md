@@ -701,7 +701,8 @@ gh workflow run release-bridge-agent.yml \
 ```
 
 已有版本需要重新同步签名制品、OSS 和更新元数据，并同时提升最低支持版本时，必须使用同一工作流的
-`repair_assets_only` 入口；工作流会通过 release service 的受支持策略 API 更新并回读策略，不直接修改数据库：
+`repair_assets_only` 入口；工作流会先读取并保留 release service 当前的 `releasePageUrl`，再通过受支持的
+策略 API 完整更新和回读策略，不直接修改数据库：
 
 ```bash
 gh workflow run release-bridge-agent.yml \

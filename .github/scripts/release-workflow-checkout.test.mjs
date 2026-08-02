@@ -64,6 +64,10 @@ describe("release workflow repository script availability", () => {
     expect(body).toContain("Update minimum supported client version");
     expect(body).toContain("inputs.minimum_supported_version != ''");
     expect(body).toContain('"$api/release-policy"');
+    expect(body).toContain('current_policy="$(curl');
+    expect(body).toContain(".releasePageUrl");
+    expect(body).toContain("releasePageUrl: $releasePageUrl");
+    expect(body).toContain(".releasePageUrl == $release_page_url");
     expect(body).toContain("forceUpdate: false");
     expect(body).toContain(
       "Minimum supported version $minimum_version exceeds release version $version",
