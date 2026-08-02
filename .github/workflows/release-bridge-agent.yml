@@ -540,6 +540,7 @@ jobs:
           SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
           WINDOWS_SIGNING_ENABLED: ${{ env.WINDOWS_SIGNING_ENABLED }}
           WINDOWS_SIGNING_DESCRIPTION: "百积木"
+          WINDOWS_SIGNING_LOG_PATH: ${{ runner.temp }}/windows-signing.log
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -552,32 +553,48 @@ jobs:
           done
           npm run tauri -- build ${{ matrix.tauri_args }}
 
-      - name: Diagnose Windows WiX fragment failure
-        if: runner.os == 'Windows' && steps.build_release_bundles.outcome == 'failure'
+      - name: Diagnose Windows bundle failure
+        if: ${{ failure() && runner.os == 'Windows' && steps.build_release_bundles.outcome == 'failure' }}
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
+          $signingLog = Join-Path $env:RUNNER_TEMP "windows-signing.log"
+          if (Test-Path -LiteralPath $signingLog) {
+            Write-Host "Windows signing diagnostics:"
+            Get-Content -LiteralPath $signingLog
+          } else {
+            Write-Host "No Windows signing diagnostic log was produced"
+          }
+
+          $msiDirectory = "src-tauri/target/release/bundle/msi"
+          if (Test-Path -LiteralPath $msiDirectory) {
+            Get-ChildItem -LiteralPath $msiDirectory -File |
+              Select-Object Name, Length, LastWriteTime |
+              Format-Table -AutoSize
+          }
+
           $candle = Get-ChildItem `
             -Path "src-tauri/target/release/wix" `
             -Filter "candle.exe" `
             -File `
             -Recurse `
-            -ErrorAction Stop | Select-Object -First 1
-          $utilExtension = Get-ChildItem `
-            -Path $candle.Directory.FullName `
-            -Filter "WixUtilExtension.dll" `
-            -File `
-            -ErrorAction Stop | Select-Object -First 1
-          if (-not $candle -or -not $utilExtension) {
-            throw "WiX compiler or WixUtilExtension was not found after bundle failure"
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+          $utilExtension = if ($candle) {
+            Get-ChildItem `
+              -Path $candle.Directory.FullName `
+              -Filter "WixUtilExtension.dll" `
+              -File `
+              -ErrorAction SilentlyContinue | Select-Object -First 1
           }
-          & $candle.FullName `
-            -nologo `
-            -arch x64 `
-            -ext $utilExtension.FullName `
-            "src-tauri/wix/bridge-agent-windows-runtime.wxs"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows WiX fragment diagnostic failed with exit code $LASTEXITCODE"
+          if (-not $candle -or -not $utilExtension) {
+            Write-Host "WiX compiler or WixUtilExtension was not found after bundle failure"
+          } else {
+            & $candle.FullName `
+              -nologo `
+              -arch x64 `
+              -ext $utilExtension.FullName `
+              "src-tauri/wix/bridge-agent-windows-runtime.wxs"
+            Write-Host "WiX fragment diagnostic exit code: $LASTEXITCODE"
           }
 
       - name: Verify macOS minimum system version
