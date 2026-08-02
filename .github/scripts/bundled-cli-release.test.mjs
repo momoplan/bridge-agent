@@ -14,6 +14,10 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const scriptPath = "tools/baijimu-cli/prepare-bundled-cli.sh";
+const pinnedCliVersion = readFileSync(
+  "tools/baijimu-cli/VERSION",
+  "utf8",
+).trim();
 const workflowPath = ".github/workflows/release-bridge-agent.yml";
 const defenderScriptPath =
   "src-tauri/scripts/verify-windows-defender.ps1";
@@ -31,7 +35,7 @@ function createFixture() {
 
   const platform =
     process.platform === "darwin" ? "macos-universal" : "linux-x64";
-  const assetName = `baijimu-cli-0.1.32-${platform}.zip`;
+  const assetName = `baijimu-cli-${pinnedCliVersion}-${platform}.zip`;
   const binaryPath = join(packageBinDirectory, "baijimu");
   writeFileSync(
     binaryPath,
@@ -39,7 +43,7 @@ function createFixture() {
       "#!/usr/bin/env bash",
       'test "$1" = "--version"',
       'test "$2" = "--json"',
-      'printf \'{"version":"0.1.32"}\\n\'',
+      `printf '{"version":"${pinnedCliVersion}"}\\n'`,
       "",
     ].join("\n"),
   );
@@ -97,7 +101,7 @@ describe("bundled Baijimu CLI release provenance", () => {
       const result = runPrepare(fixture);
 
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('"version":"0.1.32"');
+      expect(result.stdout).toContain(`"version":"${pinnedCliVersion}"`);
       expect(result.stdout).toContain(
         "Prepared pinned Baijimu CLI release asset",
       );
