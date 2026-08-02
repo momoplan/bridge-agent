@@ -312,6 +312,10 @@ Event Center 完成去重和事务持久化后才 ACK，收到 ACK 后本机才�
 
 运行时 bridge-agent 会在本机启动事件入口，默认地址是 `127.0.0.1:18081`。自定义服务发送事件：
 
+本地事件入口与 relay WebSocket 是两个独立子系统。事件端口绑定失败不会阻止 Agent 连接 relay；
+运行时会记录 `event_server.bind_failed` 并持续重试。端口恢复后会记录 `event_server.recovered`，随后本地
+服务和 Connector 可以继续向固定入口发送事件，无需重启 Agent。
+
 ```bash
 curl -X POST http://127.0.0.1:18081/v1/events \
   -H 'Content-Type: application/json' \
