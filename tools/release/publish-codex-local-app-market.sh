@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <connector-version>" >&2
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 <connector-version> <connector-manifest>" >&2
   exit 2
 fi
 
 version="$1"
+connector_manifest_path="$2"
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "invalid connector version: $version" >&2
   exit 2
 fi
+if [ ! -f "$connector_manifest_path" ]; then
+  echo "connector manifest does not exist: $connector_manifest_path" >&2
+  exit 2
+fi
+connector_manifest="$(jq -ce \
+  --arg version "$version" \
+  '
+    select(.schemaVersion == "2.0")
+    | select(.id == "com.baijimu.connector.codex")
+    | select(.version == $version)
+    | select(.source.revision == ("v" + $version))
+    | select(.runtime.type == "process")
+    | select((.runtime.command | type) == "string" and (.runtime.command | length) > 0)
+  ' "$connector_manifest_path")" || {
+  echo "connector manifest identity, version, source revision, or runtime contract is invalid" >&2
+  exit 2
+}
 
 release_tag="codex-local-app-v${version}"
 release_base="https://github.com/momoplan/bridge-agent/releases/download/${release_tag}"
@@ -54,6 +72,7 @@ for platform in macos windows linux; do
 done
 
 manifest="$(jq -nc \
+  --argjson connector "$connector_manifest" \
   --arg version "$version" \
   --arg base "$release_base" \
   --arg mac_asset "${assets[macos]}" \
@@ -62,24 +81,25 @@ manifest="$(jq -nc \
   --arg mac_sha "sha256:${checksums[macos]}" \
   --arg win_sha "sha256:${checksums[windows]}" \
   --arg linux_sha "sha256:${checksums[linux]}" \
-  '{
+  '({
     applicationType: "connector",
-    runtime: "process",
-    command: "baijimu-connector-codex",
-    args: ["start", "--daemon"],
-    management: true,
-    setup: true,
-    setupTimeoutSecs: 1800,
-    hostRequirements: {
-      minimumVersion: "0.2.21",
-      capabilities: ["connector.setup.v1"]
-    },
+    runtime: $connector.runtime.type,
+    command: $connector.runtime.command,
+    args: ($connector.runtime.args // []),
+    management: ($connector.management != null),
     artifacts: [
       {platform: "macos", arch: "universal", source: ($base + "/" + $mac_asset), checksum: $mac_sha},
       {platform: "windows", arch: "x86_64", source: ($base + "/" + $win_asset), checksum: $win_sha},
       {platform: "linux", arch: "x86_64", source: ($base + "/" + $linux_asset), checksum: $linux_sha}
     ]
-  }')"
+  }
+  + if $connector.setup == null then {} else {
+      setup: true,
+      setupTimeoutSecs: $connector.setup.timeoutSecs
+    } end
+  + if $connector.hostRequirements == null then {} else {
+      hostRequirements: $connector.hostRequirements
+    } end)')"
 capabilities='["codex.project.read","codex.thread.read","codex.app.read","codex.turn.write","codex.raw.request","codex.turn.interrupt"]'
 
 for document in "$manifest" "$capabilities"; do
@@ -120,9 +140,9 @@ b64() {
 }
 
 name_b64="$(b64 'Codex')"
-description_b64="$(b64 '在当前电脑自动安装并配置 Codex，使用客户端当前授权工作区管理本机 Codex 会话。')"
+description_b64="$(b64 '在当前电脑安装 Codex 本地应用，并在应用内初始化和管理本机 Codex 会话。')"
 risk_b64="$(b64 '需要安装和启动本机 Codex、写入 Codex 私有配置，并使用客户端当前工作区授权创建模型凭证。')"
-capability_b64="$(b64 '自动完成 Codex 安装、配置和验证，并读取和管理本机 Codex 会话。')"
+capability_b64="$(b64 '后台安装 Codex 本地应用，在应用内初始化，并读取和管理本机 Codex 会话。')"
 platforms_b64="$(b64 '["macos","windows","linux"]')"
 source_b64="$(b64 "${release_base}/${assets[macos]}")"
 repo_b64="$(b64 'zxflimit_admin/baijimu-connector-codex')"
@@ -179,12 +199,14 @@ for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
     payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
       "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}&hostVersion=0.2.21&hostCapabilities=connector.setup.v1")"
     if printf '%s' "$payload" | jq -e --arg version "$version" \
+      --argjson expected_manifest "$manifest" \
       '(if type == "array" then . elif type == "object" and (.data | type) == "array" then .data else [] end)
        | any(
            .connectorId == "com.baijimu.connector.codex"
            and .latestVersion.version == $version
            and .latestVersion.compatibility.compatible == true
            and (.latestVersion.source | length) > 0
+           and .latestVersion.manifest == $expected_manifest
          )' \
       >/dev/null; then
       verified=true

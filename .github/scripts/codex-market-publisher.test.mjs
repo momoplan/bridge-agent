@@ -14,11 +14,15 @@ describe("Codex local app market publisher", () => {
     expect(publisher).not.toMatch(/\n\s*400, '\$\{published_at\}'/);
   });
 
-  test("publishes and verifies the Codex host compatibility contract", () => {
-    expect(publisher).toContain('minimumVersion: "0.2.21"');
-    expect(publisher).toContain('capabilities: ["connector.setup.v1"]');
+  test("derives setup and host compatibility from the released connector manifest", () => {
+    expect(publisher).toContain('connector_manifest_path="$2"');
+    expect(publisher).toContain("$connector.hostRequirements");
+    expect(publisher).toContain("$connector.setup == null");
+    expect(publisher).not.toContain('capabilities: ["connector.setup.v1"]');
+    expect(publisher).not.toContain("setup: true,\n    setupTimeoutSecs: 1800");
     expect(publisher).toContain("hostVersion=0.2.21");
     expect(publisher).toContain("hostCapabilities=connector.setup.v1");
     expect(publisher).toContain(".latestVersion.compatibility.compatible == true");
+    expect(publisher).toContain(".latestVersion.manifest == $expected_manifest");
   });
 });
