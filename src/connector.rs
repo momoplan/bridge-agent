@@ -1100,10 +1100,12 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         }
         if permission.id.trim() != permission.id
             || !permission.id.chars().all(|ch| {
-                ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '-' | '_')
+                ch.is_ascii_alphabetic() || ch.is_ascii_digit() || matches!(ch, '.' | '-' | '_')
             })
         {
-            bail!("connector permission id must use lowercase ASCII letters, digits, dot, dash or underscore");
+            bail!(
+                "connector permission id must use ASCII letters, digits, dot, dash or underscore"
+            );
         }
         if !permission_ids.insert(permission.id.as_str()) {
             bail!("connector permission id `{}` is duplicated", permission.id);
@@ -3319,6 +3321,53 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("connector.unknown.v1"));
+    }
+
+    #[test]
+    fn connector_manifest_accepts_existing_camel_case_permission_id() {
+        let manifest: ConnectorManifest = serde_json::from_value(json!({
+            "schemaVersion": "2.0",
+            "id": "com.baijimu.connector.wecom",
+            "name": "WeCom Connector",
+            "version": "1.0.2",
+            "runtime": { "type": "process", "command": "wecom-bridge-collector-python" },
+            "permissions": [{
+                "id": "macos.fullDiskAccess",
+                "title": "完全磁盘访问",
+                "platforms": ["macos"]
+            }],
+            "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18084" },
+            "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+        }))
+        .unwrap();
+
+        validate_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn connector_manifest_rejects_permission_ids_outside_ascii_contract() {
+        for permission_id in [
+            "macos.full disk access",
+            "macos.完全磁盘访问",
+            "macos.fullDiskAccess/legacy",
+        ] {
+            let manifest: ConnectorManifest = serde_json::from_value(json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.invalid-permission",
+                "name": "Invalid Permission Connector",
+                "version": "1.0.0",
+                "runtime": { "type": "process", "command": "invalid-permission" },
+                "permissions": [{ "id": permission_id, "title": "Invalid" }],
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }))
+            .unwrap();
+
+            let error = validate_manifest(&manifest).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("permission id must use ASCII letters"));
+        }
     }
 
     #[test]
