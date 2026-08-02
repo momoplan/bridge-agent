@@ -178,7 +178,7 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
                     usernameVariable: 'GITHUB_USER',
                     passwordVariable: 'GITHUB_TOKEN'
                 )]) {
-                    sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION"'
+                    sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-src/connector.json'
                 }
             }
         }
@@ -200,7 +200,9 @@ curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
   | jq -e --arg version "$CONNECTOR_VERSION" '
       ((.data // .).latestVersion.version == $version)
       and ((.data // .).latestVersion.compatibility.compatible == true)
-      and (((.data // .).latestVersion.source | length) > 0)'
+      and (((.data // .).latestVersion.source | length) > 0)
+      and (((.data // .).latestVersion.manifest.setup // false) == false)
+      and ((((.data // .).latestVersion.manifest.hostRequirements.capabilities // []) | length) == 0)'
 '''
             }
         }
