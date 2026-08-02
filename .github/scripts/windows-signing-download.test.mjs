@@ -36,7 +36,23 @@ describe("Windows signing tool download", () => {
     expect(signingScript).toContain("$brandProgramName");
     expect(signingScript).toContain('"-Dfile.encoding=UTF-8"');
     expect(signingScript).toContain("& $javaExecutable.FullName");
+    expect(signingScript).toContain("$stagedInputFile");
+    expect(signingScript).toContain("bridge-agent-signing-input");
+    expect(signingScript).toContain("WINDOWS_SIGNING_LOG_PATH");
     expect(signingScript).not.toContain('& ".\\CodeSignTool.bat" @arguments');
+  });
+
+  it("preserves Windows signing diagnostics when the Tauri bundle step fails", () => {
+    const workflow = readFileSync(
+      ".github/workflows/release-bridge-agent.yml",
+      "utf8",
+    );
+
+    expect(workflow).toContain("WINDOWS_SIGNING_LOG_PATH");
+    expect(workflow).toContain(
+      "failure() && runner.os == 'Windows' && steps.build_release_bundles.outcome == 'failure'",
+    );
+    expect(workflow).toContain("Windows signing diagnostics:");
   });
 
   it("uses the canonical Chinese product name while preserving the MSI upgrade identity", () => {

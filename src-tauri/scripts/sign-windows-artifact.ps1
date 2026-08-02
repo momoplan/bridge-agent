@@ -5,6 +5,36 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Protect-DiagnosticText {
+    param([string]$Text)
+
+    $protectedText = $Text
+    foreach ($name in @("SSL_COM_USERNAME", "SSL_COM_PASSWORD", "SSL_COM_CREDENTIAL_ID", "SSL_COM_TOTP_SECRET")) {
+        $secret = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrEmpty($secret)) {
+            $protectedText = $protectedText.Replace($secret, "***")
+        }
+    }
+    return $protectedText
+}
+
+function Write-SigningDiagnostic {
+    param([string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_LOG_PATH)) {
+        return
+    }
+    $diagnosticDirectory = Split-Path -Parent $env:WINDOWS_SIGNING_LOG_PATH
+    if (-not [string]::IsNullOrWhiteSpace($diagnosticDirectory)) {
+        New-Item -ItemType Directory -Force -Path $diagnosticDirectory | Out-Null
+    }
+    $safeMessage = Protect-DiagnosticText -Text $Message
+    Add-Content `
+        -LiteralPath $env:WINDOWS_SIGNING_LOG_PATH `
+        -Value "$(Get-Date -Format o) $safeMessage" `
+        -Encoding UTF8
+}
+
 if ($env:WINDOWS_SIGNING_ENABLED -ne "true") {
     Write-Host "Windows signing is disabled; leaving artifact unsigned: $FilePath"
     exit 0
@@ -73,8 +103,21 @@ $programName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION
 }
 
 Write-Host "Signing Windows artifact: $resolvedFile"
-$outputDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "codesign-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+$workingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "codesign-$([guid]::NewGuid().ToString('N'))"
+$inputDirectory = Join-Path $workingDirectory "input"
+$outputDirectory = Join-Path $workingDirectory "output"
+New-Item -ItemType Directory -Force -Path $inputDirectory, $outputDirectory | Out-Null
+
+# CodeSignTool's local file handling is not Unicode-safe even though its
+# Authenticode program name supports Unicode. Stage every artifact under a
+# deterministic ASCII-only leaf name, then move the signed bytes back to the
+# original path. This keeps the public Chinese MSI name and metadata intact.
+$stagedInputFile = Join-Path `
+    $inputDirectory `
+    "bridge-agent-signing-input$([System.IO.Path]::GetExtension($resolvedFile.Path))"
+$replacementFile = "$($resolvedFile.Path).signed.tmp"
+Copy-Item -Force -LiteralPath $resolvedFile.Path -Destination $stagedInputFile
+Write-SigningDiagnostic "start extension=$([System.IO.Path]::GetExtension($resolvedFile.Path)) ascii_staging=true"
 
 $arguments = @(
     "sign",
@@ -82,7 +125,7 @@ $arguments = @(
     "-password=$env:SSL_COM_PASSWORD",
     "-credential_id=$env:SSL_COM_CREDENTIAL_ID",
     "-totp_secret=$env:SSL_COM_TOTP_SECRET",
-    "-input_file_path=$($resolvedFile.Path)",
+    "-input_file_path=$stagedInputFile",
     "-output_dir_path=$outputDirectory"
 )
 
@@ -100,26 +143,46 @@ if ($resolvedFile.Path.EndsWith(".msi", [StringComparison]::OrdinalIgnoreCase)) 
 # The tool still needs its installation directory as the working directory to
 # resolve the bundled configuration files.
 $codeSignToolExitCode = 0
-Push-Location $codeSignToolDirectory
 try {
-    & $javaExecutable.FullName `
-        "-Dfile.encoding=UTF-8" `
-        "-jar" `
-        $codeSignToolJar.FullName `
-        @arguments
-    $codeSignToolExitCode = $LASTEXITCODE
+    Push-Location $codeSignToolDirectory
+    try {
+        $codeSignToolOutput = & $javaExecutable.FullName `
+            "-Dfile.encoding=UTF-8" `
+            "-jar" `
+            $codeSignToolJar.FullName `
+            @arguments 2>&1
+        $codeSignToolExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+
+    foreach ($line in $codeSignToolOutput) {
+        $safeLine = Protect-DiagnosticText -Text $line.ToString()
+        Write-Host $safeLine
+        Write-SigningDiagnostic "tool $safeLine"
+    }
+    Write-SigningDiagnostic "tool_exit_code=$codeSignToolExitCode"
+
+    if ($codeSignToolExitCode -ne 0) {
+        throw "CodeSignTool failed with exit code $codeSignToolExitCode"
+    }
+
+    $signedFile = Join-Path $outputDirectory (Split-Path -Leaf $stagedInputFile)
+    if (-not (Test-Path -LiteralPath $signedFile)) {
+        throw "CodeSignTool did not produce the expected signed artifact"
+    }
+
+    Copy-Item -Force -LiteralPath $signedFile -Destination $replacementFile
+    [System.IO.File]::Replace($replacementFile, $resolvedFile.Path, $null)
+    Write-SigningDiagnostic "complete"
+} catch {
+    Write-SigningDiagnostic "failure type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
+    throw
 } finally {
-    Pop-Location
+    if (Test-Path -LiteralPath $workingDirectory) {
+        Remove-Item -Force -Recurse -LiteralPath $workingDirectory
+    }
+    if (Test-Path -LiteralPath $replacementFile) {
+        Remove-Item -Force -LiteralPath $replacementFile
+    }
 }
-
-if ($codeSignToolExitCode -ne 0) {
-    throw "CodeSignTool failed with exit code $codeSignToolExitCode"
-}
-
-$signedFile = Join-Path $outputDirectory (Split-Path -Leaf $resolvedFile.Path)
-if (-not (Test-Path -LiteralPath $signedFile)) {
-    throw "CodeSignTool did not produce expected signed file: $signedFile"
-}
-
-Move-Item -Force -LiteralPath $signedFile -Destination $resolvedFile.Path
-Remove-Item -Force -Recurse -LiteralPath $outputDirectory
