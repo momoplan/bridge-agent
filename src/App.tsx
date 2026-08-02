@@ -17,6 +17,11 @@ import {
 } from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
 import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
+import {
+  latestLocalAppInstallTasks,
+  type LocalAppInstallTask,
+  type LocalAppInstallTaskState
+} from "./local-app-install-tasks";
 
 type RuntimeStatus =
   | "stopped"
@@ -586,6 +591,7 @@ type InstallSourceMode = "market" | "custom";
 type LocalAppDetailTab = "app" | "overview" | "capabilities" | "config";
 type LocalAppLifecycleState =
   | "installed"
+  | "installing"
   | "ready"
   | "missing"
   | "broken"
@@ -618,6 +624,7 @@ interface LocalAppItem {
   localAppIndex?: number;
   connector?: ConnectorSummary;
   managedTool?: ManagedToolStatus;
+  installTask?: LocalAppInstallTask;
 }
 
 interface MarketConnector {
@@ -863,6 +870,7 @@ function App() {
   const [registeredServiceStatuses, setRegisteredServiceStatuses] = useState<RegisteredServiceStatus[]>([]);
   const [localAppRuntimeStatuses, setLocalAppRuntimeStatuses] = useState<LocalAppRuntimeStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
+  const [localAppInstallTasks, setLocalAppInstallTasks] = useState<LocalAppInstallTask[]>([]);
   const localAppsChangeRevisionRef = useRef(0);
   const localAppUpdateRefreshRef = useRef<Promise<void> | null>(null);
   const previousActivePageRef = useRef<AppPage>("apps");
@@ -926,6 +934,40 @@ function App() {
         dispose();
       }
     }).catch((err) => clientWarn("订阅 Agent 运行状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    const applyTask = (task: LocalAppInstallTask) => {
+      setLocalAppInstallTasks((current) => {
+        const next = current.filter((candidate) => candidate.taskId !== task.taskId);
+        next.push(task);
+        return next.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs);
+      });
+    };
+    void listen<LocalAppInstallTask>("local-app-install-task-changed", (event) => {
+      if (active) {
+        applyTask(event.payload);
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅本地应用安装进度失败", err));
+    void invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks")
+      .then((tasks) => {
+        if (active) {
+          setLocalAppInstallTasks(tasks.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs));
+        }
+      })
+      .catch((err) => clientWarn("读取本地应用安装任务失败", err));
     return () => {
       active = false;
       unlisten?.();
@@ -1315,6 +1357,7 @@ function App() {
       0
     ) ?? 0;
   const localApps = useMemo<LocalAppItem[]>(() => {
+    const latestInstallTasks = latestLocalAppInstallTasks(localAppInstallTasks);
     if (!config) {
       return [];
     }
@@ -1324,6 +1367,13 @@ function App() {
       );
       const capabilityCount =
         connector.methodNames.length + connector.eventNames.length;
+      const latestInstallTask = latestInstallTasks
+        .filter(
+          (task) =>
+            task.connectorId === connector.id
+        )
+        .sort((left, right) => right.updatedAtEpochMs - left.updatedAtEpochMs)[0];
+      const installTask = latestInstallTask?.state === "succeeded" ? undefined : latestInstallTask;
       return {
         id: `connector:${connector.id}`,
         name: connector.name,
@@ -1331,8 +1381,31 @@ function App() {
         kind: "connector",
         serviceIndexes: [],
         localAppIndex: localAppIndex >= 0 ? localAppIndex : undefined,
-        connector
+        connector,
+        installTask
       };
+    });
+
+    latestInstallTasks.forEach((installTask) => {
+      if (installTask.state === "succeeded") {
+        return;
+      }
+      const installed = installTask.connectorId
+        ? connectorApps.some((connector) => connector.id === installTask.connectorId)
+        : false;
+      if (installed) {
+        return;
+      }
+      apps.push({
+        id: `install-task:${installTask.taskId}`,
+        name: installTask.name,
+        description: [installTask.version ? `版本 ${installTask.version}` : null, installTask.message]
+          .filter(Boolean)
+          .join(" · "),
+        kind: "connector",
+        serviceIndexes: [],
+        installTask
+      });
     });
 
     if (baijimuCli) {
@@ -1376,7 +1449,7 @@ function App() {
       });
     });
     return apps;
-  }, [config, connectorApps, baijimuCli]);
+  }, [config, connectorApps, baijimuCli, localAppInstallTasks]);
   const selectedLocalApp =
     selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
   const availableLocalAppUpdates = localApps
@@ -1778,25 +1851,27 @@ function App() {
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
-        source,
-        replace: true,
-        checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
-        allowGit: installSourceMode === "custom",
-        marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null
+      const task = await invoke<LocalAppInstallTask>("start_connector_app_install", {
+        request: {
+          source,
+          replace: true,
+          checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
+          allowGit: installSourceMode === "custom",
+          marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null,
+          connectorId: installSourceMode === "market" ? selectedMarket?.connectorId ?? null : null,
+          name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
+          version: installSourceMode === "market" ? selectedMarket?.version ?? null : null
+        }
       });
-      applyConfigDocument(document.config);
-      await refreshConnectorApps();
-      await refreshRegisteredServiceStatuses();
-      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
+      setLocalAppInstallTasks((current) => [
+        ...current.filter((candidate) => candidate.taskId !== task.taskId),
+        task
+      ]);
+      setSelectedLocalAppId(`install-task:${task.taskId}`);
       setActivePage("apps");
       setInstallPanelOpen(false);
       setCustomInstallConfirmed(false);
-      setMessage(
-        document.setup
-          ? `应用 ${document.install.name} ${document.install.version} 已安装并配置完成`
-          : `应用 ${document.install.name} ${document.install.version} 已安装`
-      );
+      setMessage(`应用 ${task.name} 已开始后台安装，可在应用面板查看进度`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -2032,11 +2107,7 @@ function App() {
         }
       }));
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
-      setMessage(
-        document.setup
-          ? `应用 ${document.install.name} 已升级到 ${document.install.version} 并配置完成`
-          : `应用 ${document.install.name} 已升级到 ${document.install.version}`
-      );
+      setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -2086,11 +2157,7 @@ function App() {
         return next;
       });
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
-      setMessage(
-        document.setup
-          ? `应用 ${document.install.name} 已重新同步到 ${document.install.version} 并配置完成`
-          : `应用 ${document.install.name} 已重新同步到 ${document.install.version}`
-      );
+      setMessage(`应用 ${document.install.name} 已重新同步到 ${document.install.version}`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -4980,9 +5047,6 @@ function App() {
     const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
     const selectedMarketIncompatible = selectedMarket?.compatible === false;
     const closeInstallPanel = () => {
-      if (installBusy) {
-        return;
-      }
       setInstallPanelOpen(false);
       setInstallSourceMode("market");
       setMarketAppQuery("");
@@ -5040,7 +5104,6 @@ function App() {
               <button
                 className="icon-button install-panel-close"
                 onClick={closeInstallPanel}
-                disabled={installBusy}
                 aria-label="关闭应用市场"
                 title="关闭"
               >
@@ -5519,10 +5582,13 @@ function App() {
           </span>
         </div>
         <p>{app.description}</p>
+        {app.installTask ? renderLocalAppInstallProgress(app.installTask, true) : null}
         <div className="local-app-card-meta">
           <span>{formatLocalAppKind(app.kind)}</span>
           {app.managedTool ? (
             <span>版本 {app.managedTool.installedVersion ?? "未安装"}</span>
+          ) : app.installTask && !app.connector ? (
+            <span>{formatLocalAppInstallTaskState(app.installTask.state)}</span>
           ) : (
             <span>{countLocalAppCapabilities(app, config)} 项能力</span>
           )}
@@ -5532,6 +5598,32 @@ function App() {
           ) : null}
         </div>
       </button>
+    );
+  }
+
+  function renderLocalAppInstallProgress(task: LocalAppInstallTask, compact = false) {
+    const percent = task.state === "succeeded" ? 100 : task.progressPercent;
+    const indeterminate = percent == null && task.state !== "failed";
+    return (
+      <div
+        className={`local-app-install-progress ${compact ? "compact" : ""} ${task.state === "failed" ? "failed" : ""}`}
+        role="status"
+        aria-label={`${task.name}：${task.error || task.message}`}
+      >
+        <div className="local-app-install-progress-head">
+          <strong>{formatLocalAppInstallTaskState(task.state)}</strong>
+          <span>{percent == null ? "" : `${Math.round(percent)}%`}</span>
+        </div>
+        {task.state !== "failed" ? (
+          <div className="local-app-install-progress-track" aria-hidden="true">
+            <div
+              className={`local-app-install-progress-bar ${indeterminate ? "indeterminate" : ""}`}
+              style={indeterminate ? undefined : { width: `${Math.max(0, Math.min(100, percent ?? 0))}%` }}
+            />
+          </div>
+        ) : null}
+        <p>{task.error || task.message}</p>
+      </div>
     );
   }
 
@@ -5584,6 +5676,8 @@ function App() {
             </button>
           </div>
 
+          {app.installTask ? renderLocalAppInstallProgress(app.installTask) : null}
+
           <div className="app-detail-toolbar">
             <div className="section-tabs">
               {embeddedUi && app.connector ? (
@@ -5600,7 +5694,7 @@ function App() {
               >
                 概览
               </button>
-              {!isManagedTool ? (
+              {!isManagedTool && (app.kind !== "connector" || Boolean(app.connector)) ? (
                 <button
                   className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
                   onClick={() => setActiveLocalAppDetailTab("capabilities")}
@@ -5618,7 +5712,7 @@ function App() {
               ) : null}
             </div>
             <div className="service-actions">
-              {isManagedTool && app.managedTool?.state !== "ready" ? (
+              {app.installTask && !["succeeded", "failed"].includes(app.installTask.state) ? null : isManagedTool && app.managedTool?.state !== "ready" ? (
                 <>
                   <button
                     className="primary accent"
@@ -5681,7 +5775,7 @@ function App() {
                   {connectorBusy === app.id ? "启动中" : "启动应用"}
                 </button>
               ) : null}
-              {app.kind === "connector" ? (
+              {app.connector ? (
                 <button
                   className="ghost danger"
                   onClick={() => void uninstallLocalApp(app)}
@@ -5830,6 +5924,18 @@ function App() {
   function localAppLifecycle(app: LocalAppItem): LocalAppLifecycle {
     if (!config) {
       return formatLocalAppLifecycle("unknown", "等待配置加载");
+    }
+
+    if (app.installTask) {
+      if (app.installTask.state === "failed") {
+        return formatLocalAppLifecycle("broken", app.installTask.error || app.installTask.message);
+      }
+      if (app.installTask.state !== "succeeded") {
+        return formatLocalAppLifecycle("installing", app.installTask.message);
+      }
+      if (!app.connector) {
+        return formatLocalAppLifecycle("installed", app.installTask.message);
+      }
     }
 
     if (app.managedTool) {
@@ -7352,12 +7458,28 @@ function formatRegisteredServiceStatus(status: RegisteredServiceState): string {
   return labels[status];
 }
 
+function formatLocalAppInstallTaskState(state: LocalAppInstallTaskState): string {
+  const labels: Record<LocalAppInstallTaskState, string> = {
+    queued: "等待安装",
+    resolving: "解析来源",
+    downloading: "下载安装包",
+    verifying: "校验安装包",
+    installing: "安装应用",
+    starting: "启动应用",
+    finalizing: "刷新应用能力",
+    succeeded: "安装完成",
+    failed: "安装失败"
+  };
+  return labels[state];
+}
+
 function formatLocalAppLifecycle(
   state: LocalAppLifecycleState,
   detail?: string
 ): LocalAppLifecycle {
   const labels: Record<LocalAppLifecycleState, string> = {
     installed: "已安装",
+    installing: "安装中",
     ready: "可用",
     missing: "未安装",
     broken: "需修复",
@@ -7371,6 +7493,7 @@ function formatLocalAppLifecycle(
   };
   const details: Record<LocalAppLifecycleState, string> = {
     installed: "已安装，等待手动启动",
+    installing: "正在后台安装应用",
     ready: "工具已安装并通过校验",
     missing: "工具尚未安装",
     broken: "工具安装损坏或校验失败",
@@ -7384,6 +7507,7 @@ function formatLocalAppLifecycle(
   };
   const statusClasses: Record<LocalAppLifecycleState, string> = {
     installed: "installed",
+    installing: "starting",
     ready: "running",
     missing: "stopped",
     broken: "start_failed",

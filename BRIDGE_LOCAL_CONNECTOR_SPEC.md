@@ -47,7 +47,7 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责官方 Codex 安装、`codex app-server` 的 session、thread、turn 和 event 能力，以及当前授权工作区的 LLM credential 签发和本机 Codex 配置。平台项目不参与安装和凭证归属。Bridge Agent 只传入客户端当前授权的 `workspaceId`、等待 setup 生命周期完成、加载 `ui/` 静态资源并代理清单声明的管理操作；LLM credential 不经过 Bridge Agent。
+Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责官方 Codex 安装、`codex app-server` 的 session、thread、turn 和 event 能力，以及当前授权工作区的 LLM credential 签发和本机 Codex 配置。平台项目不参与安装和凭证归属。Bridge Agent 只后台安装和启动 Connector、加载 `ui/` 静态资源并代理清单声明的管理操作；Codex 初始化由用户进入应用后启动，步骤、进度、失败和重试都由 Codex 应用自身展示。LLM credential 不经过 Bridge Agent。
 
 管理接口必须满足：
 
@@ -56,7 +56,7 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 - `operations` 只能声明 `GET` 或 `POST`，路径必须位于 `/management/` 下；宿主不得接受前端传入任意 URL、方法或路径。
 - 宿主启动应用时通过 `BAIJIMU_CONNECTOR_DATA_DIR` 传入独立数据目录。应用包升级不得覆盖该目录，卸载是否清理业务配置必须由用户确认。
 
-需要在市场安装后自动完成本机初始化的 Connector 可以声明 `setup`：
+需要在应用内部提供本机初始化能力的 Connector 可以声明 `setup`：
 
 ```json
 {
@@ -80,16 +80,17 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 ```
 
 - `minimumVersion` 是可安装该版本 Connector 的最低百积木客户端语义版本。
-- `capabilities` 是宿主必须具备的协议能力；当前 setup 生命周期对应 `connector.setup.v1`。
+- `capabilities` 是宿主必须具备的协议能力；当前 setup 管理与状态代理契约对应 `connector.setup.v1`。
 - 市场必须返回兼容判断；不兼容版本仍可展示，但不得下发安装源，客户端必须提示先升级。
 - 客户端必须在 UI 和安装命令两层校验，不能依赖前端禁用按钮作为唯一保护。
 
 - `setup` 仅允许用于 `schemaVersion: "2.0"`，并要求同时声明 `management`。
 - 新发布且声明 `setup` 的 Connector 必须同时声明 `hostRequirements.minimumVersion >= 0.2.21` 和 `connector.setup.v1`；`0.2.21` 是首个会上报宿主版本/能力并展示升级提示的客户端版本。
-- `operation` 必须引用一个 `POST` management operation；宿主传入 `{ "workspaceId": 当前授权工作区 }`，操作应立即返回并在应用内部启动幂等后台任务。
+- `operation` 必须引用一个 `POST` management operation；应用内界面通过宿主受控调用桥传入当前授权工作区，操作应立即返回并在应用内部启动幂等后台任务。
 - `statusOperation` 必须引用一个 `GET` management operation，返回 `status`：`pending`、`running`、`succeeded` 或 `failed`。失败时可返回脱敏 `error`。
-- `timeoutSecs` 范围为 30–3600，默认 1800。市场 UI 安装会自动启动应用并等待 setup 成功，成功前不得显示“安装完成”。
-- setup 不得要求用户再次选择本机设备、工作区或与能力无关的业务项目；需要凭证时由应用使用宿主传入的当前工作区上下文，并精确校验本机授权。
+- `timeoutSecs` 范围为 30–3600，默认 1800，作为应用初始化任务的超时契约保留；Connector 自己负责执行和展示超时结果，宿主安装不等待该期限。
+- setup 不得阻塞 Connector 下载、校验、安装、注册和启动。宿主完成这些阶段后立即报告“安装完成”，初始化状态只能显示在应用自身界面中。
+- setup 不得要求用户再次选择本机设备或与能力无关的业务项目；需要凭证时由应用使用应用界面确认的当前工作区上下文，并精确校验本机授权。
 
 ## Connector 包结构
 
