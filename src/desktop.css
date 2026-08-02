@@ -695,9 +695,7 @@ select {
   gap: var(--ds-space-md);
 }
 
-.local-app-card,
-.market-app-card,
-.install-choice-card {
+.local-app-card {
   min-height: 148px;
   border: 1px solid var(--ds-color-border);
   border-radius: var(--ds-radius-md);
@@ -705,9 +703,7 @@ select {
   box-shadow: var(--ds-shadow-panel);
 }
 
-.local-app-card:hover,
-.market-app-card:hover,
-.install-choice-card:hover {
+.local-app-card:hover {
   border-color: rgba(37, 99, 235, 0.45);
   box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
   transform: translateY(-1px);
@@ -886,5 +882,98 @@ select {
   .local-app-panel > .notice-banner {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .modal-backdrop {
+    padding: 14px;
+  }
+
+  .install-panel {
+    width: calc(100vw - 28px);
+    height: calc(100vh - 28px);
+    min-height: 0;
+  }
+
+  .market-browser-layout {
+    grid-template-columns: minmax(230px, 42%) minmax(0, 1fr);
+  }
+
+  .market-app-detail {
+    padding: 20px;
+  }
+}
+
+@media (max-width: 620px) {
+  .custom-install-entry {
+    width: 36px;
+    padding: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    color: var(--ds-color-text-secondary);
+    font-size: 0;
+  }
+
+  .custom-install-entry svg {
+    color: var(--ds-color-text-secondary);
+  }
+
+  .install-panel-head {
+    padding: 14px;
+  }
+
+  .install-panel-title-icon,
+  .install-panel-head p,
+  .market-toolbar > span {
+    display: none;
+  }
+
+  .market-toolbar {
+    padding: 10px 12px;
+  }
+
+  .market-search {
+    width: 100%;
+  }
+
+  .market-browser-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(180px, 42%) minmax(0, 1fr);
+  }
+
+  .market-app-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--ds-color-border);
+  }
+
+  .market-detail-icon {
+    width: 50px;
+    height: 50px;
+    font-size: 20px;
+  }
+
+  .market-detail-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .market-detail-meta > div + div {
+    border-top: 1px solid var(--ds-color-border);
+    border-left: 0;
+  }
+
+  .custom-install-view {
+    padding: 22px 16px;
+  }
+
+  .install-panel-actions {
+    min-height: 64px;
+    padding: 12px 14px;
+  }
+
+  .install-action-context {
+    display: none;
+  }
+
+  .install-primary-action {
+    width: 100%;
   }
 }

@@ -2,12 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  ArrowLeft,
   AlertTriangle,
+  CheckCircle2,
   ExternalLink,
+  Package,
   Plus,
   RefreshCw,
   Search,
-  Terminal
+  ShieldCheck,
+  Terminal,
+  Wrench,
+  X
 } from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
 import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
@@ -576,7 +582,7 @@ const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
 type AppPage = DesktopPage;
 type DetailPanel = "system" | "settings" | "logs" | "manifest";
 type LocalAppKind = "connector" | "managed_tool" | "built_in" | "custom";
-type InstallSourceMode = "choose" | "market" | "custom";
+type InstallSourceMode = "market" | "custom";
 type LocalAppDetailTab = "app" | "overview" | "capabilities" | "config";
 type LocalAppLifecycleState =
   | "installed"
@@ -895,8 +901,11 @@ function App() {
   const [selectedLocalAppId, setSelectedLocalAppId] = useState<string | null>(null);
   const [activeLocalAppDetailTab, setActiveLocalAppDetailTab] = useState<LocalAppDetailTab>("overview");
   const [installPanelOpen, setInstallPanelOpen] = useState(false);
-  const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("choose");
+  const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("market");
   const [selectedMarketAppId, setSelectedMarketAppId] = useState("");
+  const [marketAppQuery, setMarketAppQuery] = useState("");
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketLoadError, setMarketLoadError] = useState("");
   const [installSource, setInstallSource] = useState("");
   const [customInstallConfirmed, setCustomInstallConfirmed] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
@@ -1197,14 +1206,26 @@ function App() {
     [marketConnectors]
   );
 
+  const visibleMarketConnectors = useMemo(() => {
+    const query = marketAppQuery.trim().toLocaleLowerCase();
+    if (!query) {
+      return installableMarketConnectors;
+    }
+    return installableMarketConnectors.filter((app) =>
+      [app.name, app.description, app.capability, app.version].some((value) =>
+        value.toLocaleLowerCase().includes(query)
+      )
+    );
+  }, [installableMarketConnectors, marketAppQuery]);
+
   useEffect(() => {
     setSelectedMarketAppId((current) => {
-      if (current && installableMarketConnectors.some((app) => app.id === current)) {
+      if (current && visibleMarketConnectors.some((app) => app.id === current)) {
         return current;
       }
-      return installableMarketConnectors[0]?.id ?? "";
+      return visibleMarketConnectors[0]?.id ?? "";
     });
-  }, [installableMarketConnectors]);
+  }, [visibleMarketConnectors]);
 
   useEffect(() => {
     if (!config) {
@@ -1641,11 +1662,16 @@ function App() {
 
   async function refreshMarketConnectorApps() {
     try {
+      setMarketLoading(true);
+      setMarketLoadError("");
       const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
       setMarketConnectors(apps);
     } catch (err) {
       clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
+      setMarketLoadError(readError(err));
+    } finally {
+      setMarketLoading(false);
     }
   }
 
@@ -4958,138 +4984,264 @@ function App() {
         return;
       }
       setInstallPanelOpen(false);
-      setInstallSourceMode("choose");
+      setInstallSourceMode("market");
+      setMarketAppQuery("");
       setCustomInstallConfirmed(false);
     };
 
     return (
       <div className="modal-backdrop" role="presentation" onClick={closeInstallPanel}>
-        <section className="install-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <section
+          className="install-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="install-panel-title"
+          onClick={(event) => event.stopPropagation()}
+        >
           <div className="install-panel-head">
-            <div>
-              <p className="eyebrow">安装</p>
-              <h3>
-                {installSourceMode === "market"
-                  ? "从市场安装"
-                  : installSourceMode === "custom"
-                    ? "自定义安装"
-                    : "安装本地应用"}
-              </h3>
+            <div className="install-panel-title">
+              <span className={`install-panel-title-icon ${installSourceMode === "custom" ? "custom" : ""}`}>
+                {installSourceMode === "market" ? <Package size={20} /> : <Wrench size={20} />}
+              </span>
+              <div>
+                <h3 id="install-panel-title">
+                  {installSourceMode === "market" ? "应用市场" : "自定义安装"}
+                </h3>
+                <p>
+                  {installSourceMode === "market"
+                    ? "发现并安装经过平台验证的本地应用"
+                    : "从可信的本地目录、代码仓库或压缩包安装"}
+                </p>
+              </div>
             </div>
-            <button className="ghost" onClick={closeInstallPanel} disabled={installBusy}>
-              关闭
-            </button>
+            <div className="install-panel-head-actions">
+              {installSourceMode === "market" ? (
+                <button
+                  className="secondary button-with-icon custom-install-entry"
+                  onClick={() => {
+                    setCustomInstallConfirmed(false);
+                    setInstallSourceMode("custom");
+                  }}
+                  disabled={installBusy}
+                >
+                  <Wrench size={15} aria-hidden="true" />
+                  自定义安装
+                </button>
+              ) : (
+                <button
+                  className="secondary button-with-icon"
+                  onClick={() => setInstallSourceMode("market")}
+                  disabled={installBusy}
+                >
+                  <ArrowLeft size={15} aria-hidden="true" />
+                  返回市场
+                </button>
+              )}
+              <button
+                className="icon-button install-panel-close"
+                onClick={closeInstallPanel}
+                disabled={installBusy}
+                aria-label="关闭应用市场"
+                title="关闭"
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
           </div>
 
-          {installSourceMode === "choose" ? (
-            <div className="install-choice-grid">
-              <button
-                className="install-choice-card"
-                onClick={() => {
-                  setInstallSourceMode("market");
-                  void refreshMarketConnectorApps();
-                }}
-              >
-                <strong>从市场安装</strong>
-                <span>选择官方维护的本地应用，安装后直接生效。</span>
-              </button>
-              <button
-                className="install-choice-card"
-                onClick={() => {
-                  setCustomInstallConfirmed(false);
-                  setInstallSourceMode("custom");
-                }}
-              >
-                <strong>自定义安装</strong>
-                <span>从本地目录、Git 仓库或远程 ZIP / tar.gz 包安装 connector。</span>
-              </button>
-            </div>
-          ) : installSourceMode === "market" ? (
-            <div className="market-app-grid">
-              {installableMarketConnectors.map((app) => (
-                <button
-                  className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
-                  key={app.id}
-                  onClick={() => setSelectedMarketAppId(app.id)}
-                >
-                  <strong>{app.name}</strong>
-                  <span>{app.description}</span>
-                  <small>
-                    {app.capability} · {app.version}
-                    {!app.compatible
-                      ? ` · 需要百积木 ${app.minimumHostVersion ?? "更高版本"}`
-                      : ""}
-                  </small>
-                </button>
-              ))}
-              {installableMarketConnectors.length === 0 ? (
-                <div className="empty-state">暂时没有可安装的市场应用。</div>
-              ) : null}
-              {selectedMarket ? (
-                <div className={`install-risk-note ${selectedMarketIncompatible ? "incompatible" : ""}`}>
-                  <strong>{selectedMarketIncompatible ? "需要升级客户端" : "权限提示"}</strong>
-                  <span>
-                    {selectedMarketIncompatible
-                      ? selectedMarket.compatibilityMessage ||
-                        "当前百积木客户端不支持该应用版本，请先升级客户端。"
-                      : selectedMarket.risk}
-                  </span>
+          {installSourceMode === "market" ? (
+            <div className="install-panel-body market-browser">
+              <div className="market-toolbar">
+                <label className="market-search">
+                  <Search size={16} aria-hidden="true" />
+                  <input
+                    value={marketAppQuery}
+                    onChange={(event) => setMarketAppQuery(event.target.value)}
+                    placeholder="搜索应用、能力或版本"
+                    aria-label="搜索市场应用"
+                  />
+                </label>
+                <span>{marketLoading ? "正在更新市场…" : `${visibleMarketConnectors.length} 个可用应用`}</span>
+              </div>
+
+              <div className="market-browser-layout">
+                <div className="market-app-list" aria-label="市场应用列表">
+                  {marketLoading && installableMarketConnectors.length === 0 ? (
+                    <div className="market-list-state" role="status">
+                      <RefreshCw className="spin" size={20} aria-hidden="true" />
+                      <strong>正在加载应用市场</strong>
+                      <span>马上就好</span>
+                    </div>
+                  ) : null}
+                  {!marketLoading && marketLoadError ? (
+                    <div className="market-list-state error" role="alert">
+                      <AlertTriangle size={20} aria-hidden="true" />
+                      <strong>市场加载失败</strong>
+                      <span>{marketLoadError}</span>
+                      <button className="secondary" onClick={() => void refreshMarketConnectorApps()}>
+                        重新加载
+                      </button>
+                    </div>
+                  ) : null}
+                  {!marketLoadError && visibleMarketConnectors.map((app) => (
+                    <button
+                      className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
+                      key={app.id}
+                      onClick={() => setSelectedMarketAppId(app.id)}
+                      aria-pressed={selectedMarketAppId === app.id}
+                    >
+                      <span className="market-app-icon" aria-hidden="true">
+                        {app.name.trim().slice(0, 1).toLocaleUpperCase() || "应"}
+                      </span>
+                      <span className="market-app-card-copy">
+                        <span className="market-app-card-title">
+                          <strong>{app.name}</strong>
+                          {!app.compatible ? <em>不兼容</em> : null}
+                        </span>
+                        <span>{app.description}</span>
+                        <small>{app.capability} · {app.version}</small>
+                      </span>
+                    </button>
+                  ))}
+                  {!marketLoading && !marketLoadError && visibleMarketConnectors.length === 0 ? (
+                    <div className="market-list-state">
+                      <Search size={20} aria-hidden="true" />
+                      <strong>{marketAppQuery.trim() ? "没有找到相关应用" : "市场暂时没有应用"}</strong>
+                      <span>{marketAppQuery.trim() ? "试试应用名称或能力关键词" : "你仍然可以使用自定义安装"}</span>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
+
+                <div className="market-app-detail" aria-live="polite">
+                  {selectedMarket ? (
+                    <>
+                      <div className="market-detail-hero">
+                        <span className="market-detail-icon" aria-hidden="true">
+                          {selectedMarket.name.trim().slice(0, 1).toLocaleUpperCase() || "应"}
+                        </span>
+                        <div>
+                          <div className="market-detail-title-row">
+                            <h4>{selectedMarket.name}</h4>
+                            <span className="market-verified-badge">
+                              <CheckCircle2 size={13} aria-hidden="true" />
+                              平台验证
+                            </span>
+                          </div>
+                          <p>{selectedMarket.description}</p>
+                        </div>
+                      </div>
+                      <div className="market-detail-meta">
+                        <div><span>版本</span><strong>{selectedMarket.version}</strong></div>
+                        <div><span>主要能力</span><strong>{selectedMarket.capability}</strong></div>
+                      </div>
+                      <div className={`market-permission-card ${selectedMarketIncompatible ? "incompatible" : ""}`}>
+                        {selectedMarketIncompatible ? (
+                          <AlertTriangle size={18} aria-hidden="true" />
+                        ) : (
+                          <ShieldCheck size={18} aria-hidden="true" />
+                        )}
+                        <div>
+                          <strong>{selectedMarketIncompatible ? "当前版本不可安装" : "安装前须知"}</strong>
+                          <p>
+                            {selectedMarketIncompatible
+                              ? selectedMarket.compatibilityMessage ||
+                                `需要百积木 ${selectedMarket.minimumHostVersion ?? "更高版本"}`
+                              : selectedMarket.risk}
+                          </p>
+                        </div>
+                      </div>
+                      {selectedMarket.requiredHostCapabilities.length > 0 ? (
+                        <div className="market-requirements">
+                          <strong>所需主机能力</strong>
+                          <div>
+                            {selectedMarket.requiredHostCapabilities.map((capability) => (
+                              <span key={capability}>{capability}</span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="market-detail-empty">
+                      <Package size={28} aria-hidden="true" />
+                      <strong>选择一个应用查看详情</strong>
+                      <span>安装前可确认版本、能力和权限说明</span>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="form-grid">
-              <Field label="本地目录、Git 仓库或远程压缩包" wide>
-                <input
-                  value={installSource}
-                  onChange={(event) => setInstallSource(event.target.value)}
-                  placeholder="/path/to/app、https://gitee.com/org/repo.git 或 https://example.com/app.zip"
-                />
-              </Field>
-              <div className="install-risk-note">
-                <strong>平台未验证的自定义来源</strong>
-                <span>
-                  本地目录、Git 仓库和远程压缩包不属于市场可信发布。安装后应用可以执行其声明的本机命令，后续同步也需要再次确认。
-                </span>
+            <div className="install-panel-body custom-install-view">
+              <div className="custom-install-form">
+                <div className="custom-install-intro">
+                  <strong>安装你信任的应用包</strong>
+                  <p>支持本地目录、Git 仓库，以及 ZIP / tar.gz 远程压缩包。</p>
+                </div>
+                <Field label="应用来源" wide>
+                  <input
+                    value={installSource}
+                    onChange={(event) => setInstallSource(event.target.value)}
+                    placeholder="/path/to/app、https://gitee.com/org/repo.git 或 https://example.com/app.zip"
+                    autoFocus
+                  />
+                </Field>
+                <div className="install-risk-note">
+                  <AlertTriangle size={18} aria-hidden="true" />
+                  <div>
+                    <strong>平台未验证的自定义来源</strong>
+                    <span>
+                      自定义应用可以执行其声明的本机命令。请在安装前检查来源、代码与权限，后续同步也需要再次确认。
+                    </span>
+                  </div>
+                </div>
+                <label className="check-row wide custom-trust-confirmation">
+                  <input
+                    type="checkbox"
+                    checked={customInstallConfirmed}
+                    onChange={(event) => setCustomInstallConfirmed(event.target.checked)}
+                  />
+                  <span>我已检查并确认来源可信，同意以“用户信任”状态安装</span>
+                </label>
               </div>
-              <label className="check-row wide">
-                <input
-                  type="checkbox"
-                  checked={customInstallConfirmed}
-                  onChange={(event) => setCustomInstallConfirmed(event.target.checked)}
-                />
-                <span>我确认来源可信，并同意以“用户信任”状态安装</span>
-              </label>
             </div>
           )}
 
           <div className="install-panel-actions">
-            {installSourceMode === "choose" ? (
-              <button className="secondary" onClick={closeInstallPanel} disabled={installBusy}>
-                取消
-              </button>
-            ) : (
-              <>
-                <button className="secondary" onClick={() => setInstallSourceMode("choose")} disabled={installBusy}>
-                  返回
-                </button>
-                <button
-                  className="primary"
-                  onClick={() => void installLocalApp()}
-                  disabled={
-                    installBusy ||
-                    selectedMarketIncompatible ||
-                    (installSourceMode === "custom" && !customInstallConfirmed)
-                  }
-                >
-                  {installBusy
-                    ? "安装中"
-                    : selectedMarketIncompatible
-                      ? "请先升级客户端"
-                      : "安装应用"}
-                </button>
-              </>
-            )}
+            <div className="install-action-context">
+              {installSourceMode === "market" ? (
+                selectedMarket ? (
+                  <>
+                    <strong>{selectedMarket.name}</strong>
+                    <span>{selectedMarket.version} · {selectedMarket.capability}</span>
+                  </>
+                ) : (
+                  <span>请选择一个应用后安装</span>
+                )
+              ) : (
+                <>
+                  <strong>自定义来源</strong>
+                  <span>仅安装你已检查并信任的应用</span>
+                </>
+              )}
+            </div>
+            <button
+              className="primary install-primary-action"
+              onClick={() => void installLocalApp()}
+              disabled={
+                installBusy ||
+                (installSourceMode === "market" && (!selectedMarket || selectedMarketIncompatible)) ||
+                (installSourceMode === "custom" && (!installSource.trim() || !customInstallConfirmed))
+              }
+            >
+              {installBusy
+                ? "正在安装…"
+                : selectedMarketIncompatible
+                  ? "请先升级客户端"
+                  : installSourceMode === "market" && selectedMarket
+                    ? `安装 ${selectedMarket.name}`
+                    : "安装应用"}
+            </button>
           </div>
         </section>
       </div>
@@ -5279,9 +5431,11 @@ function App() {
             <button
               className="primary button-with-icon"
               onClick={() => {
-                setInstallSourceMode("choose");
+                setInstallSourceMode("market");
+                setMarketAppQuery("");
                 setCustomInstallConfirmed(false);
                 setInstallPanelOpen(true);
+                void refreshMarketConnectorApps();
               }}
             >
               <Plus size={16} strokeWidth={2} aria-hidden="true" />

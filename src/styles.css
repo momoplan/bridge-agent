@@ -997,13 +997,14 @@ select:focus {
 }
 
 .install-panel {
-  width: min(720px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
-  overflow: auto;
+  width: min(960px, calc(100vw - 48px));
+  height: min(720px, calc(100vh - 48px));
+  min-height: 520px;
+  overflow: hidden;
   display: grid;
-  gap: 18px;
-  padding: 22px;
-  border-radius: 8px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 0;
+  border-radius: 14px;
   background: var(--panel-strong);
   border: 1px solid var(--line);
   box-shadow: 0 28px 80px rgba(30, 42, 68, 0.2);
@@ -1013,60 +1014,424 @@ select:focus {
 .install-panel-actions {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
-  align-items: flex-start;
+  gap: 18px;
+  align-items: center;
+  padding: 18px 22px;
+  background: var(--panel-strong);
+}
+
+.install-panel-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.install-panel-title,
+.install-panel-head-actions,
+.market-detail-hero,
+.market-detail-title-row {
+  display: flex;
+  align-items: center;
+}
+
+.install-panel-title {
+  min-width: 0;
+  gap: 12px;
+}
+
+.install-panel-title-icon {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--accent);
+}
+
+.install-panel-title-icon.custom {
+  background: rgba(217, 119, 6, 0.1);
+  color: #b45309;
 }
 
 .install-panel-head h3 {
   margin: 0;
-  font-size: 24px;
+  font-size: 18px;
 }
 
-.market-app-grid {
+.install-panel-head p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.install-panel-head-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 0;
+}
+
+.install-panel-close {
+  border-color: transparent;
+}
+
+.install-panel-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.market-browser {
   display: grid;
-  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.market-toolbar {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.market-toolbar > span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.market-search {
+  position: relative;
+  display: block;
+  width: min(390px, 100%);
+}
+
+.market-search svg {
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  z-index: 1;
+  color: var(--muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.market-search input {
+  height: 36px;
+  padding: 7px 11px 7px 34px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+}
+
+.market-browser-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 38%) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.market-app-list {
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: rgba(248, 250, 252, 0.58);
 }
 
 .market-app-card {
   display: grid;
-  gap: 7px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 11px;
   width: 100%;
-  padding: 14px;
+  min-height: 0;
+  padding: 11px;
   text-align: left;
-  border: 1px solid rgba(30, 42, 68, 0.1);
-  border-radius: 8px;
-  background: rgba(246, 247, 249, 0.9);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 
-.market-app-card.active {
-  border-color: rgba(22, 163, 167, 0.45);
-  background: rgba(22, 163, 167, 0.08);
+.market-app-card + .market-app-card {
+  margin-top: 4px;
+}
+
+.market-app-card:hover {
+  border-color: var(--line);
+  background: var(--panel-strong);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+  transform: none;
+}
+
+.market-app-card.active,
+.market-app-card.active:hover {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.08);
+  box-shadow: none;
 }
 
 .market-app-card.incompatible {
-  border-color: #e5b95c;
-  background: #fffaf0;
+  opacity: 0.76;
 }
 
-.market-app-card span,
-.market-app-card small,
+.market-app-icon,
+.market-detail-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #2563eb, #4f46e5);
+  color: white !important;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 5px 14px rgba(37, 99, 235, 0.2);
+}
+
+.market-app-icon {
+  width: 42px;
+  height: 42px;
+  font-size: 16px;
+}
+
+.market-app-card-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.market-app-card-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--text) !important;
+}
+
+.market-app-card-title strong,
+.market-app-card-copy > span,
+.market-app-card-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-app-card-title em {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.market-app-card-copy > span,
+.market-app-card-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.market-list-state,
+.market-detail-empty {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  min-height: 220px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.market-list-state strong,
+.market-detail-empty strong {
+  margin-top: 10px;
+  color: var(--text);
+}
+
+.market-list-state span,
+.market-detail-empty span {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.market-list-state button {
+  margin-top: 14px;
+}
+
+.market-list-state.error svg {
+  color: var(--danger);
+}
+
+.market-app-detail {
+  min-width: 0;
+  min-height: 0;
+  padding: 26px;
+  overflow: auto;
+}
+
+.market-detail-hero {
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.market-detail-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  font-size: 25px;
+}
+
+.market-detail-hero > div {
+  min-width: 0;
+}
+
+.market-detail-title-row {
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.market-detail-title-row h4 {
+  margin: 2px 0 0;
+  font-size: 21px;
+}
+
+.market-detail-hero p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.market-verified-badge {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(22, 163, 74, 0.1);
+  color: #15803d;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.market-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 24px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.market-detail-meta > div {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+}
+
+.market-detail-meta > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.market-detail-meta span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.market-detail-meta strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.market-permission-card,
+.install-risk-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.market-permission-card > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.market-permission-card.incompatible,
+.install-risk-note {
+  border-color: rgba(217, 119, 6, 0.22);
+  background: rgba(217, 119, 6, 0.07);
+}
+
+.market-permission-card.incompatible > svg,
+.install-risk-note > svg {
+  flex: 0 0 auto;
+  color: #b45309;
+}
+
+.market-permission-card p,
 .install-risk-note span {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.market-requirements {
+  margin-top: 22px;
+}
+
+.market-requirements > strong {
+  font-size: 13px;
+}
+
+.market-requirements > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.market-requirements span {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.custom-install-view {
+  padding: 34px;
+  background: rgba(248, 250, 252, 0.5);
+}
+
+.custom-install-form {
+  display: grid;
+  gap: 20px;
+  width: min(680px, 100%);
+  margin: 0 auto;
+}
+
+.custom-install-intro strong {
+  font-size: 17px;
+}
+
+.custom-install-intro p {
+  margin: 6px 0 0;
   color: var(--muted);
   line-height: 1.5;
 }
 
-.install-risk-note {
-  display: grid;
-  gap: 5px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: rgba(155, 103, 0, 0.08);
-  border: 1px solid rgba(155, 103, 0, 0.14);
-}
-
-.install-risk-note.incompatible {
-  border-color: #e5b95c;
-  background: #fff7e6;
+.custom-install-view .install-risk-note {
+  margin: 0;
 }
 
 .check-row {
@@ -1084,32 +1449,41 @@ select:focus {
   margin-top: 3px;
 }
 
-.install-choice-grid {
+.custom-trust-confirmation {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.install-panel-actions {
+  min-height: 72px;
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.04);
+}
+
+.install-action-context {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  min-width: 0;
+  gap: 3px;
 }
 
-.install-choice-card {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  min-height: 128px;
-  padding: 18px;
-  text-align: left;
-  border: 1px solid rgba(30, 42, 68, 0.1);
-  border-radius: 8px;
-  background: rgba(246, 247, 249, 0.9);
+.install-action-context strong,
+.install-action-context span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.install-choice-card:hover {
-  border-color: rgba(22, 163, 167, 0.45);
-  background: rgba(22, 163, 167, 0.08);
-}
-
-.install-choice-card span {
+.install-action-context span {
   color: var(--muted);
-  line-height: 1.5;
+  font-size: 12px;
+}
+
+.install-primary-action {
+  flex: 0 0 auto;
+  min-width: 150px;
 }
 
 .method-topline {
