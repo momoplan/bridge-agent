@@ -50,5 +50,6 @@ describe("Windows signing tool download", () => {
     expect(windowsTauriConfig.bundle.windows.wix.upgradeCode).toBe(
       "94895101-CD67-53B8-BB30-F95026802DF2",
     );
+    expect(windowsTauriConfig.bundle.windows.wix.language).toBe("zh-CN");
   });
 });

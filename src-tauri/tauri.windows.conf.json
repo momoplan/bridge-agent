@@ -8,6 +8,7 @@
       },
       "wix": {
         "upgradeCode": "94895101-CD67-53B8-BB30-F95026802DF2",
+        "language": "zh-CN",
         "fragmentPaths": [
           "wix/bridge-agent-windows-runtime.wxs"
         ],

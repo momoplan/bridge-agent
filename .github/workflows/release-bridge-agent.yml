@@ -719,9 +719,9 @@ jobs:
             Windows)
               bundle_dir="src-tauri/target/release/bundle/msi"
               normalize_one "Windows msi" \
-                "$bundle_dir/Baijimu_${version}_x64_en-US.msi" \
+                "$bundle_dir/Baijimu_${version}_x64_zh-CN.msi" \
                 "$bundle_dir"/*.msi
-              test -s "$bundle_dir/Baijimu_${version}_x64_en-US.msi.sig"
+              test -s "$bundle_dir/Baijimu_${version}_x64_zh-CN.msi.sig"
               ;;
             Linux)
               appimage_dir="src-tauri/target/release/bundle/appimage"
