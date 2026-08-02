@@ -59,6 +59,25 @@ describe("Windows signing tool download", () => {
     expect(workflow).toContain("Windows signing diagnostics:");
   });
 
+  it("pins an Authenticode metadata parser for the Chinese program name", () => {
+    const workflow = readFileSync(
+      ".github/workflows/release-bridge-agent.yml",
+      "utf8",
+    );
+
+    expect(workflow).toContain(
+      "https://github.com/mtrojnar/osslsigncode/releases/download/2.14/osslsigncode-2.14-windows-x64-mingw.zip",
+    );
+    expect(workflow).toContain(
+      "9a1722aaf62a27852c4eb9c35749a0248065052d0ae0a93d4ed6bb49def027f2",
+    );
+    expect(workflow).toContain("OSSLSIGNCODE_PATH");
+    expect(workflow).toContain("Text description:\\s*百积木");
+    expect(workflow).not.toContain(
+      "signatureDetails -notmatch '(?m)^\\s*Description:",
+    );
+  });
+
   it("uses the canonical Chinese product name while preserving the MSI upgrade identity", () => {
     const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
     const windowsTauriConfig = JSON.parse(
