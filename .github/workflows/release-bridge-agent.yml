@@ -424,6 +424,40 @@ jobs:
             Pop-Location
           }
 
+          $metadataVerifierZipPath = Join-Path $env:RUNNER_TEMP "osslsigncode.zip"
+          $metadataVerifierExtractPath = Join-Path $env:RUNNER_TEMP "osslsigncode"
+          Invoke-WebRequest `
+            -Uri "https://github.com/mtrojnar/osslsigncode/releases/download/2.14/osslsigncode-2.14-windows-x64-mingw.zip" `
+            -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GitHub-Actions" `
+            -MaximumRetryCount 3 `
+            -RetryIntervalSec 5 `
+            -OutFile $metadataVerifierZipPath
+          $expectedMetadataVerifierSha256 = "9a1722aaf62a27852c4eb9c35749a0248065052d0ae0a93d4ed6bb49def027f2"
+          $actualMetadataVerifierSha256 = (
+            Get-FileHash -Algorithm SHA256 -Path $metadataVerifierZipPath
+          ).Hash.ToLowerInvariant()
+          if ($actualMetadataVerifierSha256 -ne $expectedMetadataVerifierSha256) {
+            throw "osslsigncode archive checksum mismatch: $actualMetadataVerifierSha256"
+          }
+          Expand-Archive `
+            -Force `
+            -Path $metadataVerifierZipPath `
+            -DestinationPath $metadataVerifierExtractPath
+          $metadataVerifier = Get-ChildItem `
+            -Path $metadataVerifierExtractPath `
+            -Filter "osslsigncode.exe" `
+            -Recurse `
+            -File | Select-Object -First 1
+          if (-not $metadataVerifier) {
+            throw "Unable to locate osslsigncode.exe"
+          }
+          "OSSLSIGNCODE_PATH=$($metadataVerifier.FullName)" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $metadataVerifier.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "osslsigncode version check failed with exit code $LASTEXITCODE"
+          }
+
       - name: Prepare Apple notarization credentials
         if: runner.os == 'macOS'
         env:
@@ -802,6 +836,12 @@ jobs:
           if (-not $signtool) {
             throw "signtool.exe was not found"
           }
+          if (
+            [string]::IsNullOrWhiteSpace($env:OSSLSIGNCODE_PATH) -or
+            -not (Test-Path -LiteralPath $env:OSSLSIGNCODE_PATH)
+          ) {
+            throw "Pinned osslsigncode metadata verifier was not found"
+          }
 
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
@@ -816,7 +856,36 @@ jobs:
               throw "signtool verification failed for $($file.FullName)"
             }
             Write-Host $signatureDetails
-            if ($signatureDetails -notmatch '(?m)^\s*Description:\s*百积木\s*$') {
+
+            # signtool validates the Windows trust chain, digest, and timestamp,
+            # but its verify output does not expose SpcSpOpusInfo. Use the pinned
+            # osslsigncode parser to read that authenticated attribute directly.
+            $metadataStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $metadataStartInfo.FileName = $env:OSSLSIGNCODE_PATH
+            $metadataStartInfo.UseShellExecute = $false
+            $metadataStartInfo.CreateNoWindow = $true
+            $metadataStartInfo.RedirectStandardOutput = $true
+            $metadataStartInfo.RedirectStandardError = $true
+            $metadataStartInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $metadataStartInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+            $metadataStartInfo.ArgumentList.Add("verify")
+            $metadataStartInfo.ArgumentList.Add("-in")
+            $metadataStartInfo.ArgumentList.Add($file.FullName)
+            $metadataProcess = [System.Diagnostics.Process]::new()
+            $metadataProcess.StartInfo = $metadataStartInfo
+            if (-not $metadataProcess.Start()) {
+              throw "Unable to start osslsigncode metadata verifier"
+            }
+            $metadataStdout = $metadataProcess.StandardOutput.ReadToEndAsync()
+            $metadataStderr = $metadataProcess.StandardError.ReadToEndAsync()
+            $metadataProcess.WaitForExit()
+            $metadataDetails = (
+              $metadataStdout.GetAwaiter().GetResult() + "`n" +
+              $metadataStderr.GetAwaiter().GetResult()
+            )
+            Write-Host $metadataDetails
+            Write-Host "osslsigncode metadata verifier exit code: $($metadataProcess.ExitCode)"
+            if ($metadataDetails -notmatch '(?m)^\s*Text description:\s*百积木\s*$') {
               throw "Authenticode description must be 百积木 for $($file.FullName)"
             }
           }
