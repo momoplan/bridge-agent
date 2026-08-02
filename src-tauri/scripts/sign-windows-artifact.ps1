@@ -43,8 +43,31 @@ $codeSignTool = if ([string]::IsNullOrWhiteSpace($env:CODESIGN_TOOL_PATH)) {
 } else {
     $env:CODESIGN_TOOL_PATH
 }
+$codeSignToolDirectory = Split-Path -Parent $codeSignTool
+$javaExecutable = Get-ChildItem `
+    -Path $codeSignToolDirectory `
+    -Filter "java.exe" `
+    -File `
+    -Recurse `
+    -ErrorAction Stop |
+    Where-Object { $_.FullName -match "\\jdk-[^\\]+\\bin\\java\.exe$" } |
+    Select-Object -First 1
+$codeSignToolJar = Get-ChildItem `
+    -Path (Join-Path $codeSignToolDirectory "jar") `
+    -Filter "code_sign_tool-*.jar" `
+    -File `
+    -ErrorAction Stop |
+    Select-Object -First 1
+if (-not $javaExecutable) {
+    throw "Unable to locate the Java runtime bundled with CodeSignTool"
+}
+if (-not $codeSignToolJar) {
+    throw "Unable to locate the CodeSignTool JAR"
+}
+
+$brandProgramName = ([string][char]0x767E) + ([char]0x79EF) + ([char]0x6728)
 $programName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION)) {
-    "百积木"
+    $brandProgramName
 } else {
     $env:WINDOWS_SIGNING_DESCRIPTION
 }
@@ -64,18 +87,33 @@ $arguments = @(
 )
 
 if ($resolvedFile.Path.EndsWith(".msi", [StringComparison]::OrdinalIgnoreCase)) {
+    if ($programName -ne $brandProgramName) {
+        throw "Windows MSI signing description must match the product brand"
+    }
     $arguments += "-program_name=$programName"
 }
 
-Push-Location (Split-Path -Parent $codeSignTool)
+# CodeSignTool.bat forwards arguments through cmd.exe. On an English Windows
+# code page that replaces the Chinese MSI program name with question marks
+# before Java can encode it as an Authenticode BMPString. Invoke the bundled
+# Java runtime directly so PowerShell passes the Unicode command line intact.
+# The tool still needs its installation directory as the working directory to
+# resolve the bundled configuration files.
+$codeSignToolExitCode = 0
+Push-Location $codeSignToolDirectory
 try {
-    & ".\CodeSignTool.bat" @arguments
+    & $javaExecutable.FullName `
+        "-Dfile.encoding=UTF-8" `
+        "-jar" `
+        $codeSignToolJar.FullName `
+        @arguments
+    $codeSignToolExitCode = $LASTEXITCODE
 } finally {
     Pop-Location
 }
 
-if ($LASTEXITCODE -ne 0) {
-    throw "CodeSignTool failed with exit code $LASTEXITCODE"
+if ($codeSignToolExitCode -ne 0) {
+    throw "CodeSignTool failed with exit code $codeSignToolExitCode"
 }
 
 $signedFile = Join-Path $outputDirectory (Split-Path -Leaf $resolvedFile.Path)

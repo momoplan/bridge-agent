@@ -97,6 +97,27 @@ $database = $installer.GetType().InvokeMember(
     @($resolvedMsi.Path, 0)
 )
 
+$productNameRow = Read-MsiRows `
+    -Database $database `
+    -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'ProductName'" `
+    -ColumnCount 1 |
+    Select-Object -First 1
+if (-not $productNameRow -or $productNameRow.Values[0] -cne "百积木") {
+    $actualProductName = if ($productNameRow) { $productNameRow.Values[0] } else { "<missing>" }
+    throw "MSI ProductName must be 百积木, found: $actualProductName"
+}
+
+$upgradeCodeRow = Read-MsiRows `
+    -Database $database `
+    -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'UpgradeCode'" `
+    -ColumnCount 1 |
+    Select-Object -First 1
+$expectedUpgradeCode = "{94895101-CD67-53B8-BB30-F95026802DF2}"
+if (-not $upgradeCodeRow -or $upgradeCodeRow.Values[0] -cne $expectedUpgradeCode) {
+    $actualUpgradeCode = if ($upgradeCodeRow) { $upgradeCodeRow.Values[0] } else { "<missing>" }
+    throw "MSI UpgradeCode must preserve the existing Windows upgrade identity $expectedUpgradeCode, found: $actualUpgradeCode"
+}
+
 $fileRows = Read-MsiRows `
     -Database $database `
     -Query 'SELECT `FileName` FROM `File`' `

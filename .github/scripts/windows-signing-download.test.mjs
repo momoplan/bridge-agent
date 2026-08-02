@@ -8,6 +8,10 @@ const workflowPaths = [
   ".github/workflows/release-codex-completion-local-app.yml",
 ];
 
+const bridgeSigningScriptPath = "src-tauri/scripts/sign-windows-artifact.ps1";
+const tauriConfigPath = "src-tauri/tauri.conf.json";
+const windowsTauriConfigPath = "src-tauri/tauri.windows.conf.json";
+
 describe("Windows signing tool download", () => {
   for (const workflowPath of workflowPaths) {
     it(`${workflowPath} uses the pinned archive with an accepted user agent and retries`, () => {
@@ -25,4 +29,26 @@ describe("Windows signing tool download", () => {
       );
     });
   }
+
+  it("passes the Chinese MSI program name directly to Java without cmd.exe", () => {
+    const signingScript = readFileSync(bridgeSigningScriptPath, "utf8");
+
+    expect(signingScript).toContain("$brandProgramName");
+    expect(signingScript).toContain('"-Dfile.encoding=UTF-8"');
+    expect(signingScript).toContain("& $javaExecutable.FullName");
+    expect(signingScript).not.toContain('& ".\\CodeSignTool.bat" @arguments');
+  });
+
+  it("uses the canonical Chinese product name while preserving the MSI upgrade identity", () => {
+    const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
+    const windowsTauriConfig = JSON.parse(
+      readFileSync(windowsTauriConfigPath, "utf8"),
+    );
+
+    expect(tauriConfig.productName).toBe("百积木");
+    expect(windowsTauriConfig).not.toHaveProperty("productName");
+    expect(windowsTauriConfig.bundle.windows.wix.upgradeCode).toBe(
+      "94895101-CD67-53B8-BB30-F95026802DF2",
+    );
+  });
 });

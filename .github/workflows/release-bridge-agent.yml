@@ -760,6 +760,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $diagnosticFiles = Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" -File -ErrorAction SilentlyContinue
           foreach ($file in $diagnosticFiles) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
@@ -772,11 +773,34 @@ jobs:
             throw "No Windows MSI artifacts found to verify"
           }
 
+          $signtool = Get-ChildItem `
+            -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter "signtool.exe" `
+            -File `
+            -Recurse `
+            -ErrorAction Stop |
+            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            throw "signtool.exe was not found"
+          }
+
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
             Write-Host "$($file.FullName): $($signature.Status)"
             if ($signature.Status -ne "Valid") {
               throw "Invalid Authenticode signature for $($file.FullName): $($signature.Status)"
+            }
+
+            $signatureDetails = (& $signtool.FullName verify /pa /v $file.FullName 2>&1) -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host $signatureDetails
+              throw "signtool verification failed for $($file.FullName)"
+            }
+            Write-Host $signatureDetails
+            if ($signatureDetails -notmatch '(?m)^\s*Description:\s*百积木\s*$') {
+              throw "Authenticode description must be 百积木 for $($file.FullName)"
             }
           }
 
@@ -893,7 +917,8 @@ jobs:
             }
           }
 
-          $desktopExecutable = "C:\Program Files\Baijimu\bridge-agent-desktop.exe"
+          $legacyDesktopExecutable = "C:\Program Files\Baijimu\bridge-agent-desktop.exe"
+          $desktopExecutable = "C:\Program Files\百积木\bridge-agent-desktop.exe"
           $legacyServiceExecutable = "C:\Program Files\Baijimu\bridge-agent-service.exe"
           $legacyDesktopBackup = Join-Path $env:RUNNER_TEMP "bridge-agent-desktop-0.2.22.exe"
           $configPath = "C:\ProgramData\Baijimu\BridgeAgent\agent-config.json"
@@ -932,11 +957,11 @@ jobs:
             Stop-Service -Name "BridgeAgent" -Force -ErrorAction Stop
             Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
               Stop-Process -Force -ErrorAction SilentlyContinue
-            if (-not (Test-Path -LiteralPath $desktopExecutable)) {
+            if (-not (Test-Path -LiteralPath $legacyDesktopExecutable)) {
               throw "The 0.2.22 desktop executable was not installed"
             }
             Move-Item `
-              -LiteralPath $desktopExecutable `
+              -LiteralPath $legacyDesktopExecutable `
               -Destination $legacyDesktopBackup `
               -Force
 
@@ -1007,6 +1032,9 @@ jobs:
             }
             if (-not (Test-Path -LiteralPath $desktopExecutable)) {
               throw "The upgraded desktop executable was not found"
+            }
+            if (Test-Path -LiteralPath $legacyDesktopExecutable) {
+              throw "The legacy English product directory remains after the upgrade"
             }
 
             $upgradeListener = Get-NetTCPConnection `
@@ -1126,6 +1154,9 @@ jobs:
           }
           if (Test-Path -LiteralPath "C:\Program Files\Baijimu\bridge-agent-service.exe") {
             throw "BridgeAgent service executable remained after MSI uninstall"
+          }
+          if (Test-Path -LiteralPath "C:\Program Files\百积木\bridge-agent-desktop.exe") {
+            throw "The 百积木 desktop executable remained after MSI uninstall"
           }
           Write-Host "Verified Windows desktop-owned MSI uninstall lifecycle"
 
