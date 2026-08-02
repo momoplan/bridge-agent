@@ -703,6 +703,80 @@ select:focus {
   line-height: 1.55;
 }
 
+.local-app-install-progress {
+  display: grid;
+  gap: 10px;
+  margin: 0 20px 18px;
+  padding: 14px;
+  border: 1px solid rgba(22, 163, 167, 0.2);
+  border-radius: 12px;
+  background: rgba(240, 253, 252, 0.72);
+}
+
+.local-app-install-progress.compact {
+  gap: 7px;
+  margin: 0;
+  padding: 10px;
+}
+
+.local-app-install-progress.failed {
+  border-color: rgba(220, 38, 38, 0.2);
+  background: rgba(254, 242, 242, 0.78);
+}
+
+.local-app-install-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.local-app-install-progress-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.local-app-install-progress-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.local-app-install-progress-track {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.local-app-install-progress-bar {
+  height: 100%;
+  min-width: 6px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transition: width 180ms ease;
+}
+
+.local-app-install-progress-bar.indeterminate {
+  position: absolute;
+  width: 38%;
+  min-width: 38%;
+  animation: app-update-progress-slide 1.2s ease-in-out infinite;
+}
+
+.local-app-install-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.local-app-install-progress.failed p {
+  color: #b42318;
+}
+
 .local-app-card-meta {
   justify-content: flex-start;
   align-self: end;
