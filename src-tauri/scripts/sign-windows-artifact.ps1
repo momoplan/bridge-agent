@@ -59,6 +59,7 @@ if ($missingVariables.Count -gt 0) {
 }
 
 $resolvedFile = Resolve-Path -LiteralPath $FilePath
+$isMsi = $resolvedFile.Path.EndsWith(".msi", [StringComparison]::OrdinalIgnoreCase)
 $normalizedFilePath = $resolvedFile.Path -replace '/', '\'
 if (
     $normalizedFilePath -match "\\target\\release\\wix\\" -and
@@ -94,6 +95,8 @@ if (-not $javaExecutable) {
 if (-not $codeSignToolJar) {
     throw "Unable to locate the CodeSignTool JAR"
 }
+$javaCompiler = Join-Path $javaExecutable.Directory.FullName "javac.exe"
+$unicodeLauncherSource = Join-Path $PSScriptRoot "CodeSignToolUnicodeLauncher.java"
 
 $brandProgramName = ([string][char]0x767E) + ([char]0x79EF) + ([char]0x6728)
 $programName = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_DESCRIPTION)) {
@@ -130,28 +133,67 @@ $arguments = @(
     "-output_dir_path=$outputDirectory"
 )
 
-if ($resolvedFile.Path.EndsWith(".msi", [StringComparison]::OrdinalIgnoreCase)) {
+if ($isMsi) {
     if ($programName -ne $brandProgramName) {
         throw "Windows MSI signing description must match the product brand"
     }
-    $arguments += "-program_name=$programName"
 }
 
-# CodeSignTool.bat forwards arguments through cmd.exe. On an English Windows
-# code page that replaces the Chinese MSI program name with question marks
-# before Java can encode it as an Authenticode BMPString. Invoke the bundled
-# Java runtime directly so PowerShell passes the Unicode command line intact.
-# The tool still needs its installation directory as the working directory to
+# Windows PowerShell 5.1 and cmd.exe both replace the Chinese program name with
+# question marks before a native Java process receives its arguments. For MSI
+# signing, pass an ASCII Base64 value to a tiny launcher and decode it inside
+# the JVM before calling CodeSignTool.main. The vendor tool can then encode the
+# original Unicode value as an Authenticode BMPString. Other arguments are safe
+# ASCII values and continue to use the vendor JAR directly.
+$javaInvocationArguments = @(
+    "-Dfile.encoding=UTF-8",
+    "-jar",
+    $codeSignToolJar.FullName
+) + $arguments
+if ($isMsi) {
+    if (-not (Test-Path -LiteralPath $javaCompiler)) {
+        throw "Unable to locate the Java compiler bundled with CodeSignTool"
+    }
+    if (-not (Test-Path -LiteralPath $unicodeLauncherSource)) {
+        throw "Unable to locate the CodeSignTool Unicode launcher source"
+    }
+    $launcherClasses = Join-Path $workingDirectory "launcher-classes"
+    New-Item -ItemType Directory -Force -Path $launcherClasses | Out-Null
+    $compilerOutput = & $javaCompiler `
+        "-encoding" `
+        "US-ASCII" `
+        "-classpath" `
+        $codeSignToolJar.FullName `
+        "-d" `
+        $launcherClasses `
+        $unicodeLauncherSource 2>&1
+    $compilerExitCode = $LASTEXITCODE
+    foreach ($line in $compilerOutput) {
+        Write-Host (Protect-DiagnosticText -Text $line.ToString())
+    }
+    if ($compilerExitCode -ne 0) {
+        throw "CodeSignTool Unicode launcher compilation failed with exit code $compilerExitCode"
+    }
+
+    $programNameBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($programName))
+    $launcherClasspath = "$launcherClasses$([IO.Path]::PathSeparator)$($codeSignToolJar.FullName)"
+    $javaInvocationArguments = @(
+        "-Dfile.encoding=UTF-8",
+        "-classpath",
+        $launcherClasspath,
+        "CodeSignToolUnicodeLauncher",
+        "--unicode-program-name-base64=$programNameBase64"
+    ) + $arguments
+    Write-SigningDiagnostic "unicode_program_name_launcher=true"
+}
+
+# The tool needs its installation directory as the working directory to
 # resolve the bundled configuration files.
 $codeSignToolExitCode = 0
 try {
     Push-Location $codeSignToolDirectory
     try {
-        $codeSignToolOutput = & $javaExecutable.FullName `
-            "-Dfile.encoding=UTF-8" `
-            "-jar" `
-            $codeSignToolJar.FullName `
-            @arguments 2>&1
+        $codeSignToolOutput = & $javaExecutable.FullName @javaInvocationArguments 2>&1
         $codeSignToolExitCode = $LASTEXITCODE
     } finally {
         Pop-Location

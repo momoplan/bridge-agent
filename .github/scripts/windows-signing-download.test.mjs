@@ -9,6 +9,8 @@ const workflowPaths = [
 ];
 
 const bridgeSigningScriptPath = "src-tauri/scripts/sign-windows-artifact.ps1";
+const unicodeLauncherPath =
+  "src-tauri/scripts/CodeSignToolUnicodeLauncher.java";
 const tauriConfigPath = "src-tauri/tauri.conf.json";
 const windowsTauriConfigPath = "src-tauri/tauri.windows.conf.json";
 
@@ -30,12 +32,21 @@ describe("Windows signing tool download", () => {
     });
   }
 
-  it("passes the Chinese MSI program name directly to Java without cmd.exe", () => {
+  it("reconstructs the Chinese MSI program name inside Java without cmd.exe", () => {
     const signingScript = readFileSync(bridgeSigningScriptPath, "utf8");
+    const unicodeLauncher = readFileSync(unicodeLauncherPath, "utf8");
 
     expect(signingScript).toContain("$brandProgramName");
     expect(signingScript).toContain('"-Dfile.encoding=UTF-8"');
     expect(signingScript).toContain("& $javaExecutable.FullName");
+    expect(signingScript).toContain("[Convert]::ToBase64String");
+    expect(signingScript).toContain("CodeSignToolUnicodeLauncher");
+    expect(signingScript).not.toContain(
+      '$arguments += "-program_name=$programName"',
+    );
+    expect(unicodeLauncher).toContain("Base64.getDecoder().decode");
+    expect(unicodeLauncher).toContain("StandardCharsets.UTF_8");
+    expect(unicodeLauncher).toContain('"-program_name=" + programName');
     expect(signingScript).toContain("$stagedInputFile");
     expect(signingScript).toContain("bridge-agent-signing-input");
     expect(signingScript).toContain("$unsignedBackupFile");
