@@ -38,6 +38,7 @@ const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const RELAY_CONNECT_TIMEOUT_SECS: u64 = 15;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
 const LOCAL_APP_EVENT_RETRY_INTERVAL_SECS: u64 = 30;
+const LOCAL_EVENT_SERVER_RETRY_INTERVAL_SECS: u64 = 2;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
 const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
@@ -231,15 +232,6 @@ impl AgentRuntimeManager {
         let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
         let event_outbox = EventOutbox::new(&config_base_dir)?;
-        let event_server = LocalEventServer::bind(
-            &config,
-            config_path.to_path_buf(),
-            Arc::clone(&registry),
-            event_tx,
-            apply_tx.clone(),
-            audit_tx,
-        )
-        .await?;
         let snapshot = RuntimeSnapshot {
             revision: 0,
             status: RuntimeStatus::Starting,
@@ -271,6 +263,10 @@ impl AgentRuntimeManager {
 
         let inner = Arc::clone(&self.inner);
         let config_path_string = config_path.display().to_string();
+        let event_server_config = config.clone();
+        let event_server_config_path = config_path.to_path_buf();
+        let event_server_registry = Arc::clone(&registry);
+        let event_server_apply_tx = apply_tx.clone();
         let task = tokio::spawn(async move {
             let _runtime_lock = runtime_lock;
             let system_sleep_prevention = match SystemSleepPrevention::acquire("百积木保持连接在线")
@@ -300,31 +296,19 @@ impl AgentRuntimeManager {
                     None
                 }
             };
-            let event_server_task = event_server.map(|server| {
-                let bind_addr = server.bind_addr();
-                let server_inner = Arc::clone(&inner);
-                let server_shutdown_rx = shutdown_rx.clone();
-                tokio::spawn(async move {
-                    push_log_entry(
-                        &server_inner,
-                        log_limit,
-                        "info",
-                        &format!("local event server listening on {bind_addr}"),
-                        LogMetadata::category("event_server").outcome("listening"),
-                    )
-                    .await;
-                    if let Err(err) = server.serve(server_shutdown_rx).await {
-                        push_log_entry(
-                            &server_inner,
-                            log_limit,
-                            "error",
-                            &format!("local event server stopped: {err:#}"),
-                            LogMetadata::category("event_server").outcome("stopped"),
-                        )
-                        .await;
-                    }
-                })
-            });
+            let event_server_task = tokio::spawn(
+                LocalEventServerRuntime {
+                    inner: Arc::clone(&inner),
+                    log_limit,
+                    config: event_server_config,
+                    config_path: event_server_config_path,
+                    registry: event_server_registry,
+                    event_tx,
+                    apply_tx: event_server_apply_tx,
+                    audit_tx,
+                }
+                .run(shutdown_rx.clone()),
+            );
             let runner = RuntimeRunner {
                 inner: Arc::clone(&inner),
                 log_limit,
@@ -351,12 +335,10 @@ impl AgentRuntimeManager {
                     .push_log("error", &format!("runtime stopped with error: {err:#}"))
                     .await;
             }
-            if let Some(event_server_task) = event_server_task {
-                if !event_server_task.is_finished() {
-                    event_server_task.abort();
-                }
-                let _ = event_server_task.await;
+            if !event_server_task.is_finished() {
+                event_server_task.abort();
             }
+            let _ = event_server_task.await;
             if system_sleep_prevention
                 .as_ref()
                 .is_some_and(SystemSleepPrevention::is_active)
@@ -576,6 +558,106 @@ impl AgentRuntimeManager {
 
     async fn push_log(&self, level: &str, message: &str, limit: usize) {
         push_log_entry(&self.inner, limit, level, message, LogMetadata::default()).await;
+    }
+}
+
+struct LocalEventServerRuntime {
+    inner: Arc<RuntimeInner>,
+    log_limit: usize,
+    config: AgentConfig,
+    config_path: PathBuf,
+    registry: Arc<RwLock<ServiceRegistry>>,
+    event_tx: mpsc::Sender<LocalEventEmitRequest>,
+    apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
+    audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
+}
+
+impl LocalEventServerRuntime {
+    async fn run(self, mut shutdown_rx: watch::Receiver<bool>) {
+        let mut previous_error = None::<String>;
+
+        loop {
+            if *shutdown_rx.borrow() {
+                return;
+            }
+
+            match LocalEventServer::bind(
+                &self.config,
+                self.config_path.clone(),
+                Arc::clone(&self.registry),
+                self.event_tx.clone(),
+                self.apply_tx.clone(),
+                self.audit_tx.clone(),
+            )
+            .await
+            {
+                Ok(None) => return,
+                Ok(Some(server)) => {
+                    let bind_addr = server.bind_addr();
+                    let recovered = previous_error.take().is_some();
+                    push_log_entry(
+                        &self.inner,
+                        self.log_limit,
+                        "info",
+                        &if recovered {
+                            format!("local event server recovered and is listening on {bind_addr}")
+                        } else {
+                            format!("local event server listening on {bind_addr}")
+                        },
+                        LogMetadata::category("event_server").outcome(if recovered {
+                            "recovered"
+                        } else {
+                            "listening"
+                        }),
+                    )
+                    .await;
+
+                    match server.serve(shutdown_rx.clone()).await {
+                        Ok(()) => return,
+                        Err(_) if *shutdown_rx.borrow() => return,
+                        Err(err) => {
+                            let detail = format!("{err:#}");
+                            push_log_entry(
+                                &self.inner,
+                                self.log_limit,
+                                "error",
+                                &format!(
+                                    "local event server stopped; relay remains active and the listener will retry: {detail}"
+                                ),
+                                LogMetadata::category("event_server").outcome("stopped"),
+                            )
+                            .await;
+                            previous_error = Some(detail);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let detail = format!("{err:#}");
+                    if previous_error.as_deref() != Some(detail.as_str()) {
+                        push_log_entry(
+                            &self.inner,
+                            self.log_limit,
+                            "warn",
+                            &format!(
+                                "local event server unavailable; relay remains active and binding will retry: {detail}"
+                            ),
+                            LogMetadata::category("event_server").outcome("bind_failed"),
+                        )
+                        .await;
+                    }
+                    previous_error = Some(detail);
+                }
+            }
+
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        return;
+                    }
+                }
+                _ = sleep(Duration::from_secs(LOCAL_EVENT_SERVER_RETRY_INTERVAL_SECS)) => {}
+            }
+        }
     }
 }
 
@@ -1857,11 +1939,15 @@ mod tests {
         terminate_runtime_lock_owner, wide_null_terminated_to_string, AgentRuntimeManager,
         RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
     };
-    use crate::config::AgentConfig;
+    use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use crate::logging::LogMetadata;
     use crate::protocol::AgentMessage;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
     use std::fs;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     #[test]
     fn build_url_injects_token() {
@@ -1912,6 +1998,158 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].message, "after clear");
         assert!(logs[0].sequence > cleared_through);
+    }
+
+    #[tokio::test]
+    async fn relay_stays_online_while_event_server_rebinds_and_forwards_events() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let occupied_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let event_addr = occupied_listener.local_addr().unwrap();
+        let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay_listener.local_addr().unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let capabilities =
+                tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+                    .await
+                    .expect("relay did not receive capabilities")
+                    .expect("relay websocket closed before capabilities")
+                    .unwrap();
+            let Message::Text(capabilities) = capabilities else {
+                panic!("expected text capabilities message");
+            };
+            let capabilities: Value = serde_json::from_str(capabilities.as_str()).unwrap();
+            assert_eq!(capabilities["type"], "capabilities");
+
+            socket
+                .send(Message::Text(
+                    json!({
+                        "type": "registered_ack",
+                        "agent_id": "dev_event_server_recovery",
+                        "workspace_id": 1,
+                        "connection_id": "connection-1",
+                        "registered_at_epoch_seconds": 1,
+                        "heartbeat_timeout_secs": 75
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            loop {
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(15), socket.next())
+                        .await
+                        .expect("relay did not receive forwarded event")
+                        .expect("relay websocket closed before forwarded event")
+                        .unwrap();
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                let message: Value = serde_json::from_str(message.as_str()).unwrap();
+                if message["type"] == "event_emitted" {
+                    return message;
+                }
+            }
+        });
+
+        let mut config = AgentConfig::example();
+        config.relay.url = format!("ws://{relay_addr}/ws/agent");
+        config.relay.agent_id = "dev_event_server_recovery".to_string();
+        config.relay.reconnect_secs = 1;
+        config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
+        config.runtime.event_server_bind = event_addr.to_string();
+        config.runtime.event_server_enabled = true;
+        config.runtime.service_registration_enabled = false;
+        config.services = vec![ServiceConfig {
+            name: "diagnostics".to_string(),
+            description: "Remote diagnostics events.".to_string(),
+            enabled: true,
+            health_check: None,
+            start_command: None,
+            stop_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "ready".to_string(),
+                description: "Diagnostics event is ready.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        }];
+
+        let manager = AgentRuntimeManager::new();
+        manager.start(config, &config_path).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if manager.snapshot().await.status == RuntimeStatus::Online {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("relay did not become online while event port was occupied");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if manager.logs(200).await.iter().any(|entry| {
+                    entry.metadata.category.as_deref() == Some("event_server")
+                        && entry.metadata.outcome.as_deref() == Some("bind_failed")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("event server bind failure was not reported");
+
+        drop(occupied_listener);
+        let client = reqwest::Client::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if client
+                    .get(format!("http://{event_addr}/healthz"))
+                    .send()
+                    .await
+                    .is_ok_and(|response| response.status().is_success())
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("local event server did not recover after the port was released");
+
+        let response = client
+            .post(format!("http://{event_addr}/v1/events"))
+            .json(&json!({
+                "service": "diagnostics",
+                "event": "ready",
+                "payload": {"source": "recovered-local-listener"}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+
+        let forwarded = relay_task.await.unwrap();
+        assert_eq!(forwarded["service"], "diagnostics");
+        assert_eq!(forwarded["event"], "ready");
+        assert_eq!(forwarded["payload"]["source"], "recovered-local-listener");
+
+        let logs = manager.logs(200).await;
+        assert!(logs.iter().any(|entry| {
+            entry.metadata.category.as_deref() == Some("event_server")
+                && entry.metadata.outcome.as_deref() == Some("recovered")
+        }));
+        manager.stop().await.unwrap();
     }
 
     #[test]
