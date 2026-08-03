@@ -1,0 +1,197 @@
+pipeline {
+    agent { label 'built-in' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 100, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'BRIDGE_REF', defaultValue: 'main', description: 'Bridge repository branch containing the WeCom local app release tooling')
+        string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact Bridge repository commit containing the WeCom release tooling')
+        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'WeCom local app source branch')
+        string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact WeCom local app commit to publish')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '1.0.2', description: 'WeCom local app version')
+        booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
+    }
+
+    stages {
+        stage('Validate release input') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+test -n "$BRIDGE_COMMIT"
+test -n "$CONNECTOR_COMMIT"
+test "$(git rev-parse "${BRIDGE_COMMIT}^{commit}")" = "$BRIDGE_COMMIT"
+test "$(git rev-parse HEAD)" = "$BRIDGE_COMMIT"
+case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
+if [ "$DRY_RUN" != true ]; then
+  test "$BRIDGE_REF" = main
+  test "$CONNECTOR_REF" = main
+fi
+'''
+                dir('connector-src') {
+                    deleteDir()
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.CONNECTOR_REF}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [[$class: 'CloneOption', depth: 1, noTags: false, shallow: true]],
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[
+                            credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
+                            url: 'https://gitee.com/zxflimit_admin/wecom-bridge-collector.git'
+                        ]]
+                    ])
+                }
+                sh '''#!/bin/bash
+set -euo pipefail
+test "$(git -C connector-src rev-parse HEAD)" = "$CONNECTOR_COMMIT"
+test "$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' connector-src/pyproject.toml | head -1)" = "$CONNECTOR_VERSION"
+test "$(node -p 'require("./connector-src/connector.json").version')" = "$CONNECTOR_VERSION"
+test "$(node -p 'require("./connector-src/connector.json").source.revision')" = "v${CONNECTOR_VERSION}"
+grep -Fx 'requires-python = ">=3.10"' connector-src/pyproject.toml
+! grep -Eq '^requires-python *= *"[^"]*, *<[^"]*"' connector-src/pyproject.toml
+'''
+            }
+        }
+
+        stage('Test release source') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
+cargo test --workspace
+npm ci
+npm run build
+node --test .github/scripts/wecom-local-app-release.test.mjs
+python3 -m venv connector-test-env
+connector-test-env/bin/python -m pip install --disable-pip-version-check -r connector-src/requirements.lock
+connector-test-env/bin/python -m pip install --disable-pip-version-check connector-src
+connector-test-env/bin/python -m unittest discover -s connector-src/tests
+'''
+            }
+        }
+
+        stage('Publish source refs') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
+                    usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+git config user.name "Baijimu Jenkins"
+git config user.email "jenkins@baijimu.com"
+set +x
+gitee_bridge="https://gitee.com/zxflimit_admin/bridge-agent.git"
+gitee_connector="https://gitee.com/zxflimit_admin/wecom-bridge-collector.git"
+askpass="$WORKSPACE/.release-git-askpass.sh"
+cat > "$askpass" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GIT_AUTH_USER" ;;
+  *Password*) printf '%s\n' "$GIT_AUTH_PASSWORD" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+chmod 700 "$askpass"
+export GIT_ASKPASS="$askpass"
+export GIT_TERMINAL_PROMPT=0
+
+publish_tag() {
+  remote="$1"
+  commit="$2"
+  tag="$3"
+  current="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR == 1 {print $1}')"
+  if [ -n "$current" ]; then
+    test "$current" = "$commit"
+  else
+    git push "$remote" "$commit:refs/tags/$tag"
+  fi
+}
+
+git -C connector-src config user.name "Baijimu Jenkins"
+git -C connector-src config user.email "jenkins@baijimu.com"
+export GIT_AUTH_USER="$GITEE_USER"
+export GIT_AUTH_PASSWORD="$GITEE_TOKEN"
+publish_tag "$gitee_connector" "$CONNECTOR_COMMIT" "v${CONNECTOR_VERSION}"
+publish_tag "$gitee_bridge" "$BRIDGE_COMMIT" "wecom-local-app-v${CONNECTOR_VERSION}"
+
+rm -f "$askpass"
+tools/release/publish-github-ref.sh momoplan/bridge-agent tag "wecom-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
+set -x
+'''
+                }
+            }
+        }
+
+        stage('Wait for WeCom local app release') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+tools/release/wait-github-workflow.sh momoplan/bridge-agent release-wecom-local-app.yml "wecom-local-app-v${CONNECTOR_VERSION}" "$BRIDGE_COMMIT"
+'''
+                }
+            }
+        }
+
+        stage('Publish local app market') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-momoplan-token',
+                    usernameVariable: 'GITHUB_USER',
+                    passwordVariable: 'GITHUB_TOKEN'
+                )]) {
+                    sh 'tools/release/publish-wecom-local-app-market.sh "$CONNECTOR_VERSION" connector-src/connector.json'
+                }
+            }
+        }
+
+        stage('Verify published local app') {
+            when {
+                expression { return !params.DRY_RUN }
+            }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/wecom-local-app-v${CONNECTOR_VERSION}" \
+  | jq -e --arg version "$CONNECTOR_VERSION" '
+      .draft == false and .prerelease == false and
+      ([.assets[].name] | index("baijimu-wecom-local-app-" + $version + "-macos-universal.zip") != null) and
+      ([.assets[].name] | index("baijimu-wecom-local-app-" + $version + "-windows-universal.zip") != null) and
+      ([.assets[].name] | index("baijimu-wecom-local-app-" + $version + "-linux-universal.zip") != null)'
+for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
+  curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/wecom?platform=${target}&hostVersion=0.2.39" \
+    | jq -e --arg version "$CONNECTOR_VERSION" '
+        ((.data // .).latestVersion.version == $version)
+        and ((.data // .).latestVersion.compatibility.compatible == true)
+        and (((.data // .).latestVersion.manifest.artifacts // []) | length == 3)'
+done
+'''
+            }
+        }
+    }
+
+    post {
+        always {
+            dir('connector-test-env') { deleteDir() }
+            archiveArtifacts artifacts: 'wecom-market-before-*.tsv', allowEmptyArchive: true
+        }
+    }
+}
