@@ -24,11 +24,11 @@ use bridge_agent::{
     load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
     reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
     save_config as save_agent_config, show_connector, start_connector, stop_connector,
-    sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
-    AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus,
-    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    sync_installed_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
+    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
+    ConnectorTrustLevel, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
+    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -3043,6 +3043,16 @@ async fn connector_local_app_is_healthy(
     config_path: &Path,
     connector_id: &str,
 ) -> Result<bool, String> {
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+    if !config
+        .local_apps
+        .iter()
+        .any(|app| app.connector_id == connector_id)
+    {
+        // The install record is the source of truth and local_apps is derived state. Rebuild a
+        // missing entry before deciding whether a running process must survive replacement.
+        sync_installed_connector(config_path, connector_id).map_err(|err| err.to_string())?;
+    }
     let status = connector_local_app_status(config_path, connector_id).await?;
     Ok(status.status == RegisteredServiceState::Healthy)
 }
@@ -5766,6 +5776,42 @@ mod tests {
         assert_eq!(format_byte_count(512), "512 B");
         assert_eq!(format_byte_count(1536), "1.5 KB");
         assert_eq!(format_byte_count(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn registered_desktop_commands_exactly_match_main_acl() {
+        let backend = include_str!("main.rs");
+        let permissions = include_str!("../permissions/main.toml");
+        let handler_section = backend
+            .split_once("tauri::generate_handler![")
+            .and_then(|(_, rest)| rest.split_once("])"))
+            .map(|(section, _)| section)
+            .expect("desktop backend must register a Tauri command handler");
+        let allow_section = permissions
+            .split_once("commands.allow = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(section, _)| section)
+            .expect("main ACL must define commands.allow");
+        let registered = handler_section
+            .lines()
+            .map(str::trim)
+            .map(|line| line.trim_end_matches(','))
+            .filter(|line| !line.is_empty())
+            .collect::<std::collections::BTreeSet<_>>();
+        let allowed = allow_section
+            .lines()
+            .map(str::trim)
+            .map(|line| line.trim_end_matches(',').trim_matches('"'))
+            .filter(|line| !line.is_empty())
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = registered.difference(&allowed).copied().collect::<Vec<_>>();
+        let stale = allowed.difference(&registered).copied().collect::<Vec<_>>();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "desktop command ACL drift: missing=[{}], stale=[{}]",
+            missing.join(", "),
+            stale.join(", ")
+        );
     }
 
     #[test]

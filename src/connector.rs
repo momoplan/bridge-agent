@@ -4460,6 +4460,22 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             .unwrap();
         assert!(!service.enabled);
         assert!(service.start_command.is_some());
+
+        let mut config = load_config(&config_path).unwrap();
+        config
+            .local_apps
+            .retain(|app| app.connector_id != "com.baijimu.connector.sync");
+        save_config(&config_path, &config).unwrap();
+
+        sync_installed_connector(&config_path, "com.baijimu.connector.sync").unwrap();
+        let config = load_config(&config_path).unwrap();
+        let restored = config
+            .local_apps
+            .iter()
+            .find(|app| app.connector_id == "com.baijimu.connector.sync")
+            .expect("installed connector must restore missing derived config");
+        assert!(restored.enabled);
+        assert!(restored.start_command.is_some());
     }
 
     #[test]

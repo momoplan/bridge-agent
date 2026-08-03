@@ -22,6 +22,7 @@ import {
   type LocalAppInstallTask,
   type LocalAppInstallTaskState
 } from "./local-app-install-tasks";
+import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
 
 type RuntimeStatus =
   | "stopped"
@@ -1618,10 +1619,14 @@ function App() {
     try {
       setError("");
       setRuntimeConflict(null);
-      const document = await invoke<ConfigDocument>("load_config");
+      const { apps, document } = await loadSynchronizedLocalAppCatalog(
+        () => invoke<ConnectorSummary[]>("list_connector_apps"),
+        () => invoke<ConfigDocument>("load_config")
+      );
+      setConnectorApps(apps);
       applyConfigDocument(document);
       await refreshPythonRuntime(document.config.runtime.python_path);
-      await Promise.all([refreshLocalAppUpdateData(), refreshConnectorApps()]);
+      await refreshLocalAppUpdateData();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
       handleCommandError(err);
@@ -1658,9 +1663,10 @@ function App() {
 
   async function refreshLocalAppCatalog(revision: number) {
     try {
-      // list_connector_apps first synchronizes installed manifests into the saved Agent config.
-      const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
-      const document = await invoke<ConfigDocument>("load_config");
+      const { apps, document } = await loadSynchronizedLocalAppCatalog(
+        () => invoke<ConnectorSummary[]>("list_connector_apps"),
+        () => invoke<ConfigDocument>("load_config")
+      );
       if (revision < localAppsChangeRevisionRef.current) {
         return;
       }
