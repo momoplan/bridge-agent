@@ -128,11 +128,10 @@ interface RuntimeConfig {
 }
 
 interface PythonRuntimeStatus {
-  requirement: string;
   configuredPath?: string | null;
   detectedPath?: string | null;
   version?: string | null;
-  compatible: boolean;
+  available: boolean;
   message: string;
 }
 
@@ -1644,8 +1643,7 @@ function App() {
       setPythonStatus(status);
     } catch (err) {
       setPythonStatus({
-        requirement: ">=3.12,<3.13",
-        compatible: false,
+        available: false,
         message: readError(err)
       });
     } finally {
@@ -1654,11 +1652,11 @@ function App() {
   }
 
   function useDetectedPython() {
-    if (!pythonStatus?.compatible || !pythonStatus.detectedPath) {
+    if (!pythonStatus?.available || !pythonStatus.detectedPath) {
       return;
     }
     updateRuntime("python_path", pythonStatus.detectedPath);
-    setMessage("已填入检测到的 Python 3.12 路径，请保存配置。");
+    setMessage("已填入检测到的 Python 路径，请保存配置。");
   }
 
   async function refreshLocalAppCatalog(revision: number) {
@@ -3332,9 +3330,9 @@ function App() {
         return (
           <div className="form-grid">
             <Field
-              label="Python 3.12 路径"
+              label="首选 Python 路径"
               wide
-              hint="微信、企业微信、微信发送、企业微信发送共用此解释器；客户端会为每个应用创建独立虚拟环境，不会向全局 Python 安装依赖。"
+              hint="可留空自动发现；此路径仅作为首选项。每个 Connector 通过 requires-python 声明自己的版本要求，并使用独立虚拟环境。"
             >
               <div className="python-runtime-fields">
               <input
@@ -3343,14 +3341,14 @@ function App() {
                   updateRuntime("python_path", emptyToNull(event.target.value));
                   setPythonStatus(null);
                 }}
-                placeholder="/opt/homebrew/bin/python3.12"
+                placeholder="例如 /opt/homebrew/bin/python3 或 C:\Python\python.exe"
               />
               <div className="python-runtime-panel">
-                <span className={`status-pill status-${pythonStatus?.compatible ? "online" : "stopped"}`}>
-                  {pythonStatus?.compatible ? "Python 可用" : "Python 未就绪"}
+                <span className={`status-pill status-${pythonStatus?.available ? "online" : "stopped"}`}>
+                  {pythonStatus?.available ? "Python 可用" : "Python 未就绪"}
                 </span>
                 <span>
-                  {pythonStatus?.message ?? "点击“检测 Python”检查当前路径或自动发现 Python 3.12。"}
+                  {pythonStatus?.message ?? "点击“检测 Python”检查首选路径或自动发现已安装的 Python。"}
                 </span>
               </div>
               <div className="python-runtime-actions">
@@ -3362,7 +3360,9 @@ function App() {
                 >
                   {pythonCheckBusy ? "检测中…" : "检测 Python"}
                 </button>
-                {!config.runtime.python_path && pythonStatus?.compatible && pythonStatus.detectedPath ? (
+                {pythonStatus?.available &&
+                pythonStatus.detectedPath &&
+                config.runtime.python_path !== pythonStatus.detectedPath ? (
                   <button type="button" className="secondary" onClick={useDetectedPython}>
                     使用检测路径
                   </button>
@@ -3371,10 +3371,10 @@ function App() {
                   type="button"
                   className="secondary"
                   onClick={() =>
-                    void openExternalUrl("https://www.python.org/downloads/release/python-31210/")
+                    void openExternalUrl("https://www.python.org/downloads/")
                   }
                 >
-                  安装 Python 3.12
+                  安装 Python
                 </button>
               </div>
               {pythonStatus?.detectedPath ? (
