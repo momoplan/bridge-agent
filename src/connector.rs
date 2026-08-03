@@ -5,6 +5,7 @@ use crate::config::{
 };
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
+use pep440_rs::{Version, VersionSpecifiers};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,13 +17,13 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
 const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
-const CONNECTOR_PYTHON_REQUIREMENT: &str = ">=3.12,<3.13";
 const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
 const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
 const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
@@ -41,11 +42,10 @@ const CONNECTOR_HOST_CAPABILITIES: &[&str] = &["connector.setup.v1", "connector.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PythonRuntimeStatus {
-    pub requirement: String,
     pub configured_path: Option<String>,
     pub detected_path: Option<String>,
     pub version: Option<String>,
-    pub compatible: bool,
+    pub available: bool,
     pub message: String,
 }
 
@@ -2363,19 +2363,34 @@ fn resolve_python_for_project(
     requires_python: Option<&str>,
     runtime_config: &RuntimeConfig,
 ) -> Result<String> {
-    let requirement = requires_python.unwrap_or(CONNECTOR_PYTHON_REQUIREMENT);
+    let requirement = requires_python
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let specifiers = requirement
+        .map(VersionSpecifiers::from_str)
+        .transpose()
+        .with_context(|| {
+            format!(
+                "invalid Connector requires-python `{}`",
+                requirement.unwrap_or_default()
+            )
+        })?;
     for candidate in python_candidates(runtime_config) {
-        if python_matches_requirement(&candidate, requires_python) {
+        if python_matches_requirement(&candidate, specifiers.as_ref()) {
             return Ok(candidate.display().to_string());
         }
     }
+    if let Some(requirement) = requirement {
+        bail!(
+            "failed to find a Python interpreter matching Connector requires-python `{requirement}`. Install a compatible Python version or set runtime.python_path to its absolute executable path.",
+        )
+    }
     bail!(
-        "failed to find a Python interpreter matching {requirement}. Install Python 3.12, then set runtime.python_path to its absolute executable path.",
+        "failed to find a usable Python interpreter. Install Python or set runtime.python_path to its absolute executable path.",
     )
 }
 
 pub fn inspect_python_runtime(runtime_config: &RuntimeConfig) -> PythonRuntimeStatus {
-    let requirement = CONNECTOR_PYTHON_REQUIREMENT.to_string();
     let configured_path = runtime_config
         .python_path
         .as_deref()
@@ -2387,39 +2402,50 @@ pub fn inspect_python_runtime(runtime_config: &RuntimeConfig) -> PythonRuntimeSt
         let Some(version) = python_version(&candidate) else {
             continue;
         };
-        let version_text = format!("{}.{}.{}", version.0, version.1, version.2);
+        let version_text = version.to_string();
         let detected_path = candidate
             .canonicalize()
             .unwrap_or(candidate)
             .display()
             .to_string();
-        let compatible = python_version_satisfies_requirement(version, &requirement);
-        let message = if compatible {
-            format!("已检测到 Python {version_text}，可供本地应用使用。")
+        let message = if configured_path.as_deref().is_some_and(|configured| {
+            paths_refer_to_same_file(Path::new(configured), Path::new(&detected_path))
+        }) {
+            format!(
+                "已检测到首选 Python {version_text}。安装 Connector 时会按其 requires-python 校验版本。"
+            )
+        } else if configured_path.is_some() {
+            format!(
+                "配置的 Python 不可用，已自动发现 Python {version_text}。安装 Connector 时会按其 requires-python 选择兼容版本。"
+            )
         } else {
             format!(
-                "当前解释器是 Python {version_text}，不满足 {requirement}；请安装并选择 Python 3.12。"
+                "已检测到 Python {version_text}。安装 Connector 时会按其 requires-python 选择兼容版本。"
             )
         };
         return PythonRuntimeStatus {
-            requirement,
             configured_path,
             detected_path: Some(detected_path),
             version: Some(version_text),
-            compatible,
+            available: true,
             message,
         };
     }
 
     PythonRuntimeStatus {
-        requirement,
         configured_path,
         detected_path: None,
         version: None,
-        compatible: false,
-        message: "未检测到可执行的 Python 3.12。请先安装 Python 3.12，再选择其可执行文件。"
+        available: false,
+        message: "未检测到可执行的 Python。需要 Python 的 Connector 会通过 requires-python 声明所需版本。"
             .to_string(),
     }
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
@@ -2431,7 +2457,6 @@ fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
         .filter(|value| !value.is_empty())
     {
         push_unique_path_entry(&mut candidates, PathBuf::from(value));
-        return candidates;
     }
     if let Some(value) = env::var("BRIDGE_AGENT_PYTHON")
         .ok()
@@ -2439,72 +2464,185 @@ fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
     {
         push_unique_path_entry(&mut candidates, PathBuf::from(value));
     }
-    for executable in ["python3.12", "python3", "python"] {
-        for path in find_commands_in_paths(executable) {
-            push_unique_path_entry(&mut candidates, path);
-        }
+
+    #[cfg(windows)]
+    for path in windows_python_launcher_candidates() {
+        push_unique_path_entry(&mut candidates, path);
     }
-    for path in [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/opt/anaconda3/bin/python",
-        "/usr/bin/python3",
+
+    for path in find_python_commands_in_paths() {
+        push_unique_path_entry(&mut candidates, path);
+    }
+
+    for directory in [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/anaconda3/bin"),
+        PathBuf::from("/usr/bin"),
     ] {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            push_unique_path_entry(&mut candidates, path);
-        }
+        append_python_commands_from_dir(&mut candidates, &directory);
+    }
+
+    #[cfg(windows)]
+    append_windows_python_installations(&mut candidates);
+
+    #[cfg(target_os = "macos")]
+    append_macos_python_installations(&mut candidates);
+
+    candidates
+}
+
+fn find_python_commands_in_paths() -> Vec<PathBuf> {
+    let mut search_paths = Vec::new();
+    if let Ok(path) = env::var("PATH") {
+        append_split_path(&mut search_paths, Some(&path));
+    }
+    if let Some(path) = login_shell_path() {
+        append_split_path(&mut search_paths, Some(&path));
+    }
+    let mut candidates = Vec::new();
+    for path in search_paths {
+        append_python_commands_from_dir(&mut candidates, &path);
     }
     candidates
 }
 
-fn find_commands_in_paths(executable: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(path) = env::var("PATH") {
-        append_split_path(&mut paths, Some(&path));
-    }
-    if let Some(path) = login_shell_path() {
-        append_split_path(&mut paths, Some(&path));
-    }
-    paths
-        .into_iter()
-        .map(|dir| dir.join(executable))
-        .filter(|candidate| candidate.is_file())
-        .collect()
-}
-
-fn python_matches_requirement(candidate: &Path, requires_python: Option<&str>) -> bool {
-    let Some(version) = python_version(candidate) else {
-        return false;
+fn append_python_commands_from_dir(candidates: &mut Vec<PathBuf>, directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
     };
-    python_version_satisfies_requirement(version, CONNECTOR_PYTHON_REQUIREMENT)
-        && requires_python
-            .map(|requirement| python_version_satisfies_requirement(version, requirement))
-            .unwrap_or(true)
+    let mut paths = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_python_executable_name)
+                && path.is_file()
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        push_unique_path_entry(candidates, path);
+    }
 }
 
-fn python_version_satisfies_requirement(version: (u32, u32, u32), requirement: &str) -> bool {
-    requirement.split(',').map(str::trim).all(|part| {
-        if let Some(required) = part.strip_prefix(">=").and_then(parse_python_version) {
-            return version >= required;
-        }
-        if let Some(required) = part.strip_prefix("<=").and_then(parse_python_version) {
-            return version <= required;
-        }
-        if let Some(required) = part.strip_prefix("==").and_then(parse_python_version) {
-            return version == required;
-        }
-        if let Some(required) = part.strip_prefix('>').and_then(parse_python_version) {
-            return version > required;
-        }
-        if let Some(required) = part.strip_prefix('<').and_then(parse_python_version) {
-            return version < required;
-        }
-        false
+fn is_python_executable_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let normalized = normalized.strip_suffix(".exe").unwrap_or(&normalized);
+    if matches!(normalized, "python" | "python3") {
+        return true;
+    }
+    normalized.strip_prefix("python").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.chars().any(|ch| ch.is_ascii_digit())
+            && suffix.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
     })
 }
 
-fn python_version(candidate: &Path) -> Option<(u32, u32, u32)> {
+#[cfg(windows)]
+fn windows_python_launcher_candidates() -> Vec<PathBuf> {
+    let Ok(output) = Command::new("py").arg("-0p").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_windows_python_launcher_paths(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(windows, test))]
+fn parse_windows_python_launcher_paths(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let remainder = line.split_once(char::is_whitespace)?.1.trim_start();
+            let remainder = remainder
+                .strip_prefix('*')
+                .unwrap_or(remainder)
+                .trim_start();
+            (!remainder.is_empty()).then(|| PathBuf::from(remainder))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn append_windows_python_installations(candidates: &mut Vec<PathBuf>) {
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        append_python_installation_subdirs(
+            candidates,
+            &PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("Python"),
+        );
+    }
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = env::var_os(variable) {
+            append_python_installation_subdirs(candidates, &PathBuf::from(program_files));
+        }
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn append_python_installation_subdirs(candidates: &mut Vec<PathBuf>, root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut directories = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("python"))
+        })
+        .collect::<Vec<_>>();
+    directories.sort();
+    for directory in directories {
+        append_python_commands_from_dir(candidates, &directory);
+        append_python_commands_from_dir(candidates, &directory.join("bin"));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_python_installations(candidates: &mut Vec<PathBuf>) {
+    let framework_versions = Path::new("/Library/Frameworks/Python.framework/Versions");
+    if let Ok(entries) = fs::read_dir(framework_versions) {
+        let mut directories = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        directories.sort();
+        for directory in directories {
+            append_python_commands_from_dir(candidates, &directory.join("bin"));
+        }
+    }
+    for root in ["/opt/homebrew/opt", "/usr/local/opt"] {
+        append_python_installation_subdirs(candidates, Path::new(root));
+    }
+}
+
+fn python_matches_requirement(
+    candidate: &Path,
+    requires_python: Option<&VersionSpecifiers>,
+) -> bool {
+    let Some(version) = python_version(candidate) else {
+        return false;
+    };
+    python_version_matches_requirement(&version, requires_python)
+}
+
+fn python_version_matches_requirement(
+    version: &Version,
+    requires_python: Option<&VersionSpecifiers>,
+) -> bool {
+    requires_python
+        .map(|requirement| requirement.contains(version))
+        .unwrap_or(true)
+}
+
+fn python_version(candidate: &Path) -> Option<Version> {
     let output = Command::new(candidate).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
@@ -2517,24 +2655,11 @@ fn python_version(candidate: &Path) -> Option<(u32, u32, u32)> {
     parse_python_version(&text)
 }
 
-fn parse_python_version(value: &str) -> Option<(u32, u32, u32)> {
+fn parse_python_version(value: &str) -> Option<Version> {
     let version = value
         .split_whitespace()
         .find(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))?;
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts
-        .next()
-        .and_then(|part| {
-            part.chars()
-                .take_while(|ch| ch.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0);
-    Some((major, minor, patch))
+    Version::from_str(version).ok()
 }
 
 fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Result<()> {
@@ -4387,20 +4512,71 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
 
     #[test]
     fn parses_python_version_requirements() {
-        assert_eq!(parse_python_version("Python 3.12.7"), Some((3, 12, 7)));
-        assert_eq!(parse_python_version("3.10"), Some((3, 10, 0)));
-        assert!(python_version_satisfies_requirement(
-            (3, 12, 7),
-            ">=3.12,<3.13"
+        let python_312 = parse_python_version("Python 3.12.7").unwrap();
+        let python_314 = parse_python_version("3.14.4").unwrap();
+        assert_eq!(python_312.to_string(), "3.12.7");
+        assert_eq!(parse_python_version("3.10").unwrap().to_string(), "3.10");
+        assert!(python_version_matches_requirement(&python_314, None));
+
+        let connector_312 = VersionSpecifiers::from_str(">=3.12,<3.13").unwrap();
+        assert!(python_version_matches_requirement(
+            &python_312,
+            Some(&connector_312)
         ));
-        assert!(!python_version_satisfies_requirement(
-            (3, 11, 9),
-            ">=3.12,<3.13"
+        assert!(!python_version_matches_requirement(
+            &python_314,
+            Some(&connector_312)
         ));
-        assert!(!python_version_satisfies_requirement(
-            (3, 13, 0),
-            ">=3.12,<3.13"
-        ));
+
+        let connector_314 = VersionSpecifiers::from_str(">=3.14").unwrap();
+        assert!(connector_314.contains(&python_314));
+
+        let compatible_release = VersionSpecifiers::from_str("~=3.12.0,!=3.12.5").unwrap();
+        assert!(compatible_release.contains(&python_312));
+        assert!(!compatible_release.contains(&Version::from_str("3.12.5").unwrap()));
+    }
+
+    #[test]
+    fn recognizes_versioned_python_executables_without_imposing_a_version() {
+        for name in [
+            "python",
+            "python3",
+            "python3.9",
+            "python3.12",
+            "python3.14.exe",
+            "Python4.0.EXE",
+        ] {
+            assert!(is_python_executable_name(name), "expected {name} to match");
+        }
+        for name in [
+            "pythonw.exe",
+            "python-config",
+            "python3.12-config",
+            "ipython",
+        ] {
+            assert!(
+                !is_python_executable_name(name),
+                "expected {name} not to match"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_all_windows_py_launcher_paths() {
+        let paths = parse_windows_python_launcher_paths(
+            " -V:3.14 *        C:\\Users\\50165\\AppData\\Local\\Programs\\Python\\Python314\\python.exe\r\n\
+             -V:3.12          C:\\Users\\Example User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\r\n",
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Users\50165\AppData\Local\Programs\Python\Python314\python.exe"),
+                PathBuf::from(
+                    r"C:\Users\Example User\AppData\Local\Programs\Python\Python312\python.exe"
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -4580,9 +4756,9 @@ bad-python-connector = "bad_python_connector.app:main"
             report.failures[0].connector_id,
             "com.baijimu.connector.bad-python"
         );
-        assert!(report.failures[0]
-            .error
-            .contains("failed to find a Python interpreter matching >=999.0"));
+        assert!(report.failures[0].error.contains(
+            "failed to find a Python interpreter matching Connector requires-python `>=999.0`"
+        ));
 
         let strict_error = sync_installed_connectors(&config_path).unwrap_err();
         assert!(strict_error
