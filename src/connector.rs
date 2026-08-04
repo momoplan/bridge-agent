@@ -15,10 +15,13 @@ use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
@@ -37,7 +40,22 @@ const CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_ASSET_UPLOA
 const DEFAULT_LOCAL_APP_EVENT_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-events";
 const DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-assets";
 pub(crate) const CONNECTOR_ASSET_UPLOAD_PERMISSION: &str = "assets.upload";
-const CONNECTOR_HOST_CAPABILITIES: &[&str] = &["connector.setup.v1", "connector.asset-upload.v1"];
+const HOST_MANAGED_PROCESS_MINIMUM_VERSION: &str = "0.2.40";
+const HOST_MANAGED_PROCESS_CAPABILITY: &str = "connector.process.host-managed.v1";
+const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
+    "connector.setup.v1",
+    "connector.asset-upload.v1",
+    HOST_MANAGED_PROCESS_CAPABILITY,
+];
+#[cfg(windows)]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn configure_connector_command(command: &mut Command) {
+    #[cfg(windows)]
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    let _ = command;
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +160,16 @@ pub struct ConnectorRuntime {
     pub stop_args: Vec<String>,
     #[serde(default = "default_connector_start_policy")]
     pub start_policy: String,
+    #[serde(default)]
+    pub process_ownership: ConnectorProcessOwnership,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorProcessOwnership {
+    #[default]
+    Connector,
+    Host,
 }
 
 fn default_connector_start_policy() -> String {
@@ -306,6 +334,7 @@ pub struct ConnectorSummary {
     pub ui: Option<ConnectorUi>,
     pub permissions: Vec<ConnectorPermission>,
     pub start_policy: String,
+    pub process_ownership: ConnectorProcessOwnership,
     pub method_names: Vec<String>,
     pub event_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
@@ -911,6 +940,16 @@ pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<Connect
     ensure_config_exists(config_path)?;
     sync_installed_connector(config_path, connector_id)?;
     let record = load_install_record(connector_id)?;
+    if record
+        .manifest
+        .runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.process_ownership == ConnectorProcessOwnership::Host)
+    {
+        bail!(
+            "connector `{connector_id}` declares runtime.processOwnership=host and must be started by the Bridge Agent desktop process supervisor"
+        );
+    }
     let config = load_config(config_path)?;
     let app = config
         .local_apps
@@ -1001,6 +1040,43 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
             .is_none_or(|command| command.trim().is_empty())
         {
             bail!("connector runtime.command cannot be empty");
+        }
+        if runtime.process_ownership == ConnectorProcessOwnership::Host {
+            if runtime.args.is_empty() {
+                bail!(
+                    "host-managed connector runtime.args must declare a foreground process command"
+                );
+            }
+            if runtime.stop_args.is_empty() {
+                bail!(
+                    "host-managed connector runtime.stopArgs must declare an idempotent graceful shutdown command"
+                );
+            }
+            let requirements = manifest.host_requirements.as_ref().context(
+                "host-managed connector requires hostRequirements with an explicit minimumVersion and capability",
+            )?;
+            let minimum_version = requirements
+                .minimum_version
+                .as_deref()
+                .context("host-managed connector hostRequirements.minimumVersion is required")?;
+            let minimum_version = semver::Version::parse(minimum_version).with_context(|| {
+                "host-managed connector hostRequirements.minimumVersion must be valid SemVer"
+            })?;
+            let contract_version = semver::Version::parse(HOST_MANAGED_PROCESS_MINIMUM_VERSION)?;
+            if minimum_version < contract_version {
+                bail!(
+                    "host-managed connector requires hostRequirements.minimumVersion >= {HOST_MANAGED_PROCESS_MINIMUM_VERSION}"
+                );
+            }
+            if !requirements
+                .capabilities
+                .iter()
+                .any(|capability| capability == HOST_MANAGED_PROCESS_CAPABILITY)
+            {
+                bail!(
+                    "host-managed connector requires host capability `{HOST_MANAGED_PROCESS_CAPABILITY}`"
+                );
+            }
         }
     } else {
         if manifest.services.is_empty() && manifest.service_registration_files.is_empty() {
@@ -1617,7 +1693,9 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
   } |
   Select-Object -ExpandProperty ProcessId
 "#;
-    let output = Command::new("powershell")
+    let mut inspect = Command::new("powershell");
+    configure_connector_command(&mut inspect);
+    let output = inspect
         .args(["-NoProfile", "-Command", script])
         .env(
             "BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE",
@@ -1645,7 +1723,9 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
     pids.sort_unstable();
     pids.dedup();
     for pid in pids {
-        let taskkill = Command::new("taskkill")
+        let mut terminate = Command::new("taskkill");
+        configure_connector_command(&mut terminate);
+        let taskkill = terminate
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output()
             .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
@@ -2274,7 +2354,9 @@ fn create_python_env(env_path: &Path, base_python: &str) -> Result<()> {
         .parent()
         .with_context(|| format!("failed to resolve parent for {}", env_path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let output = Command::new(base_python)
+    let mut create = Command::new(base_python);
+    configure_connector_command(&mut create);
+    let output = create
         .args(["-m", "venv"])
         .arg(env_path)
         .output()
@@ -2293,7 +2375,9 @@ fn create_python_env(env_path: &Path, base_python: &str) -> Result<()> {
 }
 
 fn python_env_uses_base_interpreter(env_python: &Path, base_python: &Path) -> bool {
-    let output = Command::new(env_python)
+    let mut inspect = Command::new(env_python);
+    configure_connector_command(&mut inspect);
+    let output = inspect
         .args([
             "-I",
             "-c",
@@ -2541,7 +2625,9 @@ fn is_python_executable_name(name: &str) -> bool {
 
 #[cfg(windows)]
 fn windows_python_launcher_candidates() -> Vec<PathBuf> {
-    let Ok(output) = Command::new("py").arg("-0p").output() else {
+    let mut launcher = Command::new("py");
+    configure_connector_command(&mut launcher);
+    let Ok(output) = launcher.arg("-0p").output() else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -2643,7 +2729,9 @@ fn python_version_matches_requirement(
 }
 
 fn python_version(candidate: &Path) -> Option<Version> {
-    let output = Command::new(candidate).arg("--version").output().ok()?;
+    let mut command = Command::new(candidate);
+    configure_connector_command(&mut command);
+    let output = command.arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2665,7 +2753,9 @@ fn parse_python_version(value: &str) -> Option<Version> {
 fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Result<()> {
     let lock_path = package_path.join("requirements.lock");
     if lock_path.is_file() {
-        let output = Command::new(python)
+        let mut install = Command::new(python);
+        configure_connector_command(&mut install);
+        let output = install
             .args([
                 "-I",
                 "-m",
@@ -2696,7 +2786,9 @@ fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Re
     if dependencies.is_empty() {
         return Ok(());
     }
-    let output = Command::new(python)
+    let mut install = Command::new(python);
+    configure_connector_command(&mut install);
+    let output = install
         .args(["-I", "-m", "pip", "install", "--disable-pip-version-check"])
         .args(&dependencies)
         .output()
@@ -3062,28 +3154,78 @@ fn run_start_command(
             command,
             cwd,
             env,
-            timeout_secs: _,
+            timeout_secs,
         } => {
             if command.is_empty() {
                 bail!("lifecycle command for local app `{connector_id}` is empty");
             }
             let mut child = Command::new(&command[0]);
+            configure_connector_command(&mut child);
             child.args(&command[1..]);
             if let Some(cwd) = cwd.as_deref().filter(|value| !value.trim().is_empty()) {
                 child.current_dir(cwd);
             }
             child.envs(env);
-            let output = child.output().with_context(|| {
+            child.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = child.spawn().with_context(|| {
                 format!("failed to run lifecycle command for local app `{connector_id}`")
             })?;
+            let deadline = Instant::now() + Duration::from_secs(timeout_secs.unwrap_or(20).max(1));
+            let (status, timed_out) = loop {
+                if let Some(status) = child.try_wait().with_context(|| {
+                    format!("failed to wait for local app `{connector_id}` lifecycle command")
+                })? {
+                    break (status, false);
+                }
+                if Instant::now() >= deadline {
+                    terminate_lifecycle_process_tree(&mut child);
+                    let status = child.wait().with_context(|| {
+                        format!("failed to reap timed out local app `{connector_id}` command")
+                    })?;
+                    break (status, true);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)?;
+            }
+            if timed_out {
+                stderr.extend_from_slice(
+                    format!(
+                        "\nlifecycle command timed out after {} seconds",
+                        timeout_secs.unwrap_or(20).max(1)
+                    )
+                    .as_bytes(),
+                );
+            }
             Ok(ConnectorLifecycleResult {
                 connector_id: connector_id.to_string(),
                 configured: true,
-                exit_code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: if timed_out { None } else { status.code() },
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).to_string(),
             })
         }
+    }
+}
+
+fn terminate_lifecycle_process_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let mut terminate = Command::new("taskkill.exe");
+        configure_connector_command(&mut terminate);
+        let _ = terminate
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
     }
 }
 
@@ -3099,6 +3241,12 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .as_ref()
         .map(|runtime| runtime.start_policy.clone())
         .unwrap_or_else(default_connector_start_policy);
+    let process_ownership = record
+        .manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.process_ownership)
+        .unwrap_or_default();
     let registrations =
         load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)
             .unwrap_or_default();
@@ -3126,6 +3274,7 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         ui: record.manifest.ui,
         permissions: record.manifest.permissions,
         start_policy,
+        process_ownership,
         method_names,
         event_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
@@ -3446,6 +3595,83 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("connector.unknown.v1"));
+    }
+
+    #[test]
+    fn connector_manifest_validates_host_managed_process_contract() {
+        let manifest = |stop_args: Value| {
+            serde_json::from_value::<ConnectorManifest>(json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-managed",
+                "name": "Host Managed Connector",
+                "version": "1.0.0",
+                "runtime": {
+                    "type": "process",
+                    "command": "host-managed-connector",
+                    "args": ["run"],
+                    "stopArgs": stop_args,
+                    "processOwnership": "host"
+                },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "hostRequirements": {
+                    "minimumVersion": env!("CARGO_PKG_VERSION"),
+                    "capabilities": ["connector.process.host-managed.v1"]
+                }
+            }))
+            .unwrap()
+        };
+
+        let valid = manifest(json!(["stop"]));
+        validate_manifest(&valid).unwrap();
+        assert_eq!(
+            valid.runtime.unwrap().process_ownership,
+            ConnectorProcessOwnership::Host
+        );
+
+        let missing_stop = manifest(json!([]));
+        assert!(validate_manifest(&missing_stop)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime.stopArgs"));
+    }
+
+    #[test]
+    fn host_managed_connector_start_requires_desktop_supervisor() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-start",
+                "name": "Host Start Connector",
+                "version": "1.0.0",
+                "runtime": {
+                    "type": "process",
+                    "command": "host-start-connector",
+                    "args": ["run"],
+                    "stopArgs": ["stop"],
+                    "processOwnership": "host"
+                },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "hostRequirements": {
+                    "minimumVersion": env!("CARGO_PKG_VERSION"),
+                    "capabilities": ["connector.process.host-managed.v1"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        install_connector_from_path(&source, &config_path, false).unwrap();
+
+        let error = start_connector("com.baijimu.connector.host-start", &config_path).unwrap_err();
+        assert!(error.to_string().contains("desktop process supervisor"));
     }
 
     #[test]

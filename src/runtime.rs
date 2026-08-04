@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{ErrorKind, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -44,6 +46,15 @@ const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_LOG_LIMIT: usize = 500;
 const RELAY_SEEN_EVENT_INTERVAL_MS: u64 = 5_000;
+#[cfg(windows)]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn hidden_windows_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    command
+}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1567,7 +1578,7 @@ fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
     let script = format!(
         "Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
     );
-    if let Ok(output) = std::process::Command::new("powershell")
+    if let Ok(output) = hidden_windows_command("powershell")
         .args(["-NoProfile", "-Command", &script])
         .output()
     {
@@ -1709,7 +1720,7 @@ fn wide_null_terminated_to_string(value: &[u16]) -> Option<String> {
 #[cfg(windows)]
 fn lookup_windows_tasklist_image_name(pid: u32) -> Option<String> {
     let filter = format!("PID eq {pid}");
-    let output = std::process::Command::new("tasklist")
+    let output = hidden_windows_command("tasklist")
         .args(["/FI", &filter, "/FO", "CSV", "/NH"])
         .output()
         .ok()?;
@@ -1838,7 +1849,7 @@ fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
 
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<()> {
-    let status = std::process::Command::new("taskkill")
+    let status = hidden_windows_command("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .status()
         .with_context(|| format!("failed to run taskkill for pid {pid}"))?;
@@ -1909,7 +1920,7 @@ fn process_is_running(pid: u32) -> bool {
     }
 
     let filter = format!("PID eq {pid}");
-    let Ok(output) = std::process::Command::new("tasklist")
+    let Ok(output) = hidden_windows_command("tasklist")
         .args(["/FI", &filter, "/FO", "CSV", "/NH"])
         .output()
     else {

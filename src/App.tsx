@@ -485,6 +485,7 @@ interface ConnectorSummary {
   ui?: ConnectorUi | null;
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
+  processOwnership: "connector" | "host";
   methodNames: string[];
   eventNames: string[];
   installedAtEpochMs: number;
@@ -5842,6 +5843,14 @@ function App() {
                     <InfoRow
                       label="启动策略"
                       value={app.connector.startPolicy === "manual" ? "用户授权后手动启动" : "自动启动"}
+                    />
+                    <InfoRow
+                      label="进程管理"
+                      value={
+                        app.connector.processOwnership === "host"
+                          ? "百积木宿主托管（停止时回收完整进程树）"
+                          : "应用自行管理"
+                      }
                     />
                   </>
                 ) : null}
