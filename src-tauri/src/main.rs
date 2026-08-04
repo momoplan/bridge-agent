@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -56,6 +57,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_window_state::StateFlags;
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
 
@@ -103,8 +105,10 @@ const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
 const QUIT_RUNNING_INSTANCE_ARG: &str = "--quit-running-instance";
+const AUTOSTART_BACKGROUND_ARG: &str = "--background-autostart";
 const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-state.json";
+const INTERACTIVE_RESTART_MARKER_FILE_NAME: &str = "bridge-agent-desktop-interactive-restart";
 const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
 const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
@@ -115,6 +119,70 @@ fn configure_desktop_command(command: &mut Command) {
     command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
     #[cfg(not(windows))]
     let _ = command;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopLaunchMode {
+    Interactive,
+    BackgroundAutostart,
+}
+
+impl DesktopLaunchMode {
+    fn from_args<I, S>(args: I, interactive_restart_requested: bool) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if !interactive_restart_requested
+            && args
+                .into_iter()
+                .any(|arg| arg.as_ref() == OsStr::new(AUTOSTART_BACKGROUND_ARG))
+        {
+            Self::BackgroundAutostart
+        } else {
+            Self::Interactive
+        }
+    }
+
+    fn should_show_main_window(self) -> bool {
+        matches!(self, Self::Interactive)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainWindowOpenReason {
+    InteractiveStartup,
+    SecondaryLaunch,
+    TrayMenu,
+    TrayIcon,
+    #[cfg(target_os = "macos")]
+    MacosReopen,
+}
+
+impl MainWindowOpenReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InteractiveStartup => "interactive_startup",
+            Self::SecondaryLaunch => "secondary_launch",
+            Self::TrayMenu => "tray_menu",
+            Self::TrayIcon => "tray_icon",
+            #[cfg(target_os = "macos")]
+            Self::MacosReopen => "macos_reopen",
+        }
+    }
+}
+
+fn desktop_window_state_flags() -> StateFlags {
+    StateFlags::SIZE
+        | StateFlags::POSITION
+        | StateFlags::MAXIMIZED
+        | StateFlags::DECORATIONS
+        | StateFlags::FULLSCREEN
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_restore_main_window_on_macos_reopen(has_visible_windows: bool) -> bool {
+    !has_visible_windows
 }
 
 struct DesktopState {
@@ -669,15 +737,30 @@ fn configure_desktop_autostart(
             "skipped",
             Some("开发构建不注册系统登录项".to_string()),
         ),
-        DesktopAutostartPolicy::EnableForDesktop => match app.autolaunch().is_enabled() {
-            Ok(true) => startup_health.set_component("autostart", "登录启动", "ready", None),
-            Ok(false) => match app.autolaunch().enable() {
+        DesktopAutostartPolicy::EnableForDesktop => {
+            let was_enabled = match app.autolaunch().is_enabled() {
+                Ok(enabled) => Some(enabled),
+                Err(err) => {
+                    diagnostics.warn(format!(
+                        "failed to inspect autostart before refreshing registration: {err:#}"
+                    ));
+                    None
+                }
+            };
+            match app.autolaunch().enable() {
                 Ok(()) => {
-                    diagnostics.info("official autostart integration enabled");
+                    diagnostics.info(format!(
+                        "official autostart integration {} with background launch argument",
+                        if was_enabled == Some(true) {
+                            "refreshed"
+                        } else {
+                            "enabled"
+                        }
+                    ));
                     startup_health.set_component("autostart", "登录启动", "ready", None);
                 }
                 Err(err) => {
-                    diagnostics.error(format!("failed to enable autostart: {err:#}"));
+                    diagnostics.error(format!("failed to register autostart: {err:#}"));
                     startup_health.set_component(
                         "autostart",
                         "登录启动",
@@ -685,17 +768,8 @@ fn configure_desktop_autostart(
                         Some(err.to_string()),
                     );
                 }
-            },
-            Err(err) => {
-                diagnostics.error(format!("failed to inspect autostart: {err:#}"));
-                startup_health.set_component(
-                    "autostart",
-                    "登录启动",
-                    "degraded",
-                    Some(err.to_string()),
-                );
             }
-        },
+        }
     }
 }
 
@@ -3734,6 +3808,7 @@ fn restart_in_normal_mode(
         .startup_health
         .diagnostics
         .info("normal mode restart requested from recovery UI");
+    request_interactive_restart(&state.config_path)?;
     app.restart();
 }
 
@@ -3910,6 +3985,9 @@ async fn install_app_update(
             downloaded_path: None,
         },
     );
+    request_interactive_restart(&state.config_path).map_err(|err| {
+        format!("更新已安装，但无法安排客户端以前台模式重启，请手动退出并重新打开百积木: {err}")
+    })?;
     let app_to_restart = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(800));
@@ -5064,27 +5142,33 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
     let icon = app.default_window_icon().cloned();
+    let menu_diagnostics = diagnostics.clone();
+    let tray_diagnostics = diagnostics.clone();
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("百积木")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            TRAY_MENU_SHOW => show_main_window(app, None),
+        .on_menu_event(move |app, event| match event.id().as_ref() {
+            TRAY_MENU_SHOW => {
+                show_main_window(app, Some(&menu_diagnostics), MainWindowOpenReason::TrayMenu)
+            }
             TRAY_MENU_QUIT => quit_app(app),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
+        .on_tray_icon_event(move |tray, event| {
+            if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
+            } = event
+            {
+                show_main_window(
+                    tray.app_handle(),
+                    Some(&tray_diagnostics),
+                    MainWindowOpenReason::TrayIcon,
+                );
             }
-            | TrayIconEvent::DoubleClick {
-                button: MouseButton::Left,
-                ..
-            } => show_main_window(tray.app_handle(), None),
-            _ => {}
         });
 
     if let Some(icon) = icon {
@@ -5098,75 +5182,59 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
     Ok(())
 }
 
-fn show_main_window(app: &tauri::AppHandle, diagnostics: Option<&StartupDiagnostics>) {
+fn show_main_window(
+    app: &tauri::AppHandle,
+    diagnostics: Option<&StartupDiagnostics>,
+    reason: MainWindowOpenReason,
+) {
     if app_is_quitting(app) {
         if let Some(diagnostics) = diagnostics {
-            diagnostics.info("skipping main window restore because app is quitting");
+            diagnostics.info(format!(
+                "skipping main window open because app is quitting: reason={}",
+                reason.as_str()
+            ));
+        }
+        return;
+    }
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.info(format!(
+            "main window open requested: reason={}",
+            reason.as_str()
+        ));
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.warn(format!(
+                "main window is unavailable during open request: reason={}",
+                reason.as_str()
+            ));
+        }
+        return;
+    };
+    if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.info(format!(
+                "main window open skipped because it is already visible and focused: reason={}",
+                reason.as_str()
+            ));
         }
         return;
     }
     show_dock_icon(app, diagnostics);
-    if let Some(window) = app.get_webview_window("main") {
-        restore_main_window(&window, diagnostics);
-    } else if let Some(diagnostics) = diagnostics {
-        diagnostics.warn("main window is unavailable during show request");
-    }
-
-    for delay_ms in [120, 400, 900] {
-        let app = app.clone();
-        let diagnostics = diagnostics.cloned();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            if app_is_quitting(&app) {
-                if let Some(diagnostics) = diagnostics.as_ref() {
-                    diagnostics.info(format!(
-                        "skipping {delay_ms}ms main window restore retry because app is quitting"
-                    ));
-                }
-                return;
-            }
-            if let Some(diagnostics) = diagnostics.as_ref() {
-                run_ui_action(
-                    diagnostics,
-                    &format!("{delay_ms}ms main window restore retry"),
-                    || restore_main_window_once(&app, Some(diagnostics), delay_ms),
-                );
-            } else {
-                restore_main_window_once(&app, None, delay_ms);
-            }
-        });
+    restore_main_window(&window, diagnostics);
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.info(format!(
+            "main window open completed: reason={} visible={} focused={}",
+            reason.as_str(),
+            window.is_visible().unwrap_or(false),
+            window.is_focused().unwrap_or(false)
+        ));
     }
 }
 
 fn app_is_quitting(app: &tauri::AppHandle) -> bool {
     app.try_state::<DesktopState>()
         .is_some_and(|state| state.quitting.load(Ordering::SeqCst))
-}
-
-fn run_ui_action(diagnostics: &StartupDiagnostics, label: &str, action: impl FnOnce()) {
-    diagnostics.info(format!("{label} started"));
-    if panic::catch_unwind(AssertUnwindSafe(action)).is_err() {
-        diagnostics.error(format!("{label} panicked; continuing"));
-    } else {
-        diagnostics.info(format!("{label} completed"));
-    }
-}
-
-fn show_main_window_deferred(
-    app: tauri::AppHandle,
-    diagnostics: StartupDiagnostics,
-    reason: &'static str,
-    delay_ms: u64,
-) {
-    diagnostics.info(format!(
-        "deferring show main window for {reason} by {delay_ms}ms"
-    ));
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        run_ui_action(&diagnostics, reason, || {
-            show_main_window(&app, Some(&diagnostics));
-        });
-    });
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow, diagnostics: Option<&StartupDiagnostics>) {
@@ -5227,21 +5295,6 @@ fn run_window_action(
     }
 }
 
-fn restore_main_window_once(
-    app: &tauri::AppHandle,
-    diagnostics: Option<&StartupDiagnostics>,
-    delay_ms: u64,
-) {
-    show_dock_icon(app, diagnostics);
-    if let Some(window) = app.get_webview_window("main") {
-        restore_main_window(&window, diagnostics);
-    } else if let Some(diagnostics) = diagnostics {
-        diagnostics.warn(format!(
-            "main window is unavailable during {delay_ms}ms restore retry"
-        ));
-    }
-}
-
 fn hide_to_tray(window: &tauri::Window) {
     if let Some(state) = window.app_handle().try_state::<DesktopState>() {
         state.main_window_visible.store(false, Ordering::SeqCst);
@@ -5254,6 +5307,26 @@ fn hide_to_tray(window: &tauri::Window) {
         eprintln!("failed to hide main window: {err}");
     }
     hide_dock_icon(window.app_handle());
+}
+
+fn prepare_background_startup(app: &tauri::AppHandle, diagnostics: &StartupDiagnostics) {
+    if let Some(state) = app.try_state::<DesktopState>() {
+        state.main_window_visible.store(false, Ordering::SeqCst);
+        state.runtime_log_streaming.store(false, Ordering::SeqCst);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        run_window_action(
+            Some(diagnostics),
+            "hide main window for background autostart",
+            "background autostart main window hide completed",
+            || window.hide(),
+        );
+    } else {
+        diagnostics.warn("main window is unavailable while preparing background autostart");
+    }
+    hide_dock_icon(app);
+    let _ = app.emit(MAIN_WINDOW_VISIBILITY_EVENT, false);
+    diagnostics.info("background autostart prepared without showing or focusing the main window");
 }
 
 #[cfg(target_os = "macos")]
@@ -5304,6 +5377,37 @@ fn quit_app(app: &tauri::AppHandle) {
 
 fn quit_running_instance_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == QUIT_RUNNING_INSTANCE_ARG)
+}
+
+fn background_autostart_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == OsStr::new(AUTOSTART_BACKGROUND_ARG))
+}
+
+fn interactive_restart_marker_path(config_path: &Path) -> PathBuf {
+    resolve_config_base_dir(config_path).join(INTERACTIVE_RESTART_MARKER_FILE_NAME)
+}
+
+fn request_interactive_restart(config_path: &Path) -> Result<(), String> {
+    let marker_path = interactive_restart_marker_path(config_path);
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建客户端重启状态目录失败: {err}"))?;
+    }
+    fs::write(&marker_path, b"interactive\n")
+        .map_err(|err| format!("写入客户端前台重启标记失败: {err}"))
+}
+
+fn consume_interactive_restart_request(config_path: &Path) -> Result<bool, String> {
+    let marker_path = interactive_restart_marker_path(config_path);
+    match fs::remove_file(&marker_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("读取客户端前台重启标记失败: {err}")),
+    }
 }
 
 fn auto_start_agent(
@@ -5512,7 +5616,28 @@ fn main() {
     let diagnostics = StartupDiagnostics::for_config_path(&config_path);
     install_panic_diagnostics(diagnostics.clone());
     log_startup_environment(&diagnostics, &config_path);
-    let forced_safe_mode = std::env::args().any(|arg| arg == "--safe-mode");
+    let process_args = std::env::args_os().collect::<Vec<_>>();
+    let forced_safe_mode = process_args
+        .iter()
+        .any(|arg| arg == OsStr::new("--safe-mode"));
+    let interactive_restart_requested = match consume_interactive_restart_request(&config_path) {
+        Ok(requested) => requested,
+        Err(err) => {
+            diagnostics.warn(err);
+            false
+        }
+    };
+    let launch_mode = DesktopLaunchMode::from_args(
+        process_args.iter().map(|arg| arg.as_os_str()),
+        interactive_restart_requested,
+    );
+    diagnostics.info(format!(
+        "desktop launch mode resolved: mode={} interactive_restart_requested={interactive_restart_requested}",
+        match launch_mode {
+            DesktopLaunchMode::Interactive => "interactive",
+            DesktopLaunchMode::BackgroundAutostart => "background_autostart",
+        }
+    ));
     // The single-instance plugin runs before the application setup callback. Keep startup
     // health persistence deferred until setup so a secondary process can notify the primary
     // instance and exit without turning a healthy startup into a recorded failure.
@@ -5529,7 +5654,7 @@ fn main() {
     let local_app_install_tasks = LocalAppInstallTaskManager::default();
     let runtime_log_streaming_requested = Arc::new(AtomicBool::new(false));
     let runtime_log_streaming = Arc::new(AtomicBool::new(false));
-    let main_window_visible = Arc::new(AtomicBool::new(true));
+    let main_window_visible = Arc::new(AtomicBool::new(false));
     let quitting = Arc::new(AtomicBool::new(false));
     let local_app_ui = Arc::new(RwLock::new(None));
     let single_instance_diagnostics = diagnostics.clone();
@@ -5552,10 +5677,15 @@ fn main() {
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("BaijimuBridgeAgent")
+                .arg(AUTOSTART_BACKGROUND_ARG)
                 .build(),
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(desktop_window_state_flags())
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(
             move |app, argv, _cwd| {
                 let diagnostics = single_instance_diagnostics.clone();
@@ -5564,9 +5694,17 @@ fn main() {
                     quit_app(app);
                     return;
                 }
-                run_ui_action(&diagnostics, "single instance show main window", || {
-                    show_main_window(app, Some(&diagnostics));
-                });
+                if background_autostart_requested(argv.iter().map(String::as_str)) {
+                    diagnostics.info(
+                        "background autostart reached an existing instance; keeping main window state unchanged",
+                    );
+                    return;
+                }
+                show_main_window(
+                    app,
+                    Some(&diagnostics),
+                    MainWindowOpenReason::SecondaryLaunch,
+                );
             },
         ))
         .manage(DesktopState {
@@ -5638,6 +5776,9 @@ fn main() {
                 setup_health.set_component("tray", "系统托盘", "degraded", Some(err.to_string()));
             } else {
                 setup_health.set_component("tray", "系统托盘", "ready", None);
+            }
+            if launch_mode == DesktopLaunchMode::BackgroundAutostart {
+                prepare_background_startup(app.handle(), &setup_diagnostics);
             }
             if setup_health.safe_mode() {
                 for (id, label) in [
@@ -5751,22 +5892,37 @@ fn main() {
                     "starting",
                     Some("等待前端就绪确认".to_string()),
                 );
-                show_main_window_deferred(
-                    app.clone(),
-                    diagnostics.clone(),
-                    "ready show main window",
-                    700,
-                );
+                if launch_mode.should_show_main_window() {
+                    show_main_window(
+                        app,
+                        Some(&diagnostics),
+                        MainWindowOpenReason::InteractiveStartup,
+                    );
+                } else {
+                    diagnostics.info(
+                        "background autostart runtime ready; main window remains hidden and unfocused",
+                    );
+                }
             }
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => {
-                diagnostics.info("tauri reopen event received");
-                show_main_window_deferred(
-                    app.clone(),
-                    diagnostics.clone(),
-                    "reopen show main window",
-                    120,
-                );
+            tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } => {
+                diagnostics.info(format!(
+                    "tauri reopen event received: has_visible_windows={has_visible_windows}"
+                ));
+                if should_restore_main_window_on_macos_reopen(has_visible_windows) {
+                    show_main_window(
+                        app,
+                        Some(&diagnostics),
+                        MainWindowOpenReason::MacosReopen,
+                    );
+                } else {
+                    diagnostics.info(
+                        "macOS already has a visible main window; skipping forced refocus",
+                    );
+                }
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 let state = app.state::<DesktopState>();
@@ -6377,6 +6533,64 @@ mod tests {
             desktop_autostart_policy(true),
             DesktopAutostartPolicy::SkipDevelopmentBuild
         );
+    }
+
+    #[test]
+    fn desktop_launch_mode_distinguishes_background_autostart_from_user_launches() {
+        assert_eq!(
+            DesktopLaunchMode::from_args(["bridge-agent-desktop", AUTOSTART_BACKGROUND_ARG], false,),
+            DesktopLaunchMode::BackgroundAutostart
+        );
+        assert_eq!(
+            DesktopLaunchMode::from_args(["bridge-agent-desktop"], false),
+            DesktopLaunchMode::Interactive
+        );
+        assert_eq!(
+            DesktopLaunchMode::from_args(["bridge-agent-desktop", AUTOSTART_BACKGROUND_ARG], true,),
+            DesktopLaunchMode::Interactive
+        );
+        assert!(!DesktopLaunchMode::BackgroundAutostart.should_show_main_window());
+        assert!(DesktopLaunchMode::Interactive.should_show_main_window());
+    }
+
+    #[test]
+    fn background_secondary_launch_does_not_request_an_interactive_window() {
+        assert!(background_autostart_requested([
+            "bridge-agent-desktop",
+            AUTOSTART_BACKGROUND_ARG,
+        ]));
+        assert!(!background_autostart_requested([
+            "bridge-agent-desktop",
+            "--safe-mode",
+        ]));
+    }
+
+    #[test]
+    fn desktop_window_state_never_restores_visibility_or_focus() {
+        let flags = desktop_window_state_flags();
+        assert!(!flags.contains(StateFlags::VISIBLE));
+        assert!(flags.contains(StateFlags::SIZE));
+        assert!(flags.contains(StateFlags::POSITION));
+
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["app"]["windows"][0]["visible"], false);
+    }
+
+    #[test]
+    fn macos_reopen_only_restores_a_missing_visible_window() {
+        assert!(should_restore_main_window_on_macos_reopen(false));
+        assert!(!should_restore_main_window_on_macos_reopen(true));
+    }
+
+    #[test]
+    fn interactive_restart_marker_is_consumed_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+
+        assert!(!consume_interactive_restart_request(&config_path).unwrap());
+        request_interactive_restart(&config_path).unwrap();
+        assert!(consume_interactive_restart_request(&config_path).unwrap());
+        assert!(!consume_interactive_restart_request(&config_path).unwrap());
     }
 
     #[test]
