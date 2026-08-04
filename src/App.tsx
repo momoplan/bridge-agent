@@ -23,7 +23,13 @@ import {
   type LocalAppInstallTaskState
 } from "./local-app-install-tasks";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
-import { describeLocalAppUpdate } from "./local-app-updates";
+import {
+  describeLocalAppUpdate,
+  type UpdateContractDeclaration,
+  type UpdateDatabaseContract,
+  type UpdateEventContract,
+  type UpdateMethodContract
+} from "./local-app-updates";
 
 type RuntimeStatus =
   | "stopped"
@@ -487,6 +493,10 @@ interface ConnectorSummary {
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
   processOwnership: "connector" | "host";
+  configSchema?: unknown | null;
+  database?: UpdateDatabaseContract | null;
+  methods?: UpdateMethodContract[];
+  events?: UpdateEventContract[];
   methodNames: string[];
   eventNames: string[];
   installedAtEpochMs: number;
@@ -644,6 +654,13 @@ interface MarketConnector {
   version: string;
   publishedAt?: string | null;
   releaseNotes: string[];
+  configurationDeclaration: UpdateContractDeclaration;
+  interfaceDeclaration: UpdateContractDeclaration;
+  databaseDeclaration: UpdateContractDeclaration;
+  configSchema: unknown | null;
+  database: UpdateDatabaseContract | null;
+  methods: UpdateMethodContract[];
+  events: UpdateEventContract[];
   methodNames: string[];
   eventNames: string[];
   permissions: ConnectorPermission[];
@@ -1737,7 +1754,15 @@ function App() {
   async function refreshConnectorApps() {
     try {
       const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
-      setConnectorApps(apps);
+      setConnectorApps(
+        apps.map((app) => ({
+          ...app,
+          configSchema: app.configSchema ?? null,
+          database: app.database ?? null,
+          methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
+          events: app.events ?? legacyEventContracts(app.eventNames ?? [])
+        }))
+      );
     } catch (err) {
       clientWarn("读取本地应用列表失败", err);
     }
@@ -1761,6 +1786,13 @@ function App() {
         apps.map((app) => ({
           ...app,
           releaseNotes: app.releaseNotes ?? [],
+          configurationDeclaration: app.configurationDeclaration ?? "undeclared",
+          interfaceDeclaration: app.interfaceDeclaration ?? "undeclared",
+          databaseDeclaration: app.databaseDeclaration ?? "undeclared",
+          configSchema: app.configSchema ?? null,
+          database: app.database ?? null,
+          methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
+          events: app.events ?? legacyEventContracts(app.eventNames ?? []),
           methodNames: app.methodNames ?? [],
           eventNames: app.eventNames ?? [],
           permissions: app.permissions ?? []
@@ -5678,19 +5710,22 @@ function App() {
     const changes = describeLocalAppUpdate(
       app.connector
         ? {
-            methodNames: app.connector.methodNames,
-            eventNames: app.connector.eventNames,
+            configSchema: app.connector.configSchema ?? null,
+            database: app.connector.database ?? null,
+            methods: app.connector.methods ?? legacyMethodContracts(app.connector.methodNames),
+            events: app.connector.events ?? legacyEventContracts(app.connector.eventNames),
             permissions: app.connector.permissions
           }
         : null,
       marketApp
     );
-    const changeGroups = [
-      { label: "新增能力", tone: "added", values: changes.addedCapabilities },
-      { label: "移除能力", tone: "removed", values: changes.removedCapabilities },
-      { label: "新增权限", tone: "warning", values: changes.addedPermissions },
-      { label: "移除权限", tone: "removed", values: changes.removedPermissions }
-    ].filter((group) => group.values.length > 0);
+    const hasStructuralChanges = changes.sections.some((section) => section.changes.length > 0);
+    const riskLabel = {
+      breaking: "包含破坏性变化",
+      attention: "需要确认",
+      compatible: hasStructuralChanges ? "兼容性变化" : "未发现结构变化",
+      unknown: "变更声明不完整"
+    }[changes.highestRisk];
 
     return (
       <section className="local-app-update-changes" aria-label="版本改动详情">
@@ -5703,7 +5738,10 @@ function App() {
               {marketApp.version}
             </span>
           </div>
-          {marketApp.publishedAt ? <small>发布于 {formatPublishedAt(marketApp.publishedAt)}</small> : null}
+          <div className="local-app-update-risk-summary">
+            <span className={`local-app-update-risk ${changes.highestRisk}`}>{riskLabel}</span>
+            {marketApp.publishedAt ? <small>发布于 {formatPublishedAt(marketApp.publishedAt)}</small> : null}
+          </div>
         </div>
         {changes.releaseNotes.length > 0 ? (
           <div className="local-app-release-notes">
@@ -5712,23 +5750,54 @@ function App() {
               {changes.releaseNotes.map((note, index) => <li key={`${note}:${index}`}>{note}</li>)}
             </ul>
           </div>
-        ) : null}
-        {changeGroups.length > 0 ? (
-          <div className="local-app-update-diff-grid">
-            {changeGroups.map((group) => (
-              <div className={`local-app-update-diff ${group.tone}`} key={group.label}>
-                <strong>{group.label}</strong>
-                <ul>
-                  {group.values.map((value) => <li key={value}>{value}</li>)}
-                </ul>
-              </div>
-            ))}
+        ) : (
+          <div className="local-app-update-no-notes compact">
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>发布方未提供版本说明，请以以下结构化契约差异为准。</span>
           </div>
-        ) : null}
-        {!changes.hasSpecificChanges ? (
+        )}
+        <div className="local-app-update-contracts">
+          {changes.sections.map((contractSection) => (
+            <article
+              className={`local-app-update-contract ${!contractSection.applicable ? "not-applicable" : contractSection.declared ? "declared" : "undeclared"}`}
+              key={contractSection.id}
+            >
+              <div className="local-app-update-contract-head">
+                <strong>{contractSection.title}</strong>
+                <span>
+                  {!contractSection.applicable
+                    ? "不适用"
+                    : !contractSection.declared
+                    ? "未声明"
+                    : contractSection.unchanged
+                      ? "无变化"
+                      : `${contractSection.changes.length} 项`}
+                </span>
+              </div>
+              {contractSection.changes.length > 0 ? (
+                <ul className="local-app-update-contract-list">
+                  {contractSection.changes.map((change) => (
+                    <li className={change.tone} key={change.id}>
+                      <span className="local-app-update-change-marker" aria-hidden="true" />
+                      <div>
+                        <strong>{change.title}</strong>
+                        {change.detail ? <p>{change.detail}</p> : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className={`local-app-update-contract-empty ${contractSection.applicable && !contractSection.declared ? "warning" : ""}`}>
+                  {contractSection.emptyMessage}
+                </p>
+              )}
+            </article>
+          ))}
+        </div>
+        {!changes.hasSpecificChanges && changes.undeclaredSections.length > 0 ? (
           <div className="local-app-update-no-notes">
             <AlertTriangle size={17} aria-hidden="true" />
-            <span>发布者没有提供版本说明，且新旧版本的能力与权限声明没有差异。</span>
+            <span>无法完整审查 {changes.undeclaredSections.join("、")}；这不代表这些部分没有变化。</span>
           </div>
         ) : null}
       </section>
@@ -7965,6 +8034,25 @@ function isCommandError(error: unknown): error is CommandError {
       conflict.process &&
       typeof conflict.process === "object"
   );
+}
+
+function legacyMethodContracts(names: string[]): UpdateMethodContract[] {
+  return names.map((name) => ({
+    name,
+    description: "",
+    inputSchema: { type: "object" },
+    responseMode: "cmodel",
+    path: "",
+    httpMethod: "POST"
+  }));
+}
+
+function legacyEventContracts(names: string[]): UpdateEventContract[] {
+  return names.map((name) => ({
+    name,
+    description: "",
+    payloadSchema: { type: "object" }
+  }));
 }
 
 export default App;

@@ -16,7 +16,9 @@ use axum::{
     Json, Router,
 };
 use bridge_agent::config::resolve_config_base_dir;
-use bridge_agent::connector::ConnectorPermission;
+use bridge_agent::connector::{
+    ConnectorDatabaseContract, ConnectorEventContract, ConnectorMethodContract, ConnectorPermission,
+};
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
@@ -1160,6 +1162,13 @@ struct MarketConnectorApp {
     version: String,
     published_at: Option<String>,
     release_notes: Vec<String>,
+    configuration_declaration: String,
+    interface_declaration: String,
+    database_declaration: String,
+    config_schema: Option<Value>,
+    database: Option<ConnectorDatabaseContract>,
+    methods: Vec<ConnectorMethodContract>,
+    events: Vec<ConnectorEventContract>,
     method_names: Vec<String>,
     event_names: Vec<String>,
     permissions: Vec<ConnectorPermission>,
@@ -4480,8 +4489,30 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let release_notes = market_release_notes(&value.latest_version.manifest);
-        let method_names = market_manifest_entry_names(&value.latest_version.manifest, "methods");
-        let event_names = market_manifest_entry_names(&value.latest_version.manifest, "events");
+        let config_schema = value.latest_version.manifest.get("configSchema").cloned();
+        let database = market_manifest_database(&value.latest_version.manifest);
+        let methods = market_manifest_method_contracts(&value.latest_version.manifest);
+        let events = market_manifest_event_contracts(&value.latest_version.manifest);
+        let configuration_declaration = market_contract_declaration(
+            &value.latest_version.manifest,
+            "configuration",
+            config_schema.is_some(),
+            &application_type,
+        );
+        let interface_declaration = market_contract_declaration(
+            &value.latest_version.manifest,
+            "interfaces",
+            !methods.is_empty() || !events.is_empty(),
+            &application_type,
+        );
+        let database_declaration = market_contract_declaration(
+            &value.latest_version.manifest,
+            "database",
+            database.is_some(),
+            &application_type,
+        );
+        let method_names = methods.iter().map(|method| method.name.clone()).collect();
+        let event_names = events.iter().map(|event| event.name.clone()).collect();
         let permissions = market_manifest_permissions(&value.latest_version.manifest);
         Self {
             id: value.id,
@@ -4498,6 +4529,13 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             version: value.latest_version.version,
             published_at: value.latest_version.published_at,
             release_notes,
+            configuration_declaration,
+            interface_declaration,
+            database_declaration,
+            config_schema,
+            database,
+            methods,
+            events,
             method_names,
             event_names,
             permissions,
@@ -4545,17 +4583,109 @@ fn normalized_market_release_notes(value: &Value) -> Option<Vec<String>> {
     (!values.is_empty()).then_some(values)
 }
 
-fn market_manifest_entry_names(manifest: &Value, field: &str) -> Vec<String> {
+fn market_manifest_database(manifest: &Value) -> Option<ConnectorDatabaseContract> {
     manifest
+        .get("database")
+        .cloned()
+        .and_then(|database| serde_json::from_value(database).ok())
+}
+
+fn market_contract_declaration(
+    manifest: &Value,
+    field: &str,
+    contract_present: bool,
+    application_type: &str,
+) -> String {
+    if contract_present {
+        return "declared".to_string();
+    }
+    manifest
+        .get("upgradeReview")
+        .and_then(|review| review.get(field))
+        .and_then(Value::as_str)
+        .filter(|status| matches!(*status, "declared" | "not_applicable"))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if application_type == "managed_tool" {
+                "not_applicable".to_string()
+            } else {
+                "undeclared".to_string()
+            }
+        })
+}
+
+fn market_manifest_method_contracts(manifest: &Value) -> Vec<ConnectorMethodContract> {
+    market_manifest_contract_entries(manifest, "methods")
+        .into_iter()
+        .filter_map(|entry| {
+            let name = market_manifest_text(entry, "name")?;
+            Some(ConnectorMethodContract {
+                name,
+                description: market_manifest_text(entry, "description").unwrap_or_default(),
+                input_schema: entry
+                    .get("inputSchema")
+                    .or_else(|| entry.get("input_schema"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                response_mode: market_manifest_text(entry, "responseMode")
+                    .or_else(|| market_manifest_text(entry, "response_mode"))
+                    .unwrap_or_else(|| "cmodel".to_string()),
+                path: market_manifest_text(entry, "path").unwrap_or_default(),
+                http_method: market_manifest_text(entry, "httpMethod")
+                    .or_else(|| market_manifest_text(entry, "http_method"))
+                    .map(|method| method.to_uppercase())
+                    .unwrap_or_else(|| "POST".to_string()),
+            })
+        })
+        .collect()
+}
+
+fn market_manifest_event_contracts(manifest: &Value) -> Vec<ConnectorEventContract> {
+    market_manifest_contract_entries(manifest, "events")
+        .into_iter()
+        .filter_map(|entry| {
+            let name = market_manifest_text(entry, "name")?;
+            Some(ConnectorEventContract {
+                name,
+                description: market_manifest_text(entry, "description").unwrap_or_default(),
+                payload_schema: entry
+                    .get("payloadSchema")
+                    .or_else(|| entry.get("payload_schema"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+            })
+        })
+        .collect()
+}
+
+fn market_manifest_contract_entries<'a>(manifest: &'a Value, field: &str) -> Vec<&'a Value> {
+    let mut entries = manifest
         .get(field)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    if let Some(services) = manifest.get("services").and_then(Value::as_array) {
+        for service in services {
+            entries.extend(
+                service
+                    .get(field)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+    }
+    entries
+}
+
+fn market_manifest_text(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect()
 }
 
 fn market_manifest_permissions(manifest: &Value) -> Vec<ConnectorPermission> {
@@ -6053,6 +6183,13 @@ mod tests {
             version: "1.0.0".to_string(),
             published_at: None,
             release_notes: Vec::new(),
+            configuration_declaration: "undeclared".to_string(),
+            interface_declaration: "undeclared".to_string(),
+            database_declaration: "undeclared".to_string(),
+            config_schema: None,
+            database: None,
+            methods: Vec::new(),
+            events: Vec::new(),
             method_names: Vec::new(),
             event_names: Vec::new(),
             permissions: Vec::new(),
@@ -6178,8 +6315,24 @@ mod tests {
     fn market_manifest_exposes_release_notes_and_update_shape() {
         let manifest = serde_json::json!({
             "releaseNotes": ["新增文件发送", "修复重连", ""],
-            "methods": [{"name": "message.send"}, {"name": "file.send"}],
-            "events": [{"name": "message.received"}],
+            "configSchema": {"type": "object", "required": ["token"], "properties": {"token": {"type": "string"}}},
+            "upgradeReview": {"configuration": "declared", "interfaces": "declared", "database": "declared"},
+            "methods": [{"name": "message.send", "path": "/send", "httpMethod": "POST", "input_schema": {"type": "object"}}, {"name": "file.send"}],
+            "events": [{"name": "message.received", "payload_schema": {"type": "object"}}],
+            "database": {
+                "engine": "sqlite",
+                "schemaVersion": "2",
+                "migrations": [{
+                    "id": "002-add-status",
+                    "fromVersion": "1",
+                    "toVersion": "2",
+                    "description": "新增状态字段",
+                    "changes": [{"operation": "add_column", "target": "messages.status", "description": "新增状态", "destructive": false}],
+                    "destructive": false,
+                    "rollback": "automatic",
+                    "downtime": "none"
+                }]
+            },
             "permissions": [{
                 "id": "filesystem",
                 "title": "文件读取",
@@ -6192,9 +6345,29 @@ mod tests {
             market_release_notes(&manifest),
             vec!["新增文件发送".to_string(), "修复重连".to_string()]
         );
+        let methods = market_manifest_method_contracts(&manifest);
         assert_eq!(
-            market_manifest_entry_names(&manifest, "methods"),
-            vec!["message.send".to_string(), "file.send".to_string()]
+            methods
+                .iter()
+                .map(|method| method.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message.send", "file.send"]
+        );
+        assert_eq!(methods[0].path, "/send");
+        assert_eq!(
+            market_manifest_event_contracts(&manifest)[0].name,
+            "message.received"
+        );
+        let database = market_manifest_database(&manifest).unwrap();
+        assert_eq!(database.schema_version, "2");
+        assert_eq!(database.migrations[0].changes[0].target, "messages.status");
+        assert_eq!(
+            market_contract_declaration(&manifest, "database", true, "connector"),
+            "declared"
+        );
+        assert_eq!(
+            market_contract_declaration(&serde_json::json!({}), "database", false, "managed_tool"),
+            "not_applicable"
         );
         assert_eq!(market_manifest_permissions(&manifest)[0].id, "filesystem");
     }

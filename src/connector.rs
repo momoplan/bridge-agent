@@ -3,6 +3,7 @@ use crate::config::{
     RegistrationMethod, RegistrationTransport, RuntimeConfig, ServiceConfig, ServiceRegistration,
     ServiceStartCommand,
 };
+use crate::protocol::ResponseMode;
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use pep440_rs::{Version, VersionSpecifiers};
@@ -92,6 +93,10 @@ pub struct ConnectorManifest {
     pub ui: Option<ConnectorUi>,
     #[serde(default)]
     pub config_schema: Option<Value>,
+    #[serde(default)]
+    pub upgrade_review: Option<ConnectorUpgradeReview>,
+    #[serde(default)]
+    pub database: Option<ConnectorDatabaseContract>,
     #[serde(default)]
     pub remote_capabilities: Vec<ConnectorRemoteCapability>,
     #[serde(default)]
@@ -185,6 +190,77 @@ pub struct ConnectorPermission {
     pub description: String,
     #[serde(default)]
     pub platforms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorUpgradeReview {
+    pub configuration: String,
+    pub interfaces: String,
+    pub database: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorDatabaseContract {
+    pub engine: String,
+    pub schema_version: String,
+    #[serde(default)]
+    pub migrations: Vec<ConnectorDatabaseMigration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorDatabaseMigration {
+    pub id: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub description: String,
+    #[serde(default)]
+    pub changes: Vec<ConnectorDatabaseChange>,
+    #[serde(default)]
+    pub destructive: bool,
+    #[serde(default = "default_database_rollback")]
+    pub rollback: String,
+    #[serde(default = "default_database_downtime")]
+    pub downtime: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorDatabaseChange {
+    pub operation: String,
+    pub target: String,
+    pub description: String,
+    #[serde(default)]
+    pub destructive: bool,
+}
+
+fn default_database_rollback() -> String {
+    "not_declared".to_string()
+}
+
+fn default_database_downtime() -> String {
+    "not_declared".to_string()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorMethodContract {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub response_mode: String,
+    pub path: String,
+    pub http_method: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorEventContract {
+    pub name: String,
+    pub description: String,
+    pub payload_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +411,10 @@ pub struct ConnectorSummary {
     pub permissions: Vec<ConnectorPermission>,
     pub start_policy: String,
     pub process_ownership: ConnectorProcessOwnership,
+    pub config_schema: Option<Value>,
+    pub database: Option<ConnectorDatabaseContract>,
+    pub methods: Vec<ConnectorMethodContract>,
+    pub events: Vec<ConnectorEventContract>,
     pub method_names: Vec<String>,
     pub event_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
@@ -1197,6 +1277,18 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
             "connector permissions, legacyAutostartLabels and manual startPolicy require schemaVersion 1.2"
         );
     }
+    if let Some(database) = manifest.database.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector database contract requires schemaVersion 2.0");
+        }
+        validate_database_contract(database)?;
+    }
+    if let Some(review) = manifest.upgrade_review.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector upgradeReview requires schemaVersion 2.0");
+        }
+        validate_upgrade_review_contract(manifest, review)?;
+    }
     let mut permission_ids = BTreeSet::new();
     for permission in &manifest.permissions {
         if permission.id.trim().is_empty() || permission.title.trim().is_empty() {
@@ -1214,6 +1306,99 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         if !permission_ids.insert(permission.id.as_str()) {
             bail!("connector permission id `{}` is duplicated", permission.id);
         }
+    }
+    Ok(())
+}
+
+fn validate_database_contract(database: &ConnectorDatabaseContract) -> Result<()> {
+    if database.engine.trim().is_empty() || database.schema_version.trim().is_empty() {
+        bail!("connector database.engine and database.schemaVersion cannot be empty");
+    }
+    let mut migration_ids = BTreeSet::new();
+    for migration in &database.migrations {
+        if migration.id.trim().is_empty()
+            || migration.from_version.trim().is_empty()
+            || migration.to_version.trim().is_empty()
+            || migration.description.trim().is_empty()
+        {
+            bail!(
+                "connector database migration id, fromVersion, toVersion and description cannot be empty"
+            );
+        }
+        if migration.from_version == migration.to_version {
+            bail!(
+                "connector database migration `{}` must change schema version",
+                migration.id
+            );
+        }
+        if !migration_ids.insert(migration.id.as_str()) {
+            bail!(
+                "connector database migration id `{}` is duplicated",
+                migration.id
+            );
+        }
+        if !matches!(
+            migration.rollback.as_str(),
+            "automatic" | "manual" | "unsupported" | "not_declared"
+        ) {
+            bail!(
+                "connector database migration `{}` rollback must be automatic, manual, unsupported or not_declared",
+                migration.id
+            );
+        }
+        if !matches!(
+            migration.downtime.as_str(),
+            "none" | "brief" | "required" | "not_declared"
+        ) {
+            bail!(
+                "connector database migration `{}` downtime must be none, brief, required or not_declared",
+                migration.id
+            );
+        }
+        if migration.changes.is_empty() {
+            bail!(
+                "connector database migration `{}` must declare at least one change",
+                migration.id
+            );
+        }
+        for change in &migration.changes {
+            if change.operation.trim().is_empty()
+                || change.target.trim().is_empty()
+                || change.description.trim().is_empty()
+            {
+                bail!(
+                    "connector database migration `{}` changes require operation, target and description",
+                    migration.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_upgrade_review_contract(
+    manifest: &ConnectorManifest,
+    review: &ConnectorUpgradeReview,
+) -> Result<()> {
+    for (name, value) in [
+        ("configuration", review.configuration.as_str()),
+        ("interfaces", review.interfaces.as_str()),
+        ("database", review.database.as_str()),
+    ] {
+        if !matches!(value, "declared" | "not_applicable") {
+            bail!("connector upgradeReview.{name} must be declared or not_applicable");
+        }
+    }
+    if (review.configuration == "declared") != manifest.config_schema.is_some() {
+        bail!(
+            "connector upgradeReview.configuration must be declared exactly when configSchema is present"
+        );
+    }
+    if review.interfaces != "declared" {
+        bail!("connector upgradeReview.interfaces must be declared for schemaVersion 2.0");
+    }
+    if (review.database == "declared") != manifest.database.is_some() {
+        bail!("connector upgradeReview.database must be declared exactly when database is present");
     }
     Ok(())
 }
@@ -3309,16 +3494,34 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
     let registrations =
         load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)
             .unwrap_or_default();
-    let method_names = registrations
+    let methods = registrations
         .iter()
         .flat_map(|registration| registration.methods.iter())
-        .map(|method| method.name.clone())
-        .collect();
-    let event_names = registrations
+        .map(|method| ConnectorMethodContract {
+            name: method.name.clone(),
+            description: method.description.clone(),
+            input_schema: method.input_schema.clone(),
+            response_mode: match method.response_mode {
+                ResponseMode::Cmodel => "cmodel",
+                ResponseMode::Plain => "plain",
+                ResponseMode::Passthrough => "passthrough",
+            }
+            .to_string(),
+            path: method.path.trim().to_string(),
+            http_method: method.http_method.trim().to_uppercase(),
+        })
+        .collect::<Vec<_>>();
+    let events = registrations
         .iter()
         .flat_map(|registration| registration.events.iter())
-        .map(|event| event.name.clone())
-        .collect();
+        .map(|event| ConnectorEventContract {
+            name: event.name.clone(),
+            description: event.description.clone(),
+            payload_schema: event.payload_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+    let method_names = methods.iter().map(|method| method.name.clone()).collect();
+    let event_names = events.iter().map(|event| event.name.clone()).collect();
     ConnectorSummary {
         id: record.manifest.id,
         name: record.manifest.name,
@@ -3334,6 +3537,10 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         permissions: record.manifest.permissions,
         start_policy,
         process_ownership,
+        config_schema: record.manifest.config_schema,
+        database: record.manifest.database,
+        methods,
+        events,
         method_names,
         event_names,
         installed_at_epoch_ms: record.installed_at_epoch_ms,
@@ -3696,6 +3903,68 @@ mod tests {
     }
 
     #[test]
+    fn connector_manifest_validates_database_migration_contract() {
+        let manifest = |database: Value| {
+            serde_json::from_value::<ConnectorManifest>(json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.database-contract",
+                "name": "Database Contract Connector",
+                "version": "1.0.0",
+                "runtime": { "type": "process", "command": "database-contract" },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "upgradeReview": {
+                    "configuration": "not_applicable",
+                    "interfaces": "declared",
+                    "database": "declared"
+                },
+                "database": database
+            }))
+            .unwrap()
+        };
+        let valid_database = json!({
+            "engine": "sqlite",
+            "schemaVersion": "2",
+            "migrations": [{
+                "id": "002-add-status",
+                "fromVersion": "1",
+                "toVersion": "2",
+                "description": "Add message status",
+                "changes": [{
+                    "operation": "add_column",
+                    "target": "messages.status",
+                    "description": "Add status column"
+                }],
+                "rollback": "automatic",
+                "downtime": "none"
+            }]
+        });
+
+        validate_manifest(&manifest(valid_database.clone())).unwrap();
+
+        let mut mismatched_review = manifest(valid_database.clone());
+        mismatched_review.upgrade_review.as_mut().unwrap().database = "not_applicable".to_string();
+        assert!(validate_manifest(&mismatched_review)
+            .unwrap_err()
+            .to_string()
+            .contains("upgradeReview.database"));
+
+        let mut missing_changes = valid_database.clone();
+        missing_changes["migrations"][0]["changes"] = json!([]);
+        assert!(validate_manifest(&manifest(missing_changes))
+            .unwrap_err()
+            .to_string()
+            .contains("at least one change"));
+
+        let mut unsupported_rollback_value = valid_database;
+        unsupported_rollback_value["migrations"][0]["rollback"] = json!("sometimes");
+        assert!(validate_manifest(&manifest(unsupported_rollback_value))
+            .unwrap_err()
+            .to_string()
+            .contains("rollback must be"));
+    }
+
+    #[test]
     fn host_managed_connector_start_requires_desktop_supervisor() {
         let dir = tempdir().unwrap();
         let _env = connector_test_env(dir.path().join("connectors"));
@@ -3975,6 +4244,64 @@ mod tests {
             serde_json::from_value(serde_json::Value::Object(legacy.clone())).unwrap();
         assert_eq!(legacy.trust_level, ConnectorTrustLevel::UserTrusted);
         assert!(legacy.market_app_id.is_none());
+    }
+
+    #[test]
+    fn installed_connector_summary_preserves_upgrade_review_contracts() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("installed-connectors"));
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.review-contract",
+                "name": "Review Contract Connector",
+                "version": "1.0.0",
+                "runtime": { "type": "process", "command": "review-contract" },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "configSchema": {"type": "object", "required": ["token"], "properties": {"token": {"type": "string"}}},
+                "methods": [{
+                    "name": "ping",
+                    "description": "Ping.",
+                    "path": "/invoke/ping",
+                    "httpMethod": "POST",
+                    "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}}
+                }],
+                "database": {
+                    "engine": "sqlite",
+                    "schemaVersion": "2",
+                    "migrations": [{
+                        "id": "002-add-status",
+                        "fromVersion": "1",
+                        "toVersion": "2",
+                        "description": "Add status",
+                        "changes": [{"operation": "add_column", "target": "items.status", "description": "Add status"}],
+                        "rollback": "automatic",
+                        "downtime": "none"
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let summary = list_connectors().unwrap().remove(0);
+
+        assert_eq!(
+            summary.config_schema.as_ref().unwrap()["required"][0],
+            "token"
+        );
+        assert_eq!(summary.methods[0].path, "/invoke/ping");
+        assert_eq!(
+            summary.methods[0].input_schema["properties"]["value"]["type"],
+            "string"
+        );
+        assert_eq!(summary.database.as_ref().unwrap().schema_version, "2");
     }
 
     #[test]
@@ -5164,6 +5491,8 @@ bad-python-connector = "bad_python_connector.app:main"
             host_requirements: None,
             ui: None,
             config_schema: None,
+            upgrade_review: None,
+            database: None,
             remote_capabilities: Vec::new(),
             permissions: Vec::new(),
             legacy_autostart_labels: Vec::new(),

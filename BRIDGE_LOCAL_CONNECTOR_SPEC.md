@@ -180,7 +180,9 @@ connector-root/
 - `management`
 - `setup`
 - `ui`
+- `upgradeReview`
 - `configSchema`
+- `database`
 - `remoteCapabilities`
 - `hooks`
 - `permissions`
@@ -244,6 +246,42 @@ connector-root/
       "payload_schema": {"type": "object"}
     }
   ],
+  "upgradeReview": {
+    "configuration": "declared",
+    "interfaces": "declared",
+    "database": "declared"
+  },
+  "configSchema": {
+    "type": "object",
+    "required": ["databasePath"],
+    "properties": {
+      "databasePath": {"type": "string"},
+      "syncIntervalSecs": {"type": "integer", "default": 30}
+    }
+  },
+  "database": {
+    "engine": "sqlite",
+    "schemaVersion": "3",
+    "migrations": [
+      {
+        "id": "003-add-message-status",
+        "fromVersion": "2",
+        "toVersion": "3",
+        "description": "为消息增加同步状态",
+        "changes": [
+          {
+            "operation": "add_column",
+            "target": "messages.sync_status",
+            "description": "新增非空状态字段并回填历史数据",
+            "destructive": false
+          }
+        ],
+        "destructive": false,
+        "rollback": "automatic",
+        "downtime": "none"
+      }
+    ]
+  },
   "ui": {
     "type": "embedded",
     "entry": "ui/index.html",
@@ -259,6 +297,39 @@ connector-root/
   ]
 }
 ```
+
+### 升级审查契约
+
+Bridge Agent 使用当前已安装 package 的不可变清单快照和市场目标版本的 `latestVersion.manifest`
+计算升级差异。发布方是三类契约的唯一源事实：
+
+- **配置变化**：来自 `configSchema`。客户端比较配置路径、类型、必填性、默认值和枚举值；新增必填项、
+  删除配置项、类型变化或枚举收窄会标记为破坏性变化。
+- **接口变化**：来自 `methods[]`、`events[]` 及其 `input_schema`、`payload_schema`、`responseMode`、
+  `httpMethod` 和 `path`。新增接口、删除接口和契约修改分别展示，不能只发布方法名称列表。
+- **数据库变化**：来自 `database`。`schemaVersion` 是 package 数据库 Schema 的当前版本；
+  `migrations[]` 必须保留从仍受支持的旧 Schema 到目标 Schema 的完整有向迁移链。
+
+`database.migrations[]` 字段规则：
+
+- `id`、`fromVersion`、`toVersion`、`description` 必填，且同一清单内 `id` 唯一。
+- `changes[]` 至少一项；每项必须声明 `operation`、`target`、`description`，并准确设置 `destructive`。
+- `rollback` 只能是 `automatic`、`manual`、`unsupported` 或 `not_declared`。
+- `downtime` 只能是 `none`、`brief`、`required` 或 `not_declared`。
+- 只要 migration 或任一 change 具有破坏性、禁止回滚或必须停机，升级页就按破坏性变化展示。
+- 从当前 `schemaVersion` 无法解析到目标版本的完整 migration 链时，升级页必须明确报告契约缺失，
+  不能显示“数据库无变化”。
+
+未声明某类契约表示“发布方未声明，无法判断”，不表示“无变化”。`releaseNotes` 只提供业务摘要，
+不能替代上述结构化契约。
+
+`upgradeReview` 必须对三类契约逐项声明 `declared` 或 `not_applicable`：
+
+- `configuration: declared` 要求同时存在 `configSchema`；没有运行配置时使用 `not_applicable`。
+- Connector 的 `interfaces` 必须为 `declared`，其 methods/events 就是接口源事实；不提供接口的
+  managed tool 可以使用 `not_applicable`。
+- `database: declared` 要求同时存在 `database`；package 不使用持久化数据库时使用 `not_applicable`。
+- 省略 `upgradeReview` 且又没有对应契约时，客户端只能显示“未声明”，不能推断为“不适用”。
 
 `runtime.startPolicy` 支持：
 
@@ -448,9 +519,14 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
       "wechat.events.messageReceived"
     ],
     "manifest": {
-      "runtime": "process",
-      "command": "wechat-bridge-collector",
-      "args": ["start"]
+      "schemaVersion": "2.0",
+      "applicationType": "connector",
+      "releaseNotes": ["新增消息同步状态。"],
+      "upgradeReview": {"configuration": "declared", "interfaces": "declared", "database": "declared"},
+      "configSchema": {"type": "object", "properties": {}},
+      "methods": [{"name": "searchMessages", "description": "Search messages.", "path": "/invoke/searchMessages", "httpMethod": "POST", "input_schema": {"type": "object"}}],
+      "events": [{"name": "messageReceived", "description": "Message received.", "payload_schema": {"type": "object"}}],
+      "database": {"engine": "sqlite", "schemaVersion": "3", "migrations": []}
     },
     "publishedAt": "2026-06-18T10:00:00Z"
   }
@@ -464,6 +540,8 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 - `latestVersion.version` 必须等于 Connector 包内 `connector.json.version`。
 - `latestVersion.revision` 推荐指向不可变 tag，例如 `v0.2.3`。
 - `latestVersion.source` 是安装源。若带 `revision`，百积木会按 `source#revision` 克隆。
+- `latestVersion.manifest` 必须是该不可变 package 版本的完整清单快照，不能只保留启动命令摘要；
+  配置、接口和数据库升级审查都以此为目标版本源事实。
 - `platforms` 必须准确表达支持平台；不要把只支持 macOS 的 Connector 标成 Windows/Linux 可用。
 - `riskLevel` 建议使用 `low`、`medium`、`high`。
 
@@ -486,6 +564,7 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 - 更新时重新安装同一个 `connectorId`，并替换该 Connector 的本地应用定义。
 - 更新不得悄悄迁移到另一个 `connectorId`。
 - 如果服务名、方法名、事件名发生破坏性变更，必须升级主版本，并在市场风险说明中写清楚。
+- 升级前必须展示配置、接口、数据库和权限的结构化差异；缺少声明时必须展示“无法判断”。
 
 自定义同步规则：
 
@@ -618,6 +697,7 @@ Connector 发布到市场前至少确认：
 - `connector.json.id` 与市场 `connectorId` 一致。
 - `connector.json.version` 与市场 `latestVersion.version` 一致。
 - `connector.json.releaseNotes` 逐条说明该版本对用户可感知的新增、修复和破坏性变化；升级版本不得只写“优化体验”等无具体内容的占位说明。
+- `configSchema`、`methods/events` 和 `database` 与真实 package 行为一致；数据库版本变化时存在从所有受支持旧版本到目标版本的完整 migration 链。
 - Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
 - 安装后本地应用定义能写入 `agent-config.json.localApps[]`，不会写入 runtime service。
 - `startCommand` 可执行，且不会永久阻塞。
@@ -635,7 +715,7 @@ Connector 发布到市场前至少确认：
 - 安装源支持本地目录和 Git URL。
 - Git URL 可以通过 `source#revision` 指定分支或 tag。
 - 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
-- 市场版本优先从清单 `releaseNotes` 读取版本说明，并兼容旧清单中的 `changes` 或 `changelog` 字符串/字符串数组；客户端还会比较新旧方法、事件和权限声明，作为升级确认页的结构化差异。
+- 市场版本优先从清单 `releaseNotes` 读取版本说明，并兼容旧清单中的 `changes` 或 `changelog` 字符串/字符串数组；客户端比较新旧 `configSchema`、methods/events 完整契约、database migration 和权限声明，并按兼容、需确认、破坏性三档展示。
 - 安装后记录写入本机 connectors 目录下的 `install.json`，包括 `sourceReference`、`sourcePath`、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
 - Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
 - 服务注册 transport 目前支持 `http`。
