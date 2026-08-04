@@ -40,7 +40,10 @@ UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 宿主管理面板遵循以下边界：
 
 - Connector 负责声明和运行可授权的服务、方法、事件、健康检查、应用管理接口及应用专用界面。
-- 应用自身负责凭证签发、密钥存储、配置文件原子更新和应用进程重启；`bridge-agent` 只负责安装、启停、健康检查、升级、回滚和经过清单校验的本机管理请求代理。
+- 应用自身负责凭证签发、密钥存储和配置文件原子更新；进程生命周期按
+  `runtime.processOwnership` 明确归属。`connector` 模式由应用维护后台进程，`host` 模式
+  由 `bridge-agent` 持有并回收前台进程。宿主同时负责安装、启停、健康检查、升级、回滚
+  和经过清单校验的本机管理请求代理。
 - 应用专用界面必须随 Connector 包发布和版本化。Bridge Agent 只提供隔离的 HTML 容器与受清单约束的调用桥，不得按应用 ID 写业务界面或业务状态。
 - 宿主管理操作不得注册成 Connector 的远程方法，不得经过 relay，也不得出现在工作区可授权能力列表中。
 - LLM key 不得进入 `bridge-agent`、前端状态或 relay，只能由对应本地应用进程签发、校验和写入。设备授权产生的本机工作区 token 仍由 Bridge Agent 写入共享 CLI 授权文件，应用只从该私有文件读取；两类密钥都不得返回前端，前端只接收脱敏后的归属、有效性和更新时间。
@@ -202,8 +205,9 @@ connector-root/
   "runtime": {
     "type": "process",
     "startPolicy": "automatic",
+    "processOwnership": "host",
     "command": "wechat-bridge-collector",
-    "args": ["start"],
+    "args": ["run"],
     "stopArgs": ["stop"],
     "healthCheck": {
       "type": "http",
@@ -257,6 +261,21 @@ connector-root/
 - `manual`：仅允许用户从本机应用页显式启动。运行时重建、重连和健康检查都不会在后台
   执行启动命令。访问 macOS 受保护数据的 Connector 必须使用该策略，避免在用户未完成
   系统授权时触发 TCC 提示。
+
+`runtime.processOwnership` 支持两种明确的进程所有权：
+
+- `connector`（默认，兼容旧包）：`runtime.command + args[]` 是执行后退出的启动命令，
+  Connector 自己维护后台进程。宿主只能通过 `stopArgs[]` 和健康检查间接控制它。
+- `host`：`runtime.command + args[]` 必须是持续运行的前台进程。桌面宿主持有子进程句柄，
+  把标准输出和错误写入 Connector 私有运行日志，在停止、升级、卸载和客户端退出时回收
+  完整进程树。Windows 创建的运行进程、停止命令和环境准备命令都必须使用无控制台窗口
+  标志；macOS 进程必须由已签名的百积木桌面宿主直接派生，以维持稳定的 TCC 权限归属。
+
+新发布且使用 `processOwnership: "host"` 的 Connector 必须声明
+`hostRequirements.minimumVersion >= 0.2.40` 和能力
+`connector.process.host-managed.v1`。它必须提供非空的 `args[]` 前台入口，以及幂等的
+`stopArgs[]`，供优雅停止和跨版本升级清理使用；即使优雅停止失败，宿主仍必须按进程树
+强制回收。
 
 需要系统权限的 Connector 应在 manifest 顶层声明：
 
@@ -369,7 +388,9 @@ Schema `2.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` 和
 - `methods[].name` 和 `events[].name` 必须稳定；删除或改名属于破坏性变更。
 - `transport.baseUrl` 默认应绑定 `127.0.0.1`，不要要求用户暴露公网端口。
 - `runtime.healthCheck` 应能快速判断本地应用是否可用。
-- `runtime.command + args[]` 应是触发启动后退出的命令，不应是永久阻塞的前台进程。
+- `processOwnership: "connector"` 时，`runtime.command + args[]` 应在触发启动后退出。
+- `processOwnership: "host"` 时，`runtime.command + args[]` 必须保持前台运行，禁止再次
+  派生自守护进程或安装系统级自启动项。
 - `runtime.command + stopArgs[]` 应尽量幂等；应用未运行时也应安全退出。
 - `input_schema` 应尽量收紧，不要长期使用完全开放的 `additionalProperties: true` 作为正式能力接口。
 

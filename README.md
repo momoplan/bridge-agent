@@ -97,6 +97,11 @@
 
 百积木桌面端把最终用户看到的概念统一为“本地应用”：本地能力宿主负责设备授权、relay 长连、Connector 安装、生命周期、健康检查和调用审计。
 
+需要宿主精确控制生命周期的 Connector 使用 `runtime.processOwnership: "host"`：清单的
+`args[]` 是持续运行的前台入口，桌面端持有进程句柄并在停止、升级、卸载和退出时回收
+完整进程树。Windows 的运行、停止和环境准备命令统一无控制台窗口；macOS 仍由已签名的
+百积木桌面宿主直接派生进程，避免把受保护数据权限漂移到临时 Python 启动器。
+
 Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿主，而应优先作为可安装 Connector 或内置应用：
 
 - Codex：作为独立 Rust 本地应用连接本机 `codex app-server`，同时提供结构化 session/thread/turn/event 能力和“账户与工作区”管理；LLM credential 签发、归属校验、本机配置切换均由 Codex 应用自身执行，Bridge Agent 只通过 Connector 声明的本机管理接口展示结果。

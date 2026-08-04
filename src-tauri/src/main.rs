@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod codex_skill;
+mod connector_process;
 mod managed_tool;
+
+use connector_process::ConnectorProcessManager;
 
 use anyhow::Context as _;
 use axum::{
@@ -23,12 +26,12 @@ use bridge_agent::{
     install_connector_from_path_with_provenance, install_rustls_crypto_provider, list_connectors,
     load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
     reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
-    save_config as save_agent_config, show_connector, start_connector, stop_connector,
-    sync_installed_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector, AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance,
-    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
-    ConnectorTrustLevel, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
-    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    save_config as save_agent_config, show_connector, sync_installed_connector,
+    sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
+    AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
+    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus,
+    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -58,6 +61,8 @@ use tokio::time::timeout;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 
 #[cfg(target_os = "macos")]
 use core_foundation::base::TCFType;
@@ -84,7 +89,11 @@ const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
 const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
 const LOCAL_APP_INSTALL_TASK_EVENT: &str = "local-app-install-task-changed";
 const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
-const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[HOST_CAPABILITY_CONNECTOR_SETUP_V1];
+const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str = "connector.process.host-managed.v1";
+const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
+    HOST_CAPABILITY_CONNECTOR_SETUP_V1,
+    HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1,
+];
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
@@ -100,8 +109,17 @@ const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
 const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn configure_desktop_command(command: &mut Command) {
+    #[cfg(windows)]
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 struct DesktopState {
     runtime: AgentRuntimeManager,
+    connector_processes: ConnectorProcessManager,
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
     local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
@@ -707,6 +725,7 @@ struct LocalAppUiHttpState {
     diagnostics: StartupDiagnostics,
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
+    connector_processes: ConnectorProcessManager,
     registered_services: RegisteredServiceMonitor,
     local_apps: LocalAppsChangeNotifier,
 }
@@ -1581,16 +1600,18 @@ fn open_url_in_edge(url: &str) -> Result<(), String> {
 
     for candidate in candidates {
         if candidate.is_file() {
-            Command::new(candidate)
-                .arg(url)
+            let mut edge = Command::new(candidate);
+            configure_desktop_command(&mut edge);
+            edge.arg(url)
                 .spawn()
                 .map_err(|err| format!("打开 Microsoft Edge 失败: {err}"))?;
             return Ok(());
         }
     }
 
-    Command::new("msedge")
-        .arg(url)
+    let mut edge = Command::new("msedge");
+    configure_desktop_command(&mut edge);
+    edge.arg(url)
         .spawn()
         .map_err(|err| format!("未找到 Microsoft Edge，请复制授权链接后手动粘贴到浏览器: {err}"))?;
     Ok(())
@@ -1785,6 +1806,7 @@ fn start_local_app_ui_server(
     diagnostics: StartupDiagnostics,
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
+    connector_processes: ConnectorProcessManager,
     registered_services: RegisteredServiceMonitor,
     local_apps: LocalAppsChangeNotifier,
 ) {
@@ -1853,6 +1875,7 @@ fn start_local_app_ui_server(
             diagnostics: diagnostics.clone(),
             config_path: config_path.clone(),
             runtime,
+            connector_processes,
             registered_services,
             local_apps,
         };
@@ -2087,6 +2110,7 @@ async fn local_app_control_install_handler(
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
                 source: request.source,
@@ -2118,8 +2142,10 @@ async fn local_app_control_start_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let result = start_connector(connector_id.trim(), &state.config_path)
-            .map_err(|err| err.to_string())?;
+        let result = state
+            .connector_processes
+            .start(connector_id.trim(), &state.config_path)
+            .await?;
         ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
         wait_for_connector_health(&state.config_path, &result.connector_id, true).await?;
         state.registered_services.request_refresh();
@@ -2138,8 +2164,10 @@ async fn local_app_control_stop_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let result = stop_connector(connector_id.trim(), &state.config_path)
-            .map_err(|err| err.to_string())?;
+        let result = state
+            .connector_processes
+            .stop(connector_id.trim(), &state.config_path)
+            .await?;
         ensure_connector_lifecycle_command_succeeded("停止应用", &result)?;
         wait_for_connector_health(&state.config_path, &result.connector_id, false).await?;
         state.registered_services.request_refresh();
@@ -2166,6 +2194,7 @@ async fn local_app_control_sync_handler(
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
                 source,
@@ -2215,6 +2244,7 @@ async fn local_app_control_uninstall_handler(
         let document = uninstall_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_processes,
             &state.registered_services,
             connector_id.clone(),
         )
@@ -2710,6 +2740,7 @@ async fn install_connector_app(
     let document = install_connector_app_with_context(
         &state.config_path,
         &state.runtime,
+        &state.connector_processes,
         &state.registered_services,
         ConnectorInstallOptions {
             source,
@@ -2771,12 +2802,14 @@ fn start_connector_app_install(
     let task_id = task.task_id.clone();
     let config_path = state.config_path.clone();
     let runtime = state.runtime.clone();
+    let connector_processes = state.connector_processes.clone();
     let registered_services = state.registered_services.clone();
     let local_apps = state.local_apps.clone();
     tauri::async_runtime::spawn(async move {
         let result = install_connector_app_with_context(
             &config_path,
             &runtime,
+            &connector_processes,
             &registered_services,
             ConnectorInstallOptions {
                 source,
@@ -2845,6 +2878,7 @@ fn list_connector_app_install_tasks(
 async fn install_connector_app_with_context(
     config_path: &Path,
     runtime_manager: &AgentRuntimeManager,
+    connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
     options: ConnectorInstallOptions,
 ) -> Result<ConnectorAppInstallDocument, String> {
@@ -2956,6 +2990,13 @@ async fn install_connector_app_with_context(
             "正在安装并注册应用",
         );
     }
+    if options.replace {
+        if let Some(connector) = existing.as_ref() {
+            connector_processes
+                .stop_if_managed(&connector.id, config_path)
+                .await?;
+        }
+    }
     let install = match install_connector_from_path_with_provenance(
         resolved_source.path(),
         config_path,
@@ -2965,7 +3006,10 @@ async fn install_connector_app_with_context(
         Ok(install) => install,
         Err(err) => {
             if restart_after_replace {
-                if let Err(restart_err) = start_connector(&candidate_manifest.id, config_path) {
+                if let Err(restart_err) = connector_processes
+                    .start(&candidate_manifest.id, config_path)
+                    .await
+                {
                     return Err(format!(
                         "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
                     ));
@@ -2984,7 +3028,9 @@ async fn install_connector_app_with_context(
                 "应用已安装，正在启动并检查运行状态",
             );
         }
-        let started = start_connector(&install.connector_id, config_path)
+        let started = connector_processes
+            .start(&install.connector_id, config_path)
+            .await
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
         wait_for_connector_health(config_path, &started.connector_id, true).await?;
@@ -3109,7 +3155,10 @@ async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = start_connector(id.trim(), &state.config_path).map_err(|err| err.to_string());
+    let result = state
+        .connector_processes
+        .start(id.trim(), &state.config_path)
+        .await;
     state.registered_services.request_refresh();
     result
 }
@@ -3119,7 +3168,10 @@ async fn stop_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = stop_connector(id.trim(), &state.config_path).map_err(|err| err.to_string());
+    let result = state
+        .connector_processes
+        .stop(id.trim(), &state.config_path)
+        .await;
     state.registered_services.request_refresh();
     result
 }
@@ -3133,6 +3185,7 @@ async fn uninstall_connector_app(
     let document = uninstall_connector_app_with_context(
         &state.config_path,
         &state.runtime,
+        &state.connector_processes,
         &state.registered_services,
         connector_id.clone(),
     )
@@ -3146,9 +3199,13 @@ async fn uninstall_connector_app(
 async fn uninstall_connector_app_with_context(
     config_path: &Path,
     runtime_manager: &AgentRuntimeManager,
+    connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
     id: String,
 ) -> Result<ConfigDocument, String> {
+    connector_processes
+        .stop_if_managed(id.trim(), config_path)
+        .await?;
     uninstall_connector(id.trim(), config_path).map_err(|err| err.to_string())?;
     let runtime = runtime_manager
         .apply_capabilities_from_path(config_path)
@@ -4233,6 +4290,7 @@ async fn resolve_connector_source(
         let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let checkout_path = temp_dir.path().join("connector");
         let mut command = Command::new("git");
+        configure_desktop_command(&mut command);
         command.args(["clone", "--depth", "1"]);
         if let Some(revision) = git_revision.as_deref().filter(|value| !value.is_empty()) {
             command.args(["--branch", revision]);
@@ -5217,8 +5275,13 @@ fn quit_app(app: &tauri::AppHandle) {
         return;
     }
     let runtime = state.runtime.clone();
+    let connector_processes = state.connector_processes.clone();
+    let config_path = state.config_path.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        for failure in connector_processes.stop_all(&config_path).await {
+            eprintln!("failed to stop managed connector before exit: {failure}");
+        }
         if let Err(err) = runtime.stop().await {
             eprintln!("failed to stop runtime before exit: {err:#}");
         }
@@ -5443,6 +5506,7 @@ fn main() {
     let startup_health = StartupHealthManager::new(&config_path, diagnostics.clone());
 
     let runtime = AgentRuntimeManager::new();
+    let connector_processes = ConnectorProcessManager::default();
     let (registered_service_request_tx, registered_service_request_rx) =
         tokio::sync::mpsc::unbounded_channel();
     let registered_services = RegisteredServiceMonitor {
@@ -5462,6 +5526,7 @@ fn main() {
     let setup_local_app_ui = Arc::clone(&local_app_ui);
     let setup_local_apps = local_apps.clone();
     let setup_local_app_install_tasks = local_app_install_tasks.clone();
+    let setup_connector_processes = connector_processes.clone();
     let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
     let page_load_runtime_log_streaming = Arc::clone(&runtime_log_streaming);
     tauri::Builder::default()
@@ -5493,6 +5558,7 @@ fn main() {
         ))
         .manage(DesktopState {
             runtime: runtime.clone(),
+            connector_processes: connector_processes.clone(),
             config_path: config_path.clone(),
             quitting: Arc::clone(&quitting),
             local_app_ui,
@@ -5580,6 +5646,7 @@ fn main() {
                     setup_diagnostics.clone(),
                     config_path.clone(),
                     runtime.clone(),
+                    setup_connector_processes.clone(),
                     registered_services.clone(),
                     setup_local_apps.clone(),
                 );

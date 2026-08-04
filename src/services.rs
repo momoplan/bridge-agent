@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;
@@ -3507,10 +3509,9 @@ fn windows_registry_path_values() -> Vec<String> {
 
 #[cfg(windows)]
 fn windows_registry_path_value(key: &str) -> Option<String> {
-    let output = StdCommand::new(windows_system32_exe("reg.exe"))
-        .args(["query", key, "/v", "Path"])
-        .output()
-        .ok()?;
+    let mut command = StdCommand::new(windows_system32_exe("reg.exe"));
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    let output = command.args(["query", key, "/v", "Path"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
