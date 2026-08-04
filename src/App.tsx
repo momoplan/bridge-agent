@@ -2384,9 +2384,25 @@ function App() {
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const document = await invoke<ConfigDocument>("uninstall_connector_app", {
-        id: app.connector.id
-      });
+      let document: ConfigDocument;
+      try {
+        document = await invoke<ConfigDocument>("uninstall_connector_app", {
+          id: app.connector.id,
+          force: false
+        });
+      } catch (gracefulError) {
+        const detail = readError(gracefulError);
+        const confirmed = window.confirm(
+          `应用 ${app.name} 无法正常停止：\n\n${detail}\n\n是否强制终止该应用包内的进程并继续卸载？`
+        );
+        if (!confirmed) {
+          throw gracefulError;
+        }
+        document = await invoke<ConfigDocument>("uninstall_connector_app", {
+          id: app.connector.id,
+          force: true
+        });
+      }
       applyConfigDocument(document);
       await refreshConnectorApps();
       await refreshRegisteredServiceStatuses();

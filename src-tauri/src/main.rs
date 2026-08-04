@@ -9,7 +9,7 @@ use connector_process::ConnectorProcessManager;
 use anyhow::Context as _;
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State as AxumState},
+    extract::{Path as AxumPath, Query as AxumQuery, State as AxumState},
     http::{header, HeaderMap, Response as HttpResponse, StatusCode},
     response::{IntoResponse, Response as AxumResponse},
     routing::{get, post},
@@ -27,10 +27,12 @@ use bridge_agent::{
     load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
     reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
     save_config as save_agent_config, show_connector, sync_installed_connector,
-    sync_installed_connectors_report, terminate_runtime_lock_owner, uninstall_connector,
-    AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
+    sync_installed_connectors_report, terminate_runtime_lock_owner,
+    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager,
+    ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus,
+    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict,
+    RuntimeSnapshot, RuntimeStatus,
     ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
@@ -855,6 +857,12 @@ struct ConnectorInstallOptions {
 #[serde(rename_all = "camelCase")]
 struct LocalAppControlManagementRequest {
     payload: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LocalAppControlUninstallQuery {
+    #[serde(default)]
+    force: bool,
 }
 
 const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
@@ -2321,6 +2329,7 @@ async fn local_app_control_management_handler(
 async fn local_app_control_uninstall_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
     AxumPath(connector_id): AxumPath<String>,
+    AxumQuery(query): AxumQuery<LocalAppControlUninstallQuery>,
     headers: HeaderMap,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
@@ -2334,6 +2343,7 @@ async fn local_app_control_uninstall_handler(
             &state.connector_processes,
             &state.registered_services,
             connector_id.clone(),
+            query.force,
         )
         .await?;
         state
@@ -3267,6 +3277,7 @@ async fn stop_connector_app(
 async fn uninstall_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
+    force: Option<bool>,
 ) -> Result<ConfigDocument, String> {
     let connector_id = id.trim().to_string();
     let document = uninstall_connector_app_with_context(
@@ -3275,6 +3286,7 @@ async fn uninstall_connector_app(
         &state.connector_processes,
         &state.registered_services,
         connector_id.clone(),
+        force.unwrap_or(false),
     )
     .await?;
     state
@@ -3289,11 +3301,27 @@ async fn uninstall_connector_app_with_context(
     connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
     id: String,
+    force: bool,
 ) -> Result<ConfigDocument, String> {
-    connector_processes
+    let managed_stop = connector_processes
         .stop_if_managed(id.trim(), config_path)
-        .await?;
-    uninstall_connector(id.trim(), config_path).map_err(|err| err.to_string())?;
+        .await;
+    if let Err(error) = managed_stop {
+        if !force {
+            return Err(error);
+        }
+        log::warn!(
+            "continuing explicit forced uninstall for connector `{}` after host-managed stop failed: {}",
+            id.trim(),
+            error
+        );
+    }
+    uninstall_connector_with_options(
+        id.trim(),
+        config_path,
+        ConnectorUninstallOptions { force },
+    )
+    .map_err(|err| err.to_string())?;
     let runtime = runtime_manager
         .apply_capabilities_from_path(config_path)
         .await

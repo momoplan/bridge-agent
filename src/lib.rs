@@ -29,11 +29,11 @@ pub use connector::{
     list_connectors, load_connector_manifest, resolve_connector_ui_asset,
     resolve_connector_ui_entry, show_connector, start_connector, stop_connector,
     sync_installed_connector, sync_installed_connectors, sync_installed_connectors_report,
-    uninstall_connector, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorLifecycleResult, ConnectorManagement,
+    uninstall_connector, uninstall_connector_with_options, ConnectorInstallProvenance,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorLifecycleResult, ConnectorManagement,
     ConnectorManagementOperation, ConnectorManifest, ConnectorProcessOwnership, ConnectorSetup,
     ConnectorStartResult, ConnectorSummary, ConnectorSyncFailure, ConnectorSyncReport,
-    ConnectorTrustLevel, ConnectorUi, PythonRuntimeStatus,
+    ConnectorTrustLevel, ConnectorUi, ConnectorUninstallOptions, PythonRuntimeStatus,
 };
 pub use logging::{LogEntry, LogMetadata};
 pub use runtime::{

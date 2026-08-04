@@ -751,13 +751,41 @@ fn normalize_sha256_checksum(value: &str) -> Result<String> {
     Ok(format!("sha256:{}", value.to_ascii_lowercase()))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectorUninstallOptions {
+    pub force: bool,
+}
+
 pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
+    uninstall_connector_with_options(
+        connector_id,
+        config_path,
+        ConnectorUninstallOptions::default(),
+    )
+}
+
+pub fn uninstall_connector_with_options(
+    connector_id: &str,
+    config_path: &Path,
+    options: ConnectorUninstallOptions,
+) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
     let record = load_install_record(connector_id)?;
     let summary = summary_from_record(record.clone());
     let mut config = load_config(config_path)?;
-    stop_connector_for_package_change(connector_id, &config)?;
-    release_connector_package_processes(Path::new(&record.package_path))?;
+    match stop_connector_for_package_change(connector_id, &config) {
+        Ok(()) => release_connector_package_processes(Path::new(&record.package_path))?,
+        Err(stop_error) if options.force => {
+            if let Err(recovery_error) =
+                force_release_connector_package_processes(Path::new(&record.package_path))
+            {
+                bail!(
+                    "forced uninstall could not recover after graceful stop failed: {stop_error:#}; host process recovery failed: {recovery_error:#}"
+                );
+            }
+        }
+        Err(stop_error) => return Err(stop_error),
+    }
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
 
     config.services.retain(|service| {
@@ -1678,6 +1706,42 @@ fn release_connector_package_processes(package_path: &Path) -> Result<()> {
     let package_path = package_path
         .canonicalize()
         .unwrap_or_else(|_| package_path.to_path_buf());
+    let pids = connector_package_processes(&package_path)?;
+    for pid in pids {
+        let mut terminate = Command::new("taskkill");
+        configure_connector_command(&mut terminate);
+        let taskkill = terminate
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
+        if !taskkill.status.success() {
+            bail!(
+                "failed to terminate connector process tree {pid}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&taskkill.stdout),
+                String::from_utf8_lossy(&taskkill.stderr)
+            );
+        }
+    }
+    for _ in 0..30 {
+        let remaining = connector_package_processes(&package_path)?;
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let remaining = connector_package_processes(&package_path)?;
+    bail!(
+        "connector package processes did not stop for {}: {:?}",
+        package_path.display(),
+        remaining
+    )
+}
+
+#[cfg(windows)]
+fn connector_package_processes(package_path: &Path) -> Result<Vec<u32>> {
+    let package_path = package_path
+        .canonicalize()
+        .unwrap_or_else(|_| package_path.to_path_buf());
     let script = r#"
 $prefix = [System.IO.Path]::GetFullPath(
   $env:BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE
@@ -1722,27 +1786,22 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
         .collect::<Vec<_>>();
     pids.sort_unstable();
     pids.dedup();
-    for pid in pids {
-        let mut terminate = Command::new("taskkill");
-        configure_connector_command(&mut terminate);
-        let taskkill = terminate
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
-        if !taskkill.status.success() {
-            bail!(
-                "failed to terminate connector process tree {pid}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&taskkill.stdout),
-                String::from_utf8_lossy(&taskkill.stderr)
-            );
-        }
-    }
-    Ok(())
+    Ok(pids)
 }
 
 #[cfg(not(windows))]
 fn release_connector_package_processes(_package_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn force_release_connector_package_processes(package_path: &Path) -> Result<()> {
+    release_connector_package_processes(package_path)
+}
+
+#[cfg(not(windows))]
+fn force_release_connector_package_processes(_package_path: &Path) -> Result<()> {
+    bail!("forced connector uninstall after a failed stop hook is only supported on Windows")
 }
 
 fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
@@ -4175,6 +4234,103 @@ mod tests {
             .local_apps
             .iter()
             .any(|app| app.connector_id == "com.baijimu.connector.uninstall-test"));
+    }
+
+    #[test]
+    fn forced_uninstall_is_explicit_and_platform_safe_after_stop_failure() {
+        let dir = tempdir().unwrap();
+        let connectors_dir = dir.path().join("connectors");
+        let _env = connector_test_env(connectors_dir.clone());
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.force-uninstall-test",
+                "name": "Force Uninstall Test Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "forceUninstallTestService",
+                    "description": "Force uninstall test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18131"
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        install_connector_from_path(&source, &config_path, false).unwrap();
+
+        let mut config = load_config(&config_path).unwrap();
+        let app = config
+            .local_apps
+            .iter_mut()
+            .find(|app| app.connector_id == "com.baijimu.connector.force-uninstall-test")
+            .unwrap();
+        app.start_command = Some(failing_test_command());
+        app.stop_command = Some(failing_test_command());
+        save_config(&config_path, &config).unwrap();
+
+        let error = uninstall_connector("com.baijimu.connector.force-uninstall-test", &config_path)
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to stop connector"));
+        let install_root = connectors_dir.join("com.baijimu.connector.force-uninstall-test");
+        assert!(install_root.exists());
+
+        let forced = uninstall_connector_with_options(
+            "com.baijimu.connector.force-uninstall-test",
+            &config_path,
+            ConnectorUninstallOptions { force: true },
+        );
+        #[cfg(windows)]
+        {
+            forced.unwrap();
+            assert!(!install_root.exists());
+        }
+        #[cfg(not(windows))]
+        {
+            let error = forced.unwrap_err();
+            assert!(error.to_string().contains("only supported on Windows"));
+            assert!(install_root.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    fn failing_test_command() -> ServiceStartCommand {
+        ServiceStartCommand::ShellCommand {
+            command: vec![
+                "cmd.exe".to_string(),
+                "/C".to_string(),
+                "exit 7".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_secs: Some(5),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn failing_test_command() -> ServiceStartCommand {
+        ServiceStartCommand::ShellCommand {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 7".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_secs: Some(5),
+        }
     }
 
     #[test]

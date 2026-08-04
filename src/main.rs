@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use bridge_agent::{
     clear_relay_credentials, default_config_path, ensure_config_exists,
     install_connector_from_path, install_rustls_crypto_provider, list_connectors, load_config,
-    save_config, show_connector, start_connector, uninstall_connector, AgentConfig,
-    AgentRuntimeManager, ServiceConfig, ServiceRegistration,
+    save_config, show_connector, start_connector, uninstall_connector_with_options, AgentConfig,
+    AgentRuntimeManager, ConnectorUninstallOptions, ServiceConfig, ServiceRegistration,
 };
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -69,6 +69,8 @@ enum ConnectorCommand {
         id: String,
         #[arg(long, env = "WS_BRIDGE_CONFIG")]
         config: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     List,
     Show {
@@ -248,9 +250,13 @@ async fn connector_command(command: ConnectorCommand) -> Result<()> {
             let result = install_connector_from_path(&source, &config_path, replace)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        ConnectorCommand::Uninstall { id, config } => {
+        ConnectorCommand::Uninstall { id, config, force } => {
             let config_path = config.unwrap_or(default_config_path()?);
-            let result = uninstall_connector(&id, &config_path)?;
+            let result = uninstall_connector_with_options(
+                &id,
+                &config_path,
+                ConnectorUninstallOptions { force },
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         ConnectorCommand::List => {
