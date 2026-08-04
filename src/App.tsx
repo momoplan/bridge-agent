@@ -1060,7 +1060,6 @@ function App() {
   }, [activePage]);
 
   useEffect(() => {
-    void loadAppVersion();
     void checkAppUpdate();
   }, []);
 
@@ -1619,10 +1618,13 @@ function App() {
     try {
       setError("");
       setRuntimeConflict(null);
-      const { apps, document } = await loadSynchronizedLocalAppCatalog(
-        () => invoke<ConnectorSummary[]>("list_connector_apps"),
-        () => invoke<ConfigDocument>("load_config")
-      );
+      const [{ apps, document }] = await Promise.all([
+        loadSynchronizedLocalAppCatalog(
+          () => invoke<ConnectorSummary[]>("list_connector_apps"),
+          () => invoke<ConfigDocument>("load_config")
+        ),
+        loadAppVersion()
+      ]);
       setConnectorApps(apps);
       applyConfigDocument(document);
       await refreshPythonRuntime(document.config.runtime.python_path);

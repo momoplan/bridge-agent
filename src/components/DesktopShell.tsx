@@ -94,6 +94,11 @@ export function DesktopSidebar({
     onNavigate("diagnostics");
   }
 
+  const workspaceLabel = workspace || "未授权";
+  const hasKnownVersion = Boolean(version && version !== "-");
+  const versionLabel = hasKnownVersion ? `v${version}` : "版本未知";
+  const versionDescription = hasKnownVersion ? version : "未知";
+
   return (
     <aside className="desktop-sidebar">
       <div className="desktop-brand" ref={connectionAreaRef}>
@@ -248,6 +253,21 @@ export function DesktopSidebar({
           </span>
         </button>
       </nav>
+
+      <footer
+        className="desktop-environment-meta"
+        aria-label={`当前工作区 ${workspaceLabel}，客户端版本 ${versionDescription}`}
+        title={`工作区 ${workspaceLabel} · 客户端 ${versionLabel}`}
+      >
+        <span className="desktop-environment-workspace">
+          <span className="desktop-environment-label">工作区</span>
+          <strong>{workspace ? `#${workspace}` : workspaceLabel}</strong>
+        </span>
+        <span className="desktop-environment-separator" aria-hidden="true">
+          ·
+        </span>
+        <span className="desktop-environment-version">{versionLabel}</span>
+      </footer>
     </aside>
   );
 }
