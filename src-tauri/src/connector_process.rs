@@ -297,11 +297,11 @@ async fn supervise_process(
 async fn terminate_process_tree(child: &mut Child, pid: u32) -> ManagedConnectorExit {
     #[cfg(unix)]
     {
-        signal_unix_process_group(pid, "-TERM").await;
+        signal_unix_process_group(pid, libc::SIGTERM);
         if let Ok(status) = timeout(GRACEFUL_STOP_TIMEOUT, child.wait()).await {
             return exit_from_wait(status);
         }
-        signal_unix_process_group(pid, "-KILL").await;
+        signal_unix_process_group(pid, libc::SIGKILL);
     }
     #[cfg(windows)]
     {
@@ -328,11 +328,15 @@ async fn terminate_process_tree(child: &mut Child, pid: u32) -> ManagedConnector
 }
 
 #[cfg(unix)]
-async fn signal_unix_process_group(pid: u32, signal: &str) {
-    let mut kill = Command::new("kill");
-    // BSD /bin/kill (used by macOS) does not accept GNU's `--` separator here.
-    // A negative PID addresses the process group created by `process_group(0)`.
-    let _ = kill.args([signal, &format!("-{pid}")]).output().await;
+fn signal_unix_process_group(pid: u32, signal: libc::c_int) {
+    let Ok(process_group) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // `killpg(2)` has identical semantics on macOS and Linux and avoids the
+    // platform-specific command-line parsing of negative PIDs by /bin/kill.
+    unsafe {
+        libc::killpg(process_group, signal);
+    }
 }
 
 fn exit_from_wait(result: std::io::Result<std::process::ExitStatus>) -> ManagedConnectorExit {
