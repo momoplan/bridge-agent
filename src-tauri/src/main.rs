@@ -730,6 +730,16 @@ struct LocalAppUiHttpState {
     local_apps: LocalAppsChangeNotifier,
 }
 
+#[derive(Clone)]
+struct LocalAppUiServerDependencies {
+    diagnostics: StartupDiagnostics,
+    config_path: PathBuf,
+    runtime: AgentRuntimeManager,
+    connector_processes: ConnectorProcessManager,
+    registered_services: RegisteredServiceMonitor,
+    local_apps: LocalAppsChangeNotifier,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalAppControlDiscovery {
@@ -1803,13 +1813,16 @@ async fn stop_registered_service(
 fn start_local_app_ui_server(
     endpoint: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     startup_health: StartupHealthManager,
-    diagnostics: StartupDiagnostics,
-    config_path: PathBuf,
-    runtime: AgentRuntimeManager,
-    connector_processes: ConnectorProcessManager,
-    registered_services: RegisteredServiceMonitor,
-    local_apps: LocalAppsChangeNotifier,
+    dependencies: LocalAppUiServerDependencies,
 ) {
+    let LocalAppUiServerDependencies {
+        diagnostics,
+        config_path,
+        runtime,
+        connector_processes,
+        registered_services,
+        local_apps,
+    } = dependencies;
     startup_health.set_component("local_app_ui_server", "本地应用界面服务", "starting", None);
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await
@@ -5643,12 +5656,14 @@ fn main() {
                 start_local_app_ui_server(
                     Arc::clone(&setup_local_app_ui),
                     setup_health.clone(),
-                    setup_diagnostics.clone(),
-                    config_path.clone(),
-                    runtime.clone(),
-                    setup_connector_processes.clone(),
-                    registered_services.clone(),
-                    setup_local_apps.clone(),
+                    LocalAppUiServerDependencies {
+                        diagnostics: setup_diagnostics.clone(),
+                        config_path: config_path.clone(),
+                        runtime: runtime.clone(),
+                        connector_processes: setup_connector_processes.clone(),
+                        registered_services: registered_services.clone(),
+                        local_apps: setup_local_apps.clone(),
+                    },
                 );
                 bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
                 auto_start_agent(
