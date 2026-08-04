@@ -132,6 +132,7 @@ connector-root/
 ```json
 {
   "applicationType": "managed_tool",
+  "releaseNotes": ["新增批量升级命令。", "修复 Windows PATH 检测。"],
   "artifacts": [
     {
       "platform": "macos",
@@ -172,6 +173,7 @@ connector-root/
 推荐字段：
 
 - `description`
+- `releaseNotes`
 - `publisher`
 - `source`
 - `runtime`
@@ -193,6 +195,10 @@ connector-root/
   "name": "WeChat Connector",
   "version": "0.2.3",
   "description": "Expose local WeChat search and message events to 百积木.",
+  "releaseNotes": [
+    "新增群聊消息搜索能力。",
+    "修复断线重连后重复上报事件的问题。"
+  ],
   "publisher": {
     "name": "Baijimu",
     "homepage": "https://baijimu.com"
@@ -611,6 +617,7 @@ Connector 发布到市场前至少确认：
 - `connector.json` 可以被百积木解析。
 - `connector.json.id` 与市场 `connectorId` 一致。
 - `connector.json.version` 与市场 `latestVersion.version` 一致。
+- `connector.json.releaseNotes` 逐条说明该版本对用户可感知的新增、修复和破坏性变化；升级版本不得只写“优化体验”等无具体内容的占位说明。
 - Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
 - 安装后本地应用定义能写入 `agent-config.json.localApps[]`，不会写入 runtime service。
 - `startCommand` 可执行，且不会永久阻塞。
@@ -628,6 +635,7 @@ Connector 发布到市场前至少确认：
 - 安装源支持本地目录和 Git URL。
 - Git URL 可以通过 `source#revision` 指定分支或 tag。
 - 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
+- 市场版本优先从清单 `releaseNotes` 读取版本说明，并兼容旧清单中的 `changes` 或 `changelog` 字符串/字符串数组；客户端还会比较新旧方法、事件和权限声明，作为升级确认页的结构化差异。
 - 安装后记录写入本机 connectors 目录下的 `install.json`，包括 `sourceReference`、`sourcePath`、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
 - Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
 - 服务注册 transport 目前支持 `http`。

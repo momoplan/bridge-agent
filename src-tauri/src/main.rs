@@ -16,6 +16,7 @@ use axum::{
     Json, Router,
 };
 use bridge_agent::config::resolve_config_base_dir;
+use bridge_agent::connector::ConnectorPermission;
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
@@ -1157,6 +1158,11 @@ struct MarketConnectorApp {
     risk_level: String,
     capability: String,
     version: String,
+    published_at: Option<String>,
+    release_notes: Vec<String>,
+    method_names: Vec<String>,
+    event_names: Vec<String>,
+    permissions: Vec<ConnectorPermission>,
     compatible: bool,
     compatibility_message: Option<String>,
     minimum_host_version: Option<String>,
@@ -1193,6 +1199,7 @@ struct RawMarketConnectorVersion {
     source_type: Option<String>,
     revision: Option<String>,
     checksum: Option<String>,
+    published_at: Option<String>,
     #[serde(default)]
     manifest: Value,
     #[serde(default)]
@@ -4472,6 +4479,10 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let release_notes = market_release_notes(&value.latest_version.manifest);
+        let method_names = market_manifest_entry_names(&value.latest_version.manifest, "methods");
+        let event_names = market_manifest_entry_names(&value.latest_version.manifest, "events");
+        let permissions = market_manifest_permissions(&value.latest_version.manifest);
         Self {
             id: value.id,
             connector_id: value.connector_id,
@@ -4485,6 +4496,11 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             risk_level: value.risk_level.unwrap_or_else(|| "medium".to_string()),
             capability: value.capability,
             version: value.latest_version.version,
+            published_at: value.latest_version.published_at,
+            release_notes,
+            method_names,
+            event_names,
+            permissions,
             compatible: host_compatibility.compatible,
             compatibility_message: host_compatibility.message,
             minimum_host_version: host_compatibility.minimum_host_version,
@@ -4492,6 +4508,64 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             missing_host_capabilities: host_compatibility.missing_capabilities,
         }
     }
+}
+
+fn market_release_notes(manifest: &Value) -> Vec<String> {
+    ["releaseNotes", "changes", "changelog"]
+        .iter()
+        .find_map(|field| {
+            manifest
+                .get(field)
+                .and_then(normalized_market_release_notes)
+        })
+        .unwrap_or_default()
+}
+
+fn normalized_market_release_notes(value: &Value) -> Option<Vec<String>> {
+    let values = match value {
+        Value::String(value) => value.lines().map(str::to_string).collect::<Vec<_>>(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+    let values = values
+        .into_iter()
+        .map(|value| {
+            value
+                .trim()
+                .trim_start_matches(['-', '*', '•'])
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn market_manifest_entry_names(manifest: &Value, field: &str) -> Vec<String> {
+    manifest
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn market_manifest_permissions(manifest: &Value) -> Vec<ConnectorPermission> {
+    manifest
+        .get("permissions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|permission| serde_json::from_value(permission.clone()).ok())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -5977,6 +6051,11 @@ mod tests {
             risk_level: "medium".to_string(),
             capability: String::new(),
             version: "1.0.0".to_string(),
+            published_at: None,
+            release_notes: Vec::new(),
+            method_names: Vec::new(),
+            event_names: Vec::new(),
+            permissions: Vec::new(),
             compatible: true,
             compatibility_message: None,
             minimum_host_version: None,
@@ -6092,6 +6171,42 @@ mod tests {
         insecure.source = "http://downloads.example.test/connector.zip".to_string();
         assert!(
             validate_market_connector_identity(&insecure, "com.baijimu.connector.test").is_err()
+        );
+    }
+
+    #[test]
+    fn market_manifest_exposes_release_notes_and_update_shape() {
+        let manifest = serde_json::json!({
+            "releaseNotes": ["新增文件发送", "修复重连", ""],
+            "methods": [{"name": "message.send"}, {"name": "file.send"}],
+            "events": [{"name": "message.received"}],
+            "permissions": [{
+                "id": "filesystem",
+                "title": "文件读取",
+                "description": "选择文件后读取内容",
+                "platforms": ["macos"]
+            }]
+        });
+
+        assert_eq!(
+            market_release_notes(&manifest),
+            vec!["新增文件发送".to_string(), "修复重连".to_string()]
+        );
+        assert_eq!(
+            market_manifest_entry_names(&manifest, "methods"),
+            vec!["message.send".to_string(), "file.send".to_string()]
+        );
+        assert_eq!(market_manifest_permissions(&manifest)[0].id, "filesystem");
+    }
+
+    #[test]
+    fn market_manifest_accepts_multiline_legacy_release_notes() {
+        let manifest = serde_json::json!({
+            "changelog": "- 新增能力\n* 修复问题\n\n"
+        });
+        assert_eq!(
+            market_release_notes(&manifest),
+            vec!["新增能力".to_string(), "修复问题".to_string()]
         );
     }
 

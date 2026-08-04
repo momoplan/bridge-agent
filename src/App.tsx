@@ -23,6 +23,7 @@ import {
   type LocalAppInstallTaskState
 } from "./local-app-install-tasks";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
+import { describeLocalAppUpdate } from "./local-app-updates";
 
 type RuntimeStatus =
   | "stopped"
@@ -641,6 +642,11 @@ interface MarketConnector {
   riskLevel: string;
   capability: string;
   version: string;
+  publishedAt?: string | null;
+  releaseNotes: string[];
+  methodNames: string[];
+  eventNames: string[];
+  permissions: ConnectorPermission[];
   compatible: boolean;
   compatibilityMessage?: string | null;
   minimumHostVersion?: string | null;
@@ -908,6 +914,7 @@ function App() {
   const [activeDetailPanel, setActiveDetailPanel] = useState<DetailPanel>("system");
   const [expandedServiceIndex, setExpandedServiceIndex] = useState<number | null>(0);
   const [selectedLocalAppId, setSelectedLocalAppId] = useState<string | null>(null);
+  const [pendingUpgradeAppId, setPendingUpgradeAppId] = useState<string | null>(null);
   const [activeLocalAppDetailTab, setActiveLocalAppDetailTab] = useState<LocalAppDetailTab>("overview");
   const [installPanelOpen, setInstallPanelOpen] = useState(false);
   const [installSourceMode, setInstallSourceMode] = useState<InstallSourceMode>("market");
@@ -1452,6 +1459,8 @@ function App() {
   }, [config, connectorApps, baijimuCli, localAppInstallTasks]);
   const selectedLocalApp =
     selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
+  const pendingUpgradeApp =
+    pendingUpgradeAppId == null ? null : localApps.find((app) => app.id === pendingUpgradeAppId) ?? null;
   const availableLocalAppUpdates = localApps
     .map((app) => ({ app, status: localAppUpdateStatus(app) }))
     .filter(
@@ -1460,6 +1469,9 @@ function App() {
     );
   useEffect(() => {
     setSelectedLocalAppId((current) =>
+      current && localApps.some((app) => app.id === current) ? current : null
+    );
+    setPendingUpgradeAppId((current) =>
       current && localApps.some((app) => app.id === current) ? current : null
     );
   }, [localApps]);
@@ -1745,7 +1757,15 @@ function App() {
       setMarketLoading(true);
       setMarketLoadError("");
       const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
-      setMarketConnectors(apps);
+      setMarketConnectors(
+        apps.map((app) => ({
+          ...app,
+          releaseNotes: app.releaseNotes ?? [],
+          methodNames: app.methodNames ?? [],
+          eventNames: app.eventNames ?? [],
+          permissions: app.permissions ?? []
+        }))
+      );
     } catch (err) {
       clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
@@ -1978,6 +1998,7 @@ function App() {
         archivePath: marketApp.archivePath ?? null
       });
       setBaijimuCli(status);
+      setPendingUpgradeAppId(null);
       setMessage(`${status.name} 已升级到 ${status.installedVersion}`);
     } catch (err) {
       handleCommandError(err);
@@ -2114,6 +2135,7 @@ function App() {
         }
       }));
       setSelectedLocalAppId(`connector:${document.install.connectorId}`);
+      setPendingUpgradeAppId(null);
       setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
     } catch (err) {
       handleCommandError(err);
@@ -5652,6 +5674,124 @@ function App() {
     );
   }
 
+  function renderLocalAppUpdateChanges(app: LocalAppItem, marketApp: MarketConnector) {
+    const changes = describeLocalAppUpdate(
+      app.connector
+        ? {
+            methodNames: app.connector.methodNames,
+            eventNames: app.connector.eventNames,
+            permissions: app.connector.permissions
+          }
+        : null,
+      marketApp
+    );
+    const changeGroups = [
+      { label: "新增能力", tone: "added", values: changes.addedCapabilities },
+      { label: "移除能力", tone: "removed", values: changes.removedCapabilities },
+      { label: "新增权限", tone: "warning", values: changes.addedPermissions },
+      { label: "移除权限", tone: "removed", values: changes.removedPermissions }
+    ].filter((group) => group.values.length > 0);
+
+    return (
+      <section className="local-app-update-changes" aria-label="版本改动详情">
+        <div className="local-app-update-changes-head">
+          <div>
+            <strong>本次更新内容</strong>
+            <span>
+              {app.managedTool?.installedVersion ?? app.connector?.version ?? "未安装"}
+              {" → "}
+              {marketApp.version}
+            </span>
+          </div>
+          {marketApp.publishedAt ? <small>发布于 {formatPublishedAt(marketApp.publishedAt)}</small> : null}
+        </div>
+        {changes.releaseNotes.length > 0 ? (
+          <div className="local-app-release-notes">
+            <strong>版本说明</strong>
+            <ul>
+              {changes.releaseNotes.map((note, index) => <li key={`${note}:${index}`}>{note}</li>)}
+            </ul>
+          </div>
+        ) : null}
+        {changeGroups.length > 0 ? (
+          <div className="local-app-update-diff-grid">
+            {changeGroups.map((group) => (
+              <div className={`local-app-update-diff ${group.tone}`} key={group.label}>
+                <strong>{group.label}</strong>
+                <ul>
+                  {group.values.map((value) => <li key={value}>{value}</li>)}
+                </ul>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {!changes.hasSpecificChanges ? (
+          <div className="local-app-update-no-notes">
+            <AlertTriangle size={17} aria-hidden="true" />
+            <span>发布者没有提供版本说明，且新旧版本的能力与权限声明没有差异。</span>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderLocalAppUpgradeDialog(app: LocalAppItem) {
+    const marketApp = marketAppForLocalApp(app);
+    const updateStatus = localAppUpdateStatus(app);
+    if (!marketApp || !updateStatus?.updateAvailable) {
+      return null;
+    }
+    const upgradeBusy = connectorUpdateBusy === app.id || (app.kind === "managed_tool" && managedToolBusy);
+    const closeUpgrade = () => {
+      if (!upgradeBusy) {
+        setPendingUpgradeAppId(null);
+      }
+    };
+
+    return (
+      <div className="modal-backdrop local-app-upgrade-backdrop" role="presentation" onClick={closeUpgrade}>
+        <section
+          className="local-app-upgrade-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="local-app-upgrade-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="install-panel-head">
+            <div>
+              <p className="eyebrow">确认升级</p>
+              <h3 id="local-app-upgrade-title">{app.name}</h3>
+              <p>确认具体改动后，再安装 {updateStatus.latestVersion}。</p>
+            </div>
+            <button className="icon-button" onClick={closeUpgrade} disabled={upgradeBusy} aria-label="关闭升级确认">
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="local-app-upgrade-body">
+            {renderLocalAppUpdateChanges(app, marketApp)}
+            <div className={`market-permission-card ${marketApp.compatible ? "" : "incompatible"}`}>
+              {marketApp.compatible ? <ShieldCheck size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
+              <div>
+                <strong>{marketApp.compatible ? "升级包已通过平台校验" : "当前版本不可升级"}</strong>
+                <p>{marketApp.compatible ? marketApp.risk : marketApp.compatibilityMessage}</p>
+              </div>
+            </div>
+          </div>
+          <div className="install-panel-actions">
+            <button className="secondary" onClick={closeUpgrade} disabled={upgradeBusy}>取消</button>
+            <button
+              className="primary accent"
+              onClick={() => void upgradeLocalAppVersion(app)}
+              disabled={upgradeBusy || !marketApp.compatible}
+            >
+              {upgradeBusy ? "正在升级…" : `确认升级到 ${updateStatus.latestVersion}`}
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   function renderLocalAppDetailDialog(app: LocalAppItem) {
     if (!config) {
       return null;
@@ -5751,7 +5891,7 @@ function App() {
                 updateStatus?.updateAvailable ? (
                   <button
                     className="primary accent"
-                    onClick={() => void upgradeLocalAppVersion(app)}
+                    onClick={() => setPendingUpgradeAppId(app.id)}
                     disabled={connectorBusy != null || connectorUpdateBusy != null || managedToolBusy}
                   >
                     {updateBusy ? "升级中" : `升级到 ${updateStatus.latestVersion}`}
@@ -5823,6 +5963,9 @@ function App() {
 
           {activeLocalAppDetailTab === "overview" ? (
             <div className="app-detail-tab-panel">
+              {marketApp && updateStatus?.updateAvailable
+                ? renderLocalAppUpdateChanges(app, marketApp)
+                : null}
               <div className="status-detail-grid">
                 <InfoRow label="类型" value={formatLocalAppKind(app.kind)} />
                 <InfoRow
@@ -5923,6 +6066,7 @@ function App() {
       <div className="service-editor-panel">
         {renderLocalAppPanel()}
         {selectedLocalApp ? renderLocalAppDetailDialog(selectedLocalApp) : null}
+        {pendingUpgradeApp ? renderLocalAppUpgradeDialog(pendingUpgradeApp) : null}
       </div>
     );
   }
@@ -7661,6 +7805,14 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString("zh-CN", {
     hour12: false
   });
+}
+
+function formatPublishedAt(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+  return new Date(timestamp).toLocaleDateString("zh-CN");
 }
 
 function formatRelayRegistration(snapshot: RuntimeSnapshot | null): string {
