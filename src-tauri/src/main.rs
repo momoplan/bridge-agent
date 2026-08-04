@@ -28,12 +28,11 @@ use bridge_agent::{
     reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
     save_config as save_agent_config, show_connector, sync_installed_connector,
     sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager,
-    ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict,
-    RuntimeSnapshot, RuntimeStatus,
-    ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance,
+    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
+    ConnectorTrustLevel, ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent,
+    RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceHealthCheck,
+    ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -3316,12 +3315,8 @@ async fn uninstall_connector_app_with_context(
             error
         );
     }
-    uninstall_connector_with_options(
-        id.trim(),
-        config_path,
-        ConnectorUninstallOptions { force },
-    )
-    .map_err(|err| err.to_string())?;
+    uninstall_connector_with_options(id.trim(), config_path, ConnectorUninstallOptions { force })
+        .map_err(|err| err.to_string())?;
     let runtime = runtime_manager
         .apply_capabilities_from_path(config_path)
         .await
