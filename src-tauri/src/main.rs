@@ -5895,24 +5895,8 @@ fn main() {
     let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
     let page_load_runtime_log_streaming = Arc::clone(&runtime_log_streaming);
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .max_file_size(5 * 1024 * 1024)
-                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
-                .build(),
-        )
-        .plugin(
-            tauri_plugin_autostart::Builder::new()
-                .app_name("BaijimuBridgeAgent")
-                .arg(AUTOSTART_BACKGROUND_ARG)
-                .build(),
-        )
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_state_flags(desktop_window_state_flags())
-                .build(),
-        )
+        // Single Instance must be registered first. With its `deep-link` feature enabled it
+        // forwards protocol URLs from secondary launches to the primary process before exit.
         .plugin(tauri_plugin_single_instance::init(
             move |app, argv, _cwd| {
                 let diagnostics = single_instance_diagnostics.clone();
@@ -5934,6 +5918,25 @@ fn main() {
                 );
             },
         ))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                .build(),
+        )
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("BaijimuBridgeAgent")
+                .arg(AUTOSTART_BACKGROUND_ARG)
+                .build(),
+        )
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(desktop_window_state_flags())
+                .build(),
+        )
         .manage(DesktopState {
             runtime: runtime.clone(),
             connector_processes: connector_processes.clone(),

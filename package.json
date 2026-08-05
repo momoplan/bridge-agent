@@ -1,7 +1,7 @@
 {
   "name": "bridge-agent-desktop",
   "private": true,
-  "version": "0.2.47",
+  "version": "0.2.48",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/plugin-deep-link": "2.4.9",
     "@tauri-apps/plugin-log": "2.9.0",
     "lucide-react": "^1.26.0",
     "react": "^18.3.1",

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
@@ -17,6 +18,12 @@ import {
 } from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
 import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
+import {
+  CODEX_CONNECTOR_ID,
+  CODEX_MARKET_APP_ID,
+  parseBaijimuDeepLink,
+  type CodexInstallDeepLinkIntent
+} from "./deep-link";
 import {
   latestLocalAppInstallTasks,
   type LocalAppInstallTask,
@@ -895,6 +902,8 @@ function App() {
   const [localAppRuntimeStatuses, setLocalAppRuntimeStatuses] = useState<LocalAppRuntimeStatus[]>([]);
   const [connectorApps, setConnectorApps] = useState<ConnectorSummary[]>([]);
   const [localAppInstallTasks, setLocalAppInstallTasks] = useState<LocalAppInstallTask[]>([]);
+  const connectorAppsRef = useRef<ConnectorSummary[]>([]);
+  const localAppInstallTasksRef = useRef<LocalAppInstallTask[]>([]);
   const localAppsChangeRevisionRef = useRef(0);
   const localAppUpdateRefreshRef = useRef<Promise<void> | null>(null);
   const previousActivePageRef = useRef<AppPage>("apps");
@@ -944,6 +953,65 @@ function App() {
   const [installBusy, setInstallBusy] = useState(false);
   const [pythonStatus, setPythonStatus] = useState<PythonRuntimeStatus | null>(null);
   const [pythonCheckBusy, setPythonCheckBusy] = useState(false);
+
+  useEffect(() => {
+    connectorAppsRef.current = connectorApps;
+  }, [connectorApps]);
+
+  useEffect(() => {
+    localAppInstallTasksRef.current = localAppInstallTasks;
+  }, [localAppInstallTasks]);
+
+  useEffect(() => {
+    let active = true;
+    let initialized = false;
+    let unlisten: (() => void) | null = null;
+    const queuedUrls: string[] = [];
+
+    const dispatchUrl = (rawUrl: string) => {
+      const intent = parseBaijimuDeepLink(rawUrl);
+      if (!intent) {
+        clientWarn("忽略不支持的百积木客户端链接", rawUrl);
+        return;
+      }
+      void openCodexDeepLinkIntent(intent);
+    };
+
+    async function initializeDeepLinks() {
+      try {
+        const dispose = await onOpenUrl((urls) => {
+          if (!active) {
+            return;
+          }
+          if (!initialized) {
+            queuedUrls.push(...urls);
+            return;
+          }
+          urls.forEach(dispatchUrl);
+        });
+        if (!active) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+
+        const startupUrls = await getCurrent();
+        if (!active) {
+          return;
+        }
+        initialized = true;
+        Array.from(new Set([...(startupUrls ?? []), ...queuedUrls])).forEach(dispatchUrl);
+      } catch (err) {
+        clientWarn("初始化百积木客户端链接失败", err);
+      }
+    }
+
+    void initializeDeepLinks();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1751,20 +1819,80 @@ function App() {
     }
   }
 
-  async function refreshConnectorApps() {
+  async function openCodexDeepLinkIntent(intent: CodexInstallDeepLinkIntent) {
+    setActivePage("apps");
+    setMessage("");
+    setError("");
+
+    const installedApps = await refreshConnectorApps();
+    const installedCodex = installedApps.find(
+      (app) => app.id === CODEX_CONNECTOR_ID || app.marketAppId === CODEX_MARKET_APP_ID
+    );
+    if (installedCodex) {
+      setInstallPanelOpen(false);
+      setSelectedLocalAppId(`connector:${installedCodex.id}`);
+      setMessage(intent.shareId ? "已从分享入口打开 Codex" : "Codex 已安装");
+      return;
+    }
+
+    let tasks = localAppInstallTasksRef.current;
     try {
-      const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
-      setConnectorApps(
-        apps.map((app) => ({
-          ...app,
-          configSchema: app.configSchema ?? null,
-          database: app.database ?? null,
-          methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
-          events: app.events ?? legacyEventContracts(app.eventNames ?? [])
-        }))
+      tasks = await invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks");
+      localAppInstallTasksRef.current = tasks;
+      setLocalAppInstallTasks(
+        [...tasks].sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs)
       );
     } catch (err) {
+      clientWarn("读取 Codex 安装进度失败", err);
+    }
+    const activeTask = [...tasks]
+      .sort((left, right) => right.updatedAtEpochMs - left.updatedAtEpochMs)
+      .find(
+        (task) =>
+          (task.connectorId === CODEX_CONNECTOR_ID || task.marketAppId === CODEX_MARKET_APP_ID) &&
+          task.state !== "succeeded" &&
+          task.state !== "failed"
+      );
+    if (activeTask) {
+      setInstallPanelOpen(false);
+      setSelectedLocalAppId(`install-task:${activeTask.taskId}`);
+      setMessage("Codex 正在安装，已打开安装进度");
+      return;
+    }
+
+    setSelectedLocalAppId(null);
+    setInstallSourceMode("market");
+    setMarketAppQuery("Codex");
+    setCustomInstallConfirmed(false);
+    setInstallPanelOpen(true);
+    const marketApps = await refreshMarketConnectorApps();
+    const codexMarketApp = marketApps.find(
+      (app) => app.id === CODEX_MARKET_APP_ID || app.connectorId === CODEX_CONNECTOR_ID
+    );
+    if (codexMarketApp) {
+      setSelectedMarketAppId(codexMarketApp.id);
+      setMessage(intent.shareId ? "已从分享入口打开 Codex 安装" : "已打开 Codex 安装");
+    } else {
+      setError("应用市场暂未提供 Codex，请刷新后重试");
+    }
+  }
+
+  async function refreshConnectorApps(): Promise<ConnectorSummary[]> {
+    try {
+      const apps = await invoke<ConnectorSummary[]>("list_connector_apps");
+      const normalizedApps = apps.map((app) => ({
+        ...app,
+        configSchema: app.configSchema ?? null,
+        database: app.database ?? null,
+        methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
+        events: app.events ?? legacyEventContracts(app.eventNames ?? [])
+      }));
+      connectorAppsRef.current = normalizedApps;
+      setConnectorApps(normalizedApps);
+      return normalizedApps;
+    } catch (err) {
       clientWarn("读取本地应用列表失败", err);
+      return connectorAppsRef.current;
     }
   }
 
@@ -1777,31 +1905,32 @@ function App() {
     }
   }
 
-  async function refreshMarketConnectorApps() {
+  async function refreshMarketConnectorApps(): Promise<MarketConnector[]> {
     try {
       setMarketLoading(true);
       setMarketLoadError("");
       const apps = await invoke<MarketConnector[]>("list_market_connector_apps");
-      setMarketConnectors(
-        apps.map((app) => ({
-          ...app,
-          releaseNotes: app.releaseNotes ?? [],
-          configurationDeclaration: app.configurationDeclaration ?? "undeclared",
-          interfaceDeclaration: app.interfaceDeclaration ?? "undeclared",
-          databaseDeclaration: app.databaseDeclaration ?? "undeclared",
-          configSchema: app.configSchema ?? null,
-          database: app.database ?? null,
-          methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
-          events: app.events ?? legacyEventContracts(app.eventNames ?? []),
-          methodNames: app.methodNames ?? [],
-          eventNames: app.eventNames ?? [],
-          permissions: app.permissions ?? []
-        }))
-      );
+      const normalizedApps = apps.map((app) => ({
+        ...app,
+        releaseNotes: app.releaseNotes ?? [],
+        configurationDeclaration: app.configurationDeclaration ?? "undeclared",
+        interfaceDeclaration: app.interfaceDeclaration ?? "undeclared",
+        databaseDeclaration: app.databaseDeclaration ?? "undeclared",
+        configSchema: app.configSchema ?? null,
+        database: app.database ?? null,
+        methods: app.methods ?? legacyMethodContracts(app.methodNames ?? []),
+        events: app.events ?? legacyEventContracts(app.eventNames ?? []),
+        methodNames: app.methodNames ?? [],
+        eventNames: app.eventNames ?? [],
+        permissions: app.permissions ?? []
+      }));
+      setMarketConnectors(normalizedApps);
+      return normalizedApps;
     } catch (err) {
       clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
       setMarketLoadError(readError(err));
+      return [];
     } finally {
       setMarketLoading(false);
     }
