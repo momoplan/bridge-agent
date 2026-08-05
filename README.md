@@ -648,6 +648,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
+### 客户端唤起协议
+
+桌面安装包注册 `baijimu` URL Scheme。分享承接页只能在用户点击后调用以下固定路由：
+
+```text
+baijimu://codex/install
+baijimu://codex/install?shareId=<opaque-share-id>
+```
+
+`shareId` 可选，长度不超过 256，只接受 URL-safe 字符。客户端把所有 Deep Link 当作不可信输入：拒绝
+其他 host、path、查询参数、重复 `shareId`、fragment 和跳转 URL，不允许 Deep Link 直接触发自定义来源
+安装。合法路由按当前本机状态进入 Codex 已安装详情、正在安装进度或平台市场中的 Codex 安装确认页。
+
+Windows/Linux 的二次唤起由 Single Instance 插件转发给已有进程；macOS 的协议声明固化在正式 `.app`
+的 `CFBundleURLTypes` 中。网页不能可靠读取客户端安装状态，应采用“尝试唤起，失败后显示客户端下载”的
+交互，不得把超时推测展示成确定的未安装结论。
+
 ### 启动恢复与安全模式
 
 桌面端采用“基础壳先启动、业务组件后启动”的顺序。系统托盘、本地应用 UI 服务、内置 CLI 或 Agent runtime 启动失败时，只把对应组件标记为降级，不再终止 Tauri 主进程。单实例插件确认当前进程是主实例后才会写入本次启动记录；重复启动只唤醒已有窗口，不会累计启动失败。前端完成 IPC 握手后会清除本次未完成启动标记；连续两次真正未完成握手时，下一次自动进入安全模式。

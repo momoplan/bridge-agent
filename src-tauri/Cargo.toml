@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-desktop"
-version = "0.2.47"
+version = "0.2.48"
 description = "百积木本地连接客户端"
 edition = "2021"
 
@@ -23,8 +23,9 @@ flate2 = "1.0"
 tar = "0.4"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-log = "2"
-tauri-plugin-single-instance = "2.4.2"
+tauri-plugin-single-instance = { version = "2.4.2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3.20"
