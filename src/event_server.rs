@@ -11,6 +11,12 @@ use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::LocalAppEventEmitted;
 use crate::runtime::{RuntimeAuditLog, RuntimeRegistryUpdate};
 use crate::services::ServiceRegistry;
+#[cfg(windows)]
+use crate::windows_process::{inspect_windows_process, terminate_windows_process};
+#[cfg(windows)]
+use crate::windows_tcp::find_windows_tcp_listener_pid;
+#[cfg(test)]
+use crate::windows_tcp::windows_listener_matches;
 use anyhow::{Context, Result};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -395,6 +401,8 @@ async fn bind_event_listener(bind: SocketAddr) -> Result<TcpListener> {
 struct OccupiedPortOwner {
     pid: u32,
     image_name: String,
+    parent_pid: Option<u32>,
+    executable_path: Option<String>,
 }
 
 async fn reclaim_occupied_event_port(bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
@@ -411,10 +419,17 @@ async fn reclaim_occupied_event_port(bind: SocketAddr) -> Result<Option<Occupied
     }
 
     if !is_bridge_agent_process_name(&owner.image_name) {
+        let process_details = owner
+            .executable_path
+            .as_deref()
+            .map(|path| format!(", path {path}"))
+            .unwrap_or_default();
         anyhow::bail!(
-            "local event server port {bind} is already occupied by {} (pid {}), not a 百积木 process",
+            "local event server port {bind} is already occupied by {} (pid {}, parent pid {:?}{}), not a 百积木 process",
             owner.image_name,
-            owner.pid
+            owner.pid,
+            owner.parent_pid,
+            process_details
         );
     }
 
@@ -424,23 +439,20 @@ async fn reclaim_occupied_event_port(bind: SocketAddr) -> Result<Option<Occupied
 
 #[cfg(windows)]
 fn find_occupied_tcp_listener(bind: SocketAddr) -> Result<Option<OccupiedPortOwner>> {
-    let netstat = std::process::Command::new("netstat")
-        .args(["-ano", "-p", "TCP"])
-        .output()
-        .context("failed to inspect TCP listeners with netstat")?;
-    if !netstat.status.success() {
-        anyhow::bail!(
-            "netstat failed while inspecting local event server port: {}",
-            String::from_utf8_lossy(&netstat.stderr).trim()
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&netstat.stdout);
-    let Some(pid) = parse_listening_pid(&stdout, bind) else {
+    let Some(pid) = find_windows_tcp_listener_pid(bind)? else {
         return Ok(None);
     };
-    let image_name = lookup_process_image_name(pid)?;
-    Ok(Some(OccupiedPortOwner { pid, image_name }))
+    // The listener can exit between the TCP table snapshot and the process
+    // snapshot. Treat that as a normal race and let the runtime bind retry run.
+    let Some(process) = inspect_windows_process(pid)? else {
+        return Ok(None);
+    };
+    Ok(Some(OccupiedPortOwner {
+        pid,
+        image_name: process.image_name,
+        parent_pid: process.parent_pid,
+        executable_path: process.executable_path,
+    }))
 }
 
 #[cfg(unix)]
@@ -470,38 +482,17 @@ fn find_occupied_tcp_listener(_bind: SocketAddr) -> Result<Option<OccupiedPortOw
 }
 
 #[cfg(windows)]
-fn lookup_process_image_name(pid: u32) -> Result<String> {
-    let filter = format!("PID eq {pid}");
-    let tasklist = std::process::Command::new("tasklist")
-        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
-        .output()
-        .with_context(|| format!("failed to inspect process {pid} with tasklist"))?;
-    if !tasklist.status.success() {
-        anyhow::bail!(
-            "tasklist failed while inspecting process {pid}: {}",
-            String::from_utf8_lossy(&tasklist.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8_lossy(&tasklist.stdout);
-    parse_tasklist_image_name(&stdout).with_context(|| format!("failed to identify process {pid}"))
-}
-
-#[cfg(windows)]
 fn terminate_process(pid: u32, image_name: &str) -> Result<()> {
-    let pid_arg = pid.to_string();
-    let taskkill = std::process::Command::new("taskkill")
-        .args(["/PID", &pid_arg, "/T", "/F"])
-        .output()
-        .with_context(|| format!("failed to stop {image_name} (pid {pid}) with taskkill"))?;
-    if !taskkill.status.success() {
+    let Some(process) = inspect_windows_process(pid)? else {
+        return Ok(());
+    };
+    if !process.image_name.eq_ignore_ascii_case(image_name) {
         anyhow::bail!(
-            "failed to stop {} (pid {}): {}",
-            image_name,
-            pid,
-            String::from_utf8_lossy(&taskkill.stderr).trim()
+            "pid {pid} changed owner from {image_name} to {}; refusing to terminate a reused pid",
+            process.image_name
         );
     }
-    Ok(())
+    terminate_windows_process(&process)
 }
 
 #[cfg(unix)]
@@ -527,29 +518,6 @@ fn terminate_process(pid: u32, image_name: &str) -> Result<()> {
     anyhow::bail!("cannot stop {image_name} (pid {pid}) on this platform")
 }
 
-#[cfg(any(windows, test))]
-fn parse_listening_pid(netstat_output: &str, bind: SocketAddr) -> Option<u32> {
-    for line in netstat_output.lines() {
-        let columns = line.split_whitespace().collect::<Vec<_>>();
-        if columns.len() < 5 {
-            continue;
-        }
-        if !columns[0].eq_ignore_ascii_case("TCP") {
-            continue;
-        }
-        if !columns[3].eq_ignore_ascii_case("LISTENING") {
-            continue;
-        }
-        if !local_endpoint_covers_bind(columns[1], bind) {
-            continue;
-        }
-        if let Ok(pid) = columns[4].parse::<u32>() {
-            return Some(pid);
-        }
-    }
-    None
-}
-
 #[cfg(any(unix, test))]
 fn parse_lsof_listening_owner(lsof_output: &str, bind: SocketAddr) -> Option<OccupiedPortOwner> {
     #[derive(Default)]
@@ -567,6 +535,8 @@ fn parse_lsof_listening_owner(lsof_output: &str, bind: SocketAddr) -> Option<Occ
             Some(OccupiedPortOwner {
                 pid: self.pid?,
                 image_name: self.image_name?,
+                parent_pid: None,
+                executable_path: None,
             })
         }
     }
@@ -610,39 +580,7 @@ fn lsof_name_covers_bind(name: &str, bind: SocketAddr) -> bool {
         .any(|token| local_endpoint_covers_bind(token, bind))
 }
 
-#[cfg(any(windows, test))]
-fn parse_tasklist_image_name(tasklist_output: &str) -> Option<String> {
-    tasklist_output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with("INFO:"))
-        .find_map(first_csv_field)
-}
-
-#[cfg(any(windows, test))]
-fn first_csv_field(line: &str) -> Option<String> {
-    let line = line.trim();
-    if let Some(rest) = line.strip_prefix('"') {
-        let mut field = String::new();
-        let mut chars = rest.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    field.push('"');
-                    chars.next();
-                    continue;
-                }
-                return Some(field);
-            }
-            field.push(ch);
-        }
-        return None;
-    }
-    line.split(',').next().map(str::trim).map(ToOwned::to_owned)
-}
-
-#[cfg(any(windows, unix, test))]
+#[cfg(any(unix, test))]
 fn local_endpoint_covers_bind(endpoint: &str, bind: SocketAddr) -> bool {
     let Some((host, port)) = split_endpoint(endpoint) else {
         return false;
@@ -663,7 +601,7 @@ fn local_endpoint_covers_bind(endpoint: &str, bind: SocketAddr) -> bool {
     endpoint_ip == bind.ip()
 }
 
-#[cfg(any(windows, unix, test))]
+#[cfg(any(unix, test))]
 fn split_endpoint(endpoint: &str) -> Option<(&str, u16)> {
     let endpoint = endpoint.trim();
     if let Some(rest) = endpoint.strip_prefix('[') {
@@ -1293,9 +1231,8 @@ fn emit_audit_log(
 #[cfg(test)]
 mod tests {
     use super::{
-        content_type_matches_bytes, local_endpoint_covers_bind, parse_listening_pid,
-        parse_lsof_listening_owner, parse_tasklist_image_name, LocalEventEmitRequest,
-        LocalEventServer,
+        content_type_matches_bytes, local_endpoint_covers_bind, parse_lsof_listening_owner,
+        windows_listener_matches, LocalEventEmitRequest, LocalEventServer,
     };
     use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
     use crate::services::ServiceRegistry;
@@ -1399,28 +1336,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_listening_pid_matches_ipv4_loopback_listener() {
-        let output = r#"
-  Proto  Local Address          Foreign Address        State           PID
-  TCP    127.0.0.1:18081        0.0.0.0:0              LISTENING       1234
-  TCP    127.0.0.1:18082        0.0.0.0:0              LISTENING       5678
-"#;
-        let bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
-
-        assert_eq!(parse_listening_pid(output, bind), Some(1234));
-    }
-
-    #[test]
-    fn parse_listening_pid_treats_unspecified_listener_as_occupying_bind() {
-        let output = r#"
-  TCP    0.0.0.0:18081          0.0.0.0:0              LISTENING       4321
-  TCP    [::]:18082             [::]:0                 LISTENING       5678
-"#;
+    fn windows_listener_match_accepts_exact_and_unspecified_addresses() {
         let ipv4_bind: SocketAddr = "127.0.0.1:18081".parse().unwrap();
         let ipv6_bind: SocketAddr = "[::1]:18082".parse().unwrap();
 
-        assert_eq!(parse_listening_pid(output, ipv4_bind), Some(4321));
-        assert_eq!(parse_listening_pid(output, ipv6_bind), Some(5678));
+        assert!(windows_listener_matches(
+            ipv4_bind,
+            "127.0.0.1".parse().unwrap(),
+            u16::to_be(18081).into()
+        ));
+        assert!(windows_listener_matches(
+            ipv4_bind,
+            "0.0.0.0".parse().unwrap(),
+            u16::to_be(18081).into()
+        ));
+        assert!(windows_listener_matches(
+            ipv6_bind,
+            "::".parse().unwrap(),
+            u16::to_be(18082).into()
+        ));
+        assert!(!windows_listener_matches(
+            ipv4_bind,
+            "127.0.0.2".parse().unwrap(),
+            u16::to_be(18081).into()
+        ));
+        assert!(!windows_listener_matches(
+            ipv4_bind,
+            "127.0.0.1".parse().unwrap(),
+            u16::to_be(18082).into()
+        ));
     }
 
     #[test]
@@ -1429,16 +1373,6 @@ mod tests {
 
         assert!(!local_endpoint_covers_bind("127.0.0.2:18081", bind));
         assert!(!local_endpoint_covers_bind("127.0.0.1:18082", bind));
-    }
-
-    #[test]
-    fn parse_tasklist_image_name_reads_csv_first_field() {
-        let output = r#""百积木.exe","1234","Console","1","64,000 K""#;
-
-        assert_eq!(
-            parse_tasklist_image_name(output),
-            Some("百积木.exe".to_string())
-        );
     }
 
     #[test]
@@ -1457,7 +1391,9 @@ n127.0.0.1:18082
             parse_lsof_listening_owner(output, bind),
             Some(super::OccupiedPortOwner {
                 pid: 1234,
-                image_name: "百积木".to_string()
+                image_name: "百积木".to_string(),
+                parent_pid: None,
+                executable_path: None,
             })
         );
     }
@@ -1475,7 +1411,9 @@ n*:18081
             parse_lsof_listening_owner(output, bind),
             Some(super::OccupiedPortOwner {
                 pid: 4321,
-                image_name: "bridge-agent".to_string()
+                image_name: "bridge-agent".to_string(),
+                parent_pid: None,
+                executable_path: None,
             })
         );
     }

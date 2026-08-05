@@ -4,23 +4,23 @@ use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
-#[cfg(windows)]
-use crate::process_identity::process_file_name;
 use crate::protocol::{
     AgentCapabilities, AgentMessage, EventEmitted,
     AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
 use crate::services::ServiceRegistry;
+#[cfg(windows)]
+use crate::windows_process::{
+    inspect_windows_process, terminate_windows_process, windows_process_is_running,
+};
 use anyhow::{bail, Context, Result};
-use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{ErrorKind, Write};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -46,16 +46,6 @@ const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_LOG_LIMIT: usize = 500;
 const RELAY_SEEN_EVENT_INTERVAL_MS: u64 = 5_000;
-#[cfg(windows)]
-const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[cfg(windows)]
-fn hidden_windows_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
-    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
-    command
-}
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStatus {
@@ -1333,11 +1323,16 @@ struct RuntimeLockDocument {
 
 impl RuntimeInstanceLock {
     fn acquire(config_path: &Path, agent_id: &str) -> Result<Self> {
-        let lock_path = runtime_lock_path(config_path, agent_id);
+        let lock_path = runtime_lock_path(config_path);
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create runtime lock dir {}", parent.display())
             })?;
+            if let Some(conflict) =
+                find_legacy_runtime_lock_conflict(parent, &lock_path, config_path)?
+            {
+                return Err(conflict.into());
+            }
         }
 
         for _ in 0..3 {
@@ -1412,21 +1407,74 @@ impl Drop for RuntimeInstanceLock {
     }
 }
 
-fn runtime_lock_path(config_path: &Path, agent_id: &str) -> PathBuf {
+fn runtime_lock_path(config_path: &Path) -> PathBuf {
     let config_base_dir = resolve_config_base_dir(config_path);
     let config_file = config_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("agent-config.json");
-    let fingerprint =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(config_path.display().to_string());
-    let fingerprint = &fingerprint[..fingerprint.len().min(16)];
+    let resolved_path = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    let digest = Sha256::digest(resolved_path.to_string_lossy().as_bytes());
+    let fingerprint = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    // The runtime owns a configuration instance, not an agent identity. Agent
+    // identity can be migrated while a stale process is still alive, so putting
+    // agent_id in the filename would allow both identities to acquire a lock.
     let name = format!(
-        "{}-{}-{fingerprint}.lock",
-        sanitize_lock_component(config_file),
-        sanitize_lock_component(agent_id)
+        "{}-{fingerprint}.lock",
+        sanitize_lock_component(config_file)
     );
     config_base_dir.join(RUNTIME_LOCK_DIR).join(name)
+}
+
+fn find_legacy_runtime_lock_conflict(
+    lock_dir: &Path,
+    canonical_lock_path: &Path,
+    config_path: &Path,
+) -> Result<Option<RuntimeLockConflict>> {
+    let entries = fs::read_dir(lock_dir)
+        .with_context(|| format!("failed to inspect runtime lock dir {}", lock_dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("failed to read runtime lock dir {}", lock_dir.display()))?
+            .path();
+        if path == canonical_lock_path
+            || path.extension().and_then(|value| value.to_str()) != Some("lock")
+        {
+            continue;
+        }
+        let Ok(document) = read_runtime_lock(&path) else {
+            continue;
+        };
+        if !runtime_config_paths_match(Path::new(&document.config_path), config_path) {
+            continue;
+        }
+        if remove_stale_runtime_lock(&path)? {
+            continue;
+        }
+        return Ok(Some(RuntimeLockConflict {
+            pid: document.pid,
+            agent_id: document.agent_id,
+            config_path: document.config_path,
+            lock_path: path.display().to_string(),
+            process: describe_process(document.pid),
+        }));
+    }
+    Ok(None)
+}
+
+fn runtime_config_paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn sanitize_lock_component(value: &str) -> String {
@@ -1561,206 +1609,32 @@ fn describe_process(pid: u32) -> RuntimeProcessInfo {
 
 #[cfg(windows)]
 fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
-    if let Some(process) = describe_process_windows_api(pid) {
-        return process;
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "PascalCase")]
-    struct WindowsProcessInfo {
-        process_id: u32,
-        parent_process_id: Option<u32>,
-        name: Option<String>,
-        executable_path: Option<String>,
-        command_line: Option<String>,
-    }
-
-    let script = format!(
-        "Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
-    );
-    if let Ok(output) = hidden_windows_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Ok(info) = serde_json::from_str::<WindowsProcessInfo>(stdout.trim()) {
-                return RuntimeProcessInfo {
-                    pid: info.process_id,
-                    parent_pid: info.parent_process_id,
-                    name: info.name,
-                    executable_path: info.executable_path,
-                    command_line: info.command_line,
-                    running: true,
-                };
-            }
-        }
-    }
-
-    if let Some(name) = lookup_windows_tasklist_image_name(pid) {
-        return RuntimeProcessInfo {
+    match inspect_windows_process(pid) {
+        Ok(Some(process)) => RuntimeProcessInfo {
+            pid,
+            parent_pid: process.parent_pid,
+            name: Some(process.image_name),
+            executable_path: process.executable_path,
+            command_line: None,
+            running: true,
+        },
+        Ok(None) => RuntimeProcessInfo {
             pid,
             parent_pid: None,
-            name: Some(name),
+            name: None,
+            executable_path: None,
+            command_line: None,
+            running: false,
+        },
+        Err(_) => RuntimeProcessInfo {
+            pid,
+            parent_pid: None,
+            name: None,
             executable_path: None,
             command_line: None,
             running: true,
-        };
+        },
     }
-
-    RuntimeProcessInfo {
-        pid,
-        parent_pid: None,
-        name: None,
-        executable_path: None,
-        command_line: None,
-        running: process_is_running(pid),
-    }
-}
-
-#[cfg(windows)]
-fn describe_process_windows_api(pid: u32) -> Option<RuntimeProcessInfo> {
-    if let Some(entry) = find_windows_snapshot_process(pid).flatten() {
-        return Some(RuntimeProcessInfo {
-            pid,
-            parent_pid: entry.parent_pid,
-            name: entry.name,
-            executable_path: query_windows_process_image_path(pid),
-            command_line: None,
-            running: true,
-        });
-    }
-
-    query_windows_process_image_path(pid).map(|executable_path| RuntimeProcessInfo {
-        pid,
-        parent_pid: None,
-        name: Some(process_file_name(&executable_path).to_string()),
-        executable_path: Some(executable_path),
-        command_line: None,
-        running: true,
-    })
-}
-
-#[cfg(windows)]
-struct WindowsSnapshotProcessEntry {
-    parent_pid: Option<u32>,
-    name: Option<String>,
-}
-
-#[cfg(windows)]
-fn find_windows_snapshot_process(pid: u32) -> Option<Option<WindowsSnapshotProcessEntry>> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-
-    let mut entry = PROCESSENTRY32W {
-        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return None;
-    }
-
-    let mut found = None;
-    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
-    while ok {
-        if entry.th32ProcessID == pid {
-            found = Some(WindowsSnapshotProcessEntry {
-                parent_pid: Some(entry.th32ParentProcessID),
-                name: wide_null_terminated_to_string(&entry.szExeFile),
-            });
-            break;
-        }
-        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
-    }
-
-    unsafe {
-        CloseHandle(snapshot);
-    }
-    Some(found)
-}
-
-#[cfg(windows)]
-fn query_windows_process_image_path(pid: u32) -> Option<String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-
-    let mut buffer = vec![0u16; 32768];
-    let mut size = buffer.len() as u32;
-    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) } != 0;
-    unsafe {
-        CloseHandle(handle);
-    }
-    if !ok || size == 0 {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&buffer[..size as usize]))
-}
-
-#[cfg(any(windows, test))]
-fn wide_null_terminated_to_string(value: &[u16]) -> Option<String> {
-    let end = value.iter().position(|ch| *ch == 0).unwrap_or(value.len());
-    if end == 0 {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&value[..end]))
-}
-
-#[cfg(windows)]
-fn lookup_windows_tasklist_image_name(pid: u32) -> Option<String> {
-    let filter = format!("PID eq {pid}");
-    let output = hidden_windows_command("tasklist")
-        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_tasklist_image_name(&stdout)
-}
-
-#[cfg(any(windows, test))]
-fn parse_tasklist_image_name(tasklist_output: &str) -> Option<String> {
-    tasklist_output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with("INFO:"))
-        .find_map(first_csv_field)
-}
-
-#[cfg(any(windows, test))]
-fn first_csv_field(line: &str) -> Option<String> {
-    let line = line.trim();
-    if let Some(rest) = line.strip_prefix('"') {
-        let mut field = String::new();
-        let mut chars = rest.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    field.push('"');
-                    chars.next();
-                    continue;
-                }
-                return Some(field);
-            }
-            field.push(ch);
-        }
-        return None;
-    }
-    line.split(',').next().map(str::trim).map(ToOwned::to_owned)
 }
 
 #[cfg(unix)]
@@ -1849,14 +1723,18 @@ fn command_line_starts_with_bridge_agent(command_line: &str) -> bool {
 
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<()> {
-    let status = hidden_windows_command("taskkill")
-        .args(["/PID", &pid.to_string(), "/F"])
-        .status()
-        .with_context(|| format!("failed to run taskkill for pid {pid}"))?;
-    if status.success() || !process_is_running(pid) {
+    let Some(process) = inspect_windows_process(pid)? else {
         return Ok(());
+    };
+    if !is_bridge_agent_process_name(&process.image_name)
+        && !process
+            .executable_path
+            .as_deref()
+            .is_some_and(is_bridge_agent_process_name)
+    {
+        bail!("pid {pid} changed owner before termination");
     }
-    bail!("failed to terminate runtime owner pid {pid}");
+    terminate_windows_process(&process)
 }
 
 #[cfg(unix)]
@@ -1912,28 +1790,7 @@ fn process_is_running(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_is_running(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    if let Some(found) = find_windows_snapshot_process(pid) {
-        return found.is_some();
-    }
-
-    let filter = format!("PID eq {pid}");
-    let Ok(output) = hidden_windows_command("tasklist")
-        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return true;
-    };
-    if !output.status.success() {
-        return true;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .map(str::trim)
-        .any(|line| !line.is_empty() && !line.starts_with("INFO:"))
+    windows_process_is_running(pid)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1945,10 +1802,10 @@ fn process_is_running(_pid: u32) -> bool {
 mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
-        parse_tasklist_image_name, process_looks_like_bridge_agent, read_runtime_lock,
-        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, wide_null_terminated_to_string, AgentRuntimeManager,
-        RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
+        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_owner_is_active,
+        runtime_lock_path, runtime_start_is_active, terminate_runtime_lock_owner,
+        AgentRuntimeManager, RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument,
+        RuntimeProcessInfo, RuntimeStatus,
     };
     use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use crate::logging::LogMetadata;
@@ -2231,10 +2088,46 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lock_cannot_be_bypassed_by_agent_identity_change() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+
+        let first = RuntimeInstanceLock::acquire(&config_path, "dev_old_identity").unwrap();
+        let second = RuntimeInstanceLock::acquire(&config_path, "dev_new_identity");
+        assert!(second.is_err());
+        drop(first);
+    }
+
+    #[test]
+    fn runtime_lock_detects_active_legacy_agent_scoped_lock() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let lock_dir = dir.path().join(super::RUNTIME_LOCK_DIR);
+        fs::create_dir_all(&lock_dir).unwrap();
+        let legacy_lock_path = lock_dir.join("agent-config.json-dev_old_identity-legacy.lock");
+        let legacy = RuntimeLockDocument {
+            pid: std::process::id(),
+            agent_id: "dev_old_identity".to_string(),
+            config_path: config_path.display().to_string(),
+            started_at_ms: 1,
+        };
+        fs::write(
+            &legacy_lock_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let result = RuntimeInstanceLock::acquire(&config_path, "dev_new_identity");
+
+        assert!(result.is_err());
+        assert!(legacy_lock_path.exists());
+    }
+
+    #[test]
     fn runtime_lock_removes_stale_owner() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
-        let lock_path = runtime_lock_path(&config_path, "dev_1");
+        let lock_path = runtime_lock_path(&config_path);
         fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         let stale = RuntimeLockDocument {
             pid: u32::MAX,
@@ -2342,7 +2235,7 @@ mod tests {
 
         let manager = AgentRuntimeManager::new();
         manager.start(config.clone(), &config_path).await.unwrap();
-        let lock_path = runtime_lock_path(&config_path, &config.relay.agent_id);
+        let lock_path = runtime_lock_path(&config_path);
         let before = read_runtime_lock(&lock_path).unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -2359,7 +2252,7 @@ mod tests {
     fn terminating_conflicting_runtime_refuses_current_process_owner() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
-        let lock_path = runtime_lock_path(&config_path, "dev_1");
+        let lock_path = runtime_lock_path(&config_path);
         fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         let lock = RuntimeLockDocument {
             pid: std::process::id(),
@@ -2375,28 +2268,6 @@ mod tests {
 
         assert!(err.to_string().contains("owned by this 百积木 process"));
         assert!(lock_path.exists());
-    }
-
-    #[test]
-    fn tasklist_image_name_reads_product_name_with_spaces() {
-        let output = r#""百积木.exe","18080","Console","1","64,000 K""#;
-
-        assert_eq!(
-            parse_tasklist_image_name(output),
-            Some("百积木.exe".to_string())
-        );
-    }
-
-    #[test]
-    fn wide_process_name_reads_utf16_until_null() {
-        let mut value = "百积木.exe".encode_utf16().collect::<Vec<_>>();
-        value.push(0);
-        value.extend("ignored".encode_utf16());
-
-        assert_eq!(
-            wide_null_terminated_to_string(&value),
-            Some("百积木.exe".to_string())
-        );
     }
 
     #[test]

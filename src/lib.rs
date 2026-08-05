@@ -9,6 +9,9 @@ pub mod protocol;
 pub mod runtime;
 mod secret_store;
 pub mod services;
+#[cfg(windows)]
+mod windows_process;
+mod windows_tcp;
 
 use anyhow::{anyhow, Result};
 
