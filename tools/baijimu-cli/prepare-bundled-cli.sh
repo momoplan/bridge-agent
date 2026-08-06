@@ -55,14 +55,36 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
       "${BAIJIMU_CLI_RELEASE_ASSETS_DIR}/${asset_name}" \
       "${temporary_dir}/${asset_name}"
   else
-    if ! command -v gh >/dev/null 2>&1; then
-      echo "GitHub CLI is required to download ${release_tag}" >&2
-      exit 1
+    if command -v gh >/dev/null 2>&1; then
+      gh release download "${release_tag}" \
+        --repo "${release_repo}" \
+        --dir "${temporary_dir}" \
+        --pattern "${asset_name}"
+    else
+      if ! command -v curl >/dev/null 2>&1; then
+        echo "curl is required to download ${release_tag} without GitHub CLI" >&2
+        exit 1
+      fi
+      case "${release_repo}" in
+        [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) ;;
+        *) echo "Invalid GitHub release repository: ${release_repo}" >&2; exit 1 ;;
+      esac
+      case "${release_tag}:${asset_name}" in
+        *[!A-Za-z0-9._:-]*)
+          echo "Invalid GitHub release tag or asset name: ${release_tag}/${asset_name}" >&2
+          exit 1
+          ;;
+      esac
+      asset_url="https://github.com/${release_repo}/releases/download/${release_tag}/${asset_name}"
+      curl -fsSL \
+        --retry 6 \
+        --retry-all-errors \
+        --retry-delay 3 \
+        --connect-timeout 15 \
+        --max-time 600 \
+        "${asset_url}" \
+        -o "${temporary_dir}/${asset_name}"
     fi
-    gh release download "${release_tag}" \
-      --repo "${release_repo}" \
-      --dir "${temporary_dir}" \
-      --pattern "${asset_name}"
   fi
 
   actual_sha256="$(

@@ -21,6 +21,7 @@ const pinnedCliVersion = readFileSync(
 const workflowPath = ".github/workflows/release-bridge-agent.yml";
 const defenderScriptPath =
   "src-tauri/scripts/verify-windows-defender.ps1";
+const prepareScript = readFileSync(scriptPath, "utf8");
 const temporaryDirectories = [];
 
 function createFixture() {
@@ -161,5 +162,15 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(defenderScript).toContain("Start-MpScan");
     expect(defenderScript).toContain("Get-MpThreatDetection");
     expect(defenderScript).toContain("Get-MpThreatCatalog");
+  });
+
+  it("downloads the pinned release URL when gh is absent", () => {
+    expect(prepareScript).toContain(
+      'asset_url="https://github.com/${release_repo}/releases/download/${release_tag}/${asset_name}"',
+    );
+    expect(prepareScript).toContain("Invalid GitHub release tag or asset name");
+    expect(prepareScript).toContain('"${asset_url}"');
+    expect(prepareScript).not.toContain("api.github.com");
+    expect(prepareScript).not.toContain("GitHub CLI is required to download");
   });
 });
