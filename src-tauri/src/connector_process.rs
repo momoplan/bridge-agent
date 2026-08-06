@@ -175,9 +175,7 @@ impl ConnectorProcessManager {
                 )
             })?;
         let graceful_stderr = match graceful {
-            Ok(result)
-                if result.lifecycle.configured && result.lifecycle.exit_code == Some(0) =>
-            {
+            Ok(result) if result.lifecycle.configured && result.lifecycle.exit_code == Some(0) => {
                 String::new()
             }
             Ok(result) => {

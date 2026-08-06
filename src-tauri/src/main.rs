@@ -4357,26 +4357,19 @@ async fn run_start_command(
             let stderr_capture = tempfile::NamedTempFile::new()
                 .map_err(|err| format!("创建服务 `{service}` 标准错误文件失败: {err}"))?;
             process
-                .stdout(std::process::Stdio::from(
-                    stdout_capture
-                        .reopen()
-                        .map_err(|err| format!("打开服务 `{service}` 标准输出文件失败: {err}"))?,
-                ))
-                .stderr(std::process::Stdio::from(
-                    stderr_capture
-                        .reopen()
-                        .map_err(|err| format!("打开服务 `{service}` 标准错误文件失败: {err}"))?,
-                ));
+                .stdout(std::process::Stdio::from(stdout_capture.reopen().map_err(
+                    |err| format!("打开服务 `{service}` 标准输出文件失败: {err}"),
+                )?))
+                .stderr(std::process::Stdio::from(stderr_capture.reopen().map_err(
+                    |err| format!("打开服务 `{service}` 标准错误文件失败: {err}"),
+                )?));
 
             let timeout_secs = timeout_secs.unwrap_or(15).max(1);
             let mut child = process
                 .spawn()
                 .map_err(|err| format!("启动服务 `{service}` 失败: {err}"))?;
-            let (status, timed_out) = match timeout(
-                Duration::from_secs(timeout_secs),
-                child.wait(),
-            )
-            .await
+            let (status, timed_out) = match timeout(Duration::from_secs(timeout_secs), child.wait())
+                .await
             {
                 Ok(Ok(status)) => (Some(status), false),
                 Ok(Err(err)) => return Err(format!("等待服务 `{service}` 启动命令失败: {err}")),
