@@ -12,7 +12,7 @@ pipeline {
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact bridge repository commit containing the Codex local app release tooling')
         string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
-        string(name: 'CONNECTOR_VERSION', defaultValue: '1.1.1', description: 'Codex local app version')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '1.2.4', description: 'Codex local app version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
     }
 
@@ -72,6 +72,32 @@ set -euo pipefail
 if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
 cargo test --manifest-path connector-src/Cargo.toml
 '''
+            }
+        }
+
+        stage('Validate market publisher') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-momoplan-token',
+                        usernameVariable: 'GITHUB_USER',
+                        passwordVariable: 'GITHUB_TOKEN'
+                    ),
+                    string(
+                        credentialsId: 'baijimu-cli-local-app-publisher-pat',
+                        variable: 'LOCAL_APP_MARKET_PUBLISH_TOKEN'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+GH_TOKEN="$GITHUB_TOKEN" \
+BAIJIMU_CLI_USE_RELEASE_ASSET=true \
+./tools/baijimu-cli/prepare-bundled-cli.sh
+VALIDATE_ONLY=true \
+BAIJIMU_CLI="$PWD/src-tauri/resources/bin/baijimu" \
+tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-src/connector.json
+'''
+                }
             }
         }
 
@@ -173,12 +199,22 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
                 expression { return !params.DRY_RUN }
             }
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-momoplan-token',
-                    usernameVariable: 'GITHUB_USER',
-                    passwordVariable: 'GITHUB_TOKEN'
-                )]) {
-                    sh 'tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-src/connector.json'
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-momoplan-token',
+                        usernameVariable: 'GITHUB_USER',
+                        passwordVariable: 'GITHUB_TOKEN'
+                    ),
+                    string(
+                        credentialsId: 'baijimu-cli-local-app-publisher-pat',
+                        variable: 'LOCAL_APP_MARKET_PUBLISH_TOKEN'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+BAIJIMU_CLI="$PWD/src-tauri/resources/bin/baijimu" \
+tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-src/connector.json
+'''
                 }
             }
         }
@@ -200,7 +236,9 @@ curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
   | jq -e --arg version "$CONNECTOR_VERSION" '
       ((.data // .).latestVersion.version == $version)
       and ((.data // .).latestVersion.compatibility.compatible == true)
-      and (((.data // .).latestVersion.source | length) > 0)
+      and ((.data // .).latestVersion.source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/"))
+      and (all((.data // .).latestVersion.manifest.artifacts[];
+        .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/")))
       and (((.data // .).latestVersion.manifest.setup // false) == false)
       and ((((.data // .).latestVersion.manifest.hostRequirements.capabilities // []) | length) == 0)'
 '''
@@ -211,7 +249,6 @@ curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
     post {
         always {
             sh 'git worktree remove --force release-src >/dev/null 2>&1 || true; git worktree prune'
-            archiveArtifacts artifacts: 'codex-market-before-*.tsv', allowEmptyArchive: true
         }
     }
 }

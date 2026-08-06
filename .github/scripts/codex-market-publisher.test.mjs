@@ -8,10 +8,29 @@ const publisher = readFileSync(
 );
 
 describe("Codex local app market publisher", () => {
-  test("promotes the published version above the current application rank", () => {
-    expect(publisher).toContain("COALESCE(MAX(rank_order), 0) + 1");
-    expect(publisher).toContain("rank_order=VALUES(rank_order)");
-    expect(publisher).not.toMatch(/\n\s*400, '\$\{published_at\}'/);
+  test("publishes only through Baijimu CLI without database access", () => {
+    expect(publisher).toContain("local-app publish codex");
+    expect(publisher).toContain("LOCAL_APP_MARKET_PUBLISH_TOKEN");
+    expect(publisher).toContain("BAIJIMU_AUTH_FILE");
+    expect(publisher).not.toContain("GetNacosConfig");
+    expect(publisher).not.toContain("MYSQL_PWD");
+    expect(publisher).not.toMatch(/(^|\s)mysql(\s|$)/m);
+    expect(publisher).not.toContain("INSERT INTO local_app");
+  });
+
+  test("publishes content-addressed artifacts through anonymous Baijimu OSS", () => {
+    expect(publisher).toContain('OSS_BUCKET="${OSS_BUCKET:-lowcode-common}"');
+    expect(publisher).toContain(
+      'OSS_PREFIX="${OSS_PREFIX:-local-app-artifacts/codex}"',
+    );
+    expect(publisher).toContain(
+      'object_prefix="${OSS_PREFIX}/releases/v${version}/${checksum}"',
+    );
+    expect(publisher).toContain("anonymous OSS download checksum mismatch");
+    expect(publisher).toContain("Cache-Control:public,max-age=31536000,immutable");
+    expect(publisher).not.toContain(
+      'release_base="https://github.com/momoplan/bridge-agent/releases/download/',
+    );
   });
 
   test("derives setup and host compatibility from the released connector manifest", () => {
@@ -24,5 +43,6 @@ describe("Codex local app market publisher", () => {
     expect(publisher).toContain("hostCapabilities=connector.setup.v1");
     expect(publisher).toContain(".latestVersion.compatibility.compatible == true");
     expect(publisher).toContain(".latestVersion.manifest == $expected_manifest");
+    expect(publisher).toContain(".latestVersion.source == $mac_source");
   });
 });
