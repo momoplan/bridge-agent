@@ -52,10 +52,6 @@ OSS_PREFIX="${OSS_PREFIX:-local-app-artifacts/codex}"
 OSS_ENDPOINT="${OSS_ENDPOINT:-oss-cn-beijing.aliyuncs.com}"
 OSS_CONFIG_FILE="${OSS_CONFIG_FILE:-$HOME/.ossutilconfig}"
 OSS_PUBLIC_BASE_URL="${OSS_PUBLIC_BASE_URL:-https://${OSS_BUCKET}.${OSS_ENDPOINT}}"
-if [ ! -f "$OSS_CONFIG_FILE" ]; then
-  echo "OSS client configuration is unavailable: $OSS_CONFIG_FILE" >&2
-  exit 1
-fi
 if command -v ossutil >/dev/null 2>&1; then
   OSS_CLIENT="$(command -v ossutil)"
   OSS_CLIENT_MODE="native"
@@ -65,6 +61,18 @@ elif command -v aliyun >/dev/null 2>&1; then
 else
   echo "ossutil or aliyun oss is required for local app publication" >&2
   exit 127
+fi
+OSS_AUTH_ARGS=()
+if [ -n "${OSS_ACCESS_KEY_ID:-}" ] && [ -n "${OSS_ACCESS_KEY_SECRET:-}" ]; then
+  OSS_AUTH_ARGS=(
+    --access-key-id "$OSS_ACCESS_KEY_ID"
+    --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+  )
+elif [ -f "$OSS_CONFIG_FILE" ]; then
+  OSS_AUTH_ARGS=(--config-file "$OSS_CONFIG_FILE")
+else
+  echo "OSS credentials are unavailable: provide OSS_CONFIG_FILE or OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET" >&2
+  exit 1
 fi
 
 case "$OSS_BUCKET" in
@@ -94,8 +102,27 @@ BAIJIMU_AUTH_FILE="$auth_file" "$BAIJIMU_CLI" auth login \
 BAIJIMU_AUTH_FILE="$auth_file" "$BAIJIMU_CLI" local-app get codex --json \
   | jq -e '(.data // .).id == "codex" and (.data // .).connectorId == "com.baijimu.connector.codex"' \
   >/dev/null
+
+oss_validate_access() {
+  local destination="oss://${OSS_BUCKET}/${OSS_PREFIX}/"
+  if [ "$OSS_CLIENT_MODE" = "native" ]; then
+    "$OSS_CLIENT" ls "$destination" \
+      "${OSS_AUTH_ARGS[@]}" \
+      --endpoint "$OSS_ENDPOINT" \
+      --limited-num 1 \
+      >/dev/null
+  else
+    "$OSS_CLIENT" oss ls "$destination" \
+      "${OSS_AUTH_ARGS[@]}" \
+      --endpoint "$OSS_ENDPOINT" \
+      --limited-num 1 \
+      >/dev/null
+  fi
+}
+
+oss_validate_access
 if [ "${VALIDATE_ONLY:-false}" = "true" ]; then
-  echo "validated Codex local app publisher identity, pinned CLI, and OSS client configuration"
+  echo "validated Codex local app publisher identity, pinned CLI, and OSS read access"
   exit 0
 fi
 
@@ -131,14 +158,14 @@ oss_upload() {
   local metadata="Content-Type:${content_type}#Cache-Control:public,max-age=31536000,immutable"
   if [ "$OSS_CLIENT_MODE" = "native" ]; then
     "$OSS_CLIENT" cp "$source_file" "$destination" \
-      --config-file "$OSS_CONFIG_FILE" \
+      "${OSS_AUTH_ARGS[@]}" \
       --endpoint "$OSS_ENDPOINT" \
       --force \
       --no-progress \
       --meta "$metadata"
   else
     "$OSS_CLIENT" oss cp "$source_file" "$destination" \
-      --config-file "$OSS_CONFIG_FILE" \
+      "${OSS_AUTH_ARGS[@]}" \
       --endpoint "$OSS_ENDPOINT" \
       --force \
       --meta "$metadata"

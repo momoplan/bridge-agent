@@ -6,6 +6,10 @@ const publisher = readFileSync(
   "tools/release/publish-codex-local-app-market.sh",
   "utf8",
 );
+const pipeline = readFileSync(
+  "Jenkinsfile.codex-local-app-release",
+  "utf8",
+);
 
 describe("Codex local app market publisher", () => {
   test("publishes only through Baijimu CLI without database access", () => {
@@ -28,6 +32,12 @@ describe("Codex local app market publisher", () => {
     );
     expect(publisher).toContain("anonymous OSS download checksum mismatch");
     expect(publisher).toContain("Cache-Control:public,max-age=31536000,immutable");
+    expect(publisher).toContain("OSS_ACCESS_KEY_ID");
+    expect(publisher).toContain("OSS_ACCESS_KEY_SECRET");
+    expect(publisher).toContain("oss_validate_access");
+    expect(pipeline.match(/credentialsId: 'jenkins-aliyun-ram'/g)).toHaveLength(2);
+    expect(pipeline).toContain("usernameVariable: 'OSS_ACCESS_KEY_ID'");
+    expect(pipeline).toContain("passwordVariable: 'OSS_ACCESS_KEY_SECRET'");
     expect(publisher).not.toContain(
       'release_base="https://github.com/momoplan/bridge-agent/releases/download/',
     );

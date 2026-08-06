@@ -86,6 +86,11 @@ cargo test --manifest-path connector-src/Cargo.toml
                     string(
                         credentialsId: 'baijimu-cli-local-app-publisher-pat',
                         variable: 'LOCAL_APP_MARKET_PUBLISH_TOKEN'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'jenkins-aliyun-ram',
+                        usernameVariable: 'OSS_ACCESS_KEY_ID',
+                        passwordVariable: 'OSS_ACCESS_KEY_SECRET'
                     )
                 ]) {
                     sh '''#!/bin/bash
@@ -208,6 +213,11 @@ tools/release/wait-github-workflow.sh momoplan/bridge-agent release-codex-local-
                     string(
                         credentialsId: 'baijimu-cli-local-app-publisher-pat',
                         variable: 'LOCAL_APP_MARKET_PUBLISH_TOKEN'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'jenkins-aliyun-ram',
+                        usernameVariable: 'OSS_ACCESS_KEY_ID',
+                        passwordVariable: 'OSS_ACCESS_KEY_SECRET'
                     )
                 ]) {
                     sh '''#!/bin/bash
