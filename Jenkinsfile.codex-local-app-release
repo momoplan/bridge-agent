@@ -12,7 +12,7 @@ pipeline {
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact bridge repository commit containing the Codex local app release tooling')
         string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
-        string(name: 'CONNECTOR_VERSION', defaultValue: '1.2.6', description: 'Codex local app version')
+        string(name: 'CONNECTOR_VERSION', defaultValue: '1.2.7', description: 'Codex local app version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
     }
 
@@ -242,7 +242,7 @@ curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/code
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-macos-universal.zip") != null) and
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-windows-x64.zip") != null) and
       ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-linux-x64.zip") != null)'
-curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=macos&arch=aarch64&hostVersion=0.2.21&hostCapabilities=connector.setup.v1" \
+curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=macos&arch=aarch64&hostVersion=0.2.40&hostCapabilities=connector.setup.v1,connector.process.host-managed.v1" \
   | jq -e --arg version "$CONNECTOR_VERSION" '
       ((.data // .).latestVersion.version == $version)
       and ((.data // .).latestVersion.compatibility.compatible == true)
@@ -250,7 +250,10 @@ curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
       and (all((.data // .).latestVersion.manifest.artifacts[];
         .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/")))
       and (((.data // .).latestVersion.manifest.setup // false) == false)
-      and ((((.data // .).latestVersion.manifest.hostRequirements.capabilities // []) | length) == 0)'
+      and ((.data // .).latestVersion.manifest.runtime.processOwnership == "host")
+      and ((.data // .).latestVersion.manifest.runtime.args == ["start"])
+      and ((.data // .).latestVersion.manifest.hostRequirements.minimumVersion == "0.2.40")
+      and (((.data // .).latestVersion.manifest.hostRequirements.capabilities // []) | index("connector.process.host-managed.v1") != null)'
 '''
             }
         }

@@ -26,6 +26,11 @@ connector_manifest="$(jq -ce \
     | select(.source.revision == ("v" + $version))
     | select(.runtime.type == "process")
     | select((.runtime.command | type) == "string" and (.runtime.command | length) > 0)
+    | select(.runtime.processOwnership == "host")
+    | select(.runtime.args == ["start"])
+    | select(.runtime.stopArgs == ["stop"])
+    | select(.hostRequirements.minimumVersion == "0.2.40")
+    | select((.hostRequirements.capabilities // []) | index("connector.process.host-managed.v1") != null)
   ' "$connector_manifest_path")" || {
   echo "connector manifest identity, version, source revision, or runtime contract is invalid" >&2
   exit 2
@@ -324,7 +329,7 @@ for attempt in $(seq 1 400); do
   all_targets_verified=true
   for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
     payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
-      "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=${target}&hostVersion=0.2.21&hostCapabilities=connector.setup.v1")"
+      "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?platform=${target}&hostVersion=0.2.40&hostCapabilities=connector.setup.v1,connector.process.host-managed.v1")"
     if ! printf '%s' "$payload" | jq -e \
       --arg version "$version" \
       --argjson expected_manifest "$manifest" \
@@ -337,6 +342,10 @@ for attempt in $(seq 1 400); do
        .latestVersion.compatibility.compatible == true and
        .latestVersion.source == $mac_source and
        .latestVersion.manifest == $expected_manifest and
+       .latestVersion.manifest.runtime.processOwnership == "host" and
+       .latestVersion.manifest.runtime.args == ["start"] and
+       .latestVersion.manifest.hostRequirements.minimumVersion == "0.2.40" and
+       ((.latestVersion.manifest.hostRequirements.capabilities // []) | index("connector.process.host-managed.v1") != null) and
        any(.latestVersion.manifest.artifacts[]; .platform == "macos" and .source == $mac_source) and
        any(.latestVersion.manifest.artifacts[]; .platform == "windows" and .source == $win_source) and
        any(.latestVersion.manifest.artifacts[]; .platform == "linux" and .source == $linux_source)' \

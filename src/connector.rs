@@ -48,6 +48,7 @@ const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
     "connector.asset-upload.v1",
     HOST_MANAGED_PROCESS_CAPABILITY,
 ];
+const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -3410,7 +3411,19 @@ fn run_start_command(
                 child.current_dir(cwd);
             }
             child.envs(env);
-            child.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let stdout_capture = tempfile::NamedTempFile::new().with_context(|| {
+                format!("failed to create stdout capture for local app `{connector_id}`")
+            })?;
+            let stderr_capture = tempfile::NamedTempFile::new().with_context(|| {
+                format!("failed to create stderr capture for local app `{connector_id}`")
+            })?;
+            child
+                .stdout(Stdio::from(stdout_capture.reopen().with_context(|| {
+                    format!("failed to open stdout capture for local app `{connector_id}`")
+                })?))
+                .stderr(Stdio::from(stderr_capture.reopen().with_context(|| {
+                    format!("failed to open stderr capture for local app `{connector_id}`")
+                })?));
             let mut child = child.spawn().with_context(|| {
                 format!("failed to run lifecycle command for local app `{connector_id}`")
             })?;
@@ -3430,14 +3443,15 @@ fn run_start_command(
                 }
                 std::thread::sleep(Duration::from_millis(50));
             };
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_end(&mut stdout)?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_end(&mut stderr)?;
-            }
+            // Lifecycle launchers may daemonize a descendant. On Windows that
+            // descendant can inherit every inheritable stdio handle even when its
+            // own output is redirected. A pipe therefore cannot be drained by
+            // waiting for EOF: the launcher has exited, but the descendant still
+            // owns the write end. Regular files make launcher completion and
+            // output collection independent, and the bounded read prevents an
+            // untrusted lifecycle command from exhausting host memory.
+            let stdout = read_lifecycle_capture(connector_id, "stdout", &stdout_capture)?;
+            let mut stderr = read_lifecycle_capture(connector_id, "stderr", &stderr_capture)?;
             if timed_out {
                 stderr.extend_from_slice(
                     format!(
@@ -3456,6 +3470,27 @@ fn run_start_command(
             })
         }
     }
+}
+
+fn read_lifecycle_capture(
+    connector_id: &str,
+    stream_name: &str,
+    capture: &tempfile::NamedTempFile,
+) -> Result<Vec<u8>> {
+    let file = capture.reopen().with_context(|| {
+        format!("failed to read {stream_name} capture for local app `{connector_id}`")
+    })?;
+    let mut bytes = Vec::new();
+    file.take(LIFECYCLE_OUTPUT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!("failed to collect {stream_name} for local app `{connector_id}`")
+        })?;
+    if bytes.len() as u64 > LIFECYCLE_OUTPUT_MAX_BYTES {
+        bytes.truncate(LIFECYCLE_OUTPUT_MAX_BYTES as usize);
+        bytes.extend_from_slice(b"\n[output truncated by Bridge Agent]");
+    }
+    Ok(bytes)
 }
 
 fn terminate_lifecycle_process_tree(child: &mut std::process::Child) {
@@ -4658,6 +4693,77 @@ mod tests {
             env: BTreeMap::new(),
             timeout_secs: Some(5),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_command_does_not_wait_for_descendant_owned_stdio() {
+        let command = ServiceStartCommand::ShellCommand {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 3 & printf started".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_secs: Some(2),
+        };
+        let started_at = Instant::now();
+
+        let result = run_start_command("com.baijimu.connector.pipe-regression", &command).unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "started");
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "lifecycle output collection waited for a descendant-owned handle"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_command_does_not_wait_for_descendant_owned_stdio() {
+        let command = ServiceStartCommand::ShellCommand {
+            command: vec![
+                "cmd.exe".to_string(),
+                "/C".to_string(),
+                "start \"\" /B cmd.exe /C \"ping.exe 127.0.0.1 -n 4 >NUL\" & echo started"
+                    .to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_secs: Some(2),
+        };
+        let started_at = Instant::now();
+
+        let result = run_start_command("com.baijimu.connector.pipe-regression", &command).unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.contains("started"));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "lifecycle output collection waited for a descendant-owned handle"
+        );
+    }
+
+    #[test]
+    fn lifecycle_output_capture_is_bounded() {
+        use std::io::Write as _;
+
+        let mut capture = tempfile::NamedTempFile::new().unwrap();
+        capture
+            .write_all(&vec![b'x'; LIFECYCLE_OUTPUT_MAX_BYTES as usize + 32])
+            .unwrap();
+
+        let output =
+            read_lifecycle_capture("com.baijimu.connector.output-limit", "stdout", &capture)
+                .unwrap();
+
+        assert!(output.ends_with(b"\n[output truncated by Bridge Agent]"));
+        assert_eq!(
+            output.len(),
+            LIFECYCLE_OUTPUT_MAX_BYTES as usize + b"\n[output truncated by Bridge Agent]".len()
+        );
     }
 
     #[test]

@@ -80,6 +80,14 @@ impl ConnectorProcessManager {
             processes.remove(&connector_id);
         }
 
+        // The process map is intentionally in-memory. After a host crash or an
+        // interrupted upgrade, a previous connector process can still be alive
+        // even though this Bridge Agent instance has no handle for it. The host
+        // ownership contract requires an idempotent stop command, so reconcile
+        // that external state before starting the one process we will supervise.
+        let cleanup = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
+        ensure_lifecycle_succeeded(&connector_id, "启动前清理遗留进程", &cleanup)?;
+
         let command = resolved_start_command(config_path, &connector_id)?;
         let data_dir = connector_data_dir(&connector_id).map_err(|err| err.to_string())?;
         fs::create_dir_all(&data_dir)
@@ -145,6 +153,7 @@ impl ConnectorProcessManager {
             // The connector shutdown command is deliberately idempotent. Running it also
             // cleans up a process left by an older Bridge Agent version.
             let result = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
+            ensure_lifecycle_succeeded(&connector_id, "清理未托管的遗留进程", &result)?;
             return Ok(result);
         };
 
@@ -165,10 +174,22 @@ impl ConnectorProcessManager {
                     handle.pid
                 )
             })?;
-        let graceful_stderr = graceful
-            .err()
-            .map(|err| format!("优雅停止命令失败，已由宿主回收进程树: {err}"))
-            .unwrap_or_default();
+        let graceful_stderr = match graceful {
+            Ok(result)
+                if result.lifecycle.configured && result.lifecycle.exit_code == Some(0) =>
+            {
+                String::new()
+            }
+            Ok(result) => {
+                let detail = if !result.lifecycle.stderr.trim().is_empty() {
+                    result.lifecycle.stderr.trim().to_string()
+                } else {
+                    format!("退出码 {:?}", result.lifecycle.exit_code)
+                };
+                format!("优雅停止命令失败，已由宿主回收进程树: {detail}")
+            }
+            Err(err) => format!("优雅停止命令失败，已由宿主回收进程树: {err}"),
+        };
         Ok(lifecycle_result(
             &connector_id,
             Some(0),
@@ -206,6 +227,24 @@ impl ConnectorProcessManager {
         }
         failures
     }
+}
+
+fn ensure_lifecycle_succeeded(
+    connector_id: &str,
+    action: &str,
+    result: &ConnectorStartResult,
+) -> Result<(), String> {
+    if result.lifecycle.configured && result.lifecycle.exit_code == Some(0) {
+        return Ok(());
+    }
+    let detail = if !result.lifecycle.configured {
+        "命令未配置".to_string()
+    } else if !result.lifecycle.stderr.trim().is_empty() {
+        result.lifecycle.stderr.trim().to_string()
+    } else {
+        format!("退出码 {:?}", result.lifecycle.exit_code)
+    };
+    Err(format!("本地应用 `{connector_id}` {action}失败: {detail}"))
 }
 
 fn resolved_start_command(

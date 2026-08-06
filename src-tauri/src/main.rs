@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,6 +105,7 @@ const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
 const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 const LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_QUIT: &str = "quit";
@@ -4351,28 +4352,77 @@ async fn run_start_command(
             process.envs(env);
             process.kill_on_drop(true);
 
+            let stdout_capture = tempfile::NamedTempFile::new()
+                .map_err(|err| format!("创建服务 `{service}` 标准输出文件失败: {err}"))?;
+            let stderr_capture = tempfile::NamedTempFile::new()
+                .map_err(|err| format!("创建服务 `{service}` 标准错误文件失败: {err}"))?;
+            process
+                .stdout(std::process::Stdio::from(
+                    stdout_capture
+                        .reopen()
+                        .map_err(|err| format!("打开服务 `{service}` 标准输出文件失败: {err}"))?,
+                ))
+                .stderr(std::process::Stdio::from(
+                    stderr_capture
+                        .reopen()
+                        .map_err(|err| format!("打开服务 `{service}` 标准错误文件失败: {err}"))?,
+                ));
+
             let timeout_secs = timeout_secs.unwrap_or(15).max(1);
-            match timeout(Duration::from_secs(timeout_secs), process.output()).await {
-                Ok(Ok(output)) => Ok(StartRegisteredServiceResult {
-                    service,
-                    success: output.status.success(),
-                    exit_code: output.status.code(),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    timed_out: false,
-                }),
-                Ok(Err(err)) => Err(format!("启动服务 `{service}` 失败: {err}")),
-                Err(_) => Ok(StartRegisteredServiceResult {
-                    service,
-                    success: false,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: format!("timed out after {timeout_secs}s"),
-                    timed_out: true,
-                }),
+            let mut child = process
+                .spawn()
+                .map_err(|err| format!("启动服务 `{service}` 失败: {err}"))?;
+            let (status, timed_out) = match timeout(
+                Duration::from_secs(timeout_secs),
+                child.wait(),
+            )
+            .await
+            {
+                Ok(Ok(status)) => (Some(status), false),
+                Ok(Err(err)) => return Err(format!("等待服务 `{service}` 启动命令失败: {err}")),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = timeout(Duration::from_secs(3), child.wait()).await;
+                    (None, true)
+                }
+            };
+            let stdout = read_lifecycle_capture(&service, "stdout", &stdout_capture)?;
+            let mut stderr = read_lifecycle_capture(&service, "stderr", &stderr_capture)?;
+            if timed_out {
+                if !stderr.is_empty() {
+                    stderr.push('\n');
+                }
+                stderr.push_str(&format!("timed out after {timeout_secs}s"));
             }
+            Ok(StartRegisteredServiceResult {
+                service,
+                success: status.as_ref().is_some_and(|status| status.success()),
+                exit_code: status.and_then(|status| status.code()),
+                stdout,
+                stderr,
+                timed_out,
+            })
         }
     }
+}
+
+fn read_lifecycle_capture(
+    service: &str,
+    stream_name: &str,
+    capture: &tempfile::NamedTempFile,
+) -> Result<String, String> {
+    let file = capture
+        .reopen()
+        .map_err(|err| format!("读取服务 `{service}` {stream_name} 文件失败: {err}"))?;
+    let mut bytes = Vec::new();
+    file.take(LIFECYCLE_OUTPUT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("收集服务 `{service}` {stream_name} 失败: {err}"))?;
+    if bytes.len() as u64 > LIFECYCLE_OUTPUT_MAX_BYTES {
+        bytes.truncate(LIFECYCLE_OUTPUT_MAX_BYTES as usize);
+        bytes.extend_from_slice(b"\n[output truncated by Bridge Agent]");
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 enum ResolvedConnectorSource {

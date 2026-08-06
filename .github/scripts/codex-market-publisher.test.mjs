@@ -55,8 +55,18 @@ describe("Codex local app market publisher", () => {
     expect(publisher).not.toContain("runtime: $connector.runtime.type");
     expect(publisher).not.toContain("management: ($connector.management != null)");
     expect(publisher).not.toContain('capabilities: ["connector.setup.v1"]');
-    expect(publisher).toContain("hostVersion=0.2.21");
-    expect(publisher).toContain("hostCapabilities=connector.setup.v1");
+    expect(publisher).toContain("hostVersion=0.2.40");
+    expect(publisher).toContain(
+      "hostCapabilities=connector.setup.v1,connector.process.host-managed.v1",
+    );
+    expect(publisher).toContain('.runtime.processOwnership == "host"');
+    expect(publisher).toContain('.runtime.args == ["start"]');
+    expect(publisher).toContain(
+      '.hostRequirements.minimumVersion == "0.2.40"',
+    );
+    expect(publisher).toContain(
+      'index("connector.process.host-managed.v1") != null',
+    );
     expect(publisher).toContain(".latestVersion.compatibility.compatible == true");
     expect(publisher).toContain(".latestVersion.manifest == $expected_manifest");
     expect(publisher).toContain(".latestVersion.source == $mac_source");
