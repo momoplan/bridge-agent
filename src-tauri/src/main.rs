@@ -26,16 +26,16 @@ use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
     format_connector_sync_failures, inspect_python_runtime,
-    install_connector_from_path_with_provenance, install_rustls_crypto_provider, list_connectors,
-    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
-    reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
-    save_config as save_agent_config, show_connector, sync_installed_connector,
-    sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager, ConnectorInstallProvenance,
-    ConnectorInstallRecord, ConnectorInstallResult, ConnectorStartResult, ConnectorSummary,
-    ConnectorTrustLevel, ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent,
-    RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceHealthCheck,
-    ServiceStartCommand,
+    install_connector_from_path_with_provenance, install_rustls_crypto_provider,
+    is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
+    load_connector_manifest, manifest_preview_json, reset_invalid_config,
+    resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
+    show_connector, sync_installed_connector, sync_installed_connectors_report,
+    terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
+    AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
+    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
+    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -936,6 +936,23 @@ const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
 enum CommandError {
     RuntimeAlreadyRunning { conflict: RuntimeLockConflict },
     Message { message: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+enum ConnectorUninstallCommandError {
+    #[serde(rename = "connector_uninstall_stop_failed")]
+    StopFailed { message: String },
+    #[serde(rename = "connector_uninstall_failed")]
+    Failed { message: String },
+}
+
+impl ConnectorUninstallCommandError {
+    fn message(&self) -> &str {
+        match self {
+            Self::StopFailed { message } | Self::Failed { message } => message,
+        }
+    }
 }
 
 impl From<anyhow::Error> for CommandError {
@@ -2361,7 +2378,8 @@ async fn local_app_control_uninstall_handler(
             connector_id.clone(),
             query.force,
         )
-        .await?;
+        .await
+        .map_err(|error| error.message().to_string())?;
         state
             .local_apps
             .notify(LocalAppsChangeOperation::Uninstall, &connector_id);
@@ -3294,7 +3312,7 @@ async fn uninstall_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
     force: Option<bool>,
-) -> Result<ConfigDocument, String> {
+) -> Result<ConfigDocument, ConnectorUninstallCommandError> {
     let connector_id = id.trim().to_string();
     let document = uninstall_connector_app_with_context(
         &state.config_path,
@@ -3318,13 +3336,13 @@ async fn uninstall_connector_app_with_context(
     registered_services: &RegisteredServiceMonitor,
     id: String,
     force: bool,
-) -> Result<ConfigDocument, String> {
+) -> Result<ConfigDocument, ConnectorUninstallCommandError> {
     let managed_stop = connector_processes
         .stop_if_managed(id.trim(), config_path)
         .await;
     if let Err(error) = managed_stop {
         if !force {
-            return Err(error);
+            return Err(ConnectorUninstallCommandError::StopFailed { message: error });
         }
         log::warn!(
             "continuing explicit forced uninstall for connector `{}` after host-managed stop failed: {}",
@@ -3333,18 +3351,35 @@ async fn uninstall_connector_app_with_context(
         );
     }
     uninstall_connector_with_options(id.trim(), config_path, ConnectorUninstallOptions { force })
-        .map_err(|err| err.to_string())?;
+        .map_err(|error| {
+        let stop_failed = is_connector_package_stop_error(&error);
+        let message = format!("{error:#}");
+        if stop_failed && !force {
+            ConnectorUninstallCommandError::StopFailed { message }
+        } else {
+            ConnectorUninstallCommandError::Failed { message }
+        }
+    })?;
     let runtime = runtime_manager
         .apply_capabilities_from_path(config_path)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|error| ConnectorUninstallCommandError::Failed {
+            message: error.to_string(),
+        })?;
     registered_services.request_refresh();
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+    let config =
+        load_agent_config(config_path).map_err(|error| ConnectorUninstallCommandError::Failed {
+            message: format!("{error:#}"),
+        })?;
+    let manifest_preview =
+        manifest_preview_json(&config).map_err(|error| ConnectorUninstallCommandError::Failed {
+            message: format!("{error:#}"),
+        })?;
     Ok(ConfigDocument {
         config_path: config_path.display().to_string(),
         manifest_preview,
-        config: config_for_ui(&config)?,
+        config: config_for_ui(&config)
+            .map_err(|message| ConnectorUninstallCommandError::Failed { message })?,
         runtime,
     })
 }
@@ -6299,6 +6334,27 @@ mod tests {
         assert_eq!(format_byte_count(512), "512 B");
         assert_eq!(format_byte_count(1536), "1.5 KB");
         assert_eq!(format_byte_count(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn connector_uninstall_errors_preserve_force_eligibility_for_the_frontend() {
+        let stop_failed = serde_json::to_value(ConnectorUninstallCommandError::StopFailed {
+            message: "stop failed".to_string(),
+        })
+        .unwrap();
+        let uninstall_failed = serde_json::to_value(ConnectorUninstallCommandError::Failed {
+            message: "directory locked".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            stop_failed["code"],
+            serde_json::json!("connector_uninstall_stop_failed")
+        );
+        assert_eq!(
+            uninstall_failed["code"],
+            serde_json::json!("connector_uninstall_failed")
+        );
     }
 
     #[test]

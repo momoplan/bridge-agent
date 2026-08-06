@@ -837,6 +837,25 @@ pub struct ConnectorUninstallOptions {
     pub force: bool,
 }
 
+#[derive(Debug)]
+pub struct ConnectorPackageStopError {
+    message: String,
+}
+
+impl std::fmt::Display for ConnectorPackageStopError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConnectorPackageStopError {}
+
+pub fn is_connector_package_stop_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ConnectorPackageStopError>())
+}
+
 pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
     uninstall_connector_with_options(
         connector_id,
@@ -1758,40 +1777,8 @@ fn quarantine_connector_package_path(package_path: &Path) -> Result<PathBuf> {
         if quarantine_path.exists() {
             continue;
         }
-        let mut last_error = None;
-        for _ in 0..20 {
-            match fs::rename(package_path, &quarantine_path) {
-                Ok(()) => return Ok(quarantine_path),
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::PermissionDenied
-                            | std::io::ErrorKind::WouldBlock
-                            | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    last_error = Some(err);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "failed to move {} to {}",
-                            package_path.display(),
-                            quarantine_path.display()
-                        )
-                    });
-                }
-            }
-        }
-        let err = last_error.context("connector package rename failed without an error")?;
-        return Err(err).with_context(|| {
-            format!(
-                "failed to move {} to {} after waiting for process handles to close",
-                package_path.display(),
-                quarantine_path.display()
-            )
-        });
+        rename_connector_path_after_handles_close(package_path, &quarantine_path)?;
+        return Ok(quarantine_path);
     }
     bail!(
         "failed to choose replacement path for existing connector package {}",
@@ -1841,19 +1828,69 @@ fn quarantine_connector_install_root(install_root: &Path) -> Result<PathBuf> {
         if quarantine_path.exists() {
             continue;
         }
-        fs::rename(install_root, &quarantine_path).with_context(|| {
-            format!(
-                "failed to move connector installation {} to {} before uninstall",
-                install_root.display(),
-                quarantine_path.display()
-            )
-        })?;
+        rename_connector_path_after_handles_close(install_root, &quarantine_path).with_context(
+            || {
+                format!(
+                    "failed to move connector installation {} to {} before uninstall",
+                    install_root.display(),
+                    quarantine_path.display()
+                )
+            },
+        )?;
         return Ok(quarantine_path);
     }
     bail!(
         "failed to choose uninstall path for connector installation {}",
         install_root.display()
     )
+}
+
+const CONNECTOR_PATH_RENAME_ATTEMPTS: usize = 30;
+const CONNECTOR_PATH_RENAME_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+fn rename_connector_path_after_handles_close(source: &Path, destination: &Path) -> Result<()> {
+    rename_connector_path_with_retry(
+        source,
+        destination,
+        CONNECTOR_PATH_RENAME_ATTEMPTS,
+        CONNECTOR_PATH_RENAME_RETRY_DELAY,
+    )
+}
+
+fn rename_connector_path_with_retry(
+    source: &Path,
+    destination: &Path,
+    attempts: usize,
+    retry_delay: Duration,
+) -> Result<()> {
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        match fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(err) if connector_path_error_is_retryable(&err) && attempt + 1 < attempts => {
+                std::thread::sleep(retry_delay);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to move {} to {} after waiting for process handles to close",
+                        source.display(),
+                        destination.display()
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("connector path rename loop always returns")
+}
+
+fn connector_path_error_is_retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+    ) || matches!(error.raw_os_error(), Some(32 | 33))
 }
 
 fn stop_connector_for_package_change(
@@ -1869,20 +1906,32 @@ fn stop_connector_for_package_change(
     };
     match (&app.start_command, &app.stop_command) {
         (_, Some(command)) => {
-            let result = run_start_command(connector_id, command)?;
+            let result = run_start_command(connector_id, command).map_err(|error| {
+                anyhow::Error::new(ConnectorPackageStopError {
+                    message: format!(
+                        "failed to stop connector `{connector_id}` before package change: {error:#}"
+                    ),
+                })
+            })?;
             if result.exit_code != Some(0) {
                 let detail = if !result.stderr.trim().is_empty() {
                     result.stderr.trim().to_string()
                 } else {
                     format!("exit code {:?}", result.exit_code)
                 };
-                bail!("failed to stop connector `{connector_id}` before package change: {detail}");
+                return Err(anyhow::Error::new(ConnectorPackageStopError {
+                    message: format!(
+                        "failed to stop connector `{connector_id}` before package change: {detail}"
+                    ),
+                }));
             }
             Ok(())
         }
-        (Some(_), None) => bail!(
-            "connector `{connector_id}` has a start command but no stop command; refusing to change a package that may still be running"
-        ),
+        (Some(_), None) => Err(anyhow::Error::new(ConnectorPackageStopError {
+            message: format!(
+                "connector `{connector_id}` has a start command but no stop command; refusing to change a package that may still be running"
+            ),
+        })),
         (None, None) => Ok(()),
     }
 }
@@ -4646,6 +4695,7 @@ mod tests {
         let error = uninstall_connector("com.baijimu.connector.force-uninstall-test", &config_path)
             .unwrap_err();
         assert!(error.to_string().contains("failed to stop connector"));
+        assert!(is_connector_package_stop_error(&error));
         let install_root = connectors_dir.join("com.baijimu.connector.force-uninstall-test");
         assert!(install_root.exists());
 
@@ -4665,6 +4715,36 @@ mod tests {
             assert!(error.to_string().contains("only supported on Windows"));
             assert!(install_root.exists());
         }
+    }
+
+    #[test]
+    fn connector_path_rename_retries_windows_handle_release_errors() {
+        assert!(connector_path_error_is_retryable(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "locked",
+        )));
+        assert!(connector_path_error_is_retryable(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+        assert!(!connector_path_error_is_retryable(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "missing",
+        )));
+    }
+
+    #[test]
+    fn connector_path_rename_preserves_the_operating_system_error_chain() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("missing");
+        let destination = dir.path().join("destination");
+        let error =
+            rename_connector_path_with_retry(&source, &destination, 1, Duration::from_millis(0))
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("after waiting for process handles to close"));
+        assert!(error.chain().count() >= 2);
     }
 
     #[cfg(windows)]

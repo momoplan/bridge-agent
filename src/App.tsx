@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import {
   ArrowLeft,
   AlertTriangle,
@@ -29,6 +30,7 @@ import {
   type LocalAppInstallTask,
   type LocalAppInstallTaskState
 } from "./local-app-install-tasks";
+import { isConnectorUninstallStopError } from "./local-app-uninstall";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
 import {
   describeLocalAppUpdate,
@@ -79,6 +81,8 @@ interface RuntimeLockConflict {
 
 type CommandError =
   | { code: "runtime_already_running"; conflict: RuntimeLockConflict }
+  | { code: "connector_uninstall_stop_failed"; message: string }
+  | { code: "connector_uninstall_failed"; message: string }
   | { code: "message"; message: string };
 
 interface LogEntry {
@@ -918,6 +922,7 @@ function App() {
   const [startupRecoveryBusy, setStartupRecoveryBusy] = useState(false);
   const [serviceStartBusy, setServiceStartBusy] = useState<string | null>(null);
   const [connectorBusy, setConnectorBusy] = useState<string | null>(null);
+  const [connectorUninstalling, setConnectorUninstalling] = useState<string | null>(null);
   const [localAppLifecycleOverrides, setLocalAppLifecycleOverrides] = useState<
     Record<string, LocalAppLifecycleOverride>
   >({});
@@ -2565,10 +2570,13 @@ function App() {
       return;
     }
     try {
-      setConnectorBusy(app.id);
-      setMessage("");
-      setError("");
-      setRuntimeConflict(null);
+      flushSync(() => {
+        setConnectorBusy(app.id);
+        setConnectorUninstalling(app.id);
+        setMessage("");
+        setError("");
+        setRuntimeConflict(null);
+      });
       let document: ConfigDocument;
       try {
         document = await invoke<ConfigDocument>("uninstall_connector_app", {
@@ -2576,6 +2584,9 @@ function App() {
           force: false
         });
       } catch (gracefulError) {
+        if (!isConnectorUninstallStopError(gracefulError)) {
+          throw gracefulError;
+        }
         const detail = readError(gracefulError);
         const confirmed = window.confirm(
           `应用 ${app.name} 无法正常停止：\n\n${detail}\n\n是否强制终止该应用包内的进程并继续卸载？`
@@ -2596,6 +2607,7 @@ function App() {
     } catch (err) {
       handleCommandError(err);
     } finally {
+      setConnectorUninstalling(null);
       setConnectorBusy(null);
     }
   }
@@ -6150,12 +6162,16 @@ function App() {
             </div>
           </div>
 
-          {activeLocalAppDetailTab === "app" && embeddedUi && app.connector ? (
+          {activeLocalAppDetailTab === "app" && embeddedUi && app.connector && connectorUninstalling !== app.id ? (
             <div className="app-detail-tab-panel embedded-local-app-panel">
               <LocalAppEmbeddedUi
                 connectorId={app.connector.id}
                 title={embeddedUi.title?.trim() || app.name}
               />
+            </div>
+          ) : activeLocalAppDetailTab === "app" && connectorUninstalling === app.id ? (
+            <div className="app-detail-tab-panel embedded-local-app-panel">
+              <div className="embedded-local-app-loading">正在关闭应用界面并准备卸载…</div>
             </div>
           ) : null}
 
@@ -8148,6 +8164,12 @@ function isCommandError(error: unknown): error is CommandError {
   }
   const candidate = error as { code?: unknown; conflict?: unknown; message?: unknown };
   if (candidate.code === "message") {
+    return typeof candidate.message === "string";
+  }
+  if (
+    candidate.code === "connector_uninstall_stop_failed" ||
+    candidate.code === "connector_uninstall_failed"
+  ) {
     return typeof candidate.message === "string";
   }
   if (candidate.code !== "runtime_already_running") {
