@@ -97,7 +97,14 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
 
 #[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
 fn store_secret(config_path: &Path, value: &str) -> Result<()> {
-    keyring_entry(config_path)?
+    let entry = keyring_entry(config_path)?;
+    if entry
+        .get_password()
+        .is_ok_and(|current_value| current_value == value)
+    {
+        return Ok(());
+    }
+    entry
         .set_password(value)
         .context("failed to store relay token in the operating system credential store")
 }
