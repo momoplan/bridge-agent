@@ -43,14 +43,18 @@ describe("Codex local app market publisher", () => {
     );
   });
 
-  test("derives setup and host compatibility from the released connector manifest", () => {
+  test("preserves the complete Connector 2.0 manifest and adds OSS artifacts", () => {
     expect(publisher).toContain('connector_manifest_path="$2"');
-    expect(publisher).toContain("schemaVersion: $connector.schemaVersion");
     expect(publisher).toContain('select(.schemaVersion == "2.0")');
-    expect(publisher).toContain("$connector.hostRequirements");
-    expect(publisher).toContain("$connector.setup == null");
+    expect(publisher).toContain("$connector + {");
+    expect(publisher).toContain(".id == \"com.baijimu.connector.codex\"");
+    expect(publisher).toContain(".version == $version");
+    expect(publisher).toContain("(.transport | type) == \"object\"");
+    expect(publisher).toContain("((.methods // []) | length)");
+    expect(publisher).toContain("[.remoteCapabilities[]?.name]");
+    expect(publisher).not.toContain("runtime: $connector.runtime.type");
+    expect(publisher).not.toContain("management: ($connector.management != null)");
     expect(publisher).not.toContain('capabilities: ["connector.setup.v1"]');
-    expect(publisher).not.toContain("setup: true,\n    setupTimeoutSecs: 1800");
     expect(publisher).toContain("hostVersion=0.2.21");
     expect(publisher).toContain("hostCapabilities=connector.setup.v1");
     expect(publisher).toContain(".latestVersion.compatibility.compatible == true");

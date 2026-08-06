@@ -263,34 +263,31 @@ manifest="$(jq -nc \
   --arg mac_sha "sha256:${checksums[macos]}" \
   --arg win_sha "sha256:${checksums[windows]}" \
   --arg linux_sha "sha256:${checksums[linux]}" \
-  '({
-    schemaVersion: $connector.schemaVersion,
+  '($connector + {
     applicationType: "connector",
-    runtime: $connector.runtime.type,
-    command: $connector.runtime.command,
-    args: ($connector.runtime.args // []),
-    management: ($connector.management != null),
     artifacts: [
       {platform: "macos", arch: "universal", source: $mac_source, checksum: $mac_sha},
       {platform: "windows", arch: "x86_64", source: $win_source, checksum: $win_sha},
       {platform: "linux", arch: "x86_64", source: $linux_source, checksum: $linux_sha}
     ]
-  }
-  + if $connector.setup == null then {} else {
-      setup: true,
-      setupTimeoutSecs: $connector.setup.timeoutSecs
-    } end
-  + if $connector.hostRequirements == null then {} else {
-      hostRequirements: $connector.hostRequirements
-    } end)')"
-capabilities='["codex.project.read","codex.thread.read","codex.app.read","codex.turn.write","codex.raw.request","codex.turn.interrupt"]'
+  })')"
+capabilities="$(printf '%s' "$connector_manifest" | jq -c '[.remoteCapabilities[]?.name]')"
 
 for document in "$manifest" "$capabilities"; do
   printf '%s' "$document" | jq -e . >/dev/null
 done
 printf '%s' "$manifest" | jq -e \
+  --arg version "$version" \
   --arg prefix "${OSS_PUBLIC_BASE_URL%/}/${OSS_PREFIX}/releases/v${version}/" \
-  '.applicationType == "connector" and
+  '.schemaVersion == "2.0" and
+   .applicationType == "connector" and
+   .id == "com.baijimu.connector.codex" and
+   .version == $version and
+   (.runtime | type) == "object" and
+   (.transport | type) == "object" and
+   (((.methods // []) | length) + ((.events // []) | length) > 0) and
+   (has("services") | not) and
+   (has("serviceRegistrationFiles") | not) and
    (.artifacts | length) == 3 and
    all(.artifacts[]; (.source | startswith($prefix)) and (.checksum | test("^sha256:[0-9a-f]{64}$")))' \
   >/dev/null
