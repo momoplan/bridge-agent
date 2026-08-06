@@ -225,7 +225,9 @@ runtime `businessId`。
 
 ## 本地配置模型
 
-默认配置文件会写到系统配置目录下的 `agent-config.json`。
+正式构建的默认配置文件会写到系统配置目录下的 `agent-config.json`。Debug 构建使用独立的
+`agent-config.development.json`，不会加载或修改正式配置；显式传入 `--config` 或
+`WS_BRIDGE_CONFIG` 时仍以指定路径为准。
 
 示例配置可以用下面命令生成：
 
@@ -261,6 +263,12 @@ Relay token 不再明文写入 `agent-config.json`，也不会返回给 WebView 
 - macOS 使用 Keychain
 - Linux 使用 Secret Service
 - Windows 使用 CNG DPAPI-NG 的机器级保护，使交互桌面进程和 LocalSystem 服务可以读取同一份加密凭证
+
+Debug 构建不会访问正式凭据存储。macOS/Linux 开发凭据写入配置目录下独立的
+`.bridge-agent-development/*.credentials` 文件，目录和文件权限分别为 `0700`、`0600`；正式构建仍只
+使用 Keychain 或 Secret Service。开发凭据不会从正式 token 自动迁移，开发版需要独立完成一次设备授权。
+这样本地重新编译产生的新代码哈希不会触发 macOS 钥匙串身份确认，也不会让未签名调试程序获得正式
+relay token。
 
 旧版本配置中的明文 token 会在首次加载时自动迁移到系统安全存储并从 JSON 中删除。Unix 配置目录和配置文件同时收紧为 `0700`、`0600`。Windows 的加密凭证文件与共享配置放在同一 ProgramData 目录，但文件内容不能作为明文读取。
 
@@ -629,6 +637,9 @@ npm install
 ```bash
 npm run tauri dev
 ```
+
+开发版使用独立配置和凭据，不会复用已安装正式版的设备身份。需要连接 relay 时，请在开发版中单独授权；
+不要通过 `--config` 或 `WS_BRIDGE_CONFIG` 把正式配置复制成开发配置。
 
 构建前端：
 

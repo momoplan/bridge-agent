@@ -20,6 +20,7 @@ const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
 const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
 const DEFAULT_PLATFORM_BASE_URL: &str = "https://api.baijimu.com/lowcode3";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
+const DEVELOPMENT_CONFIG_FILE_NAME: &str = "agent-config.development.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
 const LEGACY_DEFAULT_DEVICE_NAME: &str = "我的百积木";
 const GENERATED_AGENT_ID_PREFIX: &str = "dev_";
@@ -1017,6 +1018,18 @@ pub fn default_config_path() -> Result<PathBuf> {
     project_config_path()
 }
 
+fn default_config_file_name() -> &'static str {
+    config_file_name_for_build(cfg!(debug_assertions))
+}
+
+fn config_file_name_for_build(debug_assertions: bool) -> &'static str {
+    if debug_assertions {
+        DEVELOPMENT_CONFIG_FILE_NAME
+    } else {
+        DEFAULT_CONFIG_FILE_NAME
+    }
+}
+
 #[cfg(windows)]
 pub fn windows_shared_config_path() -> Option<PathBuf> {
     let program_data = env::var_os("ProgramData")?;
@@ -1024,7 +1037,7 @@ pub fn windows_shared_config_path() -> Option<PathBuf> {
         PathBuf::from(program_data)
             .join("Baijimu")
             .join("BridgeAgent")
-            .join(DEFAULT_CONFIG_FILE_NAME),
+            .join(default_config_file_name()),
     )
 }
 
@@ -2017,13 +2030,13 @@ fn config_path_override_from_env() -> Option<PathBuf> {
 fn project_config_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("com", "baijimu", "bridge-agent")
         .context("failed to determine config directory")?;
-    Ok(dirs.config_dir().join(DEFAULT_CONFIG_FILE_NAME))
+    Ok(dirs.config_dir().join(default_config_file_name()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_auth_manifest_json, default_shell_exec_allow_commands,
+        browser_auth_manifest_json, config_file_name_for_build, default_shell_exec_allow_commands,
         ensure_browser_auth_agent_id, format_default_device_name, load_config,
         manifest_preview_json, reset_invalid_config, save_config, AgentConfig, EventConfig,
         HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
@@ -2043,6 +2056,15 @@ mod tests {
     #[test]
     fn example_config_is_valid() {
         AgentConfig::example().validate().unwrap();
+    }
+
+    #[test]
+    fn development_and_production_use_distinct_default_config_files() {
+        assert_eq!(
+            config_file_name_for_build(true),
+            "agent-config.development.json"
+        );
+        assert_eq!(config_file_name_for_build(false), "agent-config.json");
     }
 
     #[test]

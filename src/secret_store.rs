@@ -1,14 +1,31 @@
 use anyhow::{Context, Result};
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 use sha2::{Digest, Sha256};
 #[cfg(any(test, windows))]
 use std::fs;
 use std::path::Path;
-#[cfg(any(test, windows))]
+#[cfg(any(
+    test,
+    windows,
+    all(debug_assertions, any(target_os = "macos", target_os = "linux"))
+))]
 use std::path::PathBuf;
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 const KEYRING_SERVICE: &str = "com.baijimu.bridge-agent.relay";
+#[cfg(any(
+    test,
+    all(debug_assertions, any(target_os = "macos", target_os = "linux"))
+))]
+const DEVELOPMENT_SECRET_DIRECTORY: &str = ".bridge-agent-development";
 #[cfg(all(not(test), windows))]
 const WINDOWS_SECRET_SUFFIX: &str = "credentials";
 
@@ -33,7 +50,11 @@ pub fn delete_relay_token(config_path: &Path) -> Result<()> {
     delete_secret(config_path)
 }
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 fn credential_id(config_path: &Path) -> String {
     let normalized = config_path
         .canonicalize()
@@ -41,6 +62,145 @@ fn credential_id(config_path: &Path) -> String {
         .to_string_lossy()
         .to_string();
     format!("{:x}", Sha256::digest(normalized.as_bytes()))
+}
+
+#[cfg(any(
+    test,
+    all(debug_assertions, any(target_os = "macos", target_os = "linux"))
+))]
+fn development_secret_path(config_path: &Path) -> PathBuf {
+    let file_name = config_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "agent-config.development.json".into());
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEVELOPMENT_SECRET_DIRECTORY)
+        .join(format!("{file_name}.credentials"))
+}
+
+#[cfg(all(
+    not(test),
+    debug_assertions,
+    any(target_os = "macos", target_os = "linux")
+))]
+fn load_secret(config_path: &Path) -> Result<Option<String>> {
+    load_development_secret(config_path)
+}
+
+#[cfg(all(
+    not(test),
+    debug_assertions,
+    any(target_os = "macos", target_os = "linux")
+))]
+fn store_secret(config_path: &Path, value: &str) -> Result<()> {
+    store_development_secret(config_path, value)
+}
+
+#[cfg(all(
+    not(test),
+    debug_assertions,
+    any(target_os = "macos", target_os = "linux")
+))]
+fn delete_secret(config_path: &Path) -> Result<()> {
+    delete_development_secret(config_path)
+}
+
+#[cfg(any(
+    all(test, unix),
+    all(
+        not(test),
+        debug_assertions,
+        any(target_os = "macos", target_os = "linux")
+    )
+))]
+fn load_development_secret(config_path: &Path) -> Result<Option<String>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = development_secret_path(config_path);
+    match std::fs::read_to_string(&path) {
+        Ok(value) => {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to secure {}", path.display()))?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+#[cfg(any(
+    all(test, unix),
+    all(
+        not(test),
+        debug_assertions,
+        any(target_os = "macos", target_os = "linux")
+    )
+))]
+fn store_development_secret(config_path: &Path, value: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let path = development_secret_path(config_path);
+    let parent = path
+        .parent()
+        .context("development credential path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to secure {}", parent.display()))?;
+
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "credentials".into()),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+            .with_context(|| format!("failed to create {}", temporary.display()))?;
+        file.write_all(value.as_bytes())
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temporary.display()))?;
+        std::fs::rename(&temporary, &path).with_context(|| {
+            format!(
+                "failed to commit development credentials from {} to {}",
+                temporary.display(),
+                path.display()
+            )
+        })?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure {}", path.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+#[cfg(any(
+    all(test, unix),
+    all(
+        not(test),
+        debug_assertions,
+        any(target_os = "macos", target_os = "linux")
+    )
+))]
+fn delete_development_secret(config_path: &Path) -> Result<()> {
+    let path = development_secret_path(config_path);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to delete {}", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -78,13 +238,21 @@ fn delete_secret(config_path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 fn keyring_entry(config_path: &Path) -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, &credential_id(config_path))
         .context("failed to open the operating system credential store")
 }
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 fn load_secret(config_path: &Path) -> Result<Option<String>> {
     let entry = keyring_entry(config_path)?;
     match entry.get_password() {
@@ -95,7 +263,11 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
     }
 }
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 fn store_secret(config_path: &Path, value: &str) -> Result<()> {
     let entry = keyring_entry(config_path)?;
     if entry
@@ -109,7 +281,11 @@ fn store_secret(config_path: &Path, value: &str) -> Result<()> {
         .context("failed to store relay token in the operating system credential store")
 }
 
-#[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
 fn delete_secret(config_path: &Path) -> Result<()> {
     let entry = keyring_entry(config_path)?;
     match entry.delete_credential() {
@@ -249,7 +425,10 @@ compile_error!("bridge-agent secure credential storage is unsupported on this pl
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_relay_token, load_relay_token, store_relay_token};
+    #[cfg(unix)]
+    use super::{delete_development_secret, load_development_secret, store_development_secret};
+    use super::{delete_relay_token, development_secret_path, load_relay_token, store_relay_token};
+    use std::path::PathBuf;
 
     #[test]
     fn test_store_round_trip_and_delete() {
@@ -263,5 +442,52 @@ mod tests {
         );
         delete_relay_token(&config_path).unwrap();
         assert!(load_relay_token(&config_path).unwrap().is_none());
+    }
+
+    #[test]
+    fn development_credentials_use_a_distinct_sibling_file() {
+        let config_path = PathBuf::from("config").join("agent-config.json");
+        assert_eq!(
+            development_secret_path(&config_path),
+            PathBuf::from("config")
+                .join(".bridge-agent-development")
+                .join("agent-config.json.credentials")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn development_credentials_are_private_and_atomic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("bridge-agent");
+        let config_path = config_dir.join("agent-config.development.json");
+
+        store_development_secret(&config_path, "first-token").unwrap();
+        store_development_secret(&config_path, "second-token").unwrap();
+
+        let secret_path = development_secret_path(&config_path);
+        let secret_dir = secret_path.parent().unwrap();
+        assert_eq!(
+            load_development_secret(&config_path).unwrap().as_deref(),
+            Some("second-token")
+        );
+        assert_eq!(
+            std::fs::metadata(secret_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&secret_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(secret_dir).unwrap().count(), 1);
+
+        delete_development_secret(&config_path).unwrap();
+        assert!(load_development_secret(&config_path).unwrap().is_none());
     }
 }
