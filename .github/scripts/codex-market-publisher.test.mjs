@@ -45,6 +45,8 @@ describe("Codex local app market publisher", () => {
 
   test("derives setup and host compatibility from the released connector manifest", () => {
     expect(publisher).toContain('connector_manifest_path="$2"');
+    expect(publisher).toContain("schemaVersion: $connector.schemaVersion");
+    expect(publisher).toContain('select(.schemaVersion == "2.0")');
     expect(publisher).toContain("$connector.hostRequirements");
     expect(publisher).toContain("$connector.setup == null");
     expect(publisher).not.toContain('capabilities: ["connector.setup.v1"]');

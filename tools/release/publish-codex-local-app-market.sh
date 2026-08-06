@@ -264,6 +264,7 @@ manifest="$(jq -nc \
   --arg win_sha "sha256:${checksums[windows]}" \
   --arg linux_sha "sha256:${checksums[linux]}" \
   '({
+    schemaVersion: $connector.schemaVersion,
     applicationType: "connector",
     runtime: $connector.runtime.type,
     command: $connector.runtime.command,
