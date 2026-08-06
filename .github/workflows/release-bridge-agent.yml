@@ -259,6 +259,12 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
 
+      - name: Test Microsoft Defender signature update retries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "src-tauri/scripts/update-defender-signatures.test.ps1"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

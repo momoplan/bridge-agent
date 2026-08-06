@@ -21,6 +21,8 @@ const pinnedCliVersion = readFileSync(
 const workflowPath = ".github/workflows/release-bridge-agent.yml";
 const defenderScriptPath =
   "src-tauri/scripts/verify-windows-defender.ps1";
+const defenderUpdateScriptPath =
+  "src-tauri/scripts/update-defender-signatures.ps1";
 const prepareScript = readFileSync(scriptPath, "utf8");
 const temporaryDirectories = [];
 
@@ -142,6 +144,10 @@ describe("bundled Baijimu CLI release provenance", () => {
   it("uses the immutable CLI release and scans final Windows artifacts", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     const defenderScript = readFileSync(defenderScriptPath, "utf8");
+    const defenderUpdateScript = readFileSync(
+      defenderUpdateScriptPath,
+      "utf8",
+    );
 
     expect(workflow).toContain(
       'BAIJIMU_CLI_USE_RELEASE_ASSET: "true"',
@@ -155,7 +161,21 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(workflow).toContain(
       "src-tauri/scripts/verify-windows-defender.ps1",
     );
-    expect(defenderScript).toContain("Update-MpSignature");
+    expect(workflow).toContain(
+      "src-tauri/scripts/update-defender-signatures.test.ps1",
+    );
+    expect(defenderScript).toContain("Update-DefenderSignaturesWithRetry");
+    expect(defenderScript).toContain("SignatureUpdateMaxAttempts = 3");
+    expect(defenderScript).toContain("SignatureUpdateRetrySeconds = 10");
+    expect(defenderUpdateScript).toContain(
+      "Update-MpSignature -ErrorAction Stop",
+    );
+    expect(defenderUpdateScript).toContain(
+      "Microsoft Defender signature update failed after {0} attempts",
+    );
+    expect(defenderUpdateScript).toMatch(
+      /if \(\$attempt -eq \$MaxAttempts\) \{\s*throw/s,
+    );
     expect(defenderScript).toContain("Get-AuthenticodeSignature");
     expect(defenderScript).toContain('signature.Status -ne "Valid"');
     expect(defenderScript).toContain("ZoneId=3");

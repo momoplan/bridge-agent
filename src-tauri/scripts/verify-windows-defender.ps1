@@ -1,11 +1,21 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string[]]$FilePath
+    [string[]]$FilePath,
+
+    [ValidateRange(1, 10)]
+    [int]$SignatureUpdateMaxAttempts = 3,
+
+    [ValidateRange(0, 300)]
+    [int]$SignatureUpdateRetrySeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
 
-Update-MpSignature
+. "$PSScriptRoot/update-defender-signatures.ps1"
+
+Update-DefenderSignaturesWithRetry `
+    -MaxAttempts $SignatureUpdateMaxAttempts `
+    -RetrySeconds $SignatureUpdateRetrySeconds
 $status = Get-MpComputerStatus
 if (-not $status.AntivirusEnabled) {
     throw "Microsoft Defender Antivirus must be enabled for the release scan"
