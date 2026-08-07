@@ -354,12 +354,21 @@ jobs:
               "$api" "$service_tag" "$service_version" "$target" "$asset"
           }
 
+          macos_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-macos-universal.zip"
+          windows_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-windows-x64.zip"
+          linux_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-linux-x64.zip"
+          macos_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-macos-universal.zip"
+          windows_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-windows-x64.zip"
+          linux_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-linux-x64.zip"
+          cp "$macos_asset" "$macos_service_asset"
+          cp "$windows_asset" "$windows_service_asset"
+          cp "$linux_asset" "$linux_service_asset"
           upload_asset "macOS Universal" \
-            "$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-macos-universal.zip"
+            "$macos_service_asset"
           upload_asset "Windows x64" \
-            "$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-windows-x64.zip"
+            "$windows_service_asset"
           upload_asset "Linux x64" \
-            "$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-linux-x64.zip"
+            "$linux_service_asset"
 
       - name: Publish OSS manifest to release archive
         shell: bash
@@ -381,19 +390,20 @@ jobs:
             --arg version "$version" \
             --arg prefix "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/" \
             '.tagName == $serviceTag and .version == $serviceVersion and
-             ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-macos-universal.zip") != null) and
-             ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-windows-x64.zip") != null) and
-             ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-linux-x64.zip") != null) and
+             ([.assets[].name] | index("baijimu-codex-local-app-" + $serviceVersion + "-macos-universal.zip") != null) and
+             ([.assets[].name] | index("baijimu-codex-local-app-" + $serviceVersion + "-windows-x64.zip") != null) and
+             ([.assets[].name] | index("baijimu-codex-local-app-" + $serviceVersion + "-linux-x64.zip") != null) and
              all(.assets[]; .downloadUrl | startswith($prefix))' >/dev/null
           printf '%s' "$release_json" | jq -c \
             --arg tag "$RELEASE_TAG" \
             --arg version "$version" \
+            --arg serviceVersion "$service_version" \
             --arg connectorId "com.baijimu.connector.codex" \
             '{schemaVersion:"1.0",applicationId:"codex",connectorId:$connectorId,releaseTag:$tag,version:$version,
               artifacts: ([
-                {platform:"macos",arch:"universal",name:("baijimu-codex-local-app-" + $version + "-macos-universal.zip")},
-                {platform:"windows",arch:"x86_64",name:("baijimu-codex-local-app-" + $version + "-windows-x64.zip")},
-                {platform:"linux",arch:"x86_64",name:("baijimu-codex-local-app-" + $version + "-linux-x64.zip")}
+                {platform:"macos",arch:"universal",name:("baijimu-codex-local-app-" + $serviceVersion + "-macos-universal.zip")},
+                {platform:"windows",arch:"x86_64",name:("baijimu-codex-local-app-" + $serviceVersion + "-windows-x64.zip")},
+                {platform:"linux",arch:"x86_64",name:("baijimu-codex-local-app-" + $serviceVersion + "-linux-x64.zip")}
               ] as $wanted |
               [$wanted[] as $item |
                 (.assets[] | select(.name == $item.name) |
