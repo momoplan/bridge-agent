@@ -914,7 +914,8 @@ jobs:
           }
 
           $executables = @(
-            (Resolve-Path "src-tauri/target/release/bridge-agent-desktop.exe").Path
+            (Resolve-Path "src-tauri/target/release/bridge-agent-desktop.exe").Path,
+            (Resolve-Path "src-tauri/resources/bin/baijimu.exe").Path
           )
           foreach ($executable in $executables) {
             $imports = (& $dumpbin.FullName /DEPENDENTS $executable 2>&1) -join "`n"

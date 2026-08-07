@@ -164,6 +164,13 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(workflow).toContain(
       "src-tauri/scripts/update-defender-signatures.test.ps1",
     );
+    expect(workflow).toContain(
+      "Verify Windows executables are self-contained",
+    );
+    expect(workflow).toContain(
+      '(Resolve-Path "src-tauri/resources/bin/baijimu.exe").Path',
+    );
+    expect(workflow).toContain("VCRUNTIME|MSVCP");
     expect(defenderScript).toContain("Update-DefenderSignaturesWithRetry");
     expect(defenderScript).toContain("SignatureUpdateMaxAttempts = 3");
     expect(defenderScript).toContain("SignatureUpdateRetrySeconds = 10");
