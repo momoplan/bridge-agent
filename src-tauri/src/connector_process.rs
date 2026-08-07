@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 use tokio::process::{Child, Command};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex, Notify};
 use tokio::time::{timeout, Duration};
 
 #[cfg(unix)]
@@ -29,6 +29,7 @@ const CONNECTOR_RUNTIME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 pub(crate) struct ConnectorProcessManager {
     inner: Arc<Mutex<HashMap<String, ManagedConnectorHandle>>>,
     next_generation: Arc<AtomicU64>,
+    changed: Arc<Notify>,
 }
 
 struct ManagedConnectorHandle {
@@ -45,6 +46,29 @@ struct ManagedConnectorExit {
 }
 
 impl ConnectorProcessManager {
+    pub(crate) async fn changed(&self) {
+        self.changed.notified().await;
+    }
+
+    pub(crate) async fn managed_running(&self, connector_id: &str) -> Option<bool> {
+        let record = show_connector(connector_id).ok()?;
+        if record
+            .manifest
+            .runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
+        {
+            return None;
+        }
+
+        let processes = self.inner.lock().await;
+        Some(
+            processes
+                .get(connector_id)
+                .is_some_and(|handle| handle.exit_rx.borrow().is_none()),
+        )
+    }
+
     pub(crate) async fn start(
         &self,
         connector_id: &str,
@@ -110,8 +134,10 @@ impl ConnectorProcessManager {
                 exit_rx,
             },
         );
+        self.changed.notify_waiters();
 
         let inner = Arc::clone(&self.inner);
+        let changed = Arc::clone(&self.changed);
         let supervised_id = connector_id.clone();
         tauri::async_runtime::spawn(async move {
             let exit = supervise_process(&mut child, pid, stop_rx).await;
@@ -123,6 +149,8 @@ impl ConnectorProcessManager {
             {
                 processes.remove(&supervised_id);
             }
+            drop(processes);
+            changed.notify_waiters();
         });
 
         Ok(lifecycle_result(
@@ -156,6 +184,7 @@ impl ConnectorProcessManager {
             ensure_lifecycle_succeeded(&connector_id, "清理未托管的遗留进程", &result)?;
             return Ok(result);
         };
+        self.changed.notify_waiters();
 
         let graceful = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await;
         if wait_for_exit(&mut handle.exit_rx, GRACEFUL_STOP_TIMEOUT)

@@ -92,6 +92,7 @@ const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
 const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
 const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
 const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
+const LOCAL_APP_RUNTIME_EVENT: &str = "local-app-runtime-changed";
 const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
 const LOCAL_APP_INSTALL_TASK_EVENT: &str = "local-app-install-task-changed";
 const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
@@ -1139,6 +1140,8 @@ struct LocalAppRuntimeStatus {
     health_check_configured: bool,
     start_command_configured: bool,
     stop_command_configured: bool,
+    process_managed: bool,
+    process_running: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1763,11 +1766,12 @@ async fn registered_service_statuses(
 async fn local_app_runtime_statuses(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<LocalAppRuntimeStatus>, String> {
-    collect_local_app_runtime_statuses(&state.config_path).await
+    collect_local_app_runtime_statuses(&state.config_path, &state.connector_processes).await
 }
 
 async fn collect_local_app_runtime_statuses(
     config_path: &Path,
+    connector_processes: &ConnectorProcessManager,
 ) -> Result<Vec<LocalAppRuntimeStatus>, String> {
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
@@ -1777,7 +1781,8 @@ async fn collect_local_app_runtime_statuses(
         .map_err(|err| err.to_string())?;
     let mut statuses = Vec::with_capacity(config.local_apps.len());
     for app in config.local_apps {
-        statuses.push(check_local_app(&client, app).await);
+        let process_running = connector_processes.managed_running(&app.connector_id).await;
+        statuses.push(check_local_app(&client, app, process_running).await);
     }
     Ok(statuses)
 }
@@ -1818,13 +1823,32 @@ fn registered_service_statuses_changed(
         })
 }
 
+fn local_app_runtime_statuses_changed(
+    previous: &[LocalAppRuntimeStatus],
+    current: &[LocalAppRuntimeStatus],
+) -> bool {
+    previous.len() != current.len()
+        || previous.iter().zip(current).any(|(left, right)| {
+            left.connector_id != right.connector_id
+                || left.status != right.status
+                || left.detail != right.detail
+                || left.health_check_configured != right.health_check_configured
+                || left.start_command_configured != right.start_command_configured
+                || left.stop_command_configured != right.stop_command_configured
+                || left.process_managed != right.process_managed
+                || left.process_running != right.process_running
+        })
+}
+
 fn start_registered_service_monitor(
     app: tauri::AppHandle,
     config_path: PathBuf,
+    connector_processes: ConnectorProcessManager,
     mut request_rx: tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut previous: Option<Vec<RegisteredServiceStatus>> = None;
+        let mut previous_local_apps: Option<Vec<LocalAppRuntimeStatus>> = None;
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + REGISTERED_SERVICES_MONITOR_INTERVAL,
             REGISTERED_SERVICES_MONITOR_INTERVAL,
@@ -1835,6 +1859,7 @@ fn start_registered_service_monitor(
             let mut responders = Vec::new();
             tokio::select! {
                 _ = interval.tick() => {}
+                _ = connector_processes.changed() => {}
                 request = request_rx.recv() => {
                     match request {
                         Some(RegisteredServiceMonitorRequest::Refresh) => {}
@@ -1872,6 +1897,22 @@ fn start_registered_service_monitor(
             }
             for responder in responders {
                 let _ = responder.send(result.clone());
+            }
+
+            match collect_local_app_runtime_statuses(&config_path, &connector_processes).await {
+                Ok(current) => {
+                    let changed = previous_local_apps
+                        .as_deref()
+                        .is_none_or(|last| local_app_runtime_statuses_changed(last, &current));
+                    if changed {
+                        log::debug!("local app runtime status changed");
+                        let _ = app.emit(LOCAL_APP_RUNTIME_EVENT, current.clone());
+                    }
+                    previous_local_apps = Some(current);
+                }
+                Err(err) => {
+                    log::warn!("failed to refresh local app runtime statuses: {err}");
+                }
             }
         }
     });
@@ -2205,7 +2246,13 @@ async fn local_app_control_show_handler(
     }
     let result = async {
         let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
-        let status = connector_local_app_status(&state.config_path, &record.manifest.id).await?;
+        let process_running = state
+            .connector_processes
+            .managed_running(&record.manifest.id)
+            .await;
+        let status =
+            connector_local_app_status(&state.config_path, &record.manifest.id, process_running)
+                .await?;
         Ok::<_, String>(serde_json::json!({
             "app": record,
             "status": status,
@@ -2269,17 +2316,14 @@ async fn local_app_control_start_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    let result = async {
-        let result = state
-            .connector_processes
-            .start(connector_id.trim(), &state.config_path)
-            .await?;
-        ensure_connector_lifecycle_command_succeeded("启动应用", &result)?;
-        wait_for_connector_health(&state.config_path, &result.connector_id, true).await?;
-        state.registered_services.request_refresh();
-        Ok::<_, String>(result)
-    }
+    let result = start_connector_and_wait(
+        &state.connector_processes,
+        &state.config_path,
+        connector_id.trim(),
+        "启动应用",
+    )
     .await;
+    state.registered_services.request_refresh();
     local_app_control_result(result)
 }
 
@@ -2291,17 +2335,14 @@ async fn local_app_control_stop_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    let result = async {
-        let result = state
-            .connector_processes
-            .stop(connector_id.trim(), &state.config_path)
-            .await?;
-        ensure_connector_lifecycle_command_succeeded("停止应用", &result)?;
-        wait_for_connector_health(&state.config_path, &result.connector_id, false).await?;
-        state.registered_services.request_refresh();
-        Ok::<_, String>(result)
-    }
+    let result = stop_connector_and_wait(
+        &state.connector_processes,
+        &state.config_path,
+        connector_id.trim(),
+        "停止应用",
+    )
     .await;
+    state.registered_services.request_refresh();
     local_app_control_result(result)
 }
 
@@ -3098,7 +3139,10 @@ async fn install_connector_app_with_context(
         .find(|connector| connector.id == candidate_manifest.id);
     let restart_after_replace = if options.replace {
         match existing.as_ref() {
-            Some(connector) => connector_local_app_is_healthy(config_path, &connector.id).await?,
+            Some(connector) => {
+                connector_local_app_is_healthy(config_path, &connector.id, connector_processes)
+                    .await?
+            }
             None => false,
         }
     } else {
@@ -3137,9 +3181,13 @@ async fn install_connector_app_with_context(
         Ok(install) => install,
         Err(err) => {
             if restart_after_replace {
-                if let Err(restart_err) = connector_processes
-                    .start(&candidate_manifest.id, config_path)
-                    .await
+                if let Err(restart_err) = start_connector_and_wait(
+                    connector_processes,
+                    config_path,
+                    &candidate_manifest.id,
+                    "恢复旧版应用",
+                )
+                .await
                 {
                     return Err(format!(
                         "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
@@ -3159,12 +3207,14 @@ async fn install_connector_app_with_context(
                 "应用已安装，正在启动并检查运行状态",
             );
         }
-        let started = connector_processes
-            .start(&install.connector_id, config_path)
-            .await
-            .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
-        ensure_connector_lifecycle_command_succeeded("启动新版应用", &started)?;
-        wait_for_connector_health(config_path, &started.connector_id, true).await?;
+        let started = start_connector_and_wait(
+            connector_processes,
+            config_path,
+            &install.connector_id,
+            "启动新版应用",
+        )
+        .await
+        .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
         Some(started)
     } else {
         None
@@ -3219,6 +3269,7 @@ fn ensure_connector_lifecycle_command_succeeded(
 async fn connector_local_app_is_healthy(
     config_path: &Path,
     connector_id: &str,
+    connector_processes: &ConnectorProcessManager,
 ) -> Result<bool, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     if !config
@@ -3230,13 +3281,15 @@ async fn connector_local_app_is_healthy(
         // missing entry before deciding whether a running process must survive replacement.
         sync_installed_connector(config_path, connector_id).map_err(|err| err.to_string())?;
     }
-    let status = connector_local_app_status(config_path, connector_id).await?;
+    let process_running = connector_processes.managed_running(connector_id).await;
+    let status = connector_local_app_status(config_path, connector_id, process_running).await?;
     Ok(status.status == RegisteredServiceState::Healthy)
 }
 
 async fn connector_local_app_status(
     config_path: &Path,
     connector_id: &str,
+    process_running: Option<bool>,
 ) -> Result<LocalAppRuntimeStatus, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let client = Client::builder()
@@ -3248,7 +3301,7 @@ async fn connector_local_app_status(
         .into_iter()
         .find(|app| app.connector_id == connector_id)
         .ok_or_else(|| format!("本地应用 `{connector_id}` 不在当前配置中"))?;
-    Ok(check_local_app(&client, app).await)
+    Ok(check_local_app(&client, app, process_running).await)
 }
 
 async fn wait_for_connector_health(
@@ -3258,7 +3311,7 @@ async fn wait_for_connector_health(
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let status = connector_local_app_status(config_path, connector_id).await?;
+        let status = connector_local_app_status(config_path, connector_id, None).await?;
         let matches = if expected_healthy {
             !status.health_check_configured || status.status == RegisteredServiceState::Healthy
         } else {
@@ -3281,15 +3334,86 @@ async fn wait_for_connector_health(
     }
 }
 
+async fn start_connector_and_wait(
+    connector_processes: &ConnectorProcessManager,
+    config_path: &Path,
+    connector_id: &str,
+    action: &str,
+) -> Result<ConnectorStartResult, String> {
+    let result = connector_processes.start(connector_id, config_path).await?;
+    let verification = ensure_connector_lifecycle_command_succeeded(action, &result);
+    if let Err(error) = verification {
+        return Err(cleanup_failed_connector_start(
+            connector_processes,
+            config_path,
+            &result.connector_id,
+            error,
+        )
+        .await);
+    }
+    if connector_processes
+        .managed_running(&result.connector_id)
+        .await
+        == Some(false)
+    {
+        return Err(cleanup_failed_connector_start(
+            connector_processes,
+            config_path,
+            &result.connector_id,
+            format!("{action}失败：宿主管理进程已提前退出"),
+        )
+        .await);
+    }
+    if let Err(error) = wait_for_connector_health(config_path, &result.connector_id, true).await {
+        return Err(cleanup_failed_connector_start(
+            connector_processes,
+            config_path,
+            &result.connector_id,
+            error,
+        )
+        .await);
+    }
+    Ok(result)
+}
+
+async fn cleanup_failed_connector_start(
+    connector_processes: &ConnectorProcessManager,
+    config_path: &Path,
+    connector_id: &str,
+    error: String,
+) -> String {
+    match connector_processes.stop(connector_id, config_path).await {
+        Ok(_) => format!("{error}；已回收未通过启动验证的应用进程"),
+        Err(cleanup_error) => {
+            format!("{error}；回收未通过启动验证的应用进程也失败: {cleanup_error}")
+        }
+    }
+}
+
+async fn stop_connector_and_wait(
+    connector_processes: &ConnectorProcessManager,
+    config_path: &Path,
+    connector_id: &str,
+    action: &str,
+) -> Result<ConnectorStartResult, String> {
+    let result = connector_processes.stop(connector_id, config_path).await?;
+    ensure_connector_lifecycle_command_succeeded(action, &result)?;
+    wait_for_connector_health(config_path, &result.connector_id, false).await?;
+    Ok(result)
+}
+
 #[tauri::command]
 async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = state
-        .connector_processes
-        .start(id.trim(), &state.config_path)
-        .await;
+    let result = start_connector_and_wait(
+        &state.connector_processes,
+        &state.config_path,
+        id.trim(),
+        "启动应用",
+    )
+    .await;
     state.registered_services.request_refresh();
     result
 }
@@ -3299,10 +3423,13 @@ async fn stop_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = state
-        .connector_processes
-        .stop(id.trim(), &state.config_path)
-        .await;
+    let result = stop_connector_and_wait(
+        &state.connector_processes,
+        &state.config_path,
+        id.trim(),
+        "停止应用",
+    )
+    .await;
     state.registered_services.request_refresh();
     result
 }
@@ -4332,9 +4459,13 @@ async fn check_registered_service(
     }
 }
 
-async fn check_local_app(client: &Client, app: LocalAppConfig) -> LocalAppRuntimeStatus {
+async fn check_local_app(
+    client: &Client,
+    app: LocalAppConfig,
+    process_running: Option<bool>,
+) -> LocalAppRuntimeStatus {
     let connector_id = app.connector_id.clone();
-    let status = check_registered_service(
+    let mut status = check_registered_service(
         client,
         ServiceConfig {
             name: connector_id.clone(),
@@ -4348,6 +4479,7 @@ async fn check_local_app(client: &Client, app: LocalAppConfig) -> LocalAppRuntim
         },
     )
     .await;
+    apply_managed_process_status(&mut status, process_running);
     LocalAppRuntimeStatus {
         connector_id,
         status: status.status,
@@ -4356,6 +4488,28 @@ async fn check_local_app(client: &Client, app: LocalAppConfig) -> LocalAppRuntim
         health_check_configured: status.health_check_configured,
         start_command_configured: status.start_command_configured,
         stop_command_configured: status.stop_command_configured,
+        process_managed: process_running.is_some(),
+        process_running,
+    }
+}
+
+fn apply_managed_process_status(
+    status: &mut RegisteredServiceStatus,
+    process_running: Option<bool>,
+) {
+    if status.health_check_configured {
+        return;
+    }
+    match process_running {
+        Some(true) => {
+            status.status = RegisteredServiceState::Healthy;
+            status.detail = Some("宿主管理进程正在运行".to_string());
+        }
+        Some(false) => {
+            status.status = RegisteredServiceState::Unhealthy;
+            status.detail = Some("宿主管理进程未运行".to_string());
+        }
+        None => {}
     }
 }
 
@@ -6067,6 +6221,7 @@ fn main() {
             start_registered_service_monitor(
                 app.handle().clone(),
                 config_path.clone(),
+                setup_connector_processes.clone(),
                 registered_service_request_rx,
             );
             #[cfg(debug_assertions)]
@@ -6543,6 +6698,61 @@ mod tests {
 
         assert!(!registered_service_statuses_changed(&previous, &refreshed));
         assert!(registered_service_statuses_changed(&previous, &unhealthy));
+    }
+
+    fn local_app_status(
+        status: RegisteredServiceState,
+        process_running: Option<bool>,
+    ) -> LocalAppRuntimeStatus {
+        LocalAppRuntimeStatus {
+            connector_id: "com.baijimu.connector.test".to_string(),
+            status,
+            detail: None,
+            checked_at_ms: 100,
+            health_check_configured: false,
+            start_command_configured: true,
+            stop_command_configured: true,
+            process_managed: process_running.is_some(),
+            process_running,
+        }
+    }
+
+    #[test]
+    fn host_managed_process_state_is_authoritative_without_health_check() {
+        let mut running = registered_status(RegisteredServiceState::NotConfigured, 100);
+        running.health_check_configured = false;
+        apply_managed_process_status(&mut running, Some(true));
+        assert_eq!(running.status, RegisteredServiceState::Healthy);
+        assert_eq!(running.detail.as_deref(), Some("宿主管理进程正在运行"));
+
+        let mut stopped = registered_status(RegisteredServiceState::NotConfigured, 100);
+        stopped.health_check_configured = false;
+        apply_managed_process_status(&mut stopped, Some(false));
+        assert_eq!(stopped.status, RegisteredServiceState::Unhealthy);
+        assert_eq!(stopped.detail.as_deref(), Some("宿主管理进程未运行"));
+    }
+
+    #[test]
+    fn health_check_remains_authoritative_when_configured() {
+        let mut unhealthy = registered_status(RegisteredServiceState::Unhealthy, 100);
+        unhealthy.detail = Some("health HTTP 503".to_string());
+        apply_managed_process_status(&mut unhealthy, Some(true));
+        assert_eq!(unhealthy.status, RegisteredServiceState::Unhealthy);
+        assert_eq!(unhealthy.detail.as_deref(), Some("health HTTP 503"));
+    }
+
+    #[test]
+    fn local_app_monitor_detects_process_lifecycle_changes() {
+        let stopped = vec![local_app_status(
+            RegisteredServiceState::Unhealthy,
+            Some(false),
+        )];
+        let running = vec![local_app_status(
+            RegisteredServiceState::Healthy,
+            Some(true),
+        )];
+        assert!(local_app_runtime_statuses_changed(&stopped, &running));
+        assert!(!local_app_runtime_statuses_changed(&running, &running));
     }
 
     #[test]

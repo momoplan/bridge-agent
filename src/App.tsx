@@ -32,6 +32,7 @@ import {
 } from "./local-app-install-tasks";
 import { isConnectorUninstallStopError } from "./local-app-uninstall";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
+import { embeddedLocalAppView } from "./local-app-runtime";
 import {
   describeLocalAppUpdate,
   type UpdateContractDeclaration,
@@ -478,6 +479,8 @@ interface LocalAppRuntimeStatus {
   healthCheckConfigured: boolean;
   startCommandConfigured: boolean;
   stopCommandConfigured: boolean;
+  processManaged: boolean;
+  processRunning: boolean | null;
 }
 
 interface StartRegisteredServiceResult {
@@ -1138,6 +1141,37 @@ function App() {
         dispose();
       }
     }).catch((err) => clientWarn("订阅本地应用运行状态失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<LocalAppRuntimeStatus[]>("local-app-runtime-changed", (event) => {
+      if (!active) return;
+      setLocalAppRuntimeStatuses(event.payload);
+      setLocalAppLifecycleOverrides((current) => {
+        const next = { ...current };
+        for (const status of event.payload) {
+          const appId = `connector:${status.connectorId}`;
+          const override = next[appId];
+          if (
+            override &&
+            ((override.state === "starting" && status.status === "healthy") ||
+              (override.state === "stopping" && status.status === "unhealthy"))
+          ) {
+            delete next[appId];
+          }
+        }
+        return next;
+      });
+    }).then((dispose) => {
+      if (active) unlisten = dispose;
+      else dispose();
+    }).catch((err) => clientWarn("订阅 Connector 运行状态失败", err));
     return () => {
       active = false;
       unlisten?.();
@@ -1819,8 +1853,10 @@ function App() {
       ]);
       setRegisteredServiceStatuses(serviceStatuses);
       setLocalAppRuntimeStatuses(appStatuses);
+      return appStatuses;
     } catch (err) {
       clientWarn("读取本地应用运行状态失败", err);
+      return null;
     }
   }
 
@@ -2378,7 +2414,7 @@ function App() {
           id: app.connector.id
         });
         const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
-        await refreshRegisteredServiceStatuses();
+        const statuses = await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
           setLocalAppLifecycleOverride(app.id, {
             state: "start_failed",
@@ -2389,12 +2425,15 @@ function App() {
               formatConnectorServiceFailures(failed)
           );
         } else {
+          const runtimeStatus = statuses?.find(
+            (status) => status.connectorId === app.connector!.id
+          );
+          if (statuses && runtimeStatus?.status !== "healthy") {
+            throw new Error(`应用 ${app.name} 启动后未进入健康运行状态`);
+          }
           const snapshot = await invoke<RuntimeSnapshot>("apply_saved_config_to_runtime");
           applyRuntimeSnapshot(snapshot);
-          setLocalAppLifecycleOverride(app.id, {
-            state: "running",
-            detail: "启动命令已执行"
-          });
+          clearLocalAppLifecycleOverride(app.id);
           setMessage(formatApplyMessage(`应用 ${app.name} 已启动`, snapshot));
         }
         return;
@@ -2441,21 +2480,21 @@ function App() {
           id: app.connector.id
         });
         const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
-        await refreshRegisteredServiceStatuses();
+        const statuses = await refreshRegisteredServiceStatuses();
         if (failed.length > 0) {
-          setLocalAppLifecycleOverride(app.id, {
-            state: "running",
-            detail: `停止失败：${formatConnectorServiceFailures(failed)}`
-          });
+          clearLocalAppLifecycleOverride(app.id);
           setError(
             `应用 ${app.name} 停止失败：` +
               formatConnectorServiceFailures(failed)
           );
         } else {
-          setLocalAppLifecycleOverride(app.id, {
-            state: "stopped",
-            detail: "停止命令已执行"
-          });
+          const runtimeStatus = statuses?.find(
+            (status) => status.connectorId === app.connector!.id
+          );
+          if (runtimeStatus?.status === "healthy") {
+            throw new Error(`应用 ${app.name} 停止后仍处于健康运行状态`);
+          }
+          setLocalAppLifecycleOverride(app.id, { state: "stopped", detail: "已确认应用停止" });
           setMessage(`应用 ${app.name} 已停止`);
         }
         return;
@@ -2476,10 +2515,8 @@ function App() {
         });
       }
     } catch (err) {
-      setLocalAppLifecycleOverride(app.id, {
-        state: "running",
-        detail: `停止失败：${readError(err)}`
-      });
+      clearLocalAppLifecycleOverride(app.id);
+      await refreshRegisteredServiceStatuses();
       handleCommandError(err);
     } finally {
       setConnectorBusy(null);
@@ -6027,6 +6064,10 @@ function App() {
     const updateStatus = localAppUpdateStatus(app);
     const updateBusy = connectorUpdateBusy === app.id || (isManagedTool && managedToolBusy);
     const lifecycle = localAppLifecycle(app);
+    const embeddedView = embeddedLocalAppView(
+      lifecycle.state,
+      connectorUninstalling === app.id,
+    );
     const appIsRunning = lifecycle.state === "running";
     const appCanStop = hasLocalAppStopCommand(app);
     const syncSource = connectorSyncSource(app);
@@ -6162,16 +6203,36 @@ function App() {
             </div>
           </div>
 
-          {activeLocalAppDetailTab === "app" && embeddedUi && app.connector && connectorUninstalling !== app.id ? (
+          {activeLocalAppDetailTab === "app" && embeddedUi && app.connector && embeddedView === "mounted" ? (
             <div className="app-detail-tab-panel embedded-local-app-panel">
               <LocalAppEmbeddedUi
                 connectorId={app.connector.id}
                 title={embeddedUi.title?.trim() || app.name}
               />
             </div>
-          ) : activeLocalAppDetailTab === "app" && connectorUninstalling === app.id ? (
+          ) : activeLocalAppDetailTab === "app" && embeddedView === "uninstalling" ? (
             <div className="app-detail-tab-panel embedded-local-app-panel">
               <div className="embedded-local-app-loading">正在关闭应用界面并准备卸载…</div>
+            </div>
+          ) : activeLocalAppDetailTab === "app" && embeddedUi && embeddedView === "transitioning" ? (
+            <div className="app-detail-tab-panel embedded-local-app-panel">
+              <div className="embedded-local-app-loading">{lifecycle.detail}</div>
+            </div>
+          ) : activeLocalAppDetailTab === "app" && embeddedUi ? (
+            <div className="app-detail-tab-panel embedded-local-app-panel">
+              <div className="empty-state">
+                <strong>{lifecycle.label}</strong>
+                <p>{lifecycle.detail}</p>
+                {hasLocalAppStartCommand(app) ? (
+                  <button
+                    className="primary"
+                    onClick={() => void startLocalApp(app)}
+                    disabled={connectorBusy != null || connectorUpdateBusy != null}
+                  >
+                    {connectorBusy === app.id ? "启动中" : "启动应用"}
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -6312,6 +6373,14 @@ function App() {
     }));
   }
 
+  function clearLocalAppLifecycleOverride(appId: string) {
+    setLocalAppLifecycleOverrides((current) => {
+      const next = { ...current };
+      delete next[appId];
+      return next;
+    });
+  }
+
   function localAppLifecycle(app: LocalAppItem): LocalAppLifecycle {
     if (!config) {
       return formatLocalAppLifecycle("unknown", "等待配置加载");
@@ -6346,13 +6415,13 @@ function App() {
         (candidate) => candidate.connectorId === localApp.connectorId
       );
       if (status?.status === "healthy") {
-        return formatLocalAppLifecycle("running", "healthCheck 已通过");
-      }
-      if (override?.state === "running") {
-        return formatLocalAppLifecycle("running", override.detail ?? "启动命令已执行");
+        return formatLocalAppLifecycle(
+          "running",
+          status.detail || (status.healthCheckConfigured ? "healthCheck 已通过" : "宿主管理进程正在运行")
+        );
       }
       if (status?.status === "unhealthy") {
-        return formatLocalAppLifecycle("stopped", "healthCheck 未通过");
+        return formatLocalAppLifecycle("stopped", status.detail || "运行状态检查未通过");
       }
       if (status?.status === "unknown") {
         return formatLocalAppLifecycle("unknown", "等待运行状态检查");
@@ -6378,9 +6447,6 @@ function App() {
       .filter((status): status is RegisteredServiceStatus => Boolean(status));
     if (statuses.some((status) => status.status === "healthy")) {
       return formatLocalAppLifecycle("running", "healthCheck 已通过");
-    }
-    if (override?.state === "running") {
-      return formatLocalAppLifecycle("running", override.detail ?? "启动命令已执行");
     }
     if (statuses.some((status) => status.status === "unhealthy")) {
       return formatLocalAppLifecycle("stopped", "healthCheck 未通过");
