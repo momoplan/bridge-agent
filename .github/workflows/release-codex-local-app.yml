@@ -330,10 +330,12 @@ jobs:
           set -euo pipefail
           api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#codex-local-app-v}"
+          service_version="${version}-codex.1"
+          service_tag="bridge-agent-v${service_version}"
           release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           jq -n \
-            --arg tagName "$RELEASE_TAG" \
-            --arg version "$version" \
+            --arg tagName "$service_tag" \
+            --arg version "$service_version" \
             --arg releaseName "Baijimu Codex Local App $version" \
             --arg releaseUrl "$release_url" \
             '{tagName:$tagName,version:$version,releaseName:$releaseName,releaseUrl:$releaseUrl,source:"github-actions-oss"}' \
@@ -342,14 +344,14 @@ jobs:
                 -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
                 -H 'Content-Type: application/json' \
                 --data-binary @- \
-                "$api/releases/$RELEASE_TAG" >/dev/null
+                "$api/releases/$service_tag" >/dev/null
 
           upload_asset() {
             local target="$1"
             local asset="$2"
             [ -s "$asset" ] || { echo "Missing release archive: $asset" >&2; exit 1; }
             node .github/scripts/upload-oss-release-asset.mjs \
-              "$api" "$RELEASE_TAG" "$version" "$target" "$asset"
+              "$api" "$service_tag" "$service_version" "$target" "$asset"
           }
 
           upload_asset "macOS Universal" \
@@ -367,15 +369,18 @@ jobs:
           set -euo pipefail
           api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#codex-local-app-v}"
+          service_version="${version}-codex.1"
+          service_tag="bridge-agent-v${service_version}"
           release_json="$(curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
             -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            "$api/releases/$RELEASE_TAG")"
+            "$api/releases/$service_tag")"
           manifest="$RUNNER_TEMP/baijimu-codex-local-app-${version}-oss-manifest.json"
           printf '%s' "$release_json" | jq -e \
-            --arg tag "$RELEASE_TAG" \
+            --arg serviceTag "$service_tag" \
+            --arg serviceVersion "$service_version" \
             --arg version "$version" \
             --arg prefix "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/" \
-            '.tagName == $tag and .version == $version and
+            '.tagName == $serviceTag and .version == $serviceVersion and
              ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-macos-universal.zip") != null) and
              ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-windows-x64.zip") != null) and
              ([.assets[].name] | index("baijimu-codex-local-app-" + $version + "-linux-x64.zip") != null) and

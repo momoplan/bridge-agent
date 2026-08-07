@@ -5,9 +5,13 @@
 
 ## Codex
 
-Codex 本地应用由 GitHub Actions 通过 release service 申请预签名 PUT 地址，直接上传到百积木公共 OSS；Jenkins
+Codex 本地应用由 GitHub Actions 通过 release service 的预签名 PUT 通道，直接上传到百积木公共 OSS；Jenkins
 只下载 GitHub Release 中很小的 OSS manifest，并从其中的 OSS 地址校验和发布市场。生产制品地址使用
 release service 返回的不可变 OSS 对象：
+
+由于该 release service 的管理接口固定使用 Bridge Agent 的版本命名空间，Codex 上传使用同版本的内部
+`bridge-agent-v<version>-codex.1` 影子记录；它不调用 Bridge Agent 的公开发布接口，也不会进入 Bridge Agent
+更新目录。
 
 ```text
 https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/<date>/<owner>/<id>-<asset>
