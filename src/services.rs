@@ -3650,7 +3650,6 @@ mod tests {
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::Path;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
     use tokio::time::{sleep, Duration, Instant};
@@ -3684,11 +3683,15 @@ mod tests {
         fs::create_dir_all(home.join(".pyenv/shims")).unwrap();
         fs::create_dir_all(home.join(".nvm/versions/node/v18.19.1/bin")).unwrap();
         fs::create_dir_all(home.join(".nvm/versions/node/v20.11.0/bin")).unwrap();
+        let system_bin = home.join("system-bin");
+        let secondary_bin = home.join("secondary-bin");
+        fs::create_dir_all(&system_bin).unwrap();
+        fs::create_dir_all(&secondary_bin).unwrap();
 
         let system_path = std::env::join_paths([
-            Path::new("/usr/bin"),
-            Path::new("/bin"),
-            Path::new("/usr/bin"),
+            system_bin.as_path(),
+            secondary_bin.as_path(),
+            system_bin.as_path(),
         ])
         .unwrap();
         let path = shell_exec_path(Some(&system_path.to_string_lossy()), Some(home)).unwrap();
@@ -3698,13 +3701,7 @@ mod tests {
         assert_eq!(parts[1], home.join(".pyenv/shims"));
         assert_eq!(parts[2], home.join(".nvm/versions/node/v20.11.0/bin"));
         assert_eq!(parts[3], home.join(".nvm/versions/node/v18.19.1/bin"));
-        assert_eq!(
-            parts
-                .iter()
-                .filter(|path| *path == Path::new("/usr/bin"))
-                .count(),
-            1
-        );
+        assert_eq!(parts.iter().filter(|path| *path == &system_bin).count(), 1);
     }
 
     #[test]
