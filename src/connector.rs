@@ -2193,7 +2193,13 @@ fn resolve_installed_start_commands(
     let python_env =
         ensure_python_project_environment(package_path, &python_scripts, runtime_config)?;
     let node_path = resolve_command_path("node", runtime_config);
-    let codex_path = resolve_command_path("codex", runtime_config);
+    // Codex discovery belongs to the Codex Connector. The host only exports an
+    // authoritative override when the user explicitly configured one; an
+    // automatically discovered launcher contributes its directory to PATH.
+    let codex_binary_override = configured_runtime_command_path("codex", runtime_config);
+    let codex_path = codex_binary_override
+        .clone()
+        .or_else(|| discover_command_path("codex"));
     let command_runtime = InstalledCommandRuntime {
         package_path,
         package_bins: &package_bins,
@@ -2201,6 +2207,7 @@ fn resolve_installed_start_commands(
         python_env: python_env.as_deref(),
         node_path: &node_path,
         codex_path: &codex_path,
+        codex_binary_override: &codex_binary_override,
     };
     for service in services {
         if service.stop_command.is_none() {
@@ -2276,6 +2283,7 @@ struct InstalledCommandRuntime<'a> {
     python_env: Option<&'a Path>,
     node_path: &'a Option<PathBuf>,
     codex_path: &'a Option<PathBuf>,
+    codex_binary_override: &'a Option<PathBuf>,
 }
 
 fn resolve_installed_shell_command(
@@ -2294,7 +2302,11 @@ fn resolve_installed_shell_command(
 
     if let Some(direct_path) = native_command_path(runtime.package_path, executable) {
         command[0] = direct_path.display().to_string();
-        enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
+        enrich_start_command_env(
+            env,
+            [runtime.node_path, runtime.codex_path],
+            runtime.codex_binary_override.as_deref(),
+        );
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2306,7 +2318,11 @@ fn resolve_installed_shell_command(
             command[0] = python_script_path(env_path, executable)
                 .display()
                 .to_string();
-            enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
+            enrich_start_command_env(
+                env,
+                [runtime.node_path, runtime.codex_path],
+                runtime.codex_binary_override.as_deref(),
+            );
             prepend_path_entry(env, python_bin_dir(env_path));
             if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
                 *cwd = Some(runtime.package_path.display().to_string());
@@ -2329,7 +2345,11 @@ fn resolve_installed_shell_command(
                 .display()
                 .to_string(),
         );
-        enrich_start_command_env(env, [runtime.node_path, runtime.codex_path]);
+        enrich_start_command_env(
+            env,
+            [runtime.node_path, runtime.codex_path],
+            runtime.codex_binary_override.as_deref(),
+        );
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2390,20 +2410,13 @@ fn prepend_path_entry(env_vars: &mut BTreeMap<String, String>, entry: PathBuf) {
 fn enrich_start_command_env<'a>(
     env_vars: &mut BTreeMap<String, String>,
     executable_paths: impl IntoIterator<Item = &'a Option<PathBuf>>,
+    codex_binary_override: Option<&Path>,
 ) {
     let mut path_entries = Vec::new();
-    let mut codex_binary = None;
     for executable_path in executable_paths
         .into_iter()
         .filter_map(|path| path.as_ref())
     {
-        if executable_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "codex")
-        {
-            codex_binary = Some(executable_path.display().to_string());
-        }
         if let Some(parent) = executable_path.parent() {
             push_unique_path_entry(&mut path_entries, parent.to_path_buf());
         }
@@ -2419,10 +2432,10 @@ fn enrich_start_command_env<'a>(
             joined_path.to_string_lossy().to_string(),
         );
     }
-    if let Some(codex_binary) = codex_binary {
+    if let Some(codex_binary) = codex_binary_override {
         env_vars
             .entry("CODEX_CONNECTOR_CODEX_BINARY".to_string())
-            .or_insert(codex_binary);
+            .or_insert_with(|| codex_binary.display().to_string());
     }
 }
 
@@ -2446,7 +2459,11 @@ fn push_unique_path_entry(entries: &mut Vec<PathBuf>, entry: PathBuf) {
 
 fn resolve_command_path(executable: &str, runtime_config: &RuntimeConfig) -> Option<PathBuf> {
     configured_runtime_command_path(executable, runtime_config)
-        .or_else(|| find_command_in_path(executable, env::var("PATH").ok().as_ref()))
+        .or_else(|| discover_command_path(executable))
+}
+
+fn discover_command_path(executable: &str) -> Option<PathBuf> {
+    find_command_in_path(executable, env::var("PATH").ok().as_ref())
         .or_else(|| {
             login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
         })
@@ -2462,8 +2479,11 @@ fn configured_runtime_command_path(
         "codex" => runtime_config.codex_binary_path.as_deref(),
         _ => None,
     }?;
-    let path = PathBuf::from(path.trim());
-    path.is_file().then_some(path)
+    resolve_command_file(
+        &PathBuf::from(path.trim()),
+        cfg!(windows),
+        &windows_command_extensions(),
+    )
 }
 
 fn bundled_runtime_command_path(executable: &str) -> Option<PathBuf> {
@@ -2490,10 +2510,84 @@ fn bundled_runtime_command_path(executable: &str) -> Option<PathBuf> {
 }
 
 fn find_command_in_path(executable: &str, path: Option<&String>) -> Option<PathBuf> {
+    find_command_in_path_for_platform(
+        executable,
+        path,
+        cfg!(windows),
+        &windows_command_extensions(),
+    )
+}
+
+fn find_command_in_path_for_platform(
+    executable: &str,
+    path: Option<&String>,
+    windows: bool,
+    windows_extensions: &[String],
+) -> Option<PathBuf> {
     let path = path?;
     env::split_paths(path)
-        .map(|dir| dir.join(executable))
-        .find(|candidate| candidate.is_file())
+        .find_map(|dir| resolve_command_file(&dir.join(executable), windows, windows_extensions))
+}
+
+fn resolve_command_file(
+    path: &Path,
+    windows: bool,
+    windows_extensions: &[String],
+) -> Option<PathBuf> {
+    if !windows {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    if path.extension().is_some() {
+        return has_supported_windows_command_extension(path)
+            .then(|| path.is_file().then(|| path.to_path_buf()))
+            .flatten();
+    }
+    windows_extensions.iter().find_map(|extension| {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(extension);
+        let candidate = PathBuf::from(candidate);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+fn has_supported_windows_command_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["com", "exe", "bat", "cmd"]
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+        })
+}
+
+fn windows_command_extensions() -> Vec<String> {
+    windows_command_extensions_from(env::var("PATHEXT").ok().as_deref())
+}
+
+fn windows_command_extensions_from(value: Option<&str>) -> Vec<String> {
+    const SUPPORTED: [&str; 4] = [".COM", ".EXE", ".BAT", ".CMD"];
+    let mut extensions = Vec::new();
+    for extension in value
+        .into_iter()
+        .flat_map(|value| value.split(';'))
+        .map(str::trim)
+        .filter(|value| {
+            SUPPORTED
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(value))
+        })
+    {
+        if !extensions
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(extension))
+        {
+            extensions.push(extension.to_string());
+        }
+    }
+    if extensions.is_empty() {
+        extensions = SUPPORTED.iter().map(|value| (*value).to_string()).collect();
+    }
+    extensions
 }
 
 fn login_shell_path() -> Option<String> {
@@ -5387,6 +5481,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             python_env: Some(&env_path),
             node_path: &None,
             codex_path: &None,
+            codex_binary_override: &None,
         };
         resolve_installed_shell_command(&mut command, &mut cwd, &mut env_vars, &command_runtime);
 
@@ -5403,6 +5498,109 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             .is_some_and(|path| env::split_paths(path)
                 .next()
                 .is_some_and(|entry| entry == python_bin_dir(&env_path))));
+    }
+
+    #[test]
+    fn windows_command_resolution_ignores_extensionless_npm_shim() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("codex"), "#!/bin/sh\n").unwrap();
+        let windows_launcher = dir.path().join("codex.cmd");
+        fs::write(&windows_launcher, "@echo off\r\n").unwrap();
+        let path = env::join_paths([dir.path()])
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let resolved = find_command_in_path_for_platform(
+            "codex",
+            Some(&path),
+            true,
+            &[".exe".to_string(), ".cmd".to_string()],
+        );
+
+        assert_eq!(resolved.as_deref(), Some(windows_launcher.as_path()));
+    }
+
+    #[test]
+    fn windows_command_resolution_rejects_extensionless_only_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("codex"), "#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            resolve_command_file(
+                &dir.path().join("codex"),
+                true,
+                &[".exe".to_string(), ".cmd".to_string()],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_command_extensions_exclude_non_native_script_types() {
+        assert_eq!(
+            windows_command_extensions_from(Some(".JS;.CMD;.cmd;.EXE;.PS1")),
+            vec![".CMD".to_string(), ".EXE".to_string()]
+        );
+    }
+
+    #[test]
+    fn windows_command_resolution_rejects_unsupported_explicit_script() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("codex.ps1");
+        fs::write(&script, "Write-Output codex\n").unwrap();
+
+        assert_eq!(
+            resolve_command_file(&script, true, &[".exe".to_string(), ".cmd".to_string()]),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configured_windows_codex_path_is_normalized_to_cmd_launcher() {
+        let dir = tempdir().unwrap();
+        let shim = dir.path().join("codex");
+        fs::write(&shim, "#!/bin/sh\n").unwrap();
+        let launcher = dir.path().join("codex.cmd");
+        fs::write(&launcher, "@echo off\r\n").unwrap();
+        let mut runtime = AgentConfig::example().runtime;
+        runtime.codex_binary_path = Some(shim.display().to_string());
+
+        assert_eq!(
+            configured_runtime_command_path("codex", &runtime),
+            Some(launcher)
+        );
+    }
+
+    #[test]
+    fn automatic_codex_discovery_only_enriches_path() {
+        let dir = tempdir().unwrap();
+        let codex = Some(dir.path().join("codex.cmd"));
+        let mut env_vars = BTreeMap::new();
+
+        enrich_start_command_env(&mut env_vars, [&None, &codex], None);
+
+        assert!(!env_vars.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
+        assert!(env_vars
+            .get("PATH")
+            .is_some_and(|path| env::split_paths(path).any(|entry| entry == dir.path())));
+    }
+
+    #[test]
+    fn explicit_codex_configuration_is_exported_to_connector() {
+        let dir = tempdir().unwrap();
+        let codex = dir.path().join("codex.cmd");
+        let mut env_vars = BTreeMap::new();
+
+        enrich_start_command_env(&mut env_vars, [&None, &Some(codex.clone())], Some(&codex));
+
+        assert_eq!(
+            env_vars
+                .get("CODEX_CONNECTOR_CODEX_BINARY")
+                .map(String::as_str),
+            codex.to_str()
+        );
     }
 
     #[test]

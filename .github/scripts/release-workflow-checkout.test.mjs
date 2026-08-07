@@ -48,8 +48,9 @@ describe("release workflow repository script availability", () => {
     );
   });
 
-  test("Windows quality gate exercises real user PATH registry writes", () => {
+  test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
     const body = jobBody("windows-quality-gate", "release");
+    expect(body).toContain("cargo test --locked --workspace");
     expect(body).toContain(
       "managed_tool::tests::windows_registry_path_registration_round_trips",
     );
