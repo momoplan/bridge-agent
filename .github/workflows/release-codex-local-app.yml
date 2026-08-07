@@ -350,7 +350,9 @@ jobs:
           manifest="$RUNNER_TEMP/baijimu-codex-local-app-${version}-oss-manifest.json"
           upload_one() {
             local platform="$1" arch="$2" name="$3" file="$dir/$3"
-            local checksum="$(sha256sum "$file" | awk '{print $1}')" object="$prefix/$checksum/$name"
+            local checksum
+            checksum="$(sha256sum "$file" | awk '{print $1}')"
+            local object="$prefix/$checksum/$name"
             printf '%s  %s\n' "$checksum" "$name" > "$file.sha256"
             "$OSSUTIL" cp "$file" "oss://$bucket/$object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:application/zip#Cache-Control:public,max-age=31536000,immutable' >/dev/null
             "$OSSUTIL" cp "$file.sha256" "oss://$bucket/$object.sha256" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:text/plain; charset=utf-8#Cache-Control:public,max-age=31536000,immutable' >/dev/null
