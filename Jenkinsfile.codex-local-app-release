@@ -92,7 +92,7 @@ cargo test --manifest-path connector-src/Cargo.toml
                     sh '''#!/bin/bash
 set -euo pipefail
 GH_TOKEN="$GITHUB_TOKEN" \
-BAIJIMU_CLI_USE_RELEASE_ASSET=true \
+BAIJIMU_CLI_USE_RELEASE_ASSET=false \
 ./tools/baijimu-cli/prepare-bundled-cli.sh
 VALIDATE_ONLY=true \
 BAIJIMU_CLI="$PWD/src-tauri/resources/bin/baijimu" \
