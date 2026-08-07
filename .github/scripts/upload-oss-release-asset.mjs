@@ -233,6 +233,7 @@ async function sha256File(path) {
 }
 
 export function contentTypeFor(name) {
+  if (name.endsWith(".zip")) return "application/zip";
   if (name.endsWith(".msi")) return "application/x-msi";
   if (name.endsWith(".dmg")) return "application/x-apple-diskimage";
   if (name.endsWith(".deb")) return "application/vnd.debian.binary-package";

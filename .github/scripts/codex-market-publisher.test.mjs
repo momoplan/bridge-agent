@@ -22,22 +22,15 @@ describe("Codex local app market publisher", () => {
     expect(publisher).not.toContain("INSERT INTO local_app");
   });
 
-  test("publishes content-addressed artifacts through anonymous Baijimu OSS", () => {
-    expect(publisher).toContain('OSS_BUCKET="${OSS_BUCKET:-lowcode-common}"');
+  test("publishes GitHub Actions OSS artifacts through anonymous Baijimu OSS", () => {
+    expect(publisher).toContain("manifest_asset=");
     expect(publisher).toContain(
-      'OSS_PREFIX="${OSS_PREFIX:-local-app-artifacts/codex}"',
-    );
-    expect(publisher).toContain(
-      'object_prefix="${OSS_PREFIX}/releases/v${version}/${checksum}"',
+      "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/",
     );
     expect(publisher).toContain("anonymous OSS download checksum mismatch");
-    expect(publisher).toContain("Cache-Control:public,max-age=31536000,immutable");
-    expect(publisher).toContain("OSS_ACCESS_KEY_ID");
-    expect(publisher).toContain("OSS_ACCESS_KEY_SECRET");
-    expect(publisher).toContain("oss_validate_access");
-    expect(pipeline.match(/credentialsId: 'jenkins-aliyun-ram'/g)).toHaveLength(2);
-    expect(pipeline).toContain("usernameVariable: 'OSS_ACCESS_KEY_ID'");
-    expect(pipeline).toContain("passwordVariable: 'OSS_ACCESS_KEY_SECRET'");
+    expect(publisher).toContain("GITHUB_TOKEN is required");
+    expect(pipeline).not.toContain("jenkins-aliyun-ram");
+    expect(pipeline).toContain("REUSE_RELEASE");
     expect(publisher).not.toContain(
       'release_base="https://github.com/momoplan/bridge-agent/releases/download/',
     );

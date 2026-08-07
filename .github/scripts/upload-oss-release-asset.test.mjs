@@ -53,6 +53,9 @@ describe("OSS release asset contract", () => {
   });
 
   test("maps every supported release bundle to a stable content type", () => {
+    expect(contentTypeFor("baijimu-codex-local-app-1.2.11-linux-x64.zip")).toBe(
+      "application/zip",
+    );
     expect(contentTypeFor("Baijimu_0.2.11_universal.dmg")).toBe(
       "application/x-apple-diskimage",
     );
