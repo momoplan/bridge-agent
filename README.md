@@ -129,12 +129,9 @@ API 需求时，会先通过本机 `baijimu capabilities --offline --json` 取�
 外部进程修改既有环境，文档发现 Skill 会在当次任务直接使用上述绝对路径，用户重启
 Codex/终端后即可直接调用 `baijimu`。
 
-Baijimu CLI 的正式二进制同时保留在 GitHub Release，并同步到公开的
-`zxflimit_admin/bridge-agent` Gitee Release。GitHub Release 是完整历史和构建摘要来源，
-公开 Gitee Release 是桌面端官方工具升级使用的国内下载源；私有
-`zxflimit_admin/baijimu-cli-rs` 只保存 CLI 源码和源码 tag，不承载用户下载。只有三个平台 ZIP 和
-`.sha256` 均完成国内上传、匿名整包下载和 SHA-256 回读验证后，CLI 发布流水线才允许
-本地应用市场登记该版本；市场 manifest 不得直接返回 GitHub 下载地址。
+Baijimu CLI 由其私有 GitHub 仓库 `momoplan/baijimu-cli-rs` 的唯一
+`release.yml` 工作流独立发布。公开下载统一使用内容寻址 OSS、npm 或本地应用市场；
+Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、签名、镜像或发布 CLI。
 
 Codex 的运行状态与账户状态彼此独立：应用状态来自 Connector 的 health check，账户页单独显示当前工作区、项目和凭证有效性。LLM key 只由 Codex 本地应用处理，不进入 Bridge Agent、前端状态或 relay，也不会作为 `codexSession` 方法暴露给远端。
 
@@ -706,15 +703,16 @@ open -a "百积木" --args --safe-mode
 
 百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`www.baijimu.com/download/` 是面向用户的官网客户端下载页；二进制仍由 OSS/CDN 分发，Gitee 不参与 Bridge Agent 客户端安装包分发。
 
-独立 Baijimu CLI 的 `baijimu-cli-vX.Y.Z` GitHub Release 也遵循相同的国内制品原则，
-但其版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，不登记到桌面端
-Tauri 更新服务。CLI 的 `vX.Y.Z` 源码 tag、ZIP 和 `.sha256` 同步到
-`zxflimit_admin/bridge-agent` Gitee Release；市场发布前必须验证 Gitee 匿名下载得到
-的完整字节与 GitHub Release 服务端 SHA-256 完全一致。
+独立 Baijimu CLI 的版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，
+不登记到桌面端 Tauri 更新服务。CLI 的私有 GitHub Release 保存构建归档，内容寻址 OSS
+保存公开 ZIP 与校验和；Bridge Agent 的新版本只从 OSS 获取固定版本，不再承载 CLI Release。
 
 仓库里的工作流文件是：
 
 - `.github/workflows/release-bridge-agent.yml`
+
+Bridge Agent 只发布自身。Baijimu CLI、Codex Connector 与 Codex Completion Connector
+分别在自己的私有 GitHub 仓库使用各自唯一的 `release.yml` 发布。
 
 标准触发方式：
 
@@ -768,8 +766,6 @@ macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置�
   - 发布流程调用的 release service 地址：`https://updates.baijimu.com/api/bridge-agent`
 - `BRIDGE_AGENT_RELEASE_API_TOKEN`
   - 发布流程调用 release service 的 Bearer token
-- `BAIJIMU_CLI_RS_GIT_TOKEN`
-  - 只用于校验和拉取内置 Baijimu CLI 源码 tag
 - `TAURI_SIGNING_PRIVATE_KEY`
   - Tauri updater minisign 私钥，只在 release runner 中使用
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`

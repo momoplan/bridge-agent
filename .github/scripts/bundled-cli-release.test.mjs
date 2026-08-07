@@ -106,7 +106,7 @@ describe("bundled Baijimu CLI release provenance", () => {
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(`"version":"${pinnedCliVersion}"`);
       expect(result.stdout).toContain(
-        "Prepared pinned Baijimu CLI release asset",
+        "Prepared pinned Baijimu CLI OSS asset",
       );
       const preparedBinary = join(fixture.resourceDirectory, "baijimu");
       expect(existsSync(preparedBinary)).toBe(true);
@@ -184,15 +184,16 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(defenderScript).toContain("Get-MpThreatCatalog");
   });
 
-  it("downloads the pinned release asset through the GitHub API when gh is absent", () => {
+  it("downloads the pinned content-addressed OSS asset without repository access", () => {
     expect(prepareScript).toContain(
-      'release_api_url="https://api.github.com/repos/${release_repo}/releases/tags/${release_tag}"',
+      "https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases",
     );
-    expect(prepareScript).toContain("Invalid GitHub release tag or asset name");
-    expect(prepareScript).toContain("application/octet-stream");
-    expect(prepareScript).toContain('"${asset_api_url}"');
-    expect(prepareScript).toContain("jq is required to resolve");
-    expect(prepareScript).not.toContain("github.com/${release_repo}/releases/download");
-    expect(prepareScript).not.toContain("GitHub CLI is required to download");
+    expect(prepareScript).toContain(
+      'source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"',
+    );
+    expect(prepareScript).toContain('"${source_url}" -o "${temporary_dir}/${asset_name}"');
+    expect(prepareScript).not.toContain("api.github.com");
+    expect(prepareScript).not.toContain("gh release download");
+    expect(prepareScript).not.toContain("gitee.com");
   });
 });

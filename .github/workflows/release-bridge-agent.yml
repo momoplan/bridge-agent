@@ -50,15 +50,9 @@ jobs:
       - name: Validate immutable release source
         shell: bash
         env:
-          GITEE_USER: zxflimit_admin
-          BAIJIMU_CLI_RS_GIT_TOKEN: ${{ secrets.BAIJIMU_CLI_RS_GIT_TOKEN }}
           REPAIR_ASSETS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_assets_only || false }}
         run: |
           set -euo pipefail
-          if [ -z "$BAIJIMU_CLI_RS_GIT_TOKEN" ]; then
-            echo "Missing required secret: BAIJIMU_CLI_RS_GIT_TOKEN" >&2
-            exit 1
-          fi
           case "$RELEASE_TAG" in
             bridge-agent-v*) ;;
             *)
@@ -121,33 +115,6 @@ jobs:
               ;;
           esac
 
-          cli_askpass="$(mktemp)"
-          cleanup_cli_askpass() {
-            rm -f "$cli_askpass"
-          }
-          trap cleanup_cli_askpass EXIT
-          chmod 700 "$cli_askpass"
-          cat > "$cli_askpass" <<'ASKPASS'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' "$GITEE_USER" ;;
-            *Password*) printf '%s\n' "$BAIJIMU_CLI_RS_GIT_TOKEN" ;;
-            *) exit 1 ;;
-          esac
-          ASKPASS
-          export GIT_ASKPASS="$cli_askpass"
-          export GIT_TERMINAL_PROMPT=0
-
-          cli_remote="https://gitee.com/zxflimit_admin/baijimu-cli-rs.git"
-          cli_tag_commit="$(git ls-remote "$cli_remote" "refs/tags/v${cli_version}^{}" | awk 'NR == 1 {print $1}')"
-          if [ -z "$cli_tag_commit" ]; then
-            cli_tag_commit="$(git ls-remote "$cli_remote" "refs/tags/v${cli_version}" | awk 'NR == 1 {print $1}')"
-          fi
-          if [ -z "$cli_tag_commit" ]; then
-            echo "Bundled Baijimu CLI tag v${cli_version} does not exist" >&2
-            exit 1
-          fi
-
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             for target in \
               "macos&arch=aarch64" \
@@ -162,6 +129,10 @@ jobs:
                         .connectorId == "com.baijimu.cli"
                         and .latestVersion.manifest.applicationType == "managed_tool"
                       )
+                    | select(.latestVersion.repo == "momoplan/baijimu-cli-rs")
+                    | select(.latestVersion.revision == ("v" + .latestVersion.version))
+                    | select(all(.latestVersion.manifest.artifacts[];
+                        .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases/")))
                     | .latestVersion.version
                   '
               )"
@@ -368,8 +339,6 @@ jobs:
         shell: bash
         env:
           BAIJIMU_CLI_USE_RELEASE_ASSET: "true"
-          BAIJIMU_CLI_RELEASE_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           ./tools/baijimu-cli/prepare-bundled-cli.sh
