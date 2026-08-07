@@ -5641,6 +5641,25 @@ fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> tauri::Resu
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn setup_main_window_icon(app: &tauri::App) -> anyhow::Result<()> {
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .context("default bundled window icon is unavailable")?;
+    let window = app
+        .get_webview_window("main")
+        .context("main webview window is unavailable")?;
+    window
+        .set_icon(icon)
+        .context("failed to bind the bundled icon to the main Windows window")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn setup_main_window_icon(_app: &tauri::App) -> anyhow::Result<()> {
+    Ok(())
+}
+
 fn show_main_window(
     app: &tauri::AppHandle,
     diagnostics: Option<&StartupDiagnostics>,
@@ -6232,6 +6251,20 @@ fn main() {
             }
             setup_health.set_component("updater", "官方更新器", "ready", None);
             configure_desktop_autostart(app, &setup_health, &setup_diagnostics);
+            if let Err(err) = setup_main_window_icon(app) {
+                setup_diagnostics.error(format!(
+                    "failed to setup the main window icon; Windows may show a generic taskbar icon: {err:#}"
+                ));
+                setup_health.set_component(
+                    "window_icon",
+                    "应用图标",
+                    "degraded",
+                    Some(err.to_string()),
+                );
+            } else {
+                setup_diagnostics.info("main window icon setup completed");
+                setup_health.set_component("window_icon", "应用图标", "ready", None);
+            }
             if let Err(err) = setup_tray(app, &setup_diagnostics) {
                 setup_diagnostics.error(format!(
                     "failed to setup tray; continuing without tray icon: {err:#}"

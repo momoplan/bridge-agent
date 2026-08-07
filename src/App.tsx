@@ -32,6 +32,7 @@ import {
 } from "./local-app-install-tasks";
 import { isConnectorUninstallStopError } from "./local-app-uninstall";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
+import { resolveMarketHostUpgradeAction } from "./local-app-host-upgrade";
 import { embeddedLocalAppView } from "./local-app-runtime";
 import {
   describeLocalAppUpdate,
@@ -2649,7 +2650,7 @@ function App() {
     }
   }
 
-  async function checkAppUpdate(showLatestMessage = false) {
+  async function checkAppUpdate(showLatestMessage = false): Promise<AppUpdateStatus | null> {
     setAppUpdateCheckState("checking");
     setAppUpdateError(null);
     try {
@@ -2667,6 +2668,7 @@ function App() {
             : `当前已经是最新版本 ${status.currentVersion}`
         );
       }
+      return status;
     } catch (err) {
       const message = readError(err);
       setAppUpdateCheckState("error");
@@ -2676,6 +2678,7 @@ function App() {
       } else {
         clientWarn("自动检查更新失败", err);
       }
+      return null;
     }
   }
 
@@ -2714,14 +2717,14 @@ function App() {
     );
   }
 
-  async function installAppUpdate() {
+  async function installAppUpdate(update = appUpdate) {
     try {
       setUpdateBusy(true);
       setAppUpdateProgress({
         phase: "checking",
         message: "正在获取最新版本信息",
-        version: appUpdate?.latestVersion ?? null,
-        assetName: appUpdate?.assetName ?? null,
+        version: update?.latestVersion ?? null,
+        assetName: update?.assetName ?? null,
         downloadedBytes: null,
         totalBytes: null,
         downloadedPath: null
@@ -2743,6 +2746,28 @@ function App() {
     } finally {
       setUpdateBusy(false);
     }
+  }
+
+  async function upgradeClientForMarketApp(app: MarketConnector) {
+    let update = appUpdate;
+    if (!update?.updateAvailable) {
+      update = await checkAppUpdate(false);
+    }
+    if (!update?.updateAvailable) {
+      setError(
+        `应用 ${app.name} 需要百积木客户端 ${app.minimumHostVersion ?? "更高版本"}，但官方更新服务暂未提供可用的新版本。`
+      );
+      return;
+    }
+    if (update.autoDownloadAvailable) {
+      await installAppUpdate(update);
+      return;
+    }
+    if (update.releaseUrl) {
+      await openAppUpdateReleasePage(update);
+      return;
+    }
+    setError(`已发现客户端 ${update.latestVersion ?? "新版本"}，但当前平台没有可用的签名安装包或下载地址。`);
   }
 
   async function restartInNormalMode() {
@@ -5303,6 +5328,16 @@ function App() {
     }
     const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
     const selectedMarketIncompatible = selectedMarket?.compatible === false;
+    const marketPrimaryAction = selectedMarket
+      ? resolveMarketHostUpgradeAction(
+          selectedMarket.name,
+          !selectedMarketIncompatible,
+          appUpdate,
+          appUpdateCheckState === "checking",
+          updateBusy,
+          formatAppUpdateProgressButton(appUpdateProgress)
+        )
+      : null;
     const closeInstallPanel = () => {
       setInstallPanelOpen(false);
       setInstallSourceMode("market");
@@ -5547,17 +5582,28 @@ function App() {
             </div>
             <button
               className="primary install-primary-action"
-              onClick={() => void installLocalApp()}
+              onClick={() => {
+                if (
+                  installSourceMode === "market" &&
+                  selectedMarket &&
+                  marketPrimaryAction?.kind !== "install_app"
+                ) {
+                  void upgradeClientForMarketApp(selectedMarket);
+                  return;
+                }
+                void installLocalApp();
+              }}
               disabled={
                 installBusy ||
-                (installSourceMode === "market" && (!selectedMarket || selectedMarketIncompatible)) ||
+                (installSourceMode === "market" && !selectedMarket) ||
+                (installSourceMode === "market" && marketPrimaryAction?.disabled === true) ||
                 (installSourceMode === "custom" && (!installSource.trim() || !customInstallConfirmed))
               }
             >
               {installBusy
                 ? "正在安装…"
-                : selectedMarketIncompatible
-                  ? "请先升级客户端"
+                : installSourceMode === "market" && marketPrimaryAction
+                  ? marketPrimaryAction.label
                   : installSourceMode === "market" && selectedMarket
                     ? `安装 ${selectedMarket.name}`
                     : "安装应用"}

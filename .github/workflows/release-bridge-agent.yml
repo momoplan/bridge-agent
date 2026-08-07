@@ -809,6 +809,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          & "src-tauri/scripts/verify-windows-app-icon.ps1" `
+            -FilePath "src-tauri/target/release/bridge-agent-desktop.exe"
           $msiFiles = Get-ChildItem `
             -Path "src-tauri/target/release/bundle/msi" `
             -Filter "*.msi" `

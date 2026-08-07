@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.2.58"
+version = "0.2.59"
 dependencies = [
  "anyhow",
  "axum",
