@@ -10,7 +10,7 @@ Codex 本地应用由 GitHub Actions 通过 release service 的预签名 PUT 通
 release service 返回的不可变 OSS 对象：
 
 由于该 release service 的管理接口固定使用 Bridge Agent 的版本命名空间，Codex 上传使用同版本的内部
-`bridge-agent-v<version>-codex.1` 影子记录；它不调用 Bridge Agent 的公开发布接口，也不会进入 Bridge Agent
+`bridge-agent-v<version>` 影子记录；它不调用 Bridge Agent 的公开发布接口，也不会进入 Bridge Agent
 更新目录。
 
 ```text

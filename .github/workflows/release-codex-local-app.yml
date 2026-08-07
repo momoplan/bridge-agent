@@ -330,7 +330,7 @@ jobs:
           set -euo pipefail
           api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#codex-local-app-v}"
-          service_version="${version}-codex.1"
+          service_version="$version"
           service_tag="bridge-agent-v${service_version}"
           release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           jq -n \
@@ -357,12 +357,9 @@ jobs:
           macos_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-macos-universal.zip"
           windows_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-windows-x64.zip"
           linux_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-linux-x64.zip"
-          macos_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-macos-universal.zip"
-          windows_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-windows-x64.zip"
-          linux_service_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${service_version}-linux-x64.zip"
-          cp "$macos_asset" "$macos_service_asset"
-          cp "$windows_asset" "$windows_service_asset"
-          cp "$linux_asset" "$linux_service_asset"
+          macos_service_asset="$macos_asset"
+          windows_service_asset="$windows_asset"
+          linux_service_asset="$linux_asset"
           upload_asset "macOS Universal" \
             "$macos_service_asset"
           upload_asset "Windows x64" \
