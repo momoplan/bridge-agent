@@ -291,17 +291,17 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-      BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
-      BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+      OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
     steps:
       - name: Checkout release scripts
         uses: actions/checkout@v4
 
-      - name: Validate release service configuration
+      - name: Validate OSS configuration
         shell: bash
         run: |
           set -euo pipefail
-          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
+          for name in OSS_ACCESS_KEY_ID OSS_ACCESS_KEY_SECRET; do
             if [ -z "${!name}" ]; then
               echo "Missing required secret: $name" >&2
               exit 1
@@ -324,95 +324,47 @@ jobs:
             --dir "$RUNNER_TEMP/codex-release-assets" \
             --pattern "baijimu-codex-local-app-*.zip"
 
-      - name: Upload signed archives directly to OSS
+      - name: Install pinned ossutil
         shell: bash
         run: |
           set -euo pipefail
-          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
-          version="${RELEASE_TAG#codex-local-app-v}"
-          service_version="$version"
-          service_tag="bridge-agent-v${service_version}"
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
-          jq -n \
-            --arg tagName "$service_tag" \
-            --arg version "$service_version" \
-            --arg releaseName "Baijimu Codex Local App $version" \
-            --arg releaseUrl "$release_url" \
-            '{tagName:$tagName,version:$version,releaseName:$releaseName,releaseUrl:$releaseUrl,source:"github-actions-oss"}' \
-            | curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-                -X POST \
-                -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-                -H 'Content-Type: application/json' \
-                --data-binary @- \
-                "$api/releases/$service_tag" >/dev/null
+          version=2.3.0
+          checksum=3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
+          curl -fsSL --retry 5 "https://gosspublic.alicdn.com/ossutil/v2/${version}/ossutil-${version}-linux-amd64.zip" -o "$RUNNER_TEMP/ossutil.zip"
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/ossutil.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/ossutil.zip" -d "$RUNNER_TEMP/ossutil"
+          install -m 0755 "$RUNNER_TEMP/ossutil/ossutil-${version}-linux-amd64/ossutil" "$RUNNER_TEMP/ossutil-bin"
+          echo "OSSUTIL=$RUNNER_TEMP/ossutil-bin" >> "$GITHUB_ENV"
 
-          upload_asset() {
-            local target="$1"
-            local asset="$2"
-            [ -s "$asset" ] || { echo "Missing release archive: $asset" >&2; exit 1; }
-            node .github/scripts/upload-oss-release-asset.mjs \
-              "$api" "$service_tag" "$service_version" "$target" "$asset"
-          }
-
-          macos_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-macos-universal.zip"
-          windows_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-windows-x64.zip"
-          linux_asset="$RUNNER_TEMP/codex-release-assets/baijimu-codex-local-app-${version}-linux-x64.zip"
-          macos_service_asset="$RUNNER_TEMP/codex-release-assets/Baijimu_${service_version}_Codex-macos-universal.zip"
-          windows_service_asset="$RUNNER_TEMP/codex-release-assets/Baijimu_${service_version}_Codex-windows-x64.zip"
-          linux_service_asset="$RUNNER_TEMP/codex-release-assets/Baijimu_${service_version}_Codex-linux-x64.zip"
-          cp "$macos_asset" "$macos_service_asset"
-          cp "$windows_asset" "$windows_service_asset"
-          cp "$linux_asset" "$linux_service_asset"
-          upload_asset "macOS Universal" \
-            "$macos_service_asset"
-          upload_asset "Windows x64" \
-            "$windows_service_asset"
-          upload_asset "Linux x64" \
-            "$linux_service_asset"
-
-      - name: Publish OSS manifest to release archive
+      - name: Upload signed archives directly to OSS
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#codex-local-app-v}"
-          service_version="${version}-codex.1"
-          service_tag="bridge-agent-v${service_version}"
-          release_json="$(curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
-            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            "$api/releases/$service_tag")"
+          bucket=lowcode-common
+          endpoint=oss-cn-beijing.aliyuncs.com
+          prefix="local-app-artifacts/codex/releases/v${version}"
+          dir="$RUNNER_TEMP/codex-release-assets"
           manifest="$RUNNER_TEMP/baijimu-codex-local-app-${version}-oss-manifest.json"
-          printf '%s' "$release_json" | jq -e \
-            --arg serviceTag "$service_tag" \
-            --arg serviceVersion "$service_version" \
-            --arg version "$version" \
-            --arg prefix "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/" \
-            '.tagName == $serviceTag and .version == $serviceVersion and
-             ([.assets[].name] | index("Baijimu_" + $serviceVersion + "_Codex-macos-universal.zip") != null) and
-             ([.assets[].name] | index("Baijimu_" + $serviceVersion + "_Codex-windows-x64.zip") != null) and
-             ([.assets[].name] | index("Baijimu_" + $serviceVersion + "_Codex-linux-x64.zip") != null) and
-             all(.assets[]; .downloadUrl | startswith($prefix))' >/dev/null
-          printf '%s' "$release_json" | jq -c \
-            --arg tag "$RELEASE_TAG" \
-            --arg version "$version" \
-            --arg serviceVersion "$service_version" \
-            --arg connectorId "com.baijimu.connector.codex" \
-            '{schemaVersion:"1.0",applicationId:"codex",connectorId:$connectorId,releaseTag:$tag,version:$version,
-              artifacts: ([
-                {platform:"macos",arch:"universal",name:("Baijimu_" + $serviceVersion + "_Codex-macos-universal.zip")},
-                {platform:"windows",arch:"x86_64",name:("Baijimu_" + $serviceVersion + "_Codex-windows-x64.zip")},
-                {platform:"linux",arch:"x86_64",name:("Baijimu_" + $serviceVersion + "_Codex-linux-x64.zip")}
-              ] as $wanted |
-              [$wanted[] as $item |
-                (.assets[] | select(.name == $item.name) |
-                 {platform:$item.platform,arch:$item.arch,name:.name,source:.downloadUrl,
-                  checksum:("sha256:" + .sha256),sizeBytes:.sizeBytes})])}' \
-            > "$manifest"
-          jq -e --arg version "$version" \
-            '.schemaVersion == "1.0" and .applicationId == "codex" and .version == $version and (.artifacts | length) == 3 and
-             all(.artifacts[]; (.source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/")) and
-               (.checksum | test("^sha256:[0-9a-f]{64}$")))' "$manifest" >/dev/null
+          upload_one() {
+            local platform="$1" arch="$2" name="$3" file="$dir/$3"
+            local checksum="$(sha256sum "$file" | awk '{print $1}')" object="$prefix/$checksum/$name"
+            printf '%s  %s\n' "$checksum" "$name" > "$file.sha256"
+            "$OSSUTIL" cp "$file" "oss://$bucket/$object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:application/zip#Cache-Control:public,max-age=31536000,immutable' >/dev/null
+            "$OSSUTIL" cp "$file.sha256" "oss://$bucket/$object.sha256" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:text/plain; charset=utf-8#Cache-Control:public,max-age=31536000,immutable' >/dev/null
+            local source="https://$bucket.$endpoint/$object"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "$source" -o "$RUNNER_TEMP/$platform.zip"
+            test "$(sha256sum "$RUNNER_TEMP/$platform.zip" | awk '{print $1}')" = "$checksum"
+            jq -n --arg platform "$platform" --arg arch "$arch" --arg name "$name" --arg source "$source" --arg checksum "sha256:$checksum" '{platform:$platform,arch:$arch,name:$name,source:$source,checksum:$checksum}'
+          }
+          macos_name="baijimu-codex-local-app-${version}-macos-universal.zip"
+          windows_name="baijimu-codex-local-app-${version}-windows-x64.zip"
+          linux_name="baijimu-codex-local-app-${version}-linux-x64.zip"
+          artifacts="[$(upload_one macos universal "$macos_name"),$(upload_one windows x86_64 "$windows_name"),$(upload_one linux x86_64 "$linux_name")]"
+          jq -n --arg version "$version" --arg tag "$RELEASE_TAG" --argjson artifacts "$artifacts" '{schemaVersion:"1.0",applicationId:"codex",connectorId:"com.baijimu.connector.codex",releaseTag:$tag,version:$version,artifacts:$artifacts}' > "$manifest"
+          manifest_object="$prefix/manifest.json"
+          "$OSSUTIL" cp "$manifest" "oss://$bucket/$manifest_object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:application/json#Cache-Control:public,max-age=31536000,immutable' >/dev/null
           gh release upload "$RELEASE_TAG" "$manifest" \
             --repo "$GITHUB_REPOSITORY" --clobber

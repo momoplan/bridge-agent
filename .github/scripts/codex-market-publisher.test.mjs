@@ -25,7 +25,7 @@ describe("Codex local app market publisher", () => {
   test("publishes GitHub Actions OSS artifacts through anonymous Baijimu OSS", () => {
     expect(publisher).toContain("manifest_asset=");
     expect(publisher).toContain(
-      "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/",
+      "https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v",
     );
     expect(publisher).toContain("anonymous OSS download checksum mismatch");
     expect(publisher).toContain("GITHUB_TOKEN is required");

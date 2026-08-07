@@ -5,26 +5,23 @@
 
 ## Codex
 
-Codex 本地应用由 GitHub Actions 通过 release service 的预签名 PUT 通道，直接上传到百积木公共 OSS；Jenkins
-只下载 GitHub Release 中很小的 OSS manifest，并从其中的 OSS 地址校验和发布市场。生产制品地址使用
-release service 返回的不可变 OSS 对象：
-
-由于该 release service 的管理接口固定使用 Bridge Agent 的版本命名空间，Codex 上传使用同版本的内部
-`bridge-agent-v<version>` 影子记录；它不调用 Bridge Agent 的公开发布接口，也不会进入 Bridge Agent
-更新目录。
+Codex 本地应用由 GitHub Actions 使用受限 OSS 上传凭据直接上传到百积木公共 OSS；Jenkins 只下载 GitHub
+Release 中很小的 OSS manifest，并从其中的 OSS 地址校验和发布市场。GitHub 仓库需要配置
+`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 两个发布专用 secrets，禁止使用个人长期主账号密钥。
 
 ```text
-https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/<date>/<owner>/<id>-<asset>
+oss://lowcode-common/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
+https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
 ```
 
-对象由 release service 以不可变身份分配，并在上传完成后匿名完整回下载、校验 SHA-256 后登记。市场
+对象键包含语义版本和制品 SHA-256；上传完成后由 GitHub Actions 匿名完整回下载并校验 SHA-256。市场
 只接受无查询参数的公共 OSS 地址，禁止登记 GitHub/Gitee 下载地址。
 
 正式发布顺序固定为：
 
 1. GitHub Actions 从不可变 Connector 标签完成三平台构建和平台签名，并生成 ZIP 与 SHA-256。
-2. GitHub Actions 通过 release service 申请 OSS 预签名地址并直接 PUT 三个平台 ZIP；随后发布 OSS manifest
-   到 GitHub Release 作为小型元数据归档。
+2. GitHub Actions 直接上传三个平台 ZIP 和校验文件到内容寻址 OSS；随后发布 OSS manifest 到 GitHub Release
+   作为小型元数据归档。
 3. Jenkins `codex-local-app-release` 只读取 OSS manifest，从公共 OSS 匿名下载三平台制品并核对 SHA-256。
 4. 使用固定版本的 `baijimu` CLI 创建或复用精确市场版本并提交审核。返回
    `PENDING_REVIEW` 表示流水线提交阶段成功；流水线不得等待人工审核，也不得因此标记失败。

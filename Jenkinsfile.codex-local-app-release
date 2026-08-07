@@ -269,9 +269,9 @@ curl -fsS "https://api.baijimu.com/lowcode3/api/local-app-market/apps/codex?plat
   | jq -e --arg version "$CONNECTOR_VERSION" '
       ((.data // .).latestVersion.version == $version)
       and ((.data // .).latestVersion.compatibility.compatible == true)
-      and ((.data // .).latestVersion.source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))
+      and ((.data // .).latestVersion.source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/"))
       and (all((.data // .).latestVersion.manifest.artifacts[];
-        .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/")))
+        .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/")))
       and (((.data // .).latestVersion.manifest.setup // false) == false)
       and ((.data // .).latestVersion.manifest.runtime.processOwnership == "host")
       and ((.data // .).latestVersion.manifest.runtime.args == ["start"])

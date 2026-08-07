@@ -128,7 +128,7 @@ printf '%s' "$manifest_json" | jq -e \
    .connectorId == "com.baijimu.connector.codex" and
    .version == $version and
    (.artifacts | length) == 3 and
-   all(.artifacts[]; .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/"))' \
+   all(.artifacts[]; .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v" + $version + "/"))' \
   >/dev/null
 
 for platform in macos windows linux; do
@@ -144,7 +144,7 @@ for platform in macos windows linux; do
   fi
   checksum="$(printf '%s' "$checksum" | tr '[:upper:]' '[:lower:]')"
   case "$source_url" in
-    https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/*) ;;
+    https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v${version}/*) ;;
     *) echo "invalid immutable public OSS URL for ${platform}: ${source_url}" >&2; exit 1 ;;
   esac
   checksums[$platform]="$checksum"
@@ -187,7 +187,7 @@ for document in "$manifest" "$capabilities"; do
 done
 printf '%s' "$manifest" | jq -e \
   --arg version "$version" \
-  --arg prefix "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/" \
+  --arg prefix "https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v${version}/" \
   '.schemaVersion == "2.0" and
    .applicationType == "connector" and
    .id == "com.baijimu.connector.codex" and
