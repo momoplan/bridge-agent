@@ -6,9 +6,7 @@ import { describe, expect, it } from "vitest";
 
 const signer = ".github/scripts/sign-macos-with-retry.sh";
 const releaseWorkflows = [
-  ".github/workflows/release-baijimu-cli.yml",
   ".github/workflows/release-bridge-agent.yml",
-  ".github/workflows/release-codex-completion-local-app.yml",
 ];
 
 function runSigner(mode, maxAttempts = 4) {

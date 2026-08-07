@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-default_cli_git_url="${BAIJIMU_CLI_RS_GIT_URL:-https://gitee.com/zxflimit_admin/baijimu-cli-rs.git}"
+default_cli_git_url="${BAIJIMU_CLI_RS_GIT_URL:-https://github.com/momoplan/baijimu-cli-rs.git}"
 cli_version_file="${repo_root}/tools/baijimu-cli/VERSION"
 if [ ! -f "${cli_version_file}" ]; then
   echo "Missing pinned Baijimu CLI version: ${cli_version_file}" >&2
@@ -32,89 +32,28 @@ case "$(uname -s)" in
 esac
 
 if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
-  release_repo="${BAIJIMU_CLI_RELEASE_REPO:-momoplan/bridge-agent}"
-  release_tag="baijimu-cli-v${pinned_cli_version}"
   asset_name="baijimu-cli-${pinned_cli_version}-${platform_name}.zip"
   checksum_file="${BAIJIMU_CLI_CHECKSUM_FILE:-${repo_root}/tools/baijimu-cli/SHA256SUMS}"
-  if [ ! -f "${checksum_file}" ]; then
+  test -f "${checksum_file}" || {
     echo "Missing pinned Baijimu CLI checksums: ${checksum_file}" >&2
     exit 1
-  fi
-  expected_sha256="$(
-    awk -v asset="${asset_name}" '$2 == asset { print $1 }' "${checksum_file}"
-  )"
-  if [ -z "${expected_sha256}" ]; then
+  }
+  expected_sha256="$(awk -v asset="${asset_name}" '$2 == asset { print $1 }' "${checksum_file}")"
+  test -n "${expected_sha256}" || {
     echo "Missing pinned checksum for ${asset_name}: ${checksum_file}" >&2
     exit 1
-  fi
+  }
 
   temporary_dir="$(mktemp -d)"
   trap 'rm -rf "${temporary_dir}"' EXIT
   if [ -n "${BAIJIMU_CLI_RELEASE_ASSETS_DIR:-}" ]; then
-    cp \
-      "${BAIJIMU_CLI_RELEASE_ASSETS_DIR}/${asset_name}" \
-      "${temporary_dir}/${asset_name}"
+    cp "${BAIJIMU_CLI_RELEASE_ASSETS_DIR}/${asset_name}" "${temporary_dir}/${asset_name}"
   else
-    if command -v gh >/dev/null 2>&1; then
-      gh release download "${release_tag}" \
-        --repo "${release_repo}" \
-        --dir "${temporary_dir}" \
-        --pattern "${asset_name}"
-    else
-      if ! command -v curl >/dev/null 2>&1; then
-        echo "curl is required to download ${release_tag} without GitHub CLI" >&2
-        exit 1
-      fi
-      if ! command -v jq >/dev/null 2>&1; then
-        echo "jq is required to resolve ${release_tag} without GitHub CLI" >&2
-        exit 1
-      fi
-      case "${release_repo}" in
-        [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) ;;
-        *) echo "Invalid GitHub release repository: ${release_repo}" >&2; exit 1 ;;
-      esac
-      case "${release_tag}:${asset_name}" in
-        *[!A-Za-z0-9._:-]*)
-          echo "Invalid GitHub release tag or asset name: ${release_tag}/${asset_name}" >&2
-          exit 1
-          ;;
-      esac
-
-      github_api_headers=(
-        -H "X-GitHub-Api-Version: 2022-11-28"
-      )
-      if [ -n "${GH_TOKEN:-}" ]; then
-        github_api_headers+=( -H "Authorization: Bearer ${GH_TOKEN}" )
-      fi
-      release_api_url="https://api.github.com/repos/${release_repo}/releases/tags/${release_tag}"
-      asset_api_url="$(
-        curl -fsSL \
-          --retry 6 \
-          --retry-all-errors \
-          --retry-delay 3 \
-          --connect-timeout 15 \
-          --max-time 120 \
-          -H "Accept: application/vnd.github+json" \
-          "${github_api_headers[@]}" \
-          "${release_api_url}" \
-          | jq -r --arg asset_name "${asset_name}" \
-              '[.assets[] | select(.name == $asset_name) | .url][0] // empty'
-      )"
-      if [ -z "${asset_api_url}" ]; then
-        echo "GitHub release ${release_tag} does not contain ${asset_name}" >&2
-        exit 1
-      fi
-      curl -fsSL \
-        --retry 6 \
-        --retry-all-errors \
-        --retry-delay 3 \
-        --connect-timeout 15 \
-        --max-time 600 \
-        -H "Accept: application/octet-stream" \
-        "${github_api_headers[@]}" \
-        "${asset_api_url}" \
-        -o "${temporary_dir}/${asset_name}"
-    fi
+    release_base_url="${BAIJIMU_CLI_RELEASE_BASE_URL:-https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases}"
+    source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"
+    curl -fsSL --retry 6 --retry-all-errors --retry-delay 3 \
+      --connect-timeout 15 --max-time 600 \
+      "${source_url}" -o "${temporary_dir}/${asset_name}"
   fi
 
   actual_sha256="$(
@@ -124,10 +63,10 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
       shasum -a 256 "${temporary_dir}/${asset_name}" | awk '{ print $1 }'
     fi
   )"
-  if [ "${actual_sha256}" != "${expected_sha256}" ]; then
+  test "${actual_sha256}" = "${expected_sha256}" || {
     echo "Baijimu CLI release checksum mismatch for ${asset_name}: expected ${expected_sha256}, got ${actual_sha256}" >&2
     exit 1
-  fi
+  }
 
   extracted_dir="${temporary_dir}/extracted"
   mkdir -p "${extracted_dir}" "${resource_dir}"
@@ -135,23 +74,20 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
     BAIJIMU_CLI_ARCHIVE="${temporary_dir}/${asset_name}" \
       BAIJIMU_CLI_DESTINATION="${extracted_dir}" \
       powershell -NoProfile -Command '
-        Expand-Archive `
-          -Force `
-          -LiteralPath $env:BAIJIMU_CLI_ARCHIVE `
-          -DestinationPath $env:BAIJIMU_CLI_DESTINATION
+        Expand-Archive -Force -LiteralPath $env:BAIJIMU_CLI_ARCHIVE -DestinationPath $env:BAIJIMU_CLI_DESTINATION
       '
   else
     unzip -q "${temporary_dir}/${asset_name}" -d "${extracted_dir}"
   fi
   released_binary="${extracted_dir}/bin/${binary_name}"
-  if [ ! -f "${released_binary}" ]; then
+  test -f "${released_binary}" || {
     echo "Baijimu CLI release asset does not contain bin/${binary_name}" >&2
     exit 1
-  fi
+  }
   cp "${released_binary}" "${resource_dir}/${binary_name}"
   chmod 755 "${resource_dir}/${binary_name}" 2>/dev/null || true
   "${resource_dir}/${binary_name}" --version --json
-  echo "Prepared pinned Baijimu CLI release asset ${asset_name} (${actual_sha256})"
+  echo "Prepared pinned Baijimu CLI OSS asset ${asset_name} (${actual_sha256})"
   exit 0
 fi
 
@@ -167,11 +103,6 @@ if [ ! -f "${cli_dir}/Cargo.toml" ]; then
   clone_dir="${RUNNER_TEMP:-/tmp}/baijimu-cli-rs"
   rm -rf "${clone_dir}"
   clone_url="${default_cli_git_url}"
-  if [ -n "${BAIJIMU_CLI_RS_GIT_TOKEN:-}" ] && [[ "${clone_url}" == https://gitee.com/* ]]; then
-    clone_username="${BAIJIMU_CLI_RS_GIT_USERNAME:-oauth2}"
-    clone_username="${clone_username//@/%40}"
-    clone_url="https://${clone_username}:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
-  fi
   clone_succeeded=false
   for attempt in 1 2 3 4 5; do
     rm -rf "${clone_dir}"
