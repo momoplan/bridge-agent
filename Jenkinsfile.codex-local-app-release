@@ -80,6 +80,11 @@ cargo test --manifest-path connector-src/Cargo.toml
             steps {
                 withCredentials([
                     usernamePassword(
+                        credentialsId: 'gitee-workspace-642-pat',
+                        usernameVariable: 'CLI_GITEE_USER',
+                        passwordVariable: 'CLI_GITEE_TOKEN'
+                    ),
+                    usernamePassword(
                         credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02',
                         usernameVariable: 'GITEE_USER',
                         passwordVariable: 'GITEE_TOKEN'
@@ -96,8 +101,8 @@ cargo test --manifest-path connector-src/Cargo.toml
                 ]) {
                     sh '''#!/bin/bash
 set -euo pipefail
-BAIJIMU_CLI_RS_GIT_TOKEN="$GITEE_TOKEN" \
-BAIJIMU_CLI_RS_GIT_USERNAME="$GITEE_USER" \
+BAIJIMU_CLI_RS_GIT_TOKEN="$CLI_GITEE_TOKEN" \
+BAIJIMU_CLI_RS_GIT_USERNAME="$CLI_GITEE_USER" \
 BAIJIMU_CLI_USE_RELEASE_ASSET=false \
 ./tools/baijimu-cli/prepare-bundled-cli.sh
 VALIDATE_ONLY=true \
