@@ -20,8 +20,10 @@ https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/rel
 1. GitHub Actions 从不可变 Connector 标签完成三平台构建和平台签名，并生成 ZIP 与 SHA-256。
 2. Jenkins `codex-local-app-release` 下载 GitHub 归档，核对 GitHub 服务端摘要和 `.sha256`。
 3. Jenkins 上传内容寻址对象到公共 OSS，随后匿名完整回下载并再次核对 SHA-256。
-4. 使用固定版本的 `baijimu` CLI 执行 `local-app publish codex`，提交仅包含 OSS 地址的市场版本。
-5. 双人审核通过后，流水线分平台回读公开市场，验证版本、兼容性、manifest、OSS 地址和校验和。
+4. 使用固定版本的 `baijimu` CLI 创建或复用精确市场版本并提交审核。返回
+   `PENDING_REVIEW` 表示流水线提交阶段成功；流水线不得等待人工审核，也不得因此标记失败。
+5. 独立审核完成后，以相同不可变提交和版本重跑发布任务。任务复用既有标签、Release、OSS 制品和市场
+   版本，只执行幂等校验，并要求 macOS、Windows、Linux 公共市场记录和真实下载摘要全部一致。
 6. 在受支持的 Bridge Agent 上完成后台安装、启动、应用内初始化和核心能力验证。
 
 禁止把 GitHub/Gitee 下载地址登记为生产市场源，禁止从 MSE 读取数据库凭据或直接修改

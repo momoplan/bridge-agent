@@ -236,6 +236,20 @@ tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-s
             steps {
                 sh '''#!/bin/bash
 set -euo pipefail
+publication_status_file="$PWD/.codex-local-app-publication-status"
+test -s "$publication_status_file"
+publication_status="$(cat "$publication_status_file")"
+case "$publication_status" in
+  PENDING_REVIEW)
+    echo "Codex local app ${CONNECTOR_VERSION} was submitted successfully and is pending independent review; public verification is deferred"
+    exit 0
+    ;;
+  PUBLISHED) ;;
+  *)
+    echo "unexpected Codex local app publication status: ${publication_status}" >&2
+    exit 1
+    ;;
+esac
 curl -fsS "https://api.github.com/repos/momoplan/bridge-agent/releases/tags/codex-local-app-v${CONNECTOR_VERSION}" \
   | jq -e --arg version "$CONNECTOR_VERSION" '
       .draft == false and

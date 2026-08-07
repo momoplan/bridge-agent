@@ -8,6 +8,8 @@ fi
 
 version="$1"
 connector_manifest_path="$2"
+publication_status_file="${MARKET_PUBLICATION_STATUS_FILE:-$PWD/.codex-local-app-publication-status}"
+rm -f "$publication_status_file"
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "invalid connector version: $version" >&2
   exit 2
@@ -322,10 +324,21 @@ printf '%s' "$publish_response" | jq -e \
   >/dev/null
 publication_id="$(printf '%s' "$publish_response" | jq -r '.data.publicationId // empty')"
 publication_status="$(printf '%s' "$publish_response" | jq -r '.data.status')"
+printf '%s\n' "$publication_status" > "$publication_status_file"
 echo "submitted Codex local app ${version}; publication=${publication_id:-existing}; status=${publication_status}"
 
+# Human review belongs to local-app-market, not to the Jenkins executor.  A
+# successful submission is a complete release-pipeline outcome even though the
+# public catalog cannot expose the version until an independent reviewer acts.
+# Re-running the same immutable release after approval returns PUBLISHED and
+# performs the public propagation checks below.
+if [ "$publication_status" = "PENDING_REVIEW" ]; then
+  echo "Codex local app ${version} is pending independent market review; public verification is deferred"
+  exit 0
+fi
+
 verified=false
-for attempt in $(seq 1 400); do
+for attempt in $(seq 1 40); do
   all_targets_verified=true
   for target in 'macos&arch=aarch64' 'windows&arch=x86_64' 'linux&arch=x86_64'; do
     payload="$(curl -fsS --retry 2 --connect-timeout 5 --max-time 15 \
@@ -361,7 +374,7 @@ for attempt in $(seq 1 400); do
 done
 
 if [ "$verified" != true ]; then
-  echo "market verification failed or publication was not approved before the 20 minute deadline" >&2
+  echo "published market record did not propagate to every public target before the 2 minute deadline" >&2
   exit 1
 fi
 
