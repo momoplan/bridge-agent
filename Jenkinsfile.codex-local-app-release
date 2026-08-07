@@ -10,7 +10,7 @@ pipeline {
     parameters {
         string(name: 'BRIDGE_REF', defaultValue: 'main', description: 'Bridge repository branch containing the Codex local app release tooling')
         string(name: 'BRIDGE_COMMIT', defaultValue: '', description: 'Exact bridge repository commit containing the Codex local app release tooling')
-        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch')
+        string(name: 'CONNECTOR_REF', defaultValue: 'main', description: 'Codex local app source branch or tag')
         string(name: 'CONNECTOR_COMMIT', defaultValue: '', description: 'Exact Codex local app commit to publish')
         string(name: 'CONNECTOR_VERSION', defaultValue: '1.2.8', description: 'Codex local app version')
         booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Validate and test without publishing refs or market data')
@@ -32,7 +32,9 @@ case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
                     deleteDir()
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: "*/${params.CONNECTOR_REF}"]],
+                        // Start from the stable default branch; the shell step below
+                        // fetches and checks out the requested branch/tag exactly.
+                        branches: [[name: '*/main']],
                         doGenerateSubmoduleConfigurations: false,
                         extensions: [[$class: 'CloneOption', depth: 1, noTags: false, shallow: true]],
                         submoduleCfg: [],
@@ -41,6 +43,27 @@ case "$CONNECTOR_VERSION" in *[!0-9.]*|'') exit 1 ;; esac
                             url: 'https://gitee.com/zxflimit_admin/baijimu-connector-codex.git'
                         ]]
                     ])
+                    sh '''#!/bin/bash
+set -euo pipefail
+
+# Fetch the requested ref explicitly.  Jenkins' GitSCM branch matcher does not
+# resolve annotated tags reliably, so tags must be fetched as tags and then
+# detached at the exact commit supplied by the release parameters.
+if [[ "$CONNECTOR_REF" == refs/tags/* ]]; then
+  tag_ref="$CONNECTOR_REF"
+elif [[ "$CONNECTOR_REF" == v* ]]; then
+  tag_ref="refs/tags/$CONNECTOR_REF"
+else
+  tag_ref=""
+fi
+
+if [[ -n "$tag_ref" ]]; then
+  git fetch --depth=1 origin "$tag_ref:$tag_ref"
+else
+  git fetch --depth=1 origin "refs/heads/$CONNECTOR_REF:refs/remotes/origin/$CONNECTOR_REF"
+fi
+git checkout --detach "$CONNECTOR_COMMIT"
+'''
                 }
                 sh '''#!/bin/bash
 set -euo pipefail
