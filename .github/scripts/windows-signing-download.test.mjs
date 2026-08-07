@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 const workflowPaths = [
   ".github/workflows/release-baijimu-cli.yml",
   ".github/workflows/release-bridge-agent.yml",
-  ".github/workflows/release-codex-local-app.yml",
   ".github/workflows/release-codex-completion-local-app.yml",
 ];
 
