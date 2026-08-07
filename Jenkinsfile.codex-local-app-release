@@ -119,7 +119,7 @@ tools/release/publish-codex-local-app-market.sh "$CONNECTOR_VERSION" connector-s
             }
             steps {
                 withCredentials([
-                    usernamePassword(credentialsId: 'bd5fa0ff-2186-41e4-a7aa-97937ef32c02', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
+                    usernamePassword(credentialsId: 'gitee-workspace-642-pat', usernameVariable: 'GITEE_USER', passwordVariable: 'GITEE_TOKEN'),
                     usernamePassword(credentialsId: 'github-momoplan-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')
                 ]) {
                     sh '''#!/bin/bash
