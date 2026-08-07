@@ -184,13 +184,15 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(defenderScript).toContain("Get-MpThreatCatalog");
   });
 
-  it("downloads the pinned release URL when gh is absent", () => {
+  it("downloads the pinned release asset through the GitHub API when gh is absent", () => {
     expect(prepareScript).toContain(
-      'asset_url="https://github.com/${release_repo}/releases/download/${release_tag}/${asset_name}"',
+      'release_api_url="https://api.github.com/repos/${release_repo}/releases/tags/${release_tag}"',
     );
     expect(prepareScript).toContain("Invalid GitHub release tag or asset name");
-    expect(prepareScript).toContain('"${asset_url}"');
-    expect(prepareScript).not.toContain("api.github.com");
+    expect(prepareScript).toContain("application/octet-stream");
+    expect(prepareScript).toContain('"${asset_api_url}"');
+    expect(prepareScript).toContain("jq is required to resolve");
+    expect(prepareScript).not.toContain("github.com/${release_repo}/releases/download");
     expect(prepareScript).not.toContain("GitHub CLI is required to download");
   });
 });

@@ -3685,7 +3685,13 @@ mod tests {
         fs::create_dir_all(home.join(".nvm/versions/node/v18.19.1/bin")).unwrap();
         fs::create_dir_all(home.join(".nvm/versions/node/v20.11.0/bin")).unwrap();
 
-        let path = shell_exec_path(Some("/usr/bin:/bin:/usr/bin"), Some(home)).unwrap();
+        let system_path = std::env::join_paths([
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+            Path::new("/usr/bin"),
+        ])
+        .unwrap();
+        let path = shell_exec_path(Some(&system_path.to_string_lossy()), Some(home)).unwrap();
         let parts = std::env::split_paths(&path).collect::<Vec<_>>();
 
         assert_eq!(parts[0], home.join(".volta/bin"));
@@ -3875,7 +3881,7 @@ mod tests {
 
         let mut status = String::new();
         let mut stdout = String::new();
-        for _ in 0..20 {
+        for _ in 0..200 {
             let result = registry
                 .invoke(
                     "req-get-stdin".to_string(),

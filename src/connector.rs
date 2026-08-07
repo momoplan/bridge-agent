@@ -4899,10 +4899,11 @@ mod tests {
     fn lifecycle_command_does_not_wait_for_descendant_owned_stdio() {
         let command = ServiceStartCommand::ShellCommand {
             command: vec![
-                "cmd.exe".to_string(),
-                "/C".to_string(),
-                "start \"\" /B cmd.exe /C \"ping.exe 127.0.0.1 -n 4 >NUL\" & echo started"
-                    .to_string(),
+                "powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Start-Process -FilePath ping.exe -ArgumentList @('127.0.0.1','-n','4') -WindowStyle Hidden | Out-Null; Write-Output started".to_string(),
             ],
             cwd: None,
             env: BTreeMap::new(),
@@ -5279,7 +5280,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
-        let configured_node = dir.path().join("custom-node");
+        let configured_node = dir.path().join(if cfg!(windows) {
+            "custom-node.exe"
+        } else {
+            "custom-node"
+        });
         fs::write(&configured_node, "").unwrap();
         let mut agent_config = AgentConfig::example();
         agent_config.runtime.node_path = Some(configured_node.display().to_string());
@@ -5567,9 +5572,14 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let mut runtime = AgentConfig::example().runtime;
         runtime.codex_binary_path = Some(shim.display().to_string());
 
-        assert_eq!(
-            configured_runtime_command_path("codex", &runtime),
-            Some(launcher)
+        let resolved = configured_runtime_command_path("codex", &runtime).unwrap();
+        assert!(
+            resolved
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&launcher.to_string_lossy()),
+            "resolved {} instead of {}",
+            resolved.display(),
+            launcher.display()
         );
     }
 

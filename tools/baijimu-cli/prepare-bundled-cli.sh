@@ -65,6 +65,10 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
         echo "curl is required to download ${release_tag} without GitHub CLI" >&2
         exit 1
       fi
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is required to resolve ${release_tag} without GitHub CLI" >&2
+        exit 1
+      fi
       case "${release_repo}" in
         [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) ;;
         *) echo "Invalid GitHub release repository: ${release_repo}" >&2; exit 1 ;;
@@ -75,14 +79,40 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
           exit 1
           ;;
       esac
-      asset_url="https://github.com/${release_repo}/releases/download/${release_tag}/${asset_name}"
+
+      github_api_headers=(
+        -H "X-GitHub-Api-Version: 2022-11-28"
+      )
+      if [ -n "${GH_TOKEN:-}" ]; then
+        github_api_headers+=( -H "Authorization: Bearer ${GH_TOKEN}" )
+      fi
+      release_api_url="https://api.github.com/repos/${release_repo}/releases/tags/${release_tag}"
+      asset_api_url="$(
+        curl -fsSL \
+          --retry 6 \
+          --retry-all-errors \
+          --retry-delay 3 \
+          --connect-timeout 15 \
+          --max-time 120 \
+          -H "Accept: application/vnd.github+json" \
+          "${github_api_headers[@]}" \
+          "${release_api_url}" \
+          | jq -r --arg asset_name "${asset_name}" \
+              '[.assets[] | select(.name == $asset_name) | .url][0] // empty'
+      )"
+      if [ -z "${asset_api_url}" ]; then
+        echo "GitHub release ${release_tag} does not contain ${asset_name}" >&2
+        exit 1
+      fi
       curl -fsSL \
         --retry 6 \
         --retry-all-errors \
         --retry-delay 3 \
         --connect-timeout 15 \
         --max-time 600 \
-        "${asset_url}" \
+        -H "Accept: application/octet-stream" \
+        "${github_api_headers[@]}" \
+        "${asset_api_url}" \
         -o "${temporary_dir}/${asset_name}"
     fi
   fi
