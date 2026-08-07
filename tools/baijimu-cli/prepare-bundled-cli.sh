@@ -168,7 +168,8 @@ if [ ! -f "${cli_dir}/Cargo.toml" ]; then
   rm -rf "${clone_dir}"
   clone_url="${default_cli_git_url}"
   if [ -n "${BAIJIMU_CLI_RS_GIT_TOKEN:-}" ] && [[ "${clone_url}" == https://gitee.com/* ]]; then
-    clone_url="https://oauth2:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
+    clone_username="${BAIJIMU_CLI_RS_GIT_USERNAME:-oauth2}"
+    clone_url="https://${clone_username}:${BAIJIMU_CLI_RS_GIT_TOKEN}@${clone_url#https://}"
   fi
   clone_succeeded=false
   for attempt in 1 2 3 4 5; do
