@@ -354,8 +354,8 @@ jobs:
             checksum="$(sha256sum "$file" | awk '{print $1}')"
             local object="$prefix/$checksum/$name"
             printf '%s  %s\n' "$checksum" "$name" > "$file.sha256"
-            "$OSSUTIL" cp "$file" "oss://$bucket/$object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:application/zip#Cache-Control:public,max-age=31536000,immutable' >/dev/null
-            "$OSSUTIL" cp "$file.sha256" "oss://$bucket/$object.sha256" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:text/plain; charset=utf-8#Cache-Control:public,max-age=31536000,immutable' >/dev/null
+            "$OSSUTIL" cp "$file" "oss://$bucket/$object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --content-type application/zip --cache-control 'public,max-age=31536000,immutable' >/dev/null
+            "$OSSUTIL" cp "$file.sha256" "oss://$bucket/$object.sha256" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --content-type 'text/plain; charset=utf-8' --cache-control 'public,max-age=31536000,immutable' >/dev/null
             local source="https://$bucket.$endpoint/$object"
             curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "$source" -o "$RUNNER_TEMP/$platform.zip"
             test "$(sha256sum "$RUNNER_TEMP/$platform.zip" | awk '{print $1}')" = "$checksum"
@@ -367,6 +367,6 @@ jobs:
           artifacts="[$(upload_one macos universal "$macos_name"),$(upload_one windows x86_64 "$windows_name"),$(upload_one linux x86_64 "$linux_name")]"
           jq -n --arg version "$version" --arg tag "$RELEASE_TAG" --argjson artifacts "$artifacts" '{schemaVersion:"1.0",applicationId:"codex",connectorId:"com.baijimu.connector.codex",releaseTag:$tag,version:$version,artifacts:$artifacts}' > "$manifest"
           manifest_object="$prefix/manifest.json"
-          "$OSSUTIL" cp "$manifest" "oss://$bucket/$manifest_object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --meta 'Content-Type:application/json#Cache-Control:public,max-age=31536000,immutable' >/dev/null
+          "$OSSUTIL" cp "$manifest" "oss://$bucket/$manifest_object" --access-key-id "$OSS_ACCESS_KEY_ID" --access-key-secret "$OSS_ACCESS_KEY_SECRET" --endpoint "$endpoint" --force --no-progress --content-type application/json --cache-control 'public,max-age=31536000,immutable' >/dev/null
           gh release upload "$RELEASE_TAG" "$manifest" \
             --repo "$GITHUB_REPOSITORY" --clobber
