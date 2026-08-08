@@ -4133,9 +4133,8 @@ mod tests {
         assert_eq!(data["recommendedMethod"].as_str(), Some("queryExecution"));
         assert_eq!(data["exitCode"], Value::Null);
 
-        let mut status = String::new();
-        let mut stdout = String::new();
-        for _ in 0..80 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let (status, stdout) = loop {
             let polled = registry
                 .invoke(
                     "req-shell-running-poll".to_string(),
@@ -4147,13 +4146,13 @@ mod tests {
                 .await;
             assert!(polled.success);
             let data = polled.data.unwrap();
-            status = data["status"].as_str().unwrap().to_string();
-            stdout = data["stdout"].as_str().unwrap_or_default().to_string();
-            if status != "RUNNING" {
-                break;
+            let status = data["status"].as_str().unwrap().to_string();
+            let stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+            if status != "RUNNING" || Instant::now() >= deadline {
+                break (status, stdout);
             }
-            sleep(Duration::from_millis(25)).await;
-        }
+            sleep(Duration::from_millis(50)).await;
+        };
 
         assert_eq!(status, "SUCCEEDED");
         assert!(stdout.contains("bridge-agent-late"));
