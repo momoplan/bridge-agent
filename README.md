@@ -698,10 +698,10 @@ open -a "百积木" --args --safe-mode
 5. GitHub Actions 负责 macOS、Windows、Linux 构建、代码签名、公证，并用 Tauri updater 私钥生成更新包签名
 6. GitHub Actions 从 release service 获取短时 OSS PUT 地址，把安装包上传到百积木公共 OSS；GitHub Release 只保留完整历史和构建摘要
 7. 每个 OSS 对象通过匿名完整下载和 SHA-256 校验后，把永久 OSS URL、对象键、sha256 与 minisign 签名登记到 release service
-8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口与下载地址
+8. 所有平台产物上传完成后，工作流发布版本元数据，并校验公开更新接口只返回 `download.baijimu.com` CDN 地址
 9. 客户端先用版本策略接口判断强制更新，再由 Tauri 官方 updater 请求动态更新接口，校验签名后原子安装并重启
 
-百积木公共 OSS 是客户端二进制的权威下载源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`www.baijimu.com/download/` 是面向用户的官网客户端下载页；二进制仍由 OSS/CDN 分发，Gitee 不参与 Bridge Agent 客户端安装包分发。
+百积木公共 OSS 是客户端二进制的权威存储源，release service 是版本、校验和、签名与下载选择的唯一事实源。GitHub Actions 不保存 OSS 长期凭据，而是通过 release service 和 project-service 获取短时、单对象上传地址。`www.baijimu.com/download/` 是面向用户的官网客户端下载页；公开 latest/Tauri 元数据把已验证的不可变 OSS `objectKey` 投影到 `download.baijimu.com` CDN，Gitee 不参与 Bridge Agent 客户端安装包分发。
 
 独立 Baijimu CLI 的版本策略由 `local-app-market` 的 `managed_tool` manifest 管理，
 不登记到桌面端 Tauri 更新服务。CLI 的私有 GitHub Release 保存构建归档，内容寻址 OSS
@@ -869,7 +869,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
     {
       "name": "百积木_0.1.28_universal.dmg",
       "provider": "baijimu-oss",
-      "downloadUrl": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
+      "downloadUrl": "https://download.baijimu.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
       "sha256": "..."
     }
   ]
@@ -904,7 +904,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
 }
 ```
 
-`downloadUrl` 必须是 `lowcode-common` 公共 OSS 中与 `objectKey` 精确一致的永久公开地址，不能包含 token、签名查询参数或其他临时凭证。release service 和 GitHub Actions 都不持有 OSS 长期凭据。
+`assets/complete.downloadUrl` 必须是环境公共 OSS 中与 `objectKey` 精确一致的永久公开地址，不能包含 token、签名查询参数或其他临时凭证；release service 对外查询时再投影成同路径的 `download.baijimu.com` CDN 地址。release service 和 GitHub Actions 都不持有 OSS 长期凭据。
 
 ## 本地打包验证
 

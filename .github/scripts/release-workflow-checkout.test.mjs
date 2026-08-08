@@ -79,4 +79,15 @@ describe("release workflow repository script availability", () => {
       '"${latest_api}?currentVersion=${MINIMUM_SUPPORTED_VERSION}"',
     );
   });
+
+  test("published client metadata is verified through the canonical CDN", () => {
+    const body = jobBody("publish-update-service");
+
+    expect(body).toContain(
+      "^https://download\\\\.baijimu\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
+    );
+    expect(body).not.toContain(
+      "^https://[a-z0-9][a-z0-9-]*\\\\.oss-[a-z0-9-]+\\\\.aliyuncs\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
+    );
+  });
 });
