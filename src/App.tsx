@@ -27,6 +27,8 @@ import {
 } from "./deep-link";
 import {
   latestLocalAppInstallTasks,
+  reconcileLocalAppInstallSelection,
+  shouldShowLocalAppInstallTask,
   type LocalAppInstallTask,
   type LocalAppInstallTaskState
 } from "./local-app-install-tasks";
@@ -1519,13 +1521,12 @@ function App() {
     });
 
     latestInstallTasks.forEach((installTask) => {
-      if (installTask.state === "succeeded") {
-        return;
-      }
-      const installed = installTask.connectorId
-        ? connectorApps.some((connector) => connector.id === installTask.connectorId)
-        : false;
-      if (installed) {
+      if (
+        !shouldShowLocalAppInstallTask(
+          installTask,
+          connectorApps.map((connector) => connector.id)
+        )
+      ) {
         return;
       }
       apps.push({
@@ -1594,12 +1595,16 @@ function App() {
     );
   useEffect(() => {
     setSelectedLocalAppId((current) =>
-      current && localApps.some((app) => app.id === current) ? current : null
+      reconcileLocalAppInstallSelection(
+        current,
+        localApps.map((app) => app.id),
+        localAppInstallTasks
+      )
     );
     setPendingUpgradeAppId((current) =>
       current && localApps.some((app) => app.id === current) ? current : null
     );
-  }, [localApps]);
+  }, [localApps, localAppInstallTasks]);
 
   useEffect(() => {
     if (selectedLocalApp?.serviceIndexes.length) {
