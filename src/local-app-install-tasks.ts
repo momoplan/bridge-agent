@@ -39,3 +39,39 @@ export function latestLocalAppInstallTasks(
     }, new Map<string, LocalAppInstallTask>()).values()
   );
 }
+
+export function reconcileLocalAppInstallSelection(
+  currentSelection: string | null,
+  availableLocalAppIds: Iterable<string>,
+  tasks: LocalAppInstallTask[]
+): string | null {
+  if (currentSelection == null) {
+    return null;
+  }
+
+  const available = new Set(availableLocalAppIds);
+  if (available.has(currentSelection)) {
+    return currentSelection;
+  }
+
+  const taskPrefix = "install-task:";
+  if (!currentSelection.startsWith(taskPrefix)) {
+    return null;
+  }
+
+  const taskId = currentSelection.slice(taskPrefix.length);
+  const task = tasks.find((candidate) => candidate.taskId === taskId);
+  if (task?.state !== "succeeded" || !task.connectorId) {
+    return null;
+  }
+
+  const installedAppId = `connector:${task.connectorId}`;
+  return available.has(installedAppId) ? installedAppId : null;
+}
+
+export function shouldShowLocalAppInstallTask(
+  task: LocalAppInstallTask,
+  installedConnectorIds: Iterable<string>
+): boolean {
+  return !task.connectorId || !new Set(installedConnectorIds).has(task.connectorId);
+}
