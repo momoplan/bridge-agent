@@ -143,6 +143,7 @@ describe("bundled Baijimu CLI release provenance", () => {
 
   it("uses the immutable CLI release and scans final Windows artifacts", () => {
     const workflow = readFileSync(workflowPath, "utf8");
+    const attributes = readFileSync(".gitattributes", "utf8");
     const defenderScript = readFileSync(defenderScriptPath, "utf8");
     const defenderUpdateScript = readFileSync(
       defenderUpdateScriptPath,
@@ -171,6 +172,12 @@ describe("bundled Baijimu CLI release provenance", () => {
       '(Resolve-Path "src-tauri/resources/bin/baijimu.exe").Path',
     );
     expect(workflow).toContain("VCRUNTIME|MSVCP");
+    expect(workflow).toContain(
+      "codex_skill::tests::installs_bundled_skill_in_user_skill_directory",
+    );
+    expect(attributes).toContain(
+      "src-tauri/resources/skills/baijimu-platform/SKILL.md text eol=lf",
+    );
     expect(defenderScript).toContain("Update-DefenderSignaturesWithRetry");
     expect(defenderScript).toContain("SignatureUpdateMaxAttempts = 3");
     expect(defenderScript).toContain("SignatureUpdateRetrySeconds = 10");
