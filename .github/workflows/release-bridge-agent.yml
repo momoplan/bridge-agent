@@ -258,6 +258,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           npm ci
           npm run build
+          $env:TAURI_ENV_PLATFORM = "windows"
+          node scripts/prepare-windows-uninstaller.mjs --unsigned-for-quality-gate
 
       - name: Check Windows Rust targets
         shell: pwsh

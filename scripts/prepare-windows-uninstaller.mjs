@@ -5,6 +5,7 @@ import path from "node:path";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDir, "..");
+const skipSigningForQualityGate = process.argv.includes("--unsigned-for-quality-gate");
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -53,11 +54,13 @@ const destination = path.join(binariesDir, `bridge-agent-uninstaller-${host}.exe
 mkdirSync(binariesDir, { recursive: true });
 copyFileSync(source, destination);
 
-run("powershell", [
-  "-NoProfile",
-  "-ExecutionPolicy",
-  "Bypass",
-  "-File",
-  "src-tauri/scripts/sign-windows-artifact.ps1",
-  destination,
-]);
+if (!skipSigningForQualityGate) {
+  run("powershell", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "src-tauri/scripts/sign-windows-artifact.ps1",
+    destination,
+  ]);
+}

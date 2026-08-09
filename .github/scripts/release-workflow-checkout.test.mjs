@@ -50,6 +50,14 @@ describe("release workflow repository script availability", () => {
 
   test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
     const body = jobBody("windows-quality-gate", "release");
+    const prepareUninstallerIndex = body.indexOf(
+      "node scripts/prepare-windows-uninstaller.mjs --unsigned-for-quality-gate",
+    );
+    const desktopCheckIndex = body.indexOf(
+      "cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets",
+    );
+    expect(prepareUninstallerIndex).toBeGreaterThanOrEqual(0);
+    expect(desktopCheckIndex).toBeGreaterThan(prepareUninstallerIndex);
     expect(body).toContain("cargo test --locked --workspace");
     expect(body).toContain(
       "managed_tool::tests::windows_registry_path_registration_round_trips",
