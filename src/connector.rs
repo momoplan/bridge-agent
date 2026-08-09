@@ -3040,17 +3040,17 @@ fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(target_os = "macos")]
 fn discovered_python_candidate_is_allowed(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        // Apple's /usr/bin/python3 is a developer-tool shim. Executing it on a
-        // normal end-user Mac can open the Command Line Tools installer, so it
-        // is never an automatically discovered Connector runtime. An explicit
-        // runtime.python_path or BRIDGE_AGENT_PYTHON override remains authoritative.
-        if path.starts_with("/usr/bin") {
-            return false;
-        }
-    }
+    // Apple's /usr/bin/python3 is a developer-tool shim. Executing it on a
+    // normal end-user Mac can open the Command Line Tools installer, so it
+    // is never an automatically discovered Connector runtime. An explicit
+    // runtime.python_path or BRIDGE_AGENT_PYTHON override remains authoritative.
+    !path.starts_with("/usr/bin")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discovered_python_candidate_is_allowed(_path: &Path) -> bool {
     true
 }
 
