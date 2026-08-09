@@ -980,7 +980,7 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 - 超时限制
 - 环境变量白名单
 
-桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shell` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。macOS 如果只有 Apple 的 `/usr/bin/python3` shim，且本机尚未同意 Xcode license，该系统命令仍会被 Xcode license 拦截；此时需要用户同意 Xcode license，或安装 Homebrew / pyenv / conda 等独立 Python。
+桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shell` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。Connector 列表和客户端初始化只读取安装记录，不探测或准备本机运行环境；只有用户明确启动 Connector 时，宿主才按该 Connector 的声明发现命令、校验 Python 版本并准备隔离环境。macOS 自动发现会排除 Apple 的 `/usr/bin/python3` 开发者工具 shim，避免在普通用户设备上触发 Command Line Tools 安装提示；需要 Python 的 Connector 应使用 Homebrew、pyenv、conda 或 python.org 提供的独立解释器。
 
 对外调用参数统一使用 argv 数组形式：
 

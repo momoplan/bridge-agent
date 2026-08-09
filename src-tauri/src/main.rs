@@ -25,12 +25,11 @@ use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    format_connector_sync_failures, inspect_python_runtime,
-    install_connector_from_path_with_provenance, install_rustls_crypto_provider,
-    is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
-    load_connector_manifest, manifest_preview_json, reset_invalid_config,
-    resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
-    show_connector, sync_installed_connector, sync_installed_connectors_report,
+    inspect_python_runtime, install_connector_from_path_with_provenance,
+    install_rustls_crypto_provider, is_connector_package_stop_error, list_connectors,
+    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
+    reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
+    save_config as save_agent_config, show_connector, sync_installed_connector,
     terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
     AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
@@ -1782,7 +1781,11 @@ async fn collect_local_app_runtime_statuses(
     let mut statuses = Vec::with_capacity(config.local_apps.len());
     for app in config.local_apps {
         let process_running = connector_processes.managed_running(&app.connector_id).await;
-        statuses.push(check_local_app(&client, app, process_running).await);
+        if connector_processes.runtime_active(&app.connector_id).await {
+            statuses.push(check_local_app(&client, app, process_running).await);
+        } else {
+            statuses.push(inactive_local_app_status(app, process_running));
+        }
     }
     Ok(statuses)
 }
@@ -2221,13 +2224,11 @@ async fn local_app_control_list_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let report =
-            sync_installed_connectors_report(&state.config_path).map_err(|err| err.to_string())?;
         let apps = list_connectors().map_err(|err| err.to_string())?;
         let services = state.registered_services.statuses().await?;
         Ok::<_, String>(serde_json::json!({
             "apps": apps,
-            "syncFailures": report.failures,
+            "syncFailures": [],
             "services": services,
             "runtime": state.runtime.snapshot().await
         }))
@@ -2643,20 +2644,8 @@ fn connector_app_ui_url(
 
 #[tauri::command]
 async fn list_connector_apps(
-    state: tauri::State<'_, DesktopState>,
+    _state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<ConnectorSummary>, String> {
-    let report =
-        sync_installed_connectors_report(&state.config_path).map_err(|err| err.to_string())?;
-    if !report.failures.is_empty() {
-        state
-            .runtime
-            .push_desktop_log(
-                "warn",
-                &format_connector_sync_failures(&report.failures),
-                LogMetadata::category("connector").outcome("sync_failed"),
-            )
-            .await;
-    }
     list_connectors().map_err(|err| err.to_string())
 }
 
@@ -4488,6 +4477,23 @@ async fn check_local_app(
         health_check_configured: status.health_check_configured,
         start_command_configured: status.start_command_configured,
         stop_command_configured: status.stop_command_configured,
+        process_managed: process_running.is_some(),
+        process_running,
+    }
+}
+
+fn inactive_local_app_status(
+    app: LocalAppConfig,
+    process_running: Option<bool>,
+) -> LocalAppRuntimeStatus {
+    LocalAppRuntimeStatus {
+        connector_id: app.connector_id,
+        status: RegisteredServiceState::Unhealthy,
+        detail: Some("应用尚未由 Bridge Agent 启动".to_string()),
+        checked_at_ms: now_ms(),
+        health_check_configured: app.health_check.is_some(),
+        start_command_configured: app.start_command.is_some(),
+        stop_command_configured: app.stop_command.is_some(),
         process_managed: process_running.is_some(),
         process_running,
     }
@@ -6748,6 +6754,41 @@ mod tests {
             process_managed: process_running.is_some(),
             process_running,
         }
+    }
+
+    #[test]
+    fn inactive_connector_status_is_derived_without_a_health_probe() {
+        let app = LocalAppConfig {
+            connector_id: "com.baijimu.connector.inactive".to_string(),
+            name: "Inactive Connector".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:9/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(60),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: None,
+            stop_command: None,
+            methods: Vec::new(),
+            events: Vec::new(),
+        };
+
+        let status = inactive_local_app_status(app, None);
+
+        assert_eq!(status.connector_id, "com.baijimu.connector.inactive");
+        assert_eq!(status.status, RegisteredServiceState::Unhealthy);
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("应用尚未由 Bridge Agent 启动")
+        );
+        assert!(status.health_check_configured);
+        assert!(!status.process_managed);
+        assert_eq!(status.process_running, None);
     }
 
     #[test]

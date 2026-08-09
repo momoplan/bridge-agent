@@ -1769,7 +1769,6 @@ function App() {
       ]);
       setConnectorApps(apps);
       applyConfigDocument(document);
-      await refreshPythonRuntime(document.config.runtime.python_path);
       await refreshLocalAppUpdateData();
       await refreshRegisteredServiceStatuses();
     } catch (err) {
@@ -3613,7 +3612,7 @@ function App() {
             <Field
               label="首选 Python 路径"
               wide
-              hint="可留空自动发现；此路径仅作为首选项。每个 Connector 通过 requires-python 声明自己的版本要求，并使用独立虚拟环境。"
+              hint="可留空；只有启动 Python Connector 或手动点击检测时才会发现解释器。每个 Connector 通过 requires-python 声明版本要求，并使用独立虚拟环境。"
             >
               <div className="python-runtime-fields">
               <input
@@ -3626,7 +3625,7 @@ function App() {
               />
               <div className="python-runtime-panel">
                 <span className={`status-pill status-${pythonStatus?.available ? "online" : "stopped"}`}>
-                  {pythonStatus?.available ? "Python 可用" : "Python 未就绪"}
+                  {pythonStatus == null ? "按需检测" : pythonStatus.available ? "Python 可用" : "Python 未就绪"}
                 </span>
                 <span>
                   {pythonStatus?.message ?? "点击“检测 Python”检查首选路径或自动发现已安装的 Python。"}

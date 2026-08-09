@@ -1,9 +1,9 @@
 use bridge_agent::{
-    connector_data_dir, load_config, show_connector, start_connector, stop_connector,
-    sync_installed_connector, ConnectorLifecycleResult, ConnectorProcessOwnership,
+    connector_data_dir, load_config, prepare_installed_connector_runtime, show_connector,
+    start_connector, stop_connector, ConnectorLifecycleResult, ConnectorProcessOwnership,
     ConnectorStartResult, ServiceStartCommand,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,6 +28,7 @@ const CONNECTOR_RUNTIME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 #[derive(Clone, Default)]
 pub(crate) struct ConnectorProcessManager {
     inner: Arc<Mutex<HashMap<String, ManagedConnectorHandle>>>,
+    legacy_started: Arc<Mutex<HashSet<String>>>,
     next_generation: Arc<AtomicU64>,
     changed: Arc<Notify>,
 }
@@ -69,6 +70,13 @@ impl ConnectorProcessManager {
         )
     }
 
+    pub(crate) async fn runtime_active(&self, connector_id: &str) -> bool {
+        if let Some(running) = self.managed_running(connector_id).await {
+            return running;
+        }
+        self.legacy_started.lock().await.contains(connector_id)
+    }
+
     pub(crate) async fn start(
         &self,
         connector_id: &str,
@@ -78,7 +86,6 @@ impl ConnectorProcessManager {
         if connector_id.is_empty() {
             return Err("本地应用 ID 不能为空".to_string());
         }
-        sync_installed_connector(config_path, &connector_id).map_err(|err| err.to_string())?;
         let record = show_connector(&connector_id).map_err(|err| err.to_string())?;
         if record
             .manifest
@@ -86,7 +93,12 @@ impl ConnectorProcessManager {
             .as_ref()
             .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
         {
-            return run_legacy_start(connector_id, config_path.to_path_buf()).await;
+            let result = run_legacy_start(connector_id.clone(), config_path.to_path_buf()).await?;
+            if lifecycle_succeeded(&result) {
+                self.legacy_started.lock().await.insert(connector_id);
+                self.changed.notify_waiters();
+            }
+            return Ok(result);
         }
 
         {
@@ -103,6 +115,9 @@ impl ConnectorProcessManager {
             }
             processes.remove(&connector_id);
         }
+
+        prepare_installed_connector_runtime(config_path, &connector_id)
+            .map_err(|err| err.to_string())?;
 
         // The process map is intentionally in-memory. After a host crash or an
         // interrupted upgrade, a previous connector process can still be alive
@@ -174,7 +189,12 @@ impl ConnectorProcessManager {
             .as_ref()
             .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
         {
-            return run_legacy_stop(connector_id, config_path.to_path_buf()).await;
+            let result = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
+            if lifecycle_succeeded(&result) {
+                self.legacy_started.lock().await.remove(&connector_id);
+                self.changed.notify_waiters();
+            }
+            return Ok(result);
         }
 
         let Some(mut handle) = self.inner.lock().await.remove(&connector_id) else {
@@ -272,6 +292,10 @@ fn ensure_lifecycle_succeeded(
         format!("退出码 {:?}", result.lifecycle.exit_code)
     };
     Err(format!("本地应用 `{connector_id}` {action}失败: {detail}"))
+}
+
+fn lifecycle_succeeded(result: &ConnectorStartResult) -> bool {
+    result.lifecycle.configured && result.lifecycle.exit_code == Some(0)
 }
 
 fn resolved_start_command(

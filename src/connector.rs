@@ -723,7 +723,13 @@ pub fn install_connector_from_path_with_provenance(
     let install_result = (|| -> Result<ConnectorInstallResult> {
         copy_connector_package(&source, &package_path)?;
         let package_checksum = connector_package_sha256(&package_path)?;
-        resolve_installed_start_commands(&mut services, &package_path, &config.runtime, &manifest)?;
+        resolve_installed_start_commands(
+            &mut services,
+            &package_path,
+            &config.runtime,
+            &manifest,
+            ConnectorRuntimePreparation::Deferred,
+        )?;
         cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
         let local_app = local_app_from_services(&manifest, &services)?;
@@ -958,7 +964,29 @@ pub fn sync_installed_connector(
     ensure_config_exists(config_path)?;
     let mut config = load_config(config_path)?;
     let record = load_install_record(connector_id)?;
-    let summary = sync_installed_connector_record(&mut config, record, now_ms())?;
+    let summary = sync_installed_connector_record(
+        &mut config,
+        record,
+        now_ms(),
+        ConnectorRuntimePreparation::Deferred,
+    )?;
+    save_config(config_path, &config)?;
+    Ok(summary)
+}
+
+pub fn prepare_installed_connector_runtime(
+    config_path: &Path,
+    connector_id: &str,
+) -> Result<ConnectorSummary> {
+    ensure_config_exists(config_path)?;
+    let mut config = load_config(config_path)?;
+    let record = load_install_record(connector_id)?;
+    let summary = sync_installed_connector_record(
+        &mut config,
+        record,
+        now_ms(),
+        ConnectorRuntimePreparation::Prepare,
+    )?;
     save_config(config_path, &config)?;
     Ok(summary)
 }
@@ -981,7 +1009,12 @@ pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorS
     for record in records {
         let connector_id = record.manifest.id.clone();
         let name = record.manifest.name.clone();
-        match sync_installed_connector_record(&mut config, record, now) {
+        match sync_installed_connector_record(
+            &mut config,
+            record,
+            now,
+            ConnectorRuntimePreparation::Deferred,
+        ) {
             Ok(summary) => summaries.push(summary),
             Err(err) => {
                 let error = format!("{err:#}");
@@ -1031,6 +1064,7 @@ fn sync_installed_connector_record(
     config: &mut crate::config::AgentConfig,
     mut record: ConnectorInstallRecord,
     now: u64,
+    runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<ConnectorSummary> {
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
     let package_path = PathBuf::from(&record.package_path);
@@ -1048,6 +1082,7 @@ fn sync_installed_connector_record(
         &package_path,
         &config.runtime,
         &record.manifest,
+        runtime_preparation,
     )?;
 
     config.services.retain(|service| {
@@ -1066,7 +1101,7 @@ fn sync_installed_connector_record(
 
 pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
     ensure_config_exists(config_path)?;
-    sync_installed_connector(config_path, connector_id)?;
+    prepare_installed_connector_runtime(config_path, connector_id)?;
     let record = load_install_record(connector_id)?;
     if record
         .manifest
@@ -2156,11 +2191,18 @@ fn should_skip_connector_package_entry(name: &std::ffi::OsStr) -> bool {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectorRuntimePreparation {
+    Deferred,
+    Prepare,
+}
+
 fn resolve_installed_start_commands(
     services: &mut [ServiceConfig],
     package_path: &Path,
     runtime_config: &RuntimeConfig,
     manifest: &ConnectorManifest,
+    runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<()> {
     let data_dir = connector_data_dir(&manifest.id)?;
     let start_policy = manifest
@@ -2175,31 +2217,56 @@ fn resolve_installed_start_commands(
             manifest.id
         );
     }
-    fs::create_dir_all(&data_dir).with_context(|| {
-        format!(
-            "failed to create connector data directory {}",
-            data_dir.display()
-        )
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
-    let event_token_path = ensure_connector_event_token(&manifest.id)?;
+    if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+        fs::create_dir_all(&data_dir).with_context(|| {
+            format!(
+                "failed to create connector data directory {}",
+                data_dir.display()
+            )
+        })?;
+        #[cfg(unix)]
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let event_token_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+        ensure_connector_event_token(&manifest.id)?
+    } else {
+        connector_event_token_path(&manifest.id)?
+    };
     let asset_upload_token_path =
         connector_permission_is_active(manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION)
-            .then(|| ensure_connector_asset_upload_token(&manifest.id))
+            .then(|| {
+                if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+                    ensure_connector_asset_upload_token(&manifest.id)
+                } else {
+                    connector_asset_upload_token_path(&manifest.id)
+                }
+            })
             .transpose()?;
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
-    let python_env =
-        ensure_python_project_environment(package_path, &python_scripts, runtime_config)?;
-    let node_path = resolve_command_path("node", runtime_config);
+    let python_env = if python_scripts.is_empty() {
+        None
+    } else if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+        ensure_python_project_environment(package_path, &python_scripts, runtime_config)?
+    } else {
+        Some(package_path.join(CONNECTOR_PYTHON_ENV_DIR))
+    };
+    let node_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+        resolve_command_path("node", runtime_config)
+    } else {
+        configured_runtime_command_path("node", runtime_config)
+    };
     // Codex discovery belongs to the Codex Connector. The host only exports an
     // authoritative override when the user explicitly configured one; an
     // automatically discovered launcher contributes its directory to PATH.
     let codex_binary_override = configured_runtime_command_path("codex", runtime_config);
-    let codex_path = codex_binary_override
-        .clone()
-        .or_else(|| discover_command_path("codex"));
+    let codex_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
+        codex_binary_override
+            .clone()
+            .or_else(|| discover_command_path("codex"))
+    } else {
+        codex_binary_override.clone()
+    };
     let command_runtime = InstalledCommandRuntime {
         package_path,
         package_bins: &package_bins,
@@ -2208,6 +2275,7 @@ fn resolve_installed_start_commands(
         node_path: &node_path,
         codex_path: &codex_path,
         codex_binary_override: &codex_binary_override,
+        include_host_environment: runtime_preparation == ConnectorRuntimePreparation::Prepare,
     };
     for service in services {
         if service.stop_command.is_none() {
@@ -2284,6 +2352,7 @@ struct InstalledCommandRuntime<'a> {
     node_path: &'a Option<PathBuf>,
     codex_path: &'a Option<PathBuf>,
     codex_binary_override: &'a Option<PathBuf>,
+    include_host_environment: bool,
 }
 
 fn resolve_installed_shell_command(
@@ -2306,6 +2375,7 @@ fn resolve_installed_shell_command(
             env,
             [runtime.node_path, runtime.codex_path],
             runtime.codex_binary_override.as_deref(),
+            runtime.include_host_environment,
         );
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
@@ -2322,6 +2392,7 @@ fn resolve_installed_shell_command(
                 env,
                 [runtime.node_path, runtime.codex_path],
                 runtime.codex_binary_override.as_deref(),
+                runtime.include_host_environment,
             );
             prepend_path_entry(env, python_bin_dir(env_path));
             if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
@@ -2349,6 +2420,7 @@ fn resolve_installed_shell_command(
             env,
             [runtime.node_path, runtime.codex_path],
             runtime.codex_binary_override.as_deref(),
+            runtime.include_host_environment,
         );
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
@@ -2411,26 +2483,29 @@ fn enrich_start_command_env<'a>(
     env_vars: &mut BTreeMap<String, String>,
     executable_paths: impl IntoIterator<Item = &'a Option<PathBuf>>,
     codex_binary_override: Option<&Path>,
+    include_host_environment: bool,
 ) {
-    let mut path_entries = Vec::new();
-    for executable_path in executable_paths
-        .into_iter()
-        .filter_map(|path| path.as_ref())
-    {
-        if let Some(parent) = executable_path.parent() {
-            push_unique_path_entry(&mut path_entries, parent.to_path_buf());
+    if include_host_environment {
+        let mut path_entries = Vec::new();
+        for executable_path in executable_paths
+            .into_iter()
+            .filter_map(|path| path.as_ref())
+        {
+            if let Some(parent) = executable_path.parent() {
+                push_unique_path_entry(&mut path_entries, parent.to_path_buf());
+            }
         }
-    }
-    append_split_path(&mut path_entries, env_vars.get("PATH"));
-    append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
-    if let Some(shell_path) = login_shell_path() {
-        append_split_path(&mut path_entries, Some(&shell_path));
-    }
-    if let Ok(joined_path) = env::join_paths(path_entries) {
-        env_vars.insert(
-            "PATH".to_string(),
-            joined_path.to_string_lossy().to_string(),
-        );
+        append_split_path(&mut path_entries, env_vars.get("PATH"));
+        append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
+        if let Some(shell_path) = login_shell_path() {
+            append_split_path(&mut path_entries, Some(&shell_path));
+        }
+        if let Ok(joined_path) = env::join_paths(path_entries) {
+            env_vars.insert(
+                "PATH".to_string(),
+                joined_path.to_string_lossy().to_string(),
+            );
+        }
     }
     if let Some(codex_binary) = codex_binary_override {
         env_vars
@@ -2884,15 +2959,15 @@ pub fn inspect_python_runtime(runtime_config: &RuntimeConfig) -> PythonRuntimeSt
             paths_refer_to_same_file(Path::new(configured), Path::new(&detected_path))
         }) {
             format!(
-                "已检测到首选 Python {version_text}。安装 Connector 时会按其 requires-python 校验版本。"
+                "已检测到首选 Python {version_text}。启动 Python Connector 时会按其 requires-python 校验版本。"
             )
         } else if configured_path.is_some() {
             format!(
-                "配置的 Python 不可用，已自动发现 Python {version_text}。安装 Connector 时会按其 requires-python 选择兼容版本。"
+                "配置的 Python 不可用，已自动发现 Python {version_text}。启动 Python Connector 时会按其 requires-python 选择兼容版本。"
             )
         } else {
             format!(
-                "已检测到 Python {version_text}。安装 Connector 时会按其 requires-python 选择兼容版本。"
+                "已检测到 Python {version_text}。启动 Python Connector 时会按其 requires-python 选择兼容版本。"
             )
         };
         return PythonRuntimeStatus {
@@ -2943,14 +3018,15 @@ fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
     }
 
     for path in find_python_commands_in_paths() {
-        push_unique_path_entry(&mut candidates, path);
+        if discovered_python_candidate_is_allowed(&path) {
+            push_unique_path_entry(&mut candidates, path);
+        }
     }
 
     for directory in [
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/opt/anaconda3/bin"),
-        PathBuf::from("/usr/bin"),
     ] {
         append_python_commands_from_dir(&mut candidates, &directory);
     }
@@ -2962,6 +3038,20 @@ fn python_candidates(runtime_config: &RuntimeConfig) -> Vec<PathBuf> {
     append_macos_python_installations(&mut candidates);
 
     candidates
+}
+
+fn discovered_python_candidate_is_allowed(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Apple's /usr/bin/python3 is a developer-tool shim. Executing it on a
+        // normal end-user Mac can open the Command Line Tools installer, so it
+        // is never an automatically discovered Connector runtime. An explicit
+        // runtime.python_path or BRIDGE_AGENT_PYTHON override remains authoritative.
+        if path.starts_with("/usr/bin") {
+            return false;
+        }
+    }
+    true
 }
 
 fn find_python_commands_in_paths() -> Vec<PathBuf> {
@@ -4619,11 +4709,17 @@ mod tests {
             .get(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV)
             .map(PathBuf::from)
             .unwrap();
-        assert!(token_path.is_file());
+        assert!(
+            !token_path.exists(),
+            "install must not prepare Connector runtime credentials"
+        );
         assert!(!config
             .services
             .iter()
             .any(|service| service.name == "inlineService"));
+
+        prepare_installed_connector_runtime(&config_path, "com.baijimu.connector.inline").unwrap();
+        assert!(token_path.is_file());
     }
 
     #[test]
@@ -5160,10 +5256,7 @@ mod tests {
         let ServiceStartCommand::ShellCommand {
             command, cwd, env, ..
         } = service.start_command.as_ref().unwrap();
-        let expected_node = resolve_command_path("node", &config.runtime)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "node".to_string());
-        assert_eq!(command[0], expected_node);
+        assert_eq!(command[0], "node");
         assert_eq!(
             command[1],
             package_path.join("./bin/start.js").display().to_string()
@@ -5179,11 +5272,29 @@ mod tests {
                     .unwrap()
             )
         );
+        assert!(!env.contains_key("PATH"));
+
+        prepare_installed_connector_runtime(&config_path, "com.baijimu.connector.bin").unwrap();
+        let prepared = load_config(&config_path).unwrap();
+        let prepared_service = prepared
+            .local_apps
+            .iter()
+            .find(|app| app.connector_id == "com.baijimu.connector.bin")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand {
+            command: prepared_command,
+            env: prepared_env,
+            ..
+        } = prepared_service.start_command.as_ref().unwrap();
+        let expected_node = resolve_command_path("node", &prepared.runtime)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "node".to_string());
+        assert_eq!(prepared_command[0], expected_node);
         if let Some(node_dir) = Path::new(&expected_node)
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
         {
-            assert!(env
+            assert!(prepared_env
                 .get("PATH")
                 .is_some_and(|path| env::split_paths(path).any(|entry| entry == node_dir)));
         }
@@ -5343,7 +5454,23 @@ mod tests {
         let ServiceStartCommand::ShellCommand { command, env, .. } =
             service.start_command.as_ref().unwrap();
         assert_eq!(command[0], configured_node.display().to_string());
-        assert!(env
+        assert!(!env.contains_key("PATH"));
+
+        prepare_installed_connector_runtime(&config_path, "com.baijimu.connector.configured-node")
+            .unwrap();
+        let prepared = load_config(&config_path).unwrap();
+        let prepared_service = prepared
+            .local_apps
+            .iter()
+            .find(|app| app.connector_id == "com.baijimu.connector.configured-node")
+            .unwrap();
+        let ServiceStartCommand::ShellCommand {
+            command: prepared_command,
+            env: prepared_env,
+            ..
+        } = prepared_service.start_command.as_ref().unwrap();
+        assert_eq!(prepared_command[0], configured_node.display().to_string());
+        assert!(prepared_env
             .get("PATH")
             .is_some_and(|path| { env::split_paths(path).any(|entry| entry == dir.path()) }));
     }
@@ -5407,10 +5534,7 @@ mod tests {
             .unwrap();
         let ServiceStartCommand::ShellCommand { command, cwd, .. } =
             service.stop_command.as_ref().unwrap();
-        let expected_node = resolve_command_path("node", &config.runtime)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "node".to_string());
-        assert_eq!(command[0], expected_node);
+        assert_eq!(command[0], "node");
         assert_eq!(
             command[1],
             package_path.join("./bin/start.js").display().to_string()
@@ -5487,6 +5611,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             node_path: &None,
             codex_path: &None,
             codex_binary_override: &None,
+            include_host_environment: true,
         };
         resolve_installed_shell_command(&mut command, &mut cwd, &mut env_vars, &command_runtime);
 
@@ -5589,7 +5714,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let codex = Some(dir.path().join("codex.cmd"));
         let mut env_vars = BTreeMap::new();
 
-        enrich_start_command_env(&mut env_vars, [&None, &codex], None);
+        enrich_start_command_env(&mut env_vars, [&None, &codex], None, true);
 
         assert!(!env_vars.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
         assert!(env_vars
@@ -5603,7 +5728,12 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let codex = dir.path().join("codex.cmd");
         let mut env_vars = BTreeMap::new();
 
-        enrich_start_command_env(&mut env_vars, [&None, &Some(codex.clone())], Some(&codex));
+        enrich_start_command_env(
+            &mut env_vars,
+            [&None, &Some(codex.clone())],
+            Some(&codex),
+            true,
+        );
 
         assert_eq!(
             env_vars
@@ -5757,8 +5887,91 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         assert!(restored.start_command.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn sync_report_records_bad_connector_without_blocking_good_connectors() {
+    fn install_and_catalog_sync_do_not_execute_python_runtime() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let marker = dir.path().join("python-invoked");
+        let fake_python = dir.path().join("python3");
+        fs::write(
+            &fake_python,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nif [ \"$1\" = \"--version\" ]; then echo 'Python 3.12.1'; exit 0; fi\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_python).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_python, permissions).unwrap();
+
+        let config_path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.runtime.python_path = Some(fake_python.display().to_string());
+        save_config(&config_path, &config).unwrap();
+
+        let source = dir.path().join("python-connector");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(CONNECTOR_MANIFEST_FILE),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.lazy-python",
+                "name": "Lazy Python Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "lazyPythonService",
+                    "description": "Lazy Python service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18084"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["lazy-python-connector", "start"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            source.join("pyproject.toml"),
+            r#"[project]
+name = "lazy-python-connector"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+
+[project.scripts]
+lazy-python-connector = "lazy_python_connector.app:main"
+"#,
+        )
+        .unwrap();
+
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        sync_installed_connectors(&config_path).unwrap();
+        assert!(!marker.exists(), "install and catalog sync executed Python");
+
+        let error =
+            prepare_installed_connector_runtime(&config_path, "com.baijimu.connector.lazy-python")
+                .unwrap_err();
+        assert!(
+            marker.exists(),
+            "runtime preparation did not execute Python"
+        );
+        assert!(error
+            .to_string()
+            .contains("failed to create Python connector environment"));
+    }
+
+    #[test]
+    fn sync_defers_python_runtime_validation_until_connector_start() {
         let dir = tempdir().unwrap();
         let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
@@ -5854,19 +6067,30 @@ bad-python-connector = "bad_python_connector.app:main"
             .summaries
             .iter()
             .any(|summary| summary.id == "com.baijimu.connector.good"));
-        assert_eq!(report.failures.len(), 1);
-        assert_eq!(
-            report.failures[0].connector_id,
-            "com.baijimu.connector.bad-python"
-        );
-        assert!(report.failures[0].error.contains(
+        assert!(report
+            .summaries
+            .iter()
+            .any(|summary| summary.id == "com.baijimu.connector.bad-python"));
+        assert!(report.failures.is_empty());
+
+        sync_installed_connectors(&config_path).unwrap();
+        let runtime_error =
+            prepare_installed_connector_runtime(&config_path, "com.baijimu.connector.bad-python")
+                .unwrap_err();
+        assert!(runtime_error.to_string().contains(
             "failed to find a Python interpreter matching Connector requires-python `>=999.0`"
         ));
+    }
 
-        let strict_error = sync_installed_connectors(&config_path).unwrap_err();
-        assert!(strict_error
-            .to_string()
-            .contains("failed to sync 1 installed connector"));
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn automatic_python_discovery_rejects_apple_developer_tool_shims() {
+        assert!(!discovered_python_candidate_is_allowed(Path::new(
+            "/usr/bin/python3"
+        )));
+        assert!(discovered_python_candidate_is_allowed(Path::new(
+            "/opt/homebrew/bin/python3"
+        )));
     }
 
     #[test]
