@@ -81,6 +81,7 @@ jobs:
             assert_version src-tauri/tauri.conf.json "$(node -p 'require("./src-tauri/tauri.conf.json").version')"
             assert_version Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
             assert_version src-tauri/Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+            assert_version tools/windows-uninstaller/Cargo.toml "$(sed -n 's/^version = "\([^"]*\)"/\1/p' tools/windows-uninstaller/Cargo.toml | head -1)"
           fi
 
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -213,6 +214,7 @@ jobs:
           npm run build
           cargo fmt --all -- --check
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo fmt --manifest-path tools/windows-uninstaller/Cargo.toml -- --check
           cargo test --workspace
           cargo test --manifest-path src-tauri/Cargo.toml
           cargo clippy --workspace --all-targets -- -D warnings
@@ -269,6 +271,8 @@ jobs:
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path src-tauri/Cargo.toml codex_skill::tests::installs_bundled_skill_in_user_skill_directory -- --exact
           cargo test --locked --manifest-path src-tauri/Cargo.toml managed_tool::tests::windows_registry_path_registration_round_trips -- --exact
+          cargo fmt --manifest-path tools/windows-uninstaller/Cargo.toml -- --check
+          cargo test --locked --manifest-path tools/windows-uninstaller/Cargo.toml
 
   release:
     name: ${{ matrix.name }}
@@ -798,9 +802,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $diagnosticFiles = Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" -File -ErrorAction SilentlyContinue
+          $diagnosticFiles += Get-ChildItem -Path "src-tauri/binaries" -Filter "bridge-agent-uninstaller-*.exe" -File -ErrorAction Stop
           foreach ($file in $diagnosticFiles) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
             Write-Host "$($file.FullName): $($signature.Status) (intermediate exe)"
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $($file.FullName): $($signature.Status)"
+            }
           }
 
           $files = Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File -ErrorAction Stop
@@ -1205,6 +1213,13 @@ jobs:
                 }
                 throw "Windows MSI uninstall smoke test failed with exit code $($uninstall.ExitCode)"
               }
+              $userRunAfterUninstall = Get-OptionalRegistryValue `
+                -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
+                -SubKey $userRunSubKey `
+                -Name "BaijimuBridgeAgent"
+              if ($null -ne $userRunAfterUninstall) {
+                throw "The current-user desktop login startup entry remained after MSI uninstall"
+              }
             } elseif ($legacyInstalled) {
               Start-Process `
                 -FilePath "msiexec.exe" `
@@ -1230,7 +1245,115 @@ jobs:
           if (Test-Path -LiteralPath "C:\Program Files\百积木\bridge-agent-desktop.exe") {
             throw "The 百积木 desktop executable remained after MSI uninstall"
           }
+          if (-not (Test-Path -LiteralPath $configPath)) {
+            throw "Standard MSI uninstall removed device configuration that should be preserved"
+          }
           Write-Host "Verified Windows desktop-owned MSI uninstall lifecycle"
+
+      - name: Smoke test Windows guided full uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi = Get-ChildItem `
+            -Path "src-tauri/target/release/bundle/msi" `
+            -Filter "*.msi" `
+            -File `
+            -ErrorAction Stop | Select-Object -First 1
+          if (-not $msi) {
+            throw "Windows MSI artifact was not found for full uninstall smoke test"
+          }
+
+          $installLog = Join-Path $env:RUNNER_TEMP "baijimu-full-uninstall-install.log"
+          $install = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=True", "/L*v", "`"$installLog`"") `
+            -Wait `
+            -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) {
+            Get-Content -LiteralPath $installLog -Tail 160 -ErrorAction SilentlyContinue | Write-Host
+            throw "Windows MSI reinstall failed with exit code $($install.ExitCode)"
+          }
+
+          $desktopExecutable = "C:\Program Files\百积木\bridge-agent-desktop.exe"
+          $uninstaller = "C:\Program Files\百积木\bridge-agent-uninstaller.exe"
+          $programData = "C:\ProgramData\Baijimu\BridgeAgent"
+          $roamingData = Join-Path $env:APPDATA "baijimu\bridge-agent"
+          $tauriData = Join-Path $env:LOCALAPPDATA "com.baijimu.bridgeagent"
+          $managedCliRoot = Join-Path $env:LOCALAPPDATA "Baijimu\apps\com.baijimu.cli"
+          $managedBin = Join-Path $env:LOCALAPPDATA "Baijimu\bin"
+          $managedLauncher = Join-Path $managedBin "baijimu.exe"
+
+          $deadline = (Get-Date).AddSeconds(45)
+          do {
+            $desktop = Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue
+            if (
+              $desktop -and
+              (Test-Path -LiteralPath $uninstaller) -and
+              (Test-Path -LiteralPath $managedLauncher)
+            ) {
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          } while ((Get-Date) -lt $deadline)
+          if (-not $desktop) {
+            throw "Desktop did not start before guided full uninstall"
+          }
+          if (-not (Test-Path -LiteralPath $uninstaller)) {
+            throw "Guided uninstaller was not installed"
+          }
+          if (-not (Test-Path -LiteralPath $managedLauncher)) {
+            throw "Managed CLI was not installed before full uninstall"
+          }
+
+          New-Item -ItemType Directory -Path $roamingData, $tauriData -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $roamingData "full-uninstall-marker.txt") -Value "remove me"
+          Set-Content -LiteralPath (Join-Path $tauriData "full-uninstall-marker.txt") -Value "remove me"
+          Set-Content -LiteralPath (Join-Path $programData "full-uninstall-marker.txt") -Value "remove me"
+
+          $request = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList @("--full", "--quiet") `
+            -Wait `
+            -PassThru
+          if ($request.ExitCode -ne 0) {
+            throw "Guided uninstall launcher failed with exit code $($request.ExitCode)"
+          }
+
+          $deadline = (Get-Date).AddSeconds(90)
+          do {
+            if (-not (Test-Path -LiteralPath $desktopExecutable)) {
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          } while ((Get-Date) -lt $deadline)
+          if (Test-Path -LiteralPath $desktopExecutable) {
+            throw "Desktop executable remained after guided full uninstall"
+          }
+          foreach ($path in @($programData, $roamingData, $tauriData, $managedCliRoot, $managedLauncher)) {
+            if (Test-Path -LiteralPath $path) {
+              throw "Full uninstall left managed data behind: $path"
+            }
+          }
+          $userRun = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\Microsoft\Windows\CurrentVersion\Run")
+          try {
+            if ($userRun -and $null -ne $userRun.GetValue("BaijimuBridgeAgent", $null)) {
+              throw "Full uninstall left the login startup entry behind"
+            }
+          } finally {
+            if ($userRun) { $userRun.Dispose() }
+          }
+          $userEnvironment = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")
+          try {
+            $userPath = if ($userEnvironment) { [string]$userEnvironment.GetValue("Path", "") } else { "" }
+            $managedBinPattern = [Regex]::Escape($managedBin.TrimEnd('\'))
+            if ($userPath -match "(?i)(^|;)$managedBinPattern[\\/]*(;|$)") {
+              throw "Full uninstall left the Baijimu managed bin directory in the user PATH"
+            }
+          } finally {
+            if ($userEnvironment) { $userEnvironment.Dispose() }
+          }
+          Write-Host "Verified Windows guided full uninstall and managed data cleanup"
 
       - name: Upload bundles to GitHub release
         shell: bash

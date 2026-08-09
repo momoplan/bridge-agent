@@ -3975,6 +3975,35 @@ fn app_version() -> AppVersionInfo {
 }
 
 #[tauri::command]
+fn open_app_uninstaller() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let executable =
+            std::env::current_exe().map_err(|err| format!("无法确定客户端安装目录: {err}"))?;
+        let uninstaller = executable
+            .parent()
+            .ok_or_else(|| "无法确定客户端安装目录".to_string())?
+            .join("bridge-agent-uninstaller.exe");
+        if !uninstaller.is_file() {
+            return Err(format!(
+                "未找到百积木卸载器 {}，请先通过官方安装包修复安装",
+                uninstaller.display()
+            ));
+        }
+        let mut command = Command::new(&uninstaller);
+        command.arg("--interactive");
+        configure_desktop_command(&mut command);
+        command
+            .spawn()
+            .map_err(|err| format!("启动百积木卸载器失败: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    Err("当前平台请使用系统的软件包管理方式卸载百积木".to_string())
+}
+
+#[tauri::command]
 fn get_startup_health(state: tauri::State<'_, DesktopState>) -> StartupHealthSnapshot {
     state.startup_health.snapshot()
 }
@@ -6370,6 +6399,7 @@ fn main() {
             start_browser_auth,
             poll_browser_auth,
             app_version,
+            open_app_uninstaller,
             get_startup_health,
             mark_frontend_ready,
             restart_in_normal_mode,

@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-desktop"
-version = "0.2.67"
+version = "0.2.68"
 description = "百积木本地连接客户端"
 edition = "2021"
 

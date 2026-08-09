@@ -2694,6 +2694,16 @@ function App() {
     }
   }
 
+  async function openAppUninstaller() {
+    try {
+      setError("");
+      await invoke("open_app_uninstaller");
+      setMessage("卸载向导已打开，请在向导中选择是否保留本机数据");
+    } catch (err) {
+      handleCommandError(err);
+    }
+  }
+
   function renderAppUpdateProgress() {
     if (!updateBusy && appUpdateProgress?.phase !== "ready_to_install") {
       return null;
@@ -6691,6 +6701,11 @@ function App() {
             >
               {isCheckingUpdate ? "检查中" : "检查更新"}
             </button>
+            {appVersion?.currentTarget.startsWith("windows-") ? (
+              <button className="secondary danger" onClick={() => void openAppUninstaller()}>
+                卸载百积木
+              </button>
+            ) : null}
           </div>
         </div>
         {renderAppUpdateProgress()}

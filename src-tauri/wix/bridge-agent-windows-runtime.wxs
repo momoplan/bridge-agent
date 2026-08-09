@@ -28,6 +28,12 @@
                 Type="string"
                 Value="[BridgeAgentDataDir]"
                 KeyPath="yes" />
+              <RegistryValue
+                Root="HKLM"
+                Key="Software\Baijimu\BridgeAgent"
+                Name="ProductCode"
+                Type="string"
+                Value="[ProductCode]" />
               <!--
                 Versions through 0.2.22 installed BridgeAgent as a LocalSystem service.
                 The desktop application now owns the runtime, so every install/upgrade
@@ -44,5 +50,37 @@
         </Directory>
       </Directory>
     </DirectoryRef>
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component
+        Id="BridgeAgentGuidedUninstallShortcutComponent"
+        Guid="D7444237-A6F4-4012-BC69-2BF5C177D264">
+        <Shortcut
+          Id="BridgeAgentGuidedUninstallShortcut"
+          Name="卸载百积木"
+          Description="卸载百积木并选择是否删除本机数据"
+          Target="[#Bin_bridge_agent_uninstaller.exe]"
+          Arguments="--interactive"
+          WorkingDirectory="INSTALLDIR" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\baijimu\百积木"
+          Name="Guided Uninstall Shortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <CustomAction
+      Id="BridgeAgentCleanupBeforeUninstall"
+      FileKey="Bin_bridge_agent_uninstaller.exe"
+      ExeCommand="--msi-cleanup &quot;[BAIJIMU_REMOVE_USER_DATA]&quot;"
+      Execute="immediate"
+      Impersonate="yes"
+      Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="BridgeAgentCleanupBeforeUninstall" Before="RemoveFiles">
+        <![CDATA[(REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE]]>
+      </Custom>
+    </InstallExecuteSequence>
   </Fragment>
 </Wix>

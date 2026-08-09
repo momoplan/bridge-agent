@@ -141,6 +141,18 @@ if ($serviceFile) {
     throw "MSI still contains the retired bridge-agent-service.exe"
 }
 
+$fileIdentityRows = Read-MsiRows `
+    -Database $database `
+    -Query 'SELECT `File`, `FileName` FROM `File`' `
+    -ColumnCount 2
+$uninstallerFileRow = $fileIdentityRows |
+    Where-Object { ($_.Values[1] -split '\|')[-1] -ieq "bridge-agent-uninstaller.exe" } |
+    Select-Object -First 1
+if (-not $uninstallerFileRow) {
+    throw "MSI does not contain bridge-agent-uninstaller.exe"
+}
+$uninstallerFileId = $uninstallerFileRow.Values[0]
+
 $serviceInstallRows = @()
 if (Test-MsiTable -Database $database -Name "ServiceInstall") {
     $serviceInstallRows = Read-MsiRows `
@@ -191,4 +203,62 @@ if ($autoStart) {
     throw "MSI still contains the legacy machine-wide desktop autostart entry"
 }
 
-Write-Host "Verified Windows MSI desktop-owned runtime contract and legacy service cleanup: $($resolvedMsi.Path)"
+$productCodeRegistry = $registryRows |
+    Where-Object {
+        $_.Values[0] -ieq "ProductCode" -and
+        $_.Values[1] -eq "[ProductCode]"
+    } |
+    Select-Object -First 1
+if (-not $productCodeRegistry) {
+    throw "MSI does not publish ProductCode for the guided uninstaller"
+}
+
+$customActionRows = Read-MsiRows `
+    -Database $database `
+    -Query 'SELECT `Action`, `Source`, `Target` FROM `CustomAction`' `
+    -ColumnCount 3
+$cleanupAction = $customActionRows |
+    Where-Object { $_.Values[0] -eq "BridgeAgentCleanupBeforeUninstall" } |
+    Select-Object -First 1
+if (-not $cleanupAction) {
+    throw "MSI does not run BridgeAgent cleanup during uninstall"
+}
+if ($cleanupAction.Values[1] -ne $uninstallerFileId) {
+    throw "MSI cleanup action does not execute the bundled uninstaller"
+}
+if ($cleanupAction.Values[2] -notlike '*--msi-cleanup*BAIJIMU_REMOVE_USER_DATA*') {
+    throw "MSI cleanup action does not forward the full-uninstall property"
+}
+
+$executeSequenceRows = Read-MsiRows `
+    -Database $database `
+    -Query 'SELECT `Action`, `Condition` FROM `InstallExecuteSequence`' `
+    -ColumnCount 2
+$cleanupSequence = $executeSequenceRows |
+    Where-Object { $_.Values[0] -eq "BridgeAgentCleanupBeforeUninstall" } |
+    Select-Object -First 1
+if (-not $cleanupSequence) {
+    throw "MSI cleanup action is missing from InstallExecuteSequence"
+}
+if (
+    $cleanupSequence.Values[1] -notlike '*REMOVE*ALL*' -or
+    $cleanupSequence.Values[1] -notlike '*NOT UPGRADINGPRODUCTCODE*'
+) {
+    throw "MSI cleanup action must run only for a real uninstall, not an upgrade: $($cleanupSequence.Values[1])"
+}
+
+$shortcutRows = Read-MsiRows `
+    -Database $database `
+    -Query 'SELECT `Name`, `Target`, `Arguments` FROM `Shortcut`' `
+    -ColumnCount 3
+$guidedUninstallShortcut = $shortcutRows |
+    Where-Object {
+        ($_.Values[0] -split '\|')[-1] -ceq "卸载百积木" -and
+        $_.Values[2] -eq "--interactive"
+    } |
+    Select-Object -First 1
+if (-not $guidedUninstallShortcut) {
+    throw "MSI does not contain the guided 百积木 uninstall shortcut"
+}
+
+Write-Host "Verified Windows MSI desktop-owned runtime, guided uninstall, cleanup action, and legacy service contract: $($resolvedMsi.Path)"

@@ -43,6 +43,7 @@ commands.allow = [
   "start_browser_auth",
   "poll_browser_auth",
   "app_version",
+  "open_app_uninstaller",
   "get_startup_health",
   "mark_frontend_ready",
   "restart_in_normal_mode",

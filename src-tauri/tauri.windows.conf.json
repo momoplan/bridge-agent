@@ -1,5 +1,11 @@
 {
+  "build": {
+    "beforeBundleCommand": "node scripts/prepare-windows-uninstaller.mjs"
+  },
   "bundle": {
+    "externalBin": [
+      "binaries/bridge-agent-uninstaller"
+    ],
     "windows": {
       "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-windows-artifact.ps1 %1",
       "webviewInstallMode": {
@@ -13,7 +19,8 @@
           "wix/bridge-agent-windows-runtime.wxs"
         ],
         "componentRefs": [
-          "BridgeAgentDataDirectoryComponent"
+          "BridgeAgentDataDirectoryComponent",
+          "BridgeAgentGuidedUninstallShortcutComponent"
         ]
       },
       "nsis": {
