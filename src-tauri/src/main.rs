@@ -3996,7 +3996,7 @@ fn open_app_uninstaller() -> Result<(), String> {
         command
             .spawn()
             .map_err(|err| format!("启动百积木卸载器失败: {err}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
