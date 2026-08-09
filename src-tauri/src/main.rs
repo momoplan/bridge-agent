@@ -1037,6 +1037,10 @@ struct AuthorizedPayload {
     relay_ws_url: String,
     #[serde(rename = "agentToken")]
     agent_token: String,
+    #[serde(rename = "issuedAtEpochSeconds")]
+    issued_at_epoch_seconds: Option<u64>,
+    #[serde(rename = "expiresAtEpochSeconds")]
+    expires_at_epoch_seconds: Option<u64>,
     #[serde(rename = "localClientToken")]
     local_client_token: Option<String>,
     #[serde(rename = "localClientTokenType")]
@@ -3670,10 +3674,7 @@ async fn poll_browser_auth(
         .authorized_payload
         .ok_or_else(|| command_error_message("授权成功但缺少 authorizedPayload"))?;
     let mut updated = config;
-    updated.platform.workspace_id = Some(authorized.workspace_id);
-    updated.relay.agent_id = authorized.device_id.clone();
-    updated.relay.url = authorized.relay_ws_url.clone();
-    updated.relay.token = authorized.agent_token.clone();
+    apply_authorized_device_credentials(&mut updated, &authorized);
     save_agent_config(&state.config_path, &updated)
         .map_err(|err| command_error_message(err.to_string()))?;
     match write_shared_cli_auth(&updated, &authorized) {
@@ -3725,6 +3726,19 @@ async fn poll_browser_auth(
         config: Some(config_for_ui(&updated).map_err(command_error_message)?),
         runtime: Some(runtime),
     })
+}
+
+fn apply_authorized_device_credentials(config: &mut AgentConfig, authorized: &AuthorizedPayload) {
+    config.platform.workspace_id = Some(authorized.workspace_id);
+    config.relay.agent_id = authorized.device_id.clone();
+    config.relay.url = authorized.relay_ws_url.clone();
+    config.relay.token = authorized.agent_token.clone();
+    config.relay.token_issued_at_epoch_seconds = authorized
+        .issued_at_epoch_seconds
+        .map(|value| value.to_string());
+    config.relay.token_expires_at_epoch_seconds = authorized
+        .expires_at_epoch_seconds
+        .map(|value| value.to_string());
 }
 
 struct SharedCliAuthWriteResult {
@@ -6983,6 +6997,8 @@ mod tests {
             device_id: "wenya".to_string(),
             relay_ws_url: "wss://relay.example.test".to_string(),
             agent_token: "agent-token".to_string(),
+            issued_at_epoch_seconds: Some(1_786_205_925),
+            expires_at_epoch_seconds: Some(i64::MAX as u64),
             local_client_token: Some("lc_pat_workspace_1082".to_string()),
             local_client_token_type: Some("workspace_user_api_key".to_string()),
             local_client_key_id: Some("key-1082".to_string()),
@@ -6995,6 +7011,16 @@ mod tests {
             local_client_issued_at: Some("2026-07-29 10:00:00".to_string()),
             local_client_expires_at: Some("2026-10-27 10:00:00".to_string()),
         };
+
+        let mut authorized_config = config.clone();
+        apply_authorized_device_credentials(&mut authorized_config, &authorized);
+        assert_eq!(authorized_config.platform.workspace_id, Some(1082));
+        assert_eq!(authorized_config.relay.agent_id, "wenya");
+        assert_eq!(authorized_config.relay.token, "agent-token");
+        assert_eq!(
+            authorized_config.relay.token_expires_at_epoch_seconds,
+            Some((i64::MAX as u64).to_string())
+        );
 
         write_shared_cli_auth_at(&path, &config, &authorized).unwrap();
 

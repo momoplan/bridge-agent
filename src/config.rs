@@ -67,6 +67,10 @@ pub struct RelayConfig {
     pub url: String,
     pub agent_id: String,
     pub token: String,
+    #[serde(default)]
+    pub token_issued_at_epoch_seconds: Option<String>,
+    #[serde(default)]
+    pub token_expires_at_epoch_seconds: Option<String>,
     #[serde(default = "default_reconnect_secs")]
     pub reconnect_secs: u64,
 }
@@ -327,6 +331,8 @@ impl AgentConfig {
                 url: DEFAULT_RELAY_URL.to_string(),
                 agent_id: generate_agent_id(),
                 token: String::new(),
+                token_issued_at_epoch_seconds: None,
+                token_expires_at_epoch_seconds: None,
                 reconnect_secs: default_reconnect_secs(),
             },
             device: DeviceConfig {

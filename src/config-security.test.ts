@@ -46,6 +46,15 @@ describe("desktop credential boundary", () => {
     authorized.credential_status.relay_token_configured = false;
     expect(needsBrowserAuthorization(authorized)).toBe(true);
   });
+
+  it("requires a fresh browser authorization after relay rejects the saved credential", () => {
+    const authorized = toUiConfig(agentConfig("") as never);
+
+    expect(
+      needsBrowserAuthorization(authorized, { status: "authorization_required" })
+    ).toBe(true);
+    expect(needsBrowserAuthorization(authorized, { status: "backoff" })).toBe(false);
+  });
 });
 
 describe("production platform endpoints", () => {

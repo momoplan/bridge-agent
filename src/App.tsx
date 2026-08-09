@@ -50,6 +50,7 @@ type RuntimeStatus =
   | "connecting"
   | "online"
   | "backoff"
+  | "authorization_required"
   | "stopping";
 
 interface RuntimeSnapshot {
@@ -111,6 +112,8 @@ interface RelayConfig {
   url: string;
   agent_id: string;
   token: string;
+  token_issued_at_epoch_seconds?: string | null;
+  token_expires_at_epoch_seconds?: string | null;
   reconnect_secs: number;
 }
 
@@ -1419,7 +1422,7 @@ function App() {
   }, [config?.services.length]);
 
   const statusLabel = useMemo(() => {
-    if (config && needsBrowserAuthorization(config)) {
+    if (config && needsBrowserAuthorization(config, runtime)) {
       return "未授权";
     }
     if (!runtime) {
@@ -1431,11 +1434,12 @@ function App() {
       connecting: "连接中",
       online: "在线",
       backoff: "重连等待",
+      authorization_required: "需重新授权",
       stopping: "停止中"
     };
     return textMap[runtime.status];
   }, [config, runtime]);
-  const needsAuthorization = config ? needsBrowserAuthorization(config) : false;
+  const needsAuthorization = config ? needsBrowserAuthorization(config, runtime) : false;
   const startActionLocked =
     !needsAuthorization &&
     (runtime?.status === "starting" ||
@@ -2889,7 +2893,7 @@ function App() {
     if (!config) {
       return;
     }
-    if (needsBrowserAuthorization(config)) {
+    if (needsBrowserAuthorization(config, runtime)) {
       await beginBrowserAuth();
       return;
     }
@@ -3040,7 +3044,7 @@ function App() {
     if (!config) {
       return;
     }
-    if (needsBrowserAuthorization(config)) {
+    if (needsBrowserAuthorization(config, runtime)) {
       await beginBrowserAuth();
       return;
     }
@@ -5649,8 +5653,14 @@ function App() {
         {needsAuthorization ? (
           <div className="notice-banner warning" role="status">
             <div>
-              <strong>授权后即可使用本地应用</strong>
-              <span>完成浏览器授权后，本机应用与开放能力会连接到百积木工作区。</span>
+              <strong>
+                {runtime?.status === "authorization_required" ? "设备授权已失效" : "授权后即可使用本地应用"}
+              </strong>
+              <span>
+                {runtime?.status === "authorization_required"
+                  ? "Relay 已拒绝当前设备凭证，自动重连已暂停；重新授权后会轮换凭证并恢复连接。"
+                  : "完成浏览器授权后，本机应用与开放能力会连接到百积木工作区。"}
+              </span>
             </div>
             <button className="primary" onClick={() => void beginBrowserAuth()} disabled={busy}>
               {browserAuth ? "授权中" : "去授权"}
@@ -8255,8 +8265,15 @@ function formatByteSize(bytes: number): string {
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-export function needsBrowserAuthorization(config: UiAgentConfig): boolean {
-  return !config.platform.workspace_id.trim() || !config.credential_status.relay_token_configured;
+export function needsBrowserAuthorization(
+  config: UiAgentConfig,
+  runtime?: Pick<RuntimeSnapshot, "status"> | null
+): boolean {
+  return (
+    !config.platform.workspace_id.trim() ||
+    !config.credential_status.relay_token_configured ||
+    runtime?.status === "authorization_required"
+  );
 }
 
 function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {
@@ -8264,6 +8281,7 @@ function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {
     starting: "Agent 正在启动",
     connecting: "Agent 正在连接",
     backoff: "Agent 正在重连等待",
+    authorization_required: "Agent 需要重新授权",
     online: "Agent 已启动"
   };
   return messages[snapshot.status] ?? "Agent 已启动";

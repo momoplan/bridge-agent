@@ -31,7 +31,9 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, sleep, timeout, Duration};
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::{
+    http::StatusCode, protocol::Message, Error as WebSocketError,
+};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -46,6 +48,7 @@ const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_LOG_LIMIT: usize = 500;
 const RELAY_SEEN_EVENT_INTERVAL_MS: u64 = 5_000;
+const RELAY_AUTHORIZATION_REQUIRED_MESSAGE: &str = "Relay 授权已失效，请重新授权此设备后继续使用。";
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStatus {
@@ -54,6 +57,7 @@ pub enum RuntimeStatus {
     Connecting,
     Online,
     Backoff,
+    AuthorizationRequired,
     Stopping,
 }
 
@@ -665,7 +669,18 @@ impl LocalEventServerRuntime {
 fn runtime_start_is_active(status: RuntimeStatus) -> bool {
     matches!(
         status,
-        RuntimeStatus::Starting | RuntimeStatus::Connecting | RuntimeStatus::Backoff
+        RuntimeStatus::Starting
+            | RuntimeStatus::Connecting
+            | RuntimeStatus::Backoff
+            | RuntimeStatus::AuthorizationRequired
+    )
+}
+
+fn is_relay_authorization_error(error: &WebSocketError) -> bool {
+    matches!(
+        error,
+        WebSocketError::Http(response)
+            if matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
     )
 }
 
@@ -730,6 +745,29 @@ impl RuntimeRunner {
                     }
                 }
                 Ok(Err(err)) => {
+                    if is_relay_authorization_error(&err) {
+                        self.update_snapshot(
+                            RuntimeStatus::AuthorizationRequired,
+                            Some(RELAY_AUTHORIZATION_REQUIRED_MESSAGE.to_string()),
+                            self.config.relay.agent_id.clone(),
+                            self.config.relay.url.clone(),
+                            self.config_path.clone(),
+                        )
+                        .await;
+                        self.push_log(
+                            "warn",
+                            &format!(
+                                "relay rejected the saved device credential; reconnect paused until reauthorization: {err}"
+                            ),
+                        )
+                        .await;
+                        while !*shutdown_rx.borrow() {
+                            if shutdown_rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        break;
+                    }
                     self.update_snapshot(
                         RuntimeStatus::Backoff,
                         Some(err.to_string()),
@@ -1802,10 +1840,11 @@ fn process_is_running(_pid: u32) -> bool {
 mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
-        process_looks_like_bridge_agent, read_runtime_lock, runtime_lock_owner_is_active,
-        runtime_lock_path, runtime_start_is_active, terminate_runtime_lock_owner,
-        AgentRuntimeManager, RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument,
-        RuntimeProcessInfo, RuntimeStatus,
+        is_relay_authorization_error, process_looks_like_bridge_agent, read_runtime_lock,
+        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
+        terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeEvent, RuntimeInstanceLock,
+        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode, WebSocketError,
+        RELAY_AUTHORIZATION_REQUIRED_MESSAGE,
     };
     use crate::config::{AgentConfig, EventConfig, ServiceConfig};
     use crate::logging::LogMetadata;
@@ -1813,7 +1852,12 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
     use std::fs;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -2186,9 +2230,96 @@ mod tests {
         assert!(runtime_start_is_active(RuntimeStatus::Starting));
         assert!(runtime_start_is_active(RuntimeStatus::Connecting));
         assert!(runtime_start_is_active(RuntimeStatus::Backoff));
+        assert!(runtime_start_is_active(
+            RuntimeStatus::AuthorizationRequired
+        ));
         assert!(!runtime_start_is_active(RuntimeStatus::Online));
         assert!(!runtime_start_is_active(RuntimeStatus::Stopped));
         assert!(!runtime_start_is_active(RuntimeStatus::Stopping));
+    }
+
+    #[test]
+    fn relay_http_unauthorized_and_forbidden_require_reauthorization() {
+        let unauthorized = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(None)
+                .unwrap(),
+        ));
+        let forbidden = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(None)
+                .unwrap(),
+        ));
+        let unavailable = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(None)
+                .unwrap(),
+        ));
+
+        assert!(is_relay_authorization_error(&unauthorized));
+        assert!(is_relay_authorization_error(&forbidden));
+        assert!(!is_relay_authorization_error(&unavailable));
+    }
+
+    #[tokio::test]
+    async fn relay_unauthorized_pauses_reconnect_until_reauthorization() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&connection_count);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                server_count.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.url = format!("ws://{relay_addr}/ws/agent");
+        config.relay.agent_id = "dev_reauthorization_required".to_string();
+        config.relay.token = "rejected-token".to_string();
+        config.relay.reconnect_secs = 1;
+        config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
+        config.runtime.event_server_enabled = false;
+        config.runtime.service_registration_enabled = false;
+        config.services.clear();
+
+        let manager = AgentRuntimeManager::new();
+        manager.start(config, &config_path).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if manager.snapshot().await.status == RuntimeStatus::AuthorizationRequired {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("runtime did not enter authorization-required state");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert_eq!(connection_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            manager.snapshot().await.last_error.as_deref(),
+            Some(RELAY_AUTHORIZATION_REQUIRED_MESSAGE)
+        );
+
+        manager.stop().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]

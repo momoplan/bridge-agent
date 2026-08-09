@@ -250,6 +250,7 @@ cargo run -- init-config
 - `relay.url`
 - `relay.agent_id`
 - `relay.token`（兼容字段；持久化时始终留空，实际凭证由系统安全存储管理）
+- `relay.token_issued_at_epoch_seconds`、`relay.token_expires_at_epoch_seconds`（授权服务返回的凭证生命周期元数据；不含秘密）
 - `runtime.default_timeout_secs`
 - `runtime.log_file_enabled`
 - `runtime.log_file_dir`（可选；留空时使用系统默认日志目录）
@@ -276,6 +277,11 @@ Debug 构建不会访问正式凭据存储。macOS/Linux 开发凭据写入配�
 relay token。
 
 旧版本配置中的明文 token 会在首次加载时自动迁移到系统安全存储并从 JSON 中删除。Unix 配置目录和配置文件同时收紧为 `0700`、`0600`。Windows 的加密凭证文件与共享配置放在同一 ProgramData 目录，但文件内容不能作为明文读取。
+
+Relay 在 WebSocket 握手阶段返回 `401` 或 `403` 时，客户端会把当前凭证标记为需要
+重新授权并暂停自动重连，避免持续产生无效连接。用户完成浏览器授权后，服务端轮换
+设备 token，客户端保存新凭证并重新启动 Agent。网络故障和 Relay `5xx` 仍按普通
+退避策略自动重连。
 
 ## Connector 设备事件
 

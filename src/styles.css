@@ -1948,6 +1948,7 @@ select:focus {
 }
 
 .status-backoff,
+.status-authorization_required,
 .status-stopping {
   background: rgba(155, 103, 0, 0.14);
   color: var(--warn);

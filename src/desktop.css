@@ -448,6 +448,7 @@ select {
 }
 
 .status-dot.status-backoff,
+.status-dot.status-authorization_required,
 .status-dot.status-warning,
 .status-dot.status-stopping {
   background: var(--ds-color-warning);
