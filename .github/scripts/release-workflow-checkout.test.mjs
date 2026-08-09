@@ -6,6 +6,9 @@ const workflow = readFileSync(
   ".github/workflows/release-bridge-agent.yml",
   "utf8",
 );
+const windowsTauriConfig = JSON.parse(
+  readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
+);
 
 function jobBody(jobName, nextJobName) {
   const startMarker = `  ${jobName}:\n`;
@@ -63,6 +66,10 @@ describe("release workflow repository script availability", () => {
       "managed_tool::tests::windows_registry_path_registration_round_trips",
     );
     expect(body).toContain("cargo test --locked --manifest-path src-tauri/Cargo.toml");
+    expect(windowsTauriConfig.build.beforeBuildCommand).toBe(
+      "node scripts/prepare-windows-uninstaller.mjs --with-frontend",
+    );
+    expect(windowsTauriConfig.build.beforeBundleCommand).toBeUndefined();
   });
 
   test("metadata repair can atomically raise the minimum supported client version", () => {

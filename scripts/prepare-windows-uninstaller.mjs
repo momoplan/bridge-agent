@@ -6,6 +6,7 @@ import path from "node:path";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDir, "..");
 const skipSigningForQualityGate = process.argv.includes("--unsigned-for-quality-gate");
+const buildFrontend = process.argv.includes("--with-frontend");
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -22,6 +23,10 @@ function run(command, args) {
 
 if (process.env.TAURI_ENV_PLATFORM !== "windows") {
   process.exit(0);
+}
+
+if (buildFrontend) {
+  run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build:tauri"]);
 }
 
 const buildRoot = path.join(repositoryRoot, "src-tauri", "target", "windows-uninstaller");

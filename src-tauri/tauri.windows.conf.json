@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBundleCommand": "node scripts/prepare-windows-uninstaller.mjs"
+    "beforeBuildCommand": "node scripts/prepare-windows-uninstaller.mjs --with-frontend"
   },
   "bundle": {
     "externalBin": [
