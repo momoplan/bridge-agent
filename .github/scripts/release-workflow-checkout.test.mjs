@@ -78,6 +78,7 @@ describe("release workflow repository script availability", () => {
       'run(process.execPath, ["scripts/prepare-tauri-build.mjs"])',
     );
     expect(windowsUninstallerPreparation).not.toContain("npm.cmd");
+    expect(workflow).toContain("WiX linker diagnostic exit code");
   });
 
   test("metadata repair can atomically raise the minimum supported client version", () => {

@@ -19,8 +19,7 @@
           "wix/bridge-agent-windows-runtime.wxs"
         ],
         "componentRefs": [
-          "BridgeAgentDataDirectoryComponent",
-          "BridgeAgentGuidedUninstallShortcutComponent"
+          "BridgeAgentDataDirectoryComponent"
         ]
       },
       "nsis": {

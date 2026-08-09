@@ -617,6 +617,41 @@ jobs:
               -ext $utilExtension.FullName `
               "src-tauri/wix/bridge-agent-windows-runtime.wxs"
             Write-Host "WiX fragment diagnostic exit code: $LASTEXITCODE"
+
+            $wixToolDirectory = $candle.Directory.FullName
+            $wixBuildDirectory = Split-Path -Parent $wixToolDirectory
+            $light = Join-Path $wixToolDirectory "light.exe"
+            $uiExtension = Join-Path $wixToolDirectory "WixUIExtension.dll"
+            $locale = Join-Path $wixBuildDirectory "locale.wxl"
+            $wixObjects = @(
+              Get-ChildItem `
+                -LiteralPath $wixBuildDirectory `
+                -Filter "*.wixobj" `
+                -File `
+                -ErrorAction SilentlyContinue
+            )
+            if (
+              (Test-Path -LiteralPath $light) -and
+              (Test-Path -LiteralPath $uiExtension) -and
+              (Test-Path -LiteralPath $locale) -and
+              $wixObjects.Count -gt 0
+            ) {
+              $diagnosticMsi = Join-Path $wixBuildDirectory "diagnostic-output.msi"
+              $lightOutput = & $light `
+                -nologo `
+                -v `
+                "-cultures:zh-cn;en-US" `
+                -loc $locale `
+                -ext $uiExtension `
+                -ext $utilExtension.FullName `
+                -out $diagnosticMsi `
+                @($wixObjects.FullName) 2>&1
+              $lightExitCode = $LASTEXITCODE
+              $lightOutput | ForEach-Object { Write-Host $_ }
+              Write-Host "WiX linker diagnostic exit code: $lightExitCode"
+            } else {
+              Write-Host "WiX linker diagnostic inputs were incomplete"
+            }
           }
 
       - name: Verify macOS minimum system version

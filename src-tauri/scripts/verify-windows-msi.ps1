@@ -247,18 +247,4 @@ if (
     throw "MSI cleanup action must run only for a real uninstall, not an upgrade: $($cleanupSequence.Values[1])"
 }
 
-$shortcutRows = Read-MsiRows `
-    -Database $database `
-    -Query 'SELECT `Name`, `Target`, `Arguments` FROM `Shortcut`' `
-    -ColumnCount 3
-$guidedUninstallShortcut = $shortcutRows |
-    Where-Object {
-        ($_.Values[0] -split '\|')[-1] -ceq "卸载百积木" -and
-        $_.Values[2] -eq "--interactive"
-    } |
-    Select-Object -First 1
-if (-not $guidedUninstallShortcut) {
-    throw "MSI does not contain the guided 百积木 uninstall shortcut"
-}
-
-Write-Host "Verified Windows MSI desktop-owned runtime, guided uninstall, cleanup action, and legacy service contract: $($resolvedMsi.Path)"
+Write-Host "Verified Windows MSI desktop-owned runtime, guided uninstall executable, cleanup action, and legacy service contract: $($resolvedMsi.Path)"
