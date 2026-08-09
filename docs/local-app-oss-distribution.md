@@ -12,8 +12,8 @@ Codex 本地应用的源码、唯一 `v<version>` 标签、三平台构建与签
 Jenkins Job 定义，也不创建第二套 Codex 标签。
 
 ```text
-oss://lowcode-common/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
-https://lowcode-common.oss-cn-beijing.aliyuncs.com/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
+oss://baijimu-lowcode-public-20260420/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
+https://download.baijimu.com/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
 ```
 
 对象键包含语义版本和制品 SHA-256；上传完成后由 GitHub Actions 匿名完整回下载并校验 SHA-256。市场

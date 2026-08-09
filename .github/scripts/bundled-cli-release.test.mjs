@@ -200,7 +200,7 @@ describe("bundled Baijimu CLI release provenance", () => {
 
   it("downloads the pinned content-addressed OSS asset without repository access", () => {
     expect(prepareScript).toContain(
-      "https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases",
+      "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases",
     );
     expect(prepareScript).toContain(
       'source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"',

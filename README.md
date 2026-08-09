@@ -838,7 +838,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
 ```json
 {
   "version": "0.1.105",
-  "url": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.105_universal.app.tar.gz",
+  "url": "https://download.baijimu.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.105_universal.app.tar.gz",
   "signature": "<minisign signature>",
   "notes": "百积木 bridge-agent-v0.1.105",
   "pub_date": "2026-07-19T10:00:00Z"
@@ -900,7 +900,7 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
   "contentType": "application/x-apple-diskimage",
   "sizeBytes": 90000000,
   "objectKey": "lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
-  "downloadUrl": "https://lowcode-common.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg"
+  "downloadUrl": "https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg"
 }
 ```
 
