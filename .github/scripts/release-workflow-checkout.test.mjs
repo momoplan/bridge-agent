@@ -9,6 +9,10 @@ const workflow = readFileSync(
 const windowsTauriConfig = JSON.parse(
   readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
 );
+const windowsUninstallerPreparation = readFileSync(
+  "scripts/prepare-windows-uninstaller.mjs",
+  "utf8",
+);
 
 function jobBody(jobName, nextJobName) {
   const startMarker = `  ${jobName}:\n`;
@@ -54,7 +58,7 @@ describe("release workflow repository script availability", () => {
   test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
     const body = jobBody("windows-quality-gate", "release");
     const prepareUninstallerIndex = body.indexOf(
-      "node scripts/prepare-windows-uninstaller.mjs --unsigned-for-quality-gate",
+      "npm run prepare:windows-uninstaller:quality",
     );
     const desktopCheckIndex = body.indexOf(
       "cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets",
@@ -70,6 +74,10 @@ describe("release workflow repository script availability", () => {
       "node scripts/prepare-windows-uninstaller.mjs --with-frontend",
     );
     expect(windowsTauriConfig.build.beforeBundleCommand).toBeUndefined();
+    expect(windowsUninstallerPreparation).toContain(
+      'run(process.execPath, ["scripts/prepare-tauri-build.mjs"])',
+    );
+    expect(windowsUninstallerPreparation).not.toContain("npm.cmd");
   });
 
   test("metadata repair can atomically raise the minimum supported client version", () => {

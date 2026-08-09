@@ -1,7 +1,7 @@
 {
   "name": "bridge-agent-desktop",
   "private": true,
-  "version": "0.2.71",
+  "version": "0.2.72",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420",
@@ -9,6 +9,7 @@
     "build:web": "tsc && vite build",
     "test": "vitest run",
     "build:tauri": "node scripts/prepare-tauri-build.mjs",
+    "prepare:windows-uninstaller:quality": "node scripts/prepare-windows-uninstaller.mjs --unsigned-for-quality-gate --with-frontend",
     "preview": "vite preview --host 0.0.0.0 --port 1421",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

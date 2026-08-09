@@ -26,7 +26,7 @@ if (process.env.TAURI_ENV_PLATFORM !== "windows") {
 }
 
 if (buildFrontend) {
-  run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build:tauri"]);
+  run(process.execPath, ["scripts/prepare-tauri-build.mjs"]);
 }
 
 const buildRoot = path.join(repositoryRoot, "src-tauri", "target", "windows-uninstaller");
