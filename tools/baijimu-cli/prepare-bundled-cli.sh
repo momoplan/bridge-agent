@@ -49,7 +49,7 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
   if [ -n "${BAIJIMU_CLI_RELEASE_ASSETS_DIR:-}" ]; then
     cp "${BAIJIMU_CLI_RELEASE_ASSETS_DIR}/${asset_name}" "${temporary_dir}/${asset_name}"
   else
-    release_base_url="${BAIJIMU_CLI_RELEASE_BASE_URL:-https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases}"
+    release_base_url="${BAIJIMU_CLI_RELEASE_BASE_URL:-https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases}"
     source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"
     curl -fsSL --retry 6 --retry-all-errors --retry-delay 3 \
       --connect-timeout 15 --max-time 600 \

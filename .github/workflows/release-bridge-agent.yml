@@ -132,7 +132,7 @@ jobs:
                     | select(.latestVersion.repo == "momoplan/baijimu-cli-rs")
                     | select(.latestVersion.revision == ("v" + .latestVersion.version))
                     | select(all(.latestVersion.manifest.artifacts[];
-                        .source | startswith("https://lowcode-common.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases/")))
+                        .source | startswith("https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/")))
                     | .latestVersion.version
                   '
               )"
