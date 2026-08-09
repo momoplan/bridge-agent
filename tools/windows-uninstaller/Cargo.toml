@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-uninstaller"
-version = "0.2.68"
+version = "0.2.69"
 edition = "2021"
 publish = false
 
