@@ -93,6 +93,7 @@ function runPrepareWithFallback(fixture) {
   const fallbackVersionDirectory = join(
     fallbackBase,
     `v${pinnedCliVersion}`,
+    readFileSync(fixture.checksumPath, "utf8").split(/\s+/)[0],
   );
   mkdirSync(fallbackVersionDirectory, { recursive: true });
   copyFileSync(
@@ -250,15 +251,16 @@ describe("bundled Baijimu CLI release provenance", () => {
       'source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"',
     );
     expect(prepareScript).toContain(
-      "https://github.com/momoplan/baijimu-cli-rs/releases/download",
+      "https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/managed-tool-artifacts/baijimu-cli/releases",
     );
     expect(prepareScript).toContain(
-      'fallback_url="${fallback_base_url}/v${pinned_cli_version}/${asset_name}"',
+      'fallback_url="${fallback_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"',
     );
     expect(prepareScript).toContain('"${source_url}" -o "${temporary_dir}/${asset_name}"');
     expect(prepareScript).toContain('"${fallback_url}" -o "${temporary_dir}/${asset_name}"');
     expect(prepareScript).not.toContain("api.github.com");
     expect(prepareScript).not.toContain("gh release download");
+    expect(prepareScript).not.toContain("github.com/momoplan/baijimu-cli-rs/releases/download");
     expect(prepareScript).not.toContain("gitee.com");
   });
 });
