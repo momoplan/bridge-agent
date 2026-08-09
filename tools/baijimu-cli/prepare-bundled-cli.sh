@@ -51,9 +51,16 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
   else
     release_base_url="${BAIJIMU_CLI_RELEASE_BASE_URL:-https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases}"
     source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"
-    curl -fsSL --retry 6 --retry-all-errors --retry-delay 3 \
+    fallback_base_url="${BAIJIMU_CLI_RELEASE_FALLBACK_BASE_URL:-https://github.com/momoplan/baijimu-cli-rs/releases/download}"
+    fallback_url="${fallback_base_url}/v${pinned_cli_version}/${asset_name}"
+    if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 3 \
       --connect-timeout 15 --max-time 600 \
-      "${source_url}" -o "${temporary_dir}/${asset_name}"
+      "${source_url}" -o "${temporary_dir}/${asset_name}"; then
+      echo "Primary Baijimu CLI release download failed; retrying immutable GitHub release asset" >&2
+      curl -fsSL --retry 6 --retry-all-errors --retry-delay 3 \
+        --connect-timeout 15 --max-time 600 \
+        "${fallback_url}" -o "${temporary_dir}/${asset_name}"
+    fi
   fi
 
   actual_sha256="$(

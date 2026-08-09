@@ -79,6 +79,8 @@ describe("release workflow repository script availability", () => {
     );
     expect(windowsUninstallerPreparation).not.toContain("npm.cmd");
     expect(workflow).toContain("WiX linker diagnostic exit code");
+    expect(workflow).toContain("required signed sidecar");
+    expect(workflow).toContain("Installed executable has an invalid Authenticode signature");
   });
 
   test("metadata repair can atomically raise the minimum supported client version", () => {

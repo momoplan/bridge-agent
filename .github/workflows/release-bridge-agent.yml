@@ -838,10 +838,20 @@ jobs:
           $ErrorActionPreference = "Stop"
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $diagnosticFiles = Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" -File -ErrorAction SilentlyContinue
-          $diagnosticFiles += Get-ChildItem -Path "src-tauri/binaries" -Filter "bridge-agent-uninstaller-*.exe" -File -ErrorAction Stop
           foreach ($file in $diagnosticFiles) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
             Write-Host "$($file.FullName): $($signature.Status) (intermediate exe)"
+          }
+
+          $requiredSignedExecutables = @(
+            Get-ChildItem -Path "src-tauri/binaries" -Filter "bridge-agent-uninstaller-*.exe" -File -ErrorAction Stop
+          )
+          if ($requiredSignedExecutables.Count -ne 1) {
+            throw "Expected one signed Windows uninstaller sidecar, found $($requiredSignedExecutables.Count)"
+          }
+          foreach ($file in $requiredSignedExecutables) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            Write-Host "$($file.FullName): $($signature.Status) (required signed sidecar)"
             if ($signature.Status -ne "Valid") {
               throw "Invalid Authenticode signature for $($file.FullName): $($signature.Status)"
             }
@@ -1148,6 +1158,16 @@ jobs:
             }
             if (-not (Test-Path -LiteralPath $desktopExecutable)) {
               throw "The upgraded desktop executable was not found"
+            }
+            $installedUninstaller = "C:\Program Files\百积木\bridge-agent-uninstaller.exe"
+            if (-not (Test-Path -LiteralPath $installedUninstaller)) {
+              throw "The guided uninstaller was not installed"
+            }
+            foreach ($installedExecutable in @($desktopExecutable, $installedUninstaller)) {
+              $installedSignature = Get-AuthenticodeSignature -LiteralPath $installedExecutable
+              if ($installedSignature.Status -ne "Valid") {
+                throw "Installed executable has an invalid Authenticode signature: $installedExecutable ($($installedSignature.Status))"
+              }
             }
             if (Test-Path -LiteralPath $legacyDesktopExecutable) {
               throw "The legacy English product directory remains after the upgrade"

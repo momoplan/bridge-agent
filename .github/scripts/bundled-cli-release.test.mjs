@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
@@ -87,6 +88,32 @@ function runPrepare(fixture) {
   });
 }
 
+function runPrepareWithFallback(fixture) {
+  const fallbackBase = join(fixture.assetsDirectory, "fallback");
+  const fallbackVersionDirectory = join(
+    fallbackBase,
+    `v${pinnedCliVersion}`,
+  );
+  mkdirSync(fallbackVersionDirectory, { recursive: true });
+  copyFileSync(
+    fixture.archivePath,
+    join(fallbackVersionDirectory, basename(fixture.archivePath)),
+  );
+
+  return spawnSync("bash", [scriptPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      BAIJIMU_CLI_USE_RELEASE_ASSET: "true",
+      BAIJIMU_CLI_RELEASE_ASSETS_DIR: "",
+      BAIJIMU_CLI_RELEASE_BASE_URL: `file://${join(fixture.assetsDirectory, "missing")}`,
+      BAIJIMU_CLI_RELEASE_FALLBACK_BASE_URL: `file://${fallbackBase}`,
+      BAIJIMU_CLI_CHECKSUM_FILE: fixture.checksumPath,
+      BAIJIMU_CLI_RESOURCE_DIR: fixture.resourceDirectory,
+    },
+  });
+}
+
 afterEach(() => {
   while (temporaryDirectories.length > 0) {
     rmSync(temporaryDirectories.pop(), {
@@ -138,6 +165,23 @@ describe("bundled Baijimu CLI release provenance", () => {
       expect(
         existsSync(join(fixture.resourceDirectory, "baijimu")),
       ).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "falls back to the immutable release URL and still verifies the checksum",
+    () => {
+      const fixture = createFixture();
+      const result = runPrepareWithFallback(fixture);
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toContain(
+        "Primary Baijimu CLI release download failed",
+      );
+      expect(result.stdout).toContain(`"version":"${pinnedCliVersion}"`);
+      expect(
+        existsSync(join(fixture.resourceDirectory, "baijimu")),
+      ).toBe(true);
     },
   );
 
@@ -198,14 +242,21 @@ describe("bundled Baijimu CLI release provenance", () => {
     expect(defenderScript).toContain("Get-MpThreatCatalog");
   });
 
-  it("downloads the pinned content-addressed OSS asset without repository access", () => {
+  it("downloads the pinned OSS asset with an immutable release fallback", () => {
     expect(prepareScript).toContain(
       "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases",
     );
     expect(prepareScript).toContain(
       'source_url="${release_base_url}/v${pinned_cli_version}/${expected_sha256}/${asset_name}"',
     );
+    expect(prepareScript).toContain(
+      "https://github.com/momoplan/baijimu-cli-rs/releases/download",
+    );
+    expect(prepareScript).toContain(
+      'fallback_url="${fallback_base_url}/v${pinned_cli_version}/${asset_name}"',
+    );
     expect(prepareScript).toContain('"${source_url}" -o "${temporary_dir}/${asset_name}"');
+    expect(prepareScript).toContain('"${fallback_url}" -o "${temporary_dir}/${asset_name}"');
     expect(prepareScript).not.toContain("api.github.com");
     expect(prepareScript).not.toContain("gh release download");
     expect(prepareScript).not.toContain("gitee.com");
