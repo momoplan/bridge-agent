@@ -107,6 +107,8 @@ const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
 const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 const LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const HEALTH_ERROR_RESPONSE_MAX_BYTES: usize = 8 * 1024;
+const HEALTH_ERROR_MESSAGE_MAX_CHARS: usize = 512;
 const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
@@ -4424,14 +4426,11 @@ async fn check_registered_service(
                     let status = response.status();
                     let expected_status = expect_status.unwrap_or(200);
                     if status.as_u16() != expected_status {
+                        let detail = health_http_error_detail(response, expected_status).await;
                         return RegisteredServiceStatus {
                             service: service.name,
                             status: RegisteredServiceState::Unhealthy,
-                            detail: Some(format!(
-                                "health HTTP {}，期望 {}",
-                                status.as_u16(),
-                                expected_status
-                            )),
+                            detail: Some(detail),
                             checked_at_ms: now_ms(),
                             health_check_configured,
                             start_command_configured,
@@ -4491,6 +4490,53 @@ async fn check_registered_service(
             }
         }
     }
+}
+
+async fn health_http_error_detail(mut response: reqwest::Response, expected_status: u16) -> String {
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    while body.len() < HEALTH_ERROR_RESPONSE_MAX_BYTES {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
+        let remaining = HEALTH_ERROR_RESPONSE_MAX_BYTES - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            break;
+        }
+    }
+    format_health_http_error(status, expected_status, &body)
+}
+
+fn format_health_http_error(status: u16, expected_status: u16, body: &[u8]) -> String {
+    let prefix = format!("health HTTP {status}，期望 {expected_status}");
+    let Some(message) = structured_health_error_message(body) else {
+        return prefix;
+    };
+    format!("{prefix}：{message}")
+}
+
+fn structured_health_error_message(body: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<Value>(body).ok()?;
+    let message = [
+        "/error/message",
+        "/status/startup/error",
+        "/status/startup/message",
+        "/message",
+    ]
+    .into_iter()
+    .find_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))?;
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(
+        normalized
+            .chars()
+            .take(HEALTH_ERROR_MESSAGE_MAX_CHARS)
+            .collect(),
+    )
 }
 
 async fn check_local_app(
@@ -6889,6 +6935,54 @@ mod tests {
         apply_managed_process_status(&mut unhealthy, Some(true));
         assert_eq!(unhealthy.status, RegisteredServiceState::Unhealthy);
         assert_eq!(unhealthy.detail.as_deref(), Some("health HTTP 503"));
+    }
+
+    #[test]
+    fn health_error_detail_preserves_connector_readiness_root_cause() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "ok": false,
+            "status": {
+                "startup": {
+                    "status": "failed",
+                    "error": "同步用户级 CODEX_HOME 失败：Windows 环境广播超时"
+                }
+            },
+            "error": {
+                "code": "connector_initialization_failed",
+                "message": "同步用户级 CODEX_HOME 失败：Windows 环境广播超时"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            format_health_http_error(503, 200, &body),
+            "health HTTP 503，期望 200：同步用户级 CODEX_HOME 失败：Windows 环境广播超时"
+        );
+    }
+
+    #[test]
+    fn health_error_detail_ignores_unstructured_or_secret_fields() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "token": "must-not-be-rendered",
+            "details": "arbitrary connector response"
+        }))
+        .unwrap();
+
+        let detail = format_health_http_error(503, 200, &body);
+        assert_eq!(detail, "health HTTP 503，期望 200");
+        assert!(!detail.contains("must-not-be-rendered"));
+    }
+
+    #[test]
+    fn health_error_detail_is_bounded_for_local_connector_responses() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "error": {"message": "x".repeat(HEALTH_ERROR_MESSAGE_MAX_CHARS + 100)}
+        }))
+        .unwrap();
+
+        let detail = format_health_http_error(503, 200, &body);
+        let rendered = detail.split_once('：').unwrap().1;
+        assert_eq!(rendered.chars().count(), HEALTH_ERROR_MESSAGE_MAX_CHARS);
     }
 
     #[test]
