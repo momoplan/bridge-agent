@@ -25,16 +25,18 @@ use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
     default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    inspect_python_runtime, install_connector_from_path_with_provenance,
-    install_rustls_crypto_provider, is_connector_package_stop_error, list_connectors,
-    load_config as load_agent_config, load_connector_manifest, manifest_preview_json,
-    reset_invalid_config, resolve_connector_ui_asset, resolve_connector_ui_entry,
-    save_config as save_agent_config, show_connector, sync_installed_connector,
+    format_connector_sync_failures, inspect_python_runtime,
+    install_connector_from_path_with_provenance, install_rustls_crypto_provider,
+    is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
+    load_connector_manifest, manifest_preview_json, reset_invalid_config,
+    resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
+    show_connector, sync_installed_connector, sync_installed_connectors_report,
     terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
     AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorTrustLevel,
-    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
-    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncReport,
+    ConnectorTrustLevel, ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent,
+    RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceHealthCheck,
+    ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -5937,6 +5939,25 @@ fn consume_interactive_restart_request(config_path: &Path) -> Result<bool, Strin
     }
 }
 
+fn prepare_config_for_auto_start_with<F>(
+    config_path: &Path,
+    sync_installed_connectors: F,
+) -> anyhow::Result<(AgentConfig, ConnectorSyncReport)>
+where
+    F: FnOnce(&Path) -> anyhow::Result<ConnectorSyncReport>,
+{
+    ensure_config_exists(config_path)?;
+    let sync_report = sync_installed_connectors(config_path)?;
+    let config = load_agent_config(config_path)?;
+    Ok((config, sync_report))
+}
+
+fn prepare_config_for_auto_start(
+    config_path: &Path,
+) -> anyhow::Result<(AgentConfig, ConnectorSyncReport)> {
+    prepare_config_for_auto_start_with(config_path, sync_installed_connectors_report)
+}
+
 fn auto_start_agent(
     runtime: AgentRuntimeManager,
     config_path: PathBuf,
@@ -5949,46 +5970,48 @@ fn auto_start_agent(
             "auto start preparing config at {}",
             config_path.display()
         ));
-        if let Err(err) = ensure_config_exists(&config_path) {
-            diagnostics.error(format!(
-                "failed to prepare bridge-agent config at {}: {err:#}",
-                config_path.display()
-            ));
-            startup_health.set_component(
-                "agent_runtime",
-                "Agent 运行时",
-                "degraded",
-                Some(format!("配置初始化失败: {err}")),
-            );
-            return;
-        }
-        match load_agent_config(&config_path) {
-            Ok(config) if !config_is_authorized(&config) => {
-                diagnostics
-                    .info("bridge-agent runtime auto start skipped: device is not authorized yet");
-                startup_health.set_component(
-                    "agent_runtime",
-                    "Agent 运行时",
-                    "ready",
-                    Some("设备尚未授权，未自动连接".to_string()),
-                );
-                return;
-            }
-            Ok(_) => diagnostics.info("bridge-agent config loaded for auto start"),
+        let (config, connector_sync) = match prepare_config_for_auto_start(&config_path) {
+            Ok(prepared) => prepared,
             Err(err) => {
                 diagnostics.error(format!(
-                    "failed to load bridge-agent config before auto start from {}: {err:#}",
+                    "failed to prepare bridge-agent config and installed connectors at {}: {err:#}",
                     config_path.display()
                 ));
                 startup_health.set_component(
                     "agent_runtime",
                     "Agent 运行时",
                     "degraded",
-                    Some(format!("配置加载失败: {err}")),
+                    Some(format!("配置与本地应用同步失败: {err}")),
                 );
                 return;
             }
+        };
+        diagnostics.info(format!(
+            "installed connector sync completed before runtime auto start: installed={} failures={}",
+            connector_sync.summaries.len(),
+            connector_sync.failures.len()
+        ));
+        let connector_sync_failure_detail = if connector_sync.failures.is_empty() {
+            None
+        } else {
+            let detail = format_connector_sync_failures(&connector_sync.failures);
+            diagnostics.warn(format!(
+                "installed connector sync completed with failures before runtime auto start: {detail}"
+            ));
+            Some(detail)
+        };
+        if !config_is_authorized(&config) {
+            diagnostics
+                .info("bridge-agent runtime auto start skipped: device is not authorized yet");
+            startup_health.set_component(
+                "agent_runtime",
+                "Agent 运行时",
+                "ready",
+                Some("设备尚未授权，未自动连接".to_string()),
+            );
+            return;
         }
+        diagnostics.info("bridge-agent config loaded for auto start");
         if let Err(err) = start_runtime_from_saved_config(&runtime, &config_path).await {
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
@@ -6001,7 +6024,16 @@ fn auto_start_agent(
             );
         } else {
             diagnostics.info("bridge-agent runtime auto start completed");
-            startup_health.set_component("agent_runtime", "Agent 运行时", "ready", None);
+            if let Some(detail) = connector_sync_failure_detail {
+                startup_health.set_component(
+                    "agent_runtime",
+                    "Agent 运行时",
+                    "degraded",
+                    Some(detail),
+                );
+            } else {
+                startup_health.set_component("agent_runtime", "Agent 运行时", "ready", None);
+            }
         }
     });
 }
@@ -7344,6 +7376,55 @@ mod tests {
         request_interactive_restart(&config_path).unwrap();
         assert!(consume_interactive_restart_request(&config_path).unwrap());
         assert!(!consume_interactive_restart_request(&config_path).unwrap());
+    }
+
+    #[test]
+    fn auto_start_rebuilds_installed_connectors_before_loading_runtime_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        let config = AgentConfig::example();
+        save_agent_config(&config_path, &config).unwrap();
+        assert!(load_agent_config(&config_path)
+            .unwrap()
+            .local_apps
+            .is_empty());
+
+        let (prepared, report) = prepare_config_for_auto_start_with(&config_path, |path| {
+            let mut synchronized = load_agent_config(path)?;
+            synchronized.local_apps.push(LocalAppConfig {
+                connector_id: "com.baijimu.connector.persisted".to_string(),
+                name: "Persisted Connector".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Installed before the host upgrade".to_string(),
+                enabled: true,
+                health_check: None,
+                start_command: None,
+                stop_command: None,
+                methods: Vec::new(),
+                events: vec![bridge_agent::EventConfig {
+                    name: "changed".to_string(),
+                    description: "Connector state changed".to_string(),
+                    enabled: true,
+                    payload_schema: serde_json::json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    }),
+                }],
+            });
+            save_agent_config(path, &synchronized)?;
+            Ok(ConnectorSyncReport {
+                summaries: Vec::new(),
+                failures: Vec::new(),
+            })
+        })
+        .unwrap();
+
+        assert!(report.failures.is_empty());
+        assert_eq!(prepared.local_apps.len(), 1);
+        assert_eq!(
+            prepared.local_apps[0].connector_id,
+            "com.baijimu.connector.persisted"
+        );
     }
 
     #[test]
