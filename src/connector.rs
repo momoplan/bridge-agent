@@ -4999,11 +4999,11 @@ mod tests {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                "Start-Process -FilePath ping.exe -ArgumentList @('127.0.0.1','-n','4') -WindowStyle Hidden | Out-Null; Write-Output started".to_string(),
+                "Start-Process -FilePath ping.exe -ArgumentList @('127.0.0.1','-n','12') -WindowStyle Hidden | Out-Null; Write-Output started".to_string(),
             ],
             cwd: None,
             env: BTreeMap::new(),
-            timeout_secs: Some(2),
+            timeout_secs: Some(8),
         };
         let started_at = Instant::now();
 
@@ -5012,7 +5012,7 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("started"));
         assert!(
-            started_at.elapsed() < Duration::from_secs(2),
+            started_at.elapsed() < Duration::from_secs(8),
             "lifecycle output collection waited for a descendant-owned handle"
         );
     }
