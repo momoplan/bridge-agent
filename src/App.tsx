@@ -137,7 +137,6 @@ interface DeviceConfig {
 interface RuntimeConfig {
   node_path?: string | null;
   python_path?: string | null;
-  codex_binary_path?: string | null;
   default_timeout_secs: number;
   max_timeout_secs: number;
   log_limit: number;
@@ -3681,15 +3680,6 @@ function App() {
                 value={config.runtime.node_path ?? ""}
                 onChange={(event) => updateRuntime("node_path", emptyToNull(event.target.value))}
                 placeholder="/opt/homebrew/bin/node"
-              />
-            </Field>
-            <Field label="Codex 命令路径" hint="留空时自动从 PATH 和登录 shell 查找。">
-              <input
-                value={config.runtime.codex_binary_path ?? ""}
-                onChange={(event) =>
-                  updateRuntime("codex_binary_path", emptyToNull(event.target.value))
-                }
-                placeholder="/opt/homebrew/bin/codex"
               />
             </Field>
             <Field label="默认超时秒数">

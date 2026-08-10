@@ -90,8 +90,6 @@ pub struct RuntimeConfig {
     pub node_path: Option<String>,
     #[serde(default)]
     pub python_path: Option<String>,
-    #[serde(default)]
-    pub codex_binary_path: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub default_timeout_secs: u64,
     #[serde(default = "default_max_timeout_secs")]
@@ -343,7 +341,6 @@ impl AgentConfig {
             runtime: RuntimeConfig {
                 node_path: None,
                 python_path: None,
-                codex_binary_path: None,
                 default_timeout_secs: default_timeout_secs(),
                 max_timeout_secs: default_max_timeout_secs(),
                 log_limit: default_log_limit(),
@@ -367,6 +364,7 @@ impl AgentConfig {
         changed |= ensure_default_shell_service(self);
         changed |= ensure_service_registration_defaults(self);
         changed |= ensure_default_platform_base_url(self);
+        changed |= remove_legacy_codex_binary_overrides(self);
         changed
     }
 
@@ -396,10 +394,6 @@ impl AgentConfig {
         }
         validate_optional_runtime_path("runtime.node_path", self.runtime.node_path.as_deref())?;
         validate_optional_runtime_path("runtime.python_path", self.runtime.python_path.as_deref())?;
-        validate_optional_runtime_path(
-            "runtime.codex_binary_path",
-            self.runtime.codex_binary_path.as_deref(),
-        )?;
         if self.runtime.default_timeout_secs > self.runtime.max_timeout_secs {
             bail!("runtime.default_timeout_secs cannot exceed runtime.max_timeout_secs");
         }
@@ -1057,9 +1051,11 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let has_legacy_local_app_installation_id =
         config_has_legacy_local_app_installation_id(&content);
+    let has_legacy_codex_binary_path = config_has_legacy_codex_binary_path(&content);
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
-    let mut changed = has_legacy_local_app_installation_id || config.normalize();
+    let mut changed = has_legacy_local_app_installation_id || has_legacy_codex_binary_path;
+    changed |= config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
     config.validate()?;
     let legacy_token = config.relay.token.trim().to_string();
@@ -1076,6 +1072,34 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         write_public_config(path, &config)?;
     }
     Ok(config)
+}
+
+fn config_has_legacy_codex_binary_path(content: &str) -> bool {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .and_then(|config| config.get("runtime").cloned())
+        .and_then(|runtime| runtime.as_object().cloned())
+        .is_some_and(|runtime| runtime.contains_key("codex_binary_path"))
+}
+
+fn remove_legacy_codex_binary_overrides(config: &mut AgentConfig) -> bool {
+    fn remove(command: &mut Option<ServiceStartCommand>) -> bool {
+        let Some(ServiceStartCommand::ShellCommand { env, .. }) = command.as_mut() else {
+            return false;
+        };
+        env.remove("CODEX_CONNECTOR_CODEX_BINARY").is_some()
+    }
+
+    let mut changed = false;
+    for service in &mut config.services {
+        changed |= remove(&mut service.start_command);
+        changed |= remove(&mut service.stop_command);
+    }
+    for app in &mut config.local_apps {
+        changed |= remove(&mut app.start_command);
+        changed |= remove(&mut app.stop_command);
+    }
+    changed
 }
 
 fn config_has_legacy_local_app_installation_id(content: &str) -> bool {
@@ -2190,6 +2214,46 @@ mod tests {
         assert!(!fs::read_to_string(&path)
             .unwrap()
             .contains("installationId"));
+    }
+
+    #[test]
+    fn load_config_removes_legacy_codex_binary_overrides() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("agent-config.json");
+        let mut config = serde_json::to_value(AgentConfig::example()).unwrap();
+        config["runtime"]["codex_binary_path"] = json!("/legacy/codex");
+        config["services"][0]["start_command"] = json!({
+            "type": "shell_command",
+            "command": ["example-service"],
+            "env": {"CODEX_CONNECTOR_CODEX_BINARY": "/legacy/codex"}
+        });
+        config["local_apps"] = json!([{
+            "connectorId": "com.baijimu.connector.test",
+            "name": "Test",
+            "version": "1.0.0",
+            "events": [{
+                "name": "test.completed",
+                "description": "Test completed"
+            }],
+            "stopCommand": {
+                "type": "shell_command",
+                "command": ["example-connector", "stop"],
+                "env": {"CODEX_CONNECTOR_CODEX_BINARY": "/legacy/codex"}
+            }
+        }]);
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        let ServiceStartCommand::ShellCommand { env, .. } =
+            loaded.services[0].start_command.as_ref().unwrap();
+        assert!(!env.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
+        let ServiceStartCommand::ShellCommand { env, .. } =
+            loaded.local_apps[0].stop_command.as_ref().unwrap();
+        assert!(!env.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
+
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains("codex_binary_path"));
+        assert!(!migrated.contains("CODEX_CONNECTOR_CODEX_BINARY"));
     }
 
     #[cfg(unix)]

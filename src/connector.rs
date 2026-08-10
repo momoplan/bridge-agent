@@ -2256,25 +2256,12 @@ fn resolve_installed_start_commands(
     } else {
         configured_runtime_command_path("node", runtime_config)
     };
-    // Codex discovery belongs to the Codex Connector. The host only exports an
-    // authoritative override when the user explicitly configured one; an
-    // automatically discovered launcher contributes its directory to PATH.
-    let codex_binary_override = configured_runtime_command_path("codex", runtime_config);
-    let codex_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
-        codex_binary_override
-            .clone()
-            .or_else(|| discover_command_path("codex"))
-    } else {
-        codex_binary_override.clone()
-    };
     let command_runtime = InstalledCommandRuntime {
         package_path,
         package_bins: &package_bins,
         python_scripts: &python_scripts,
         python_env: python_env.as_deref(),
         node_path: &node_path,
-        codex_path: &codex_path,
-        codex_binary_override: &codex_binary_override,
         include_host_environment: runtime_preparation == ConnectorRuntimePreparation::Prepare,
     };
     for service in services {
@@ -2350,8 +2337,6 @@ struct InstalledCommandRuntime<'a> {
     python_scripts: &'a BTreeMap<String, String>,
     python_env: Option<&'a Path>,
     node_path: &'a Option<PathBuf>,
-    codex_path: &'a Option<PathBuf>,
-    codex_binary_override: &'a Option<PathBuf>,
     include_host_environment: bool,
 }
 
@@ -2371,12 +2356,7 @@ fn resolve_installed_shell_command(
 
     if let Some(direct_path) = native_command_path(runtime.package_path, executable) {
         command[0] = direct_path.display().to_string();
-        enrich_start_command_env(
-            env,
-            [runtime.node_path, runtime.codex_path],
-            runtime.codex_binary_override.as_deref(),
-            runtime.include_host_environment,
-        );
+        enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2388,12 +2368,7 @@ fn resolve_installed_shell_command(
             command[0] = python_script_path(env_path, executable)
                 .display()
                 .to_string();
-            enrich_start_command_env(
-                env,
-                [runtime.node_path, runtime.codex_path],
-                runtime.codex_binary_override.as_deref(),
-                runtime.include_host_environment,
-            );
+            enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
             prepend_path_entry(env, python_bin_dir(env_path));
             if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
                 *cwd = Some(runtime.package_path.display().to_string());
@@ -2416,12 +2391,7 @@ fn resolve_installed_shell_command(
                 .display()
                 .to_string(),
         );
-        enrich_start_command_env(
-            env,
-            [runtime.node_path, runtime.codex_path],
-            runtime.codex_binary_override.as_deref(),
-            runtime.include_host_environment,
-        );
+        enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2482,7 +2452,6 @@ fn prepend_path_entry(env_vars: &mut BTreeMap<String, String>, entry: PathBuf) {
 fn enrich_start_command_env<'a>(
     env_vars: &mut BTreeMap<String, String>,
     executable_paths: impl IntoIterator<Item = &'a Option<PathBuf>>,
-    codex_binary_override: Option<&Path>,
     include_host_environment: bool,
 ) {
     if include_host_environment {
@@ -2506,11 +2475,6 @@ fn enrich_start_command_env<'a>(
                 joined_path.to_string_lossy().to_string(),
             );
         }
-    }
-    if let Some(codex_binary) = codex_binary_override {
-        env_vars
-            .entry("CODEX_CONNECTOR_CODEX_BINARY".to_string())
-            .or_insert_with(|| codex_binary.display().to_string());
     }
 }
 
@@ -2549,11 +2513,9 @@ fn configured_runtime_command_path(
     executable: &str,
     runtime_config: &RuntimeConfig,
 ) -> Option<PathBuf> {
-    let path = match executable {
-        "node" => runtime_config.node_path.as_deref(),
-        "codex" => runtime_config.codex_binary_path.as_deref(),
-        _ => None,
-    }?;
+    let path = (executable == "node")
+        .then_some(runtime_config.node_path.as_deref())
+        .flatten()?;
     resolve_command_file(
         &PathBuf::from(path.trim()),
         cfg!(windows),
@@ -5609,8 +5571,6 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             python_scripts: &scripts,
             python_env: Some(&env_path),
             node_path: &None,
-            codex_path: &None,
-            codex_binary_override: &None,
             include_host_environment: true,
         };
         resolve_installed_shell_command(&mut command, &mut cwd, &mut env_vars, &command_runtime);
@@ -5686,61 +5646,13 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn configured_windows_codex_path_is_normalized_to_cmd_launcher() {
-        let dir = tempdir().unwrap();
-        let shim = dir.path().join("codex");
-        fs::write(&shim, "#!/bin/sh\n").unwrap();
-        let launcher = dir.path().join("codex.cmd");
-        fs::write(&launcher, "@echo off\r\n").unwrap();
-        let mut runtime = AgentConfig::example().runtime;
-        runtime.codex_binary_path = Some(shim.display().to_string());
-
-        let resolved = configured_runtime_command_path("codex", &runtime).unwrap();
-        assert!(
-            resolved
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&launcher.to_string_lossy()),
-            "resolved {} instead of {}",
-            resolved.display(),
-            launcher.display()
-        );
-    }
-
-    #[test]
-    fn automatic_codex_discovery_only_enriches_path() {
-        let dir = tempdir().unwrap();
-        let codex = Some(dir.path().join("codex.cmd"));
+    fn host_runtime_enrichment_does_not_add_codex_override() {
         let mut env_vars = BTreeMap::new();
 
-        enrich_start_command_env(&mut env_vars, [&None, &codex], None, true);
+        enrich_start_command_env(&mut env_vars, [&None], true);
 
         assert!(!env_vars.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
-        assert!(env_vars
-            .get("PATH")
-            .is_some_and(|path| env::split_paths(path).any(|entry| entry == dir.path())));
-    }
-
-    #[test]
-    fn explicit_codex_configuration_is_exported_to_connector() {
-        let dir = tempdir().unwrap();
-        let codex = dir.path().join("codex.cmd");
-        let mut env_vars = BTreeMap::new();
-
-        enrich_start_command_env(
-            &mut env_vars,
-            [&None, &Some(codex.clone())],
-            Some(&codex),
-            true,
-        );
-
-        assert_eq!(
-            env_vars
-                .get("CODEX_CONNECTOR_CODEX_BINARY")
-                .map(String::as_str),
-            codex.to_str()
-        );
     }
 
     #[test]
