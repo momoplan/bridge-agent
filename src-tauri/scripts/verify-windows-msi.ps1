@@ -87,6 +87,93 @@ function Test-MsiTable {
         Select-Object -First 1)
 }
 
+function Read-MsiBinaryDataSize {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Database,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $escapedName = $Name.Replace("'", "''")
+    $view = $Database.GetType().InvokeMember(
+        "OpenView",
+        [System.Reflection.BindingFlags]::InvokeMethod,
+        $null,
+        $Database,
+        @("SELECT ``Data`` FROM ``Binary`` WHERE ``Name`` = '$escapedName'")
+    )
+    try {
+        $view.GetType().InvokeMember(
+            "Execute",
+            [System.Reflection.BindingFlags]::InvokeMethod,
+            $null,
+            $view,
+            $null
+        ) | Out-Null
+        $record = $view.GetType().InvokeMember(
+            "Fetch",
+            [System.Reflection.BindingFlags]::InvokeMethod,
+            $null,
+            $view,
+            $null
+        )
+        if ($null -eq $record) {
+            return $null
+        }
+        return [int64]$record.GetType().InvokeMember(
+            "DataSize",
+            [System.Reflection.BindingFlags]::GetProperty,
+            $null,
+            $record,
+            @(1)
+        )
+    } finally {
+        $view.GetType().InvokeMember(
+            "Close",
+            [System.Reflection.BindingFlags]::InvokeMethod,
+            $null,
+            $view,
+            $null
+        ) | Out-Null
+    }
+}
+
+function Assert-BrandedInstallerBitmap {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Database,
+        [Parameter(Mandatory = $true)]
+        [string]$BinaryName,
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedWidth,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedHeight
+    )
+
+    $resolvedBitmap = Resolve-Path -LiteralPath $FilePath
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = [System.Drawing.Bitmap]::new($resolvedBitmap.Path)
+    try {
+        if ($bitmap.Width -ne $ExpectedWidth -or $bitmap.Height -ne $ExpectedHeight) {
+            throw "$BinaryName must be ${ExpectedWidth}x${ExpectedHeight}, found $($bitmap.Width)x$($bitmap.Height)"
+        }
+    } finally {
+        $bitmap.Dispose()
+    }
+
+    $sourceSize = (Get-Item -LiteralPath $resolvedBitmap.Path).Length
+    $embeddedSize = Read-MsiBinaryDataSize -Database $Database -Name $BinaryName
+    if ($null -eq $embeddedSize) {
+        throw "MSI does not contain the branded $BinaryName stream"
+    }
+    if ($embeddedSize -ne $sourceSize) {
+        throw "MSI $BinaryName stream size $embeddedSize does not match branded source size $sourceSize"
+    }
+}
+
 $resolvedMsi = Resolve-Path -LiteralPath $FilePath
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.GetType().InvokeMember(
@@ -96,6 +183,29 @@ $database = $installer.GetType().InvokeMember(
     $installer,
     @($resolvedMsi.Path, 0)
 )
+
+$tauriDirectory = Split-Path -Parent $PSScriptRoot
+$windowsConfigPath = Join-Path $tauriDirectory "tauri.windows.conf.json"
+$windowsConfig = Get-Content -LiteralPath $windowsConfigPath -Raw | ConvertFrom-Json
+$wixConfig = $windowsConfig.bundle.windows.wix
+if (
+    [string]::IsNullOrWhiteSpace($wixConfig.bannerPath) -or
+    [string]::IsNullOrWhiteSpace($wixConfig.dialogImagePath)
+) {
+    throw "Windows WiX configuration must declare branded bannerPath and dialogImagePath"
+}
+Assert-BrandedInstallerBitmap `
+    -Database $database `
+    -BinaryName "WixUI_Bmp_Banner" `
+    -FilePath (Join-Path $tauriDirectory $wixConfig.bannerPath) `
+    -ExpectedWidth 493 `
+    -ExpectedHeight 58
+Assert-BrandedInstallerBitmap `
+    -Database $database `
+    -BinaryName "WixUI_Bmp_Dialog" `
+    -FilePath (Join-Path $tauriDirectory $wixConfig.dialogImagePath) `
+    -ExpectedWidth 493 `
+    -ExpectedHeight 312
 
 $productNameRow = Read-MsiRows `
     -Database $database `
@@ -247,4 +357,4 @@ if (
     throw "MSI cleanup action must run only for a real uninstall, not an upgrade: $($cleanupSequence.Values[1])"
 }
 
-Write-Host "Verified Windows MSI desktop-owned runtime, guided uninstall executable, cleanup action, and legacy service contract: $($resolvedMsi.Path)"
+Write-Host "Verified Windows MSI branding, desktop-owned runtime, guided uninstall executable, cleanup action, and legacy service contract: $($resolvedMsi.Path)"

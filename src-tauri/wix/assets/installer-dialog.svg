@@ -1,0 +1,26 @@
+<svg width="493" height="312" viewBox="0 0 493 312" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="493" height="312" fill="#FFFFFF"/>
+  <rect width="164" height="312" fill="#1E2A44"/>
+  <circle cx="11" cy="289" r="104" fill="#233557"/>
+  <circle cx="151" cy="15" r="91" fill="#1B746F" fill-opacity=".24"/>
+  <path d="M0 241L164 156V312H0V241Z" fill="#172239" fill-opacity=".58"/>
+  <rect x="0" y="0" width="5" height="312" fill="#16A3A7"/>
+  <g transform="translate(34 61)">
+    <circle cx="48" cy="48" r="45" fill="#FFFFFF" stroke="#D7E5EA" stroke-width="3"/>
+    <g transform="translate(48 48) scale(1.34)">
+      <rect x="-20" y="-20" width="18" height="18" rx="3" fill="#1E2A44"/>
+      <rect x="2" y="-20" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#1E2A44" stroke-width="2"/>
+      <path d="M600 189Q600 133 572.5 90.5Q545 48 493 24Q441 0 370 0H69V698H357Q428 698 479.5 675Q531 652 557.5 611Q584 570 584 518Q584 457 551.5 416Q519 375 465 358Q524 347 562 299Q600 251 600 189ZM209 410H337Q387 410 414 432.5Q441 455 441 497Q441 539 414 562Q387 585 337 585H209ZM458 206Q458 251 428 276.5Q398 302 347 302H209V114H350Q401 114 429.5 138Q458 162 458 206Z" fill="#1E2A44" transform="translate(6.1775 -4.25) scale(.015 -.015)"/>
+      <rect x="-20" y="2" width="18" height="18" rx="3" fill="#1E2A44"/>
+      <rect x="2" y="2" width="18" height="18" rx="3" fill="#16A3A7"/>
+    </g>
+  </g>
+  <text x="82" y="190" fill="#FFFFFF" font-family="Arial, sans-serif" font-size="18" font-weight="700" letter-spacing="2" text-anchor="middle">BAIJIMU</text>
+  <rect x="39" y="208" width="86" height="2" rx="1" fill="#16A3A7"/>
+  <g opacity=".78">
+    <rect x="44" y="232" width="13" height="13" rx="3" fill="#FFFFFF"/>
+    <rect x="63" y="232" width="13" height="13" rx="3" fill="#16A3A7"/>
+    <rect x="82" y="232" width="13" height="13" rx="3" fill="#FFFFFF"/>
+    <rect x="101" y="232" width="13" height="13" rx="3" fill="#16A3A7"/>
+  </g>
+</svg>
