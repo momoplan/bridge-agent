@@ -3,6 +3,7 @@
 mod codex_skill;
 mod connector_process;
 mod managed_tool;
+mod managed_tool_dependency;
 
 use connector_process::ConnectorProcessManager;
 
@@ -98,9 +99,12 @@ const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
 const LOCAL_APP_INSTALL_TASK_EVENT: &str = "local-app-install-task-changed";
 const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
 const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str = "connector.process.host-managed.v1";
+const HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1: &str =
+    "connector.managed-tool-dependencies.v1";
 const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
     HOST_CAPABILITY_CONNECTOR_SETUP_V1,
     HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1,
+    HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1,
 ];
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
@@ -3130,6 +3134,14 @@ async fn install_connector_app_with_context(
             ));
         }
     }
+    let bundled_cli = bundled_baijimu_cli_path();
+    managed_tool_dependency::ensure_ready(
+        &candidate_manifest,
+        bridge_agent::ConnectorManagedToolDependencyPhase::Install,
+        bundled_cli.as_deref(),
+    )
+    .await
+    .map_err(|err| format!("应用依赖检查失败: {err:#}"))?;
     let existing = list_connectors()
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -3337,7 +3349,18 @@ async fn start_connector_and_wait(
     connector_id: &str,
     action: &str,
 ) -> Result<ConnectorStartResult, String> {
-    let result = connector_processes.start(connector_id, config_path).await?;
+    let record = show_connector(connector_id).map_err(|err| err.to_string())?;
+    let bundled_cli = bundled_baijimu_cli_path();
+    let dependency_env = managed_tool_dependency::ensure_ready(
+        &record.manifest,
+        bridge_agent::ConnectorManagedToolDependencyPhase::Start,
+        bundled_cli.as_deref(),
+    )
+    .await
+    .map_err(|err| format!("{action}前的应用依赖检查失败: {err:#}"))?;
+    let result = connector_processes
+        .start(connector_id, config_path, dependency_env)
+        .await?;
     let verification = ensure_connector_lifecycle_command_succeeded(action, &result);
     if let Err(error) = verification {
         return Err(cleanup_failed_connector_start(

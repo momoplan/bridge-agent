@@ -1,6 +1,6 @@
 use bridge_agent::{
     connector_data_dir, load_config, prepare_installed_connector_runtime, show_connector,
-    start_connector, stop_connector, ConnectorLifecycleResult, ConnectorProcessOwnership,
+    start_connector_with_env, stop_connector, ConnectorLifecycleResult, ConnectorProcessOwnership,
     ConnectorStartResult, ServiceStartCommand,
 };
 use std::collections::{HashMap, HashSet};
@@ -81,6 +81,7 @@ impl ConnectorProcessManager {
         &self,
         connector_id: &str,
         config_path: &Path,
+        dependency_env: std::collections::BTreeMap<String, String>,
     ) -> Result<ConnectorStartResult, String> {
         let connector_id = connector_id.trim().to_string();
         if connector_id.is_empty() {
@@ -93,7 +94,12 @@ impl ConnectorProcessManager {
             .as_ref()
             .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
         {
-            let result = run_legacy_start(connector_id.clone(), config_path.to_path_buf()).await?;
+            let result = run_legacy_start(
+                connector_id.clone(),
+                config_path.to_path_buf(),
+                dependency_env,
+            )
+            .await?;
             if lifecycle_succeeded(&result) {
                 self.legacy_started.lock().await.insert(connector_id);
                 self.changed.notify_waiters();
@@ -127,7 +133,8 @@ impl ConnectorProcessManager {
         let cleanup = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
         ensure_lifecycle_succeeded(&connector_id, "启动前清理遗留进程", &cleanup)?;
 
-        let command = resolved_start_command(config_path, &connector_id)?;
+        let mut command = resolved_start_command(config_path, &connector_id)?;
+        inject_dependency_env(&mut command, dependency_env);
         let data_dir = connector_data_dir(&connector_id).map_err(|err| err.to_string())?;
         fs::create_dir_all(&data_dir)
             .map_err(|err| format!("创建本地应用运行目录 {} 失败: {err}", data_dir.display()))?;
@@ -458,11 +465,22 @@ async fn wait_for_exit(
 async fn run_legacy_start(
     connector_id: String,
     config_path: PathBuf,
+    dependency_env: std::collections::BTreeMap<String, String>,
 ) -> Result<ConnectorStartResult, String> {
-    tokio::task::spawn_blocking(move || start_connector(&connector_id, &config_path))
-        .await
-        .map_err(|err| format!("启动本地应用任务失败: {err}"))?
-        .map_err(|err| err.to_string())
+    tokio::task::spawn_blocking(move || {
+        start_connector_with_env(&connector_id, &config_path, &dependency_env)
+    })
+    .await
+    .map_err(|err| format!("启动本地应用任务失败: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+fn inject_dependency_env(
+    command: &mut ServiceStartCommand,
+    dependency_env: std::collections::BTreeMap<String, String>,
+) {
+    let ServiceStartCommand::ShellCommand { env, .. } = command;
+    env.extend(dependency_env);
 }
 
 async fn run_legacy_stop(
@@ -495,12 +513,38 @@ fn lifecycle_result(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{spawn_foreground_process, supervise_process};
+    use super::{inject_dependency_env, spawn_foreground_process, supervise_process};
     use bridge_agent::ServiceStartCommand;
     use std::collections::BTreeMap;
     use std::fs::OpenOptions;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn host_dependency_environment_overrides_manifest_environment() {
+        let mut command = ServiceStartCommand::ShellCommand {
+            command: vec!["example".to_string()],
+            cwd: None,
+            env: BTreeMap::from([(
+                "CODEX_CONNECTOR_BAIJIMU_BINARY".to_string(),
+                "relative-baijimu".to_string(),
+            )]),
+            timeout_secs: None,
+        };
+        inject_dependency_env(
+            &mut command,
+            BTreeMap::from([(
+                "CODEX_CONNECTOR_BAIJIMU_BINARY".to_string(),
+                "/absolute/managed/baijimu".to_string(),
+            )]),
+        );
+        let ServiceStartCommand::ShellCommand { env, .. } = command;
+        assert_eq!(
+            env.get("CODEX_CONNECTOR_BAIJIMU_BINARY")
+                .map(String::as_str),
+            Some("/absolute/managed/baijimu")
+        );
+    }
 
     #[tokio::test]
     async fn supervisor_stops_the_complete_foreground_process_group() {

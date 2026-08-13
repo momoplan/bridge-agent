@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -23,12 +24,13 @@ use winreg::types::FromRegValue;
 #[cfg(windows)]
 use winreg::{RegKey, RegValue};
 
-const TOOL_ID: &str = "com.baijimu.cli";
+pub const TOOL_ID: &str = "com.baijimu.cli";
 const TOOL_NAME: &str = "Baijimu CLI";
 const TOOL_DESCRIPTION: &str =
     "百积木官方命令行工具，用于在本机管理工作区、项目、智能体和平台能力。";
 const STATE_FILE_NAME: &str = "state.json";
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+static MANAGED_TOOL_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -73,6 +75,11 @@ struct CliVersionOutput {
 }
 
 pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
+    let _guard = lock_managed_tool()?;
+    bootstrap_bundled_inner(source)
+}
+
+fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
     fs::create_dir_all(versions_dir())?;
 
     if let Some(state) = load_state()? {
@@ -87,7 +94,7 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
                 if let Ok(version) = validate_cli(&launcher, None) {
                     if version_is_newer(&version, &state.active_version)? {
                         import_binary(&launcher, &version, "newer-stable-launcher", None)?;
-                        return bootstrap_bundled(source);
+                        return bootstrap_bundled_inner(source);
                     }
                 }
             }
@@ -95,18 +102,18 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
                 if let Ok(version) = validate_cli(bundled, None) {
                     if version_is_newer(&version, &state.active_version)? {
                         import_binary(bundled, &version, "bundled-upgrade", None)?;
-                        return inspect(Some(bundled));
+                        return inspect_inner(Some(bundled));
                     }
                 }
             }
             repair_launcher(&version_binary_path(&state.active_version))?;
-            return inspect(source);
+            return inspect_inner(source);
         }
         let launcher = launcher_path();
         if launcher.is_file() {
             if let Ok(version) = validate_cli(&launcher, None) {
                 import_binary(&launcher, &version, "recovered-stable-launcher", None)?;
-                return bootstrap_bundled(source);
+                return bootstrap_bundled_inner(source);
             }
         }
         if let Some(previous) = state.previous_version.clone() {
@@ -119,7 +126,7 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
                 recovered.updated_at_epoch_ms = now_ms();
                 save_state(&recovered)?;
                 repair_launcher(&version_binary_path(&recovered.active_version))?;
-                return bootstrap_bundled(source);
+                return bootstrap_bundled_inner(source);
             }
         }
     }
@@ -128,7 +135,7 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
     if launcher.is_file() {
         if let Ok(version) = validate_cli(&launcher, None) {
             import_binary(&launcher, &version, "legacy-launcher", None)?;
-            return bootstrap_bundled(source);
+            return bootstrap_bundled_inner(source);
         }
     }
 
@@ -136,7 +143,7 @@ pub fn bootstrap_bundled(source: Option<&Path>) -> Result<ManagedToolStatus> {
     let version = validate_cli(source, None)
         .with_context(|| format!("bundled baijimu CLI is invalid: {}", source.display()))?;
     import_binary(source, &version, "bundled", None)?;
-    inspect(Some(source))
+    inspect_inner(Some(source))
 }
 
 fn version_is_newer(candidate: &str, current: &str) -> Result<bool> {
@@ -148,6 +155,11 @@ fn version_is_newer(candidate: &str, current: &str) -> Result<bool> {
 }
 
 pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
+    let _guard = lock_managed_tool()?;
+    inspect_inner(bundled_source)
+}
+
+fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
     let bundled_version = bundled_source.and_then(|path| validate_cli(path, None).ok());
     let launcher = launcher_path();
     let fallback_active_path = managed_root().join("versions");
@@ -180,15 +192,15 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
                 "external-stable-launcher",
                 None,
             )?;
-            return inspect(bundled_source);
+            return inspect_inner(bundled_source);
         }
         if launcher_version != &state.active_version {
             repair_launcher(&active)?;
-            return inspect(bundled_source);
+            return inspect_inner(bundled_source);
         }
     } else if active_result.is_ok() {
         repair_launcher(&active)?;
-        return inspect(bundled_source);
+        return inspect_inner(bundled_source);
     }
 
     let launcher_result = validate_cli(&launcher, Some(&state.active_version));
@@ -227,6 +239,46 @@ pub fn inspect(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
         can_rollback: previous_valid,
         detail,
     })
+}
+
+pub fn ensure_bundled_dependency_ready(
+    tool_id: &str,
+    minimum_version: &str,
+    bundled_source: Option<&Path>,
+) -> Result<ManagedToolStatus> {
+    if tool_id != TOOL_ID {
+        bail!("unsupported managed tool dependency: {tool_id}");
+    }
+    let required_version = Version::parse(minimum_version)
+        .with_context(|| format!("invalid minimum managed tool version: {minimum_version}"))?;
+    let _guard = lock_managed_tool()?;
+    let status = bootstrap_bundled_inner(bundled_source)?;
+    if status.state != "ready" {
+        bail!("managed tool {tool_id} is not ready: {}", status.detail);
+    }
+    let installed_version_text = status
+        .installed_version
+        .as_deref()
+        .context("managed tool ready state is missing installed version")?;
+    let installed_version = Version::parse(installed_version_text).with_context(|| {
+        format!("invalid installed managed tool version: {installed_version_text}")
+    })?;
+    if installed_version < required_version {
+        bail!(
+            "managed tool {tool_id} requires version {minimum_version} or newer, installed version is {installed_version}"
+        );
+    }
+    validate_cli(
+        Path::new(&status.launcher_path),
+        Some(installed_version_text),
+    )
+    .with_context(|| {
+        format!(
+            "managed tool launcher is not executable: {}",
+            status.launcher_path
+        )
+    })?;
+    Ok(status)
 }
 
 pub async fn install_update(
@@ -285,12 +337,14 @@ pub async fn install_update(
     write_executable(&candidate, &binary)?;
     verify_platform_signature(&candidate)?;
     validate_cli(&candidate, Some(expected_version))?;
+    let _guard = lock_managed_tool()?;
     activate_candidate(&candidate, expected_version, source, &actual_checksum)?;
     let _ = fs::remove_file(candidate);
-    inspect(None)
+    inspect_inner(None)
 }
 
 pub fn rollback() -> Result<ManagedToolStatus> {
+    let _guard = lock_managed_tool()?;
     let mut state = load_state()?.context("managed CLI is not installed")?;
     let previous = state
         .previous_version
@@ -305,7 +359,13 @@ pub fn rollback() -> Result<ManagedToolStatus> {
     state.updated_at_epoch_ms = now_ms();
     save_state(&state)?;
     repair_launcher(&previous_binary)?;
-    inspect(None)
+    inspect_inner(None)
+}
+
+fn lock_managed_tool() -> Result<MutexGuard<'static, ()>> {
+    MANAGED_TOOL_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("managed tool operation lock is poisoned"))
 }
 
 fn import_binary(
@@ -1161,6 +1221,41 @@ mod tests {
         assert_eq!(inspected.state, "ready");
         assert_eq!(inspected.installed_version.as_deref(), Some("0.1.26"));
         assert_eq!(validate_cli(&launcher, None).unwrap(), "0.1.26");
+
+        std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
+        std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_dependency_bootstraps_validates_version_and_returns_stable_launcher() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("managed");
+        let bin = temp.path().join("bin");
+        std::env::set_var("BAIJIMU_MANAGED_TOOL_ROOT", &root);
+        std::env::set_var("BAIJIMU_MANAGED_BIN_DIR", &bin);
+
+        let bundled = temp.path().join("baijimu-bundled");
+        write_fake_cli(&bundled, "0.2.0");
+
+        let ready = ensure_bundled_dependency_ready(TOOL_ID, "0.1.45", Some(&bundled)).unwrap();
+        let launcher = PathBuf::from(&ready.launcher_path);
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.installed_version.as_deref(), Some("0.2.0"));
+        assert!(launcher.is_absolute());
+        assert!(launcher.is_file());
+
+        let version_error =
+            ensure_bundled_dependency_ready(TOOL_ID, "0.3.0", Some(&bundled)).unwrap_err();
+        assert!(version_error.to_string().contains("requires version 0.3.0"));
+        let id_error = ensure_bundled_dependency_ready(
+            "com.example.unknown-tool",
+            "0.1.0",
+            Some(&bundled),
+        )
+        .unwrap_err();
+        assert!(id_error.to_string().contains("unsupported managed tool"));
 
         std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
         std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");

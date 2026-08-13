@@ -43,10 +43,12 @@ const DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT: &str = "http://127.0.0.1:18081/v1
 pub(crate) const CONNECTOR_ASSET_UPLOAD_PERMISSION: &str = "assets.upload";
 const HOST_MANAGED_PROCESS_MINIMUM_VERSION: &str = "0.2.40";
 const HOST_MANAGED_PROCESS_CAPABILITY: &str = "connector.process.host-managed.v1";
+const MANAGED_TOOL_DEPENDENCIES_CAPABILITY: &str = "connector.managed-tool-dependencies.v1";
 const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
     "connector.setup.v1",
     "connector.asset-upload.v1",
     HOST_MANAGED_PROCESS_CAPABILITY,
+    MANAGED_TOOL_DEPENDENCIES_CAPABILITY,
 ];
 const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 #[cfg(windows)]
@@ -91,6 +93,8 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub host_requirements: Option<ConnectorHostRequirements>,
     #[serde(default)]
+    pub managed_tool_dependencies: Vec<ConnectorManagedToolDependency>,
+    #[serde(default)]
     pub ui: Option<ConnectorUi>,
     #[serde(default)]
     pub config_schema: Option<Value>,
@@ -116,6 +120,22 @@ pub struct ConnectorManifest {
     pub service_registration_files: Vec<String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorManagedToolDependency {
+    pub id: String,
+    pub minimum_version: String,
+    pub required_for: Vec<ConnectorManagedToolDependencyPhase>,
+    pub executable_path_env: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorManagedToolDependencyPhase {
+    Install,
+    Start,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1100,6 +1120,14 @@ fn sync_installed_connector_record(
 }
 
 pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
+    start_connector_with_env(connector_id, config_path, &BTreeMap::new())
+}
+
+pub fn start_connector_with_env(
+    connector_id: &str,
+    config_path: &Path,
+    additional_env: &BTreeMap<String, String>,
+) -> Result<ConnectorStartResult> {
     ensure_config_exists(config_path)?;
     prepare_installed_connector_runtime(config_path, connector_id)?;
     let record = load_install_record(connector_id)?;
@@ -1119,7 +1147,7 @@ pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<Connect
         .iter()
         .find(|app| app.connector_id == connector_id);
     let lifecycle = match app.and_then(|app| app.start_command.as_ref()) {
-        Some(command) => run_start_command(connector_id, command)?,
+        Some(command) => run_start_command(connector_id, command, additional_env)?,
         None => ConnectorLifecycleResult {
             connector_id: connector_id.to_string(),
             configured: false,
@@ -1143,7 +1171,7 @@ pub fn stop_connector(connector_id: &str, config_path: &Path) -> Result<Connecto
         .iter()
         .find(|app| app.connector_id == connector_id);
     let lifecycle = match app.and_then(|app| app.stop_command.as_ref()) {
-        Some(command) => run_start_command(connector_id, command)?,
+        Some(command) => run_start_command(connector_id, command, &BTreeMap::new())?,
         None => ConnectorLifecycleResult {
             connector_id: connector_id.to_string(),
             configured: false,
@@ -1309,6 +1337,7 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
             );
         }
     }
+    validate_managed_tool_dependencies(manifest)?;
     if let Some(ui) = manifest.ui.as_ref() {
         if manifest.schema_version == "1.0" {
             bail!("connector ui requires schemaVersion 1.1 or newer");
@@ -1363,6 +1392,104 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_managed_tool_dependencies(manifest: &ConnectorManifest) -> Result<()> {
+    if manifest.managed_tool_dependencies.is_empty() {
+        return Ok(());
+    }
+    if manifest.schema_version != "2.0" {
+        bail!("connector managedToolDependencies requires schemaVersion 2.0");
+    }
+    let requirements = manifest.host_requirements.as_ref().context(
+        "connector managedToolDependencies requires hostRequirements with the managed-tool dependency capability",
+    )?;
+    if !requirements
+        .capabilities
+        .iter()
+        .any(|capability| capability == MANAGED_TOOL_DEPENDENCIES_CAPABILITY)
+    {
+        bail!(
+            "connector managedToolDependencies requires host capability `{MANAGED_TOOL_DEPENDENCIES_CAPABILITY}`"
+        );
+    }
+
+    let runtime_env = manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| &runtime.env)
+        .context("connector managedToolDependencies requires runtime")?;
+    let mut ids = BTreeSet::new();
+    let mut environment_variables = BTreeSet::new();
+    for dependency in &manifest.managed_tool_dependencies {
+        if dependency.id.trim().is_empty() || dependency.id.trim() != dependency.id {
+            bail!("connector managedToolDependencies[].id must be a non-empty canonical id");
+        }
+        validate_connector_id(&dependency.id)
+            .context("connector managedToolDependencies[].id is invalid")?;
+        if !ids.insert(dependency.id.clone()) {
+            bail!(
+                "connector managedToolDependencies contains duplicate tool id `{}`",
+                dependency.id
+            );
+        }
+        semver::Version::parse(dependency.minimum_version.trim()).with_context(|| {
+            format!(
+                "connector managed tool `{}` minimumVersion must be valid SemVer",
+                dependency.id
+            )
+        })?;
+        if dependency.minimum_version.trim() != dependency.minimum_version {
+            bail!(
+                "connector managed tool `{}` minimumVersion must not contain surrounding whitespace",
+                dependency.id
+            );
+        }
+        if dependency.required_for.is_empty() {
+            bail!(
+                "connector managed tool `{}` requiredFor must contain install or start",
+                dependency.id
+            );
+        }
+        let phases = dependency
+            .required_for
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if phases.len() != dependency.required_for.len() {
+            bail!(
+                "connector managed tool `{}` requiredFor contains duplicate phases",
+                dependency.id
+            );
+        }
+        if !valid_environment_variable_name(&dependency.executable_path_env) {
+            bail!(
+                "connector managed tool `{}` executablePathEnv is invalid",
+                dependency.id
+            );
+        }
+        if !environment_variables.insert(dependency.executable_path_env.clone()) {
+            bail!(
+                "connector managedToolDependencies contains duplicate executablePathEnv `{}`",
+                dependency.executable_path_env
+            );
+        }
+        if runtime_env.contains_key(&dependency.executable_path_env) {
+            bail!(
+                "connector runtime.env cannot override host-managed dependency variable `{}`",
+                dependency.executable_path_env
+            );
+        }
+    }
+    Ok(())
+}
+
+fn valid_environment_variable_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn validate_database_contract(database: &ConnectorDatabaseContract) -> Result<()> {
@@ -1941,7 +2068,7 @@ fn stop_connector_for_package_change(
     };
     match (&app.start_command, &app.stop_command) {
         (_, Some(command)) => {
-            let result = run_start_command(connector_id, command).map_err(|error| {
+            let result = run_start_command(connector_id, command, &BTreeMap::new()).map_err(|error| {
                 anyhow::Error::new(ConnectorPackageStopError {
                     message: format!(
                         "failed to stop connector `{connector_id}` before package change: {error:#}"
@@ -3588,6 +3715,7 @@ fn cleanup_legacy_autostart_label(label: &str) {
 fn run_start_command(
     connector_id: &str,
     command: &ServiceStartCommand,
+    additional_env: &BTreeMap<String, String>,
 ) -> Result<ConnectorLifecycleResult> {
     match command {
         ServiceStartCommand::ShellCommand {
@@ -3606,6 +3734,7 @@ fn run_start_command(
                 child.current_dir(cwd);
             }
             child.envs(env);
+            child.envs(additional_env);
             let stdout_capture = tempfile::NamedTempFile::new().with_context(|| {
                 format!("failed to create stdout capture for local app `{connector_id}`")
             })?;
@@ -4091,6 +4220,67 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("connector.unknown.v1"));
+    }
+
+    #[test]
+    fn connector_manifest_validates_managed_tool_dependencies() {
+        let manifest = |dependency: Value, capabilities: Value, runtime_env: Value| {
+            serde_json::from_value::<ConnectorManifest>(json!({
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.managed-tool",
+                "name": "Managed Tool Connector",
+                "version": "1.0.0",
+                "runtime": {
+                    "type": "process",
+                    "command": "example",
+                    "env": runtime_env
+                },
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "hostRequirements": {
+                    "minimumVersion": env!("CARGO_PKG_VERSION"),
+                    "capabilities": capabilities
+                },
+                "managedToolDependencies": [dependency]
+            }))
+            .unwrap()
+        };
+        let dependency = json!({
+            "id": "com.baijimu.cli",
+            "minimumVersion": "0.1.45",
+            "requiredFor": ["install", "start"],
+            "executablePathEnv": "CODEX_CONNECTOR_BAIJIMU_BINARY"
+        });
+
+        let valid = manifest(
+            dependency.clone(),
+            json!(["connector.managed-tool-dependencies.v1"]),
+            json!({}),
+        );
+        validate_manifest(&valid).unwrap();
+        assert_eq!(
+            valid.managed_tool_dependencies[0].required_for,
+            vec![
+                ConnectorManagedToolDependencyPhase::Install,
+                ConnectorManagedToolDependencyPhase::Start
+            ]
+        );
+
+        let missing_capability = manifest(dependency.clone(), json!([]), json!({}));
+        assert!(validate_manifest(&missing_capability)
+            .unwrap_err()
+            .to_string()
+            .contains("connector.managed-tool-dependencies.v1"));
+
+        let overridden = manifest(
+            dependency,
+            json!(["connector.managed-tool-dependencies.v1"]),
+            json!({"CODEX_CONNECTOR_BAIJIMU_BINARY": "baijimu"}),
+        );
+        assert!(validate_manifest(&overridden)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot override"));
     }
 
     #[test]
@@ -4942,7 +5132,12 @@ mod tests {
         };
         let started_at = Instant::now();
 
-        let result = run_start_command("com.baijimu.connector.pipe-regression", &command).unwrap();
+        let result = run_start_command(
+            "com.baijimu.connector.pipe-regression",
+            &command,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, "started");
@@ -4969,7 +5164,12 @@ mod tests {
         };
         let started_at = Instant::now();
 
-        let result = run_start_command("com.baijimu.connector.pipe-regression", &command).unwrap();
+        let result = run_start_command(
+            "com.baijimu.connector.pipe-regression",
+            &command,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("started"));
@@ -6019,6 +6219,7 @@ bad-python-connector = "bad_python_connector.app:main"
             management: None,
             setup: None,
             host_requirements: None,
+            managed_tool_dependencies: Vec::new(),
             ui: None,
             config_schema: None,
             upgrade_review: None,

@@ -95,6 +95,34 @@ Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.con
 - setup 不得阻塞 Connector 下载、校验、安装、注册和启动。宿主完成这些阶段后立即报告“安装完成”，初始化状态只能显示在应用自身界面中。
 - setup 不得要求用户再次选择本机设备或与能力无关的业务项目；需要凭证时由应用使用应用界面确认的当前工作区上下文，并精确校验本机授权。
 
+### 官方托管工具依赖
+
+Connector 需要调用 Baijimu CLI 等官方托管工具时，必须在清单中声明依赖，不能依赖桌面宿主进程启动时继承的 `PATH`：
+
+```json
+{
+  "hostRequirements": {
+    "minimumVersion": "0.2.82",
+    "capabilities": ["connector.managed-tool-dependencies.v1"]
+  },
+  "managedToolDependencies": [
+    {
+      "id": "com.baijimu.cli",
+      "minimumVersion": "0.1.45",
+      "requiredFor": ["install", "start"],
+      "executablePathEnv": "EXAMPLE_BAIJIMU_BINARY"
+    }
+  ]
+}
+```
+
+- `managedToolDependencies` 仅允许用于 `schemaVersion: "2.0"`，并要求宿主能力 `connector.managed-tool-dependencies.v1`。
+- `id` 是官方托管工具的稳定身份；`minimumVersion` 是 Connector 实际调用契约所需的最低 SemVer，不能写成随发布变化的“当前最新版”。
+- `requiredFor` 可包含 `install` 和 `start`。宿主必须在进入对应阶段前串行完成工具安装或修复、版本校验和真实可执行性检查；失败时必须停止该阶段，不能继续安装或启动 Connector。
+- `executablePathEnv` 是宿主在每次启动 Connector 时注入的变量。值必须是宿主动态解析并验证过的稳定 launcher 绝对路径；不得持久化到 Connector 配置，也不得允许 `runtime.env` 覆盖。
+- `install` 门禁发生在包下载、签名和清单校验之后、停止或替换现有应用之前；因此依赖失败不会破坏已安装版本。`start` 门禁发生在创建 Connector 进程之前，覆盖首次安装后的自动启动、手动启动、升级重启和客户端恢复启动。
+- 官方托管工具可随 Bridge Agent 安装包提供内置副本，也可独立升级；依赖解析始终采用托管工具状态与版本目录作为源事实。内置副本只负责首次引导和修复，不能覆盖更高版本。
+
 ## Connector 包结构
 
 一个 Connector 包必须至少包含：
