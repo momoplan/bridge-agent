@@ -1249,12 +1249,9 @@ mod tests {
         let version_error =
             ensure_bundled_dependency_ready(TOOL_ID, "0.3.0", Some(&bundled)).unwrap_err();
         assert!(version_error.to_string().contains("requires version 0.3.0"));
-        let id_error = ensure_bundled_dependency_ready(
-            "com.example.unknown-tool",
-            "0.1.0",
-            Some(&bundled),
-        )
-        .unwrap_err();
+        let id_error =
+            ensure_bundled_dependency_ready("com.example.unknown-tool", "0.1.0", Some(&bundled))
+                .unwrap_err();
         assert!(id_error.to_string().contains("unsupported managed tool"));
 
         std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
