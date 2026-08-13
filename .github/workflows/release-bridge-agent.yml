@@ -1730,7 +1730,8 @@ jobs:
           latest_api="$(node .github/scripts/release-service-url.mjs update "$BRIDGE_AGENT_UPDATE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
 
-          latest_payload="$(curl -fsSL --retry 6 --retry-delay 5 \
+          latest_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 \
             "${latest_api}?currentVersion=0.0.0")"
           jq -e --arg version "$version" '
             .version == $version
@@ -1748,7 +1749,8 @@ jobs:
               and .minimumSupportedVersion == $minimum_version
             ' <<<"$latest_payload" >/dev/null
 
-            supported_payload="$(curl -fsSL --retry 6 --retry-delay 5 \
+            supported_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+              --connect-timeout 20 \
               "${latest_api}?currentVersion=${MINIMUM_SUPPORTED_VERSION}")"
             jq -e --arg version "$version" --arg minimum_version "$MINIMUM_SUPPORTED_VERSION" '
               .version == $version
@@ -1760,7 +1762,8 @@ jobs:
           for target_arch in darwin:aarch64 windows:x86_64 linux:x86_64; do
             target="${target_arch%%:*}"
             arch="${target_arch#*:}"
-            updater_payload="$(curl -fsSL --retry 6 --retry-delay 5 \
+            updater_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+              --connect-timeout 20 \
               "${latest_api}/tauri?target=${target}&arch=${arch}&currentVersion=0.0.0")"
             updater_url="$(jq -er --arg version "$version" '
               select(.version == $version)
@@ -1768,6 +1771,7 @@ jobs:
               | .url
               | select(test("^https://download\\.baijimu\\.com/lowcode/direct-uploads/bridge-agent-release/"))
             ' <<<"$updater_payload")"
-            curl -fsSL --retry 6 --retry-delay 5 --range 0-0 --max-time 120 \
+            curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+              --connect-timeout 20 --range 0-0 --max-time 120 \
               --output /dev/null "$updater_url"
           done
