@@ -267,7 +267,10 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           cargo check --locked --workspace --all-targets
           cargo clippy --locked --workspace --all-targets -- -D warnings
-          cargo test --locked --workspace
+          # Shell lifecycle tests exercise real child-process and pipe handling.
+          # Keep the Windows quality gate deterministic instead of competing with
+          # the connector installation tests for process and I/O resources.
+          cargo test --locked --workspace -- --test-threads=1
           cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path src-tauri/Cargo.toml codex_skill::tests::installs_bundled_skill_in_user_skill_directory -- --exact
