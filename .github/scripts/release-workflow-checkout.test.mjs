@@ -55,6 +55,18 @@ describe("release workflow repository script availability", () => {
     );
   });
 
+  test("new build assets are public while latest metadata remains manually selected", () => {
+    const publishBody = jobBody("publish-update-service");
+
+    expect(workflow).not.toContain("--draft");
+    expect(workflow).not.toContain("publish_only:");
+    expect(publishBody).toContain("inputs.repair_assets_only");
+    expect(publishBody).toContain(
+      "needs.mirror-domestic-release.result == 'success'",
+    );
+    expect(publishBody).not.toContain("github.event_name == 'push'");
+  });
+
   test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
     const body = jobBody("windows-quality-gate", "release");
     const prepareUninstallerIndex = body.indexOf(
