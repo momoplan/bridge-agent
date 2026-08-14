@@ -212,9 +212,6 @@ impl AgentRuntimeManager {
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
         let runtime_lock = RuntimeInstanceLock::acquire(config_path, &config.relay.agent_id)?;
-        let registry = Arc::new(RwLock::new(
-            ServiceRegistry::from_config_checked(&config, &config_base_dir).await?,
-        ));
         let file_log = FileLogSink::from_config(
             &FileLogConfig {
                 enabled: config.runtime.log_file_enabled,
@@ -265,6 +262,16 @@ impl AgentRuntimeManager {
             *active_file_log = file_log;
         }
         self.push_log("info", "runtime starting", log_limit).await;
+
+        let registry = match ServiceRegistry::from_config_checked(&config, &config_base_dir).await {
+            Ok(registry) => Arc::new(RwLock::new(registry)),
+            Err(err) => {
+                let message = format!("runtime preparation failed: {err:#}");
+                self.force_stopped_with_error(message.clone()).await;
+                self.push_log("error", &message, log_limit).await;
+                return Err(err);
+            }
+        };
 
         let inner = Arc::clone(&self.inner);
         let config_path_string = config_path.display().to_string();
@@ -474,7 +481,7 @@ impl AgentRuntimeManager {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 let message = format!("runtime task ended before stop completed: {err:#}");
-                self.force_stopped_after_failed_stop(message.clone()).await;
+                self.force_stopped_with_error(message.clone()).await;
                 self.push_log("error", &message, DEFAULT_LOG_LIMIT).await;
             }
             Err(_) => {
@@ -521,12 +528,12 @@ impl AgentRuntimeManager {
                         .await;
                     }
                 }
-                self.force_stopped_after_failed_stop(message).await;
+                self.force_stopped_with_error(message).await;
             }
         }
     }
 
-    async fn force_stopped_after_failed_stop(&self, last_error: String) {
+    async fn force_stopped_with_error(&self, last_error: String) {
         let snapshot = {
             let mut state = self.inner.state.lock().await;
             state.snapshot.status = RuntimeStatus::Stopped;
@@ -1846,11 +1853,12 @@ mod tests {
         RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode, WebSocketError,
         RELAY_AUTHORIZATION_REQUIRED_MESSAGE,
     };
-    use crate::config::{AgentConfig, EventConfig, ServiceConfig};
+    use crate::config::{AgentConfig, EventConfig, ServiceConfig, ServiceHealthCheck};
     use crate::logging::LogMetadata;
     use crate::protocol::AgentMessage;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -2350,6 +2358,82 @@ mod tests {
         assert!(first.is_ok(), "first start failed: {first:?}");
         assert!(second.is_ok(), "second start failed: {second:?}");
         manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_reports_starting_while_local_services_are_prepared() {
+        let health_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let health_addr = health_listener.local_addr().unwrap();
+        let health_server = tokio::spawn(async move {
+            let Ok((socket, _)) = health_listener.accept().await else {
+                return;
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            drop(socket);
+        });
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        let mut config = AgentConfig::example();
+        config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
+        config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
+        config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
+        config.runtime.event_server_enabled = false;
+        config.runtime.service_registration_enabled = false;
+        config.services = vec![ServiceConfig {
+            name: "slowHealthCheck".to_string(),
+            description: "Keeps runtime preparation pending for the test.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: format!("http://{health_addr}/health"),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: None,
+            stop_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "changed".to_string(),
+                description: "Changed.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        }];
+
+        let manager = AgentRuntimeManager::new();
+        let mut events = manager.subscribe();
+        let start_manager = manager.clone();
+        let start_path = config_path.clone();
+        let start = tokio::spawn(async move { start_manager.start(config, &start_path).await });
+
+        let starting = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                if let RuntimeEvent::SnapshotChanged(snapshot) = events.recv().await.unwrap() {
+                    if snapshot.status == RuntimeStatus::Starting {
+                        break snapshot;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("runtime did not report starting while service preparation was pending");
+
+        assert_eq!(
+            starting.agent_id.as_deref(),
+            Some("dev_starting_during_service_preparation")
+        );
+        assert_eq!(manager.snapshot().await.status, RuntimeStatus::Starting);
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), start)
+            .await
+            .expect("runtime preparation did not finish")
+            .expect("runtime start task panicked")
+            .expect("runtime start failed");
+        manager.stop().await.unwrap();
+        health_server.abort();
     }
 
     #[tokio::test]
