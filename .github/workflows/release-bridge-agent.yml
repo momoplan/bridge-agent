@@ -15,6 +15,16 @@ on:
         required: false
         default: false
         type: boolean
+      publish_only:
+        description: Publish an existing tested draft release without rebuilding assets
+        required: false
+        default: false
+        type: boolean
+      requested_by:
+        description: Operator forwarded by the release management console
+        required: false
+        default: ""
+        type: string
       minimum_supported_version:
         description: Optional minimum supported client version to publish after repairing release metadata
         required: false
@@ -37,6 +47,7 @@ jobs:
   prepare-domestic-release:
     name: Prepare domestic release
     runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.publish_only }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
@@ -170,7 +181,7 @@ jobs:
 
   quality-gate:
     name: Release quality gate
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.repair_assets_only && !inputs.publish_only) }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -223,7 +234,7 @@ jobs:
 
   windows-quality-gate:
     name: Windows release quality gate
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.repair_assets_only && !inputs.publish_only) }}
     runs-on: windows-latest
 
     steps:
@@ -281,7 +292,7 @@ jobs:
   release:
     name: ${{ matrix.name }}
     needs: [prepare-domestic-release, quality-gate, windows-quality-gate]
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.repair_assets_only && !inputs.publish_only) }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -1456,6 +1467,7 @@ jobs:
           release_create_args=(
             "$RELEASE_TAG"
             --verify-tag
+            --draft
             --title "百积木 $RELEASE_TAG"
             --notes-file "$release_notes"
           )
@@ -1601,10 +1613,18 @@ jobs:
           upload_asset "Linux x64" "${linux_appimage[0]}"
 
   publish-update-service:
-    name: Publish update service metadata
+    name: Publish approved release
     runs-on: ubuntu-22.04
     needs: mirror-domestic-release
-    if: ${{ always() && needs.mirror-domestic-release.result == 'success' }}
+    if: >-
+      ${{
+        always()
+        && github.event_name == 'workflow_dispatch'
+        && (
+          inputs.publish_only
+          || (inputs.repair_assets_only && needs.mirror-domestic-release.result == 'success')
+        )
+      }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
@@ -1616,7 +1636,11 @@ jobs:
 
       - name: Validate release tag
         shell: bash
+        env:
+          PUBLISH_ONLY: ${{ inputs.publish_only }}
+          REPAIR_ASSETS_ONLY: ${{ inputs.repair_assets_only }}
         run: |
+          set -euo pipefail
           case "$RELEASE_TAG" in
             bridge-agent-v*) ;;
             *)
@@ -1624,12 +1648,39 @@ jobs:
               exit 1
               ;;
           esac
+          if [ "$PUBLISH_ONLY" = "true" ] && [ "$REPAIR_ASSETS_ONLY" = "true" ]; then
+            echo "publish_only and repair_assets_only cannot both be enabled" >&2
+            exit 1
+          fi
+
+      - name: Validate approved GitHub release assets
+        if: ${{ inputs.publish_only }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,tagName,assets)"
+          jq -e --arg tag "$RELEASE_TAG" '
+            .tagName == $tag
+            and ([.assets[].name | select(endswith(".dmg"))] | length == 1)
+            and ([.assets[].name | select(endswith(".app.tar.gz"))] | length == 1)
+            and ([.assets[].name | select(endswith(".app.tar.gz.sig"))] | length == 1)
+            and ([.assets[].name | select(endswith(".msi"))] | length == 1)
+            and ([.assets[].name | select(endswith(".msi.sig"))] | length == 1)
+            and ([.assets[].name | select(endswith(".deb"))] | length == 1)
+            and ([.assets[].name | select(endswith(".AppImage"))] | length == 1)
+            and ([.assets[].name | select(endswith(".AppImage.sig"))] | length == 1)
+          ' <<<"$release_json" >/dev/null
 
       - name: Publish release to update service
         shell: bash
         env:
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
           BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
+          REQUESTED_BY: ${{ inputs.requested_by }}
         run: |
           set -euo pipefail
           for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
@@ -1641,13 +1692,26 @@ jobs:
 
           api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
           version="${RELEASE_TAG#bridge-agent-v}"
+          actor="${REQUESTED_BY:-github-actions:${GITHUB_RUN_ID}}"
 
           curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
             -X POST \
             -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
+            -H "X-Bridge-Release-Actor: $actor" \
             -H "Content-Type: application/json" \
             --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\"}" \
             "$api/releases/$RELEASE_TAG/publish"
+
+      - name: Make approved GitHub release public
+        if: ${{ inputs.publish_only }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
 
       - name: Update minimum supported client version
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.minimum_supported_version != '' }}
