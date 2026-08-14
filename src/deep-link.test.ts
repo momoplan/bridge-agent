@@ -14,10 +14,8 @@ describe("Baijimu desktop deep links", () => {
       });
   });
 
-  it("accepts the device authorization completion route without authorization data", () => {
-    expect(
-      parseBaijimuDeepLink("baijimu://bridge-agent/device-authorization-complete")
-    ).toEqual({ kind: "device_authorization_complete" });
+  it("accepts a generic app activation route without asserting business state", () => {
+    expect(parseBaijimuDeepLink("baijimu://open")).toEqual({ kind: "app_open" });
   });
 
   it.each([
@@ -28,8 +26,12 @@ describe("Baijimu desktop deep links", () => {
     "baijimu://codex/install?next=https%3A%2F%2Fevil.example",
     "baijimu://codex/install?shareId=one&shareId=two",
     "baijimu://codex/install?shareId=contains%2Fslash",
+    "baijimu://open/",
+    "baijimu://open?authorized=true",
+    "baijimu://open#fragment",
     "baijimu://bridge-agent/device-authorization-complete?user_code=secret",
     "baijimu://bridge-agent/device-authorization-complete#fragment",
+    "baijimu://bridge-agent/device-authorization-complete",
     "baijimu://bridge-agent/other"
   ])("rejects unsupported or unsafe routes: %s", (url) => {
     expect(parseBaijimuDeepLink(url)).toBeNull();

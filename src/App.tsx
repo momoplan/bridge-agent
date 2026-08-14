@@ -18,7 +18,12 @@ import {
   X
 } from "lucide-react";
 import { clientInfo, clientWarn } from "./client-logger";
+import { DeviceAuthorizationGate } from "./components/DeviceAuthorizationGate";
 import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
+import {
+  deriveDeviceAuthorizationState,
+  deviceAuthorizationLocksCapabilities
+} from "./device-authorization-state";
 import {
   CODEX_CONNECTOR_ID,
   CODEX_MARKET_APP_ID,
@@ -920,6 +925,8 @@ function App() {
   const localAppsChangeRevisionRef = useRef(0);
   const localAppUpdateRefreshRef = useRef<Promise<void> | null>(null);
   const previousActivePageRef = useRef<AppPage>("apps");
+  const authorizationStateRef = useRef<ReturnType<typeof deriveDeviceAuthorizationState> | null>(null);
+  const queuedDeepLinkIntentsRef = useRef<BaijimuDeepLinkIntent[]>([]);
   const [marketConnectors, setMarketConnectors] = useState<MarketConnector[]>([]);
   const [baijimuCli, setBaijimuCli] = useState<ManagedToolStatus | null>(null);
   const [connectorUpdateStatuses, setConnectorUpdateStatuses] = useState<Record<string, ConnectorAppUpdateStatus>>({});
@@ -986,6 +993,10 @@ function App() {
       const intent = parseBaijimuDeepLink(rawUrl);
       if (!intent) {
         clientWarn("忽略不支持的百积木客户端链接", rawUrl);
+        return;
+      }
+      if (authorizationStateRef.current == null) {
+        queuedDeepLinkIntentsRef.current.push(intent);
         return;
       }
       openBaijimuDeepLinkIntent(intent);
@@ -1421,9 +1432,32 @@ function App() {
     });
   }, [config?.services.length]);
 
+  const authorizationState = useMemo(() => deriveDeviceAuthorizationState({
+    workspaceId: config?.platform.workspace_id ?? "",
+    relayTokenConfigured: config?.credential_status.relay_token_configured ?? false,
+    runtimeStatus: runtime?.status,
+    authorizationPending: browserAuth != null
+  }), [browserAuth, config, runtime?.status]);
+  const needsAuthorization = deviceAuthorizationLocksCapabilities(authorizationState);
+
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    authorizationStateRef.current = authorizationState;
+    const queuedIntents = queuedDeepLinkIntentsRef.current.splice(0);
+    queuedIntents.forEach(openBaijimuDeepLinkIntent);
+  }, [authorizationState, config]);
+
   const statusLabel = useMemo(() => {
-    if (config && needsBrowserAuthorization(config, runtime)) {
+    if (authorizationState === "unauthorized") {
       return "未授权";
+    }
+    if (authorizationState === "authorizing") {
+      return "授权中";
+    }
+    if (authorizationState === "reauthorization_required") {
+      return "需重新授权";
     }
     if (!runtime) {
       return "未加载";
@@ -1438,8 +1472,18 @@ function App() {
       stopping: "停止中"
     };
     return textMap[runtime.status];
-  }, [config, runtime]);
-  const needsAuthorization = config ? needsBrowserAuthorization(config, runtime) : false;
+  }, [authorizationState, runtime]);
+
+  useEffect(() => {
+    if (!needsAuthorization) {
+      return;
+    }
+    setActivePage((current) => current === "diagnostics" ? current : "apps");
+    setInstallPanelOpen(false);
+    setSelectedLocalAppId(null);
+    setPendingUpgradeAppId(null);
+  }, [installPanelOpen, needsAuthorization, pendingUpgradeAppId, selectedLocalAppId]);
+
   const startActionLocked =
     !needsAuthorization &&
     (runtime?.status === "starting" ||
@@ -1929,15 +1973,19 @@ function App() {
 
   function openBaijimuDeepLinkIntent(intent: BaijimuDeepLinkIntent) {
     if (intent.kind === "codex_install") {
+      if (authorizationStateRef.current !== "authorized") {
+        setActivePage("apps");
+        setInstallPanelOpen(false);
+        setSelectedLocalAppId(null);
+        setPendingUpgradeAppId(null);
+        clientWarn("设备未授权，忽略本地应用安装链接");
+        return;
+      }
       void openCodexDeepLinkIntent(intent);
       return;
     }
 
-    setActivePage("apps");
-    setInstallPanelOpen(false);
-    setSelectedLocalAppId(null);
-    setMessage("设备授权已完成，正在同步连接状态");
-    setError("");
+    clientInfo("收到通用客户端唤起请求");
   }
 
   async function refreshConnectorApps(): Promise<ConnectorSummary[]> {
@@ -3835,44 +3883,35 @@ function App() {
     );
   }
 
-  function renderBrowserAuthPanel() {
-    if (!browserAuth) {
+  function renderDeviceAuthorizationGate() {
+    if (authorizationState === "authorized" || !config) {
       return null;
     }
 
     return (
-      <div className="browser-auth-panel" role="status">
-        <div className="browser-auth-copy">
-          <strong>等待浏览器授权</strong>
-          <p>用户码 {browserAuth.userCode}</p>
-          <input
-            aria-label="授权链接"
-            readOnly
-            value={browserAuth.verificationUriComplete}
-            onFocus={(event) => event.currentTarget.select()}
-          />
-        </div>
-        <div className="browser-auth-actions">
-          <button
-            className="primary"
-            onClick={() => void copyText(browserAuth.verificationUriComplete, "授权链接")}
-          >
-            复制链接
-          </button>
-          <button
-            className="secondary"
-            onClick={() => void openExternalUrlInEdge(browserAuth.verificationUriComplete)}
-          >
-            用 Edge 打开
-          </button>
-          <button
-            className="secondary"
-            onClick={() => void openExternalUrl(browserAuth.verificationUriComplete)}
-          >
-            默认浏览器打开
-          </button>
-        </div>
-      </div>
+      <DeviceAuthorizationGate
+        state={authorizationState}
+        workspaceId={config.platform.workspace_id}
+        pendingAuthorization={browserAuth}
+        busy={busy}
+        onAuthorize={() => void beginBrowserAuth()}
+        onCopyAuthorizationUrl={() => {
+          if (browserAuth) {
+            void copyText(browserAuth.verificationUriComplete, "授权链接");
+          }
+        }}
+        onOpenAuthorizationUrl={() => {
+          if (browserAuth) {
+            void openExternalUrl(browserAuth.verificationUriComplete);
+          }
+        }}
+        onOpenAuthorizationUrlInEdge={() => {
+          if (browserAuth) {
+            void openExternalUrlInEdge(browserAuth.verificationUriComplete);
+          }
+        }}
+        onOpenDiagnostics={() => setActivePage("diagnostics")}
+      />
     );
   }
 
@@ -5641,37 +5680,18 @@ function App() {
       return null;
     }
     const actionableRuntime =
-      !needsAuthorization &&
       runtime != null &&
       (runtime.status !== "online" || !runtime.relay_registered)
         ? runtime
         : null;
     const hasClientUpdate = appUpdate?.updateAvailable === true && !appUpdate.forceUpdateRequired;
 
-    if (!needsAuthorization && !actionableRuntime && !hasDesktopPermissionGap && !hasClientUpdate) {
+    if (!actionableRuntime && !hasDesktopPermissionGap && !hasClientUpdate) {
       return null;
     }
 
     return (
       <div className="app-attention-stack" aria-label="需要处理">
-        {needsAuthorization ? (
-          <div className="notice-banner warning" role="status">
-            <div>
-              <strong>
-                {runtime?.status === "authorization_required" ? "设备授权已失效" : "授权后即可使用本地应用"}
-              </strong>
-              <span>
-                {runtime?.status === "authorization_required"
-                  ? "Relay 已拒绝当前设备凭证，自动重连已暂停；重新授权后会轮换凭证并恢复连接。"
-                  : "完成浏览器授权后，本机应用与开放能力会连接到百积木工作区。"}
-              </span>
-            </div>
-            <button className="primary" onClick={() => void beginBrowserAuth()} disabled={busy}>
-              {browserAuth ? "授权中" : "去授权"}
-            </button>
-          </div>
-        ) : null}
-
         {actionableRuntime ? (
           <div className="notice-banner warning" role="status">
             <div>
@@ -7124,6 +7144,10 @@ function App() {
   const currentVersion = appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-";
 
   function navigateToPage(page: AppPage) {
+    if (needsAuthorization && page === "settings") {
+      setActivePage("apps");
+      return;
+    }
     setActivePage(page);
     if (page === "apps") {
       setSelectedLocalAppId(null);
@@ -7147,6 +7171,7 @@ function App() {
           version={currentVersion}
           lastError={needsAuthorization ? null : runtime?.last_error}
           refreshing={refreshing}
+          authorizationState={authorizationState}
           onNavigate={navigateToPage}
           onRefresh={() => void refreshAll()}
         />
@@ -7156,7 +7181,7 @@ function App() {
             <div className="desktop-content">
               <div className="desktop-content-inner">
                 <h1 className="sr-only">{pageTitleMap[activePage]}</h1>
-                {renderRuntimeConflictPanel()}
+                {!needsAuthorization ? renderRuntimeConflictPanel() : null}
                 {degradedStartupComponents.length > 0 && !startupHealth?.safeMode ? (
                   <div className="alert warning startup-health-alert">
                     <span>
@@ -7177,12 +7202,16 @@ function App() {
                     {runtime.last_error}
                   </div>
                 ) : null}
-                {renderBrowserAuthPanel()}
-
                 <div className="page-body">
-                  {activePage === "apps" ? renderAppsPage() : null}
-                  {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
-                  {activePage === "settings" ? renderSettingsPage() : null}
+                  {needsAuthorization ? (
+                    activePage === "diagnostics" ? renderDiagnosticsPage() : renderDeviceAuthorizationGate()
+                  ) : (
+                    <>
+                      {activePage === "apps" ? renderAppsPage() : null}
+                      {activePage === "diagnostics" ? renderDiagnosticsPage() : null}
+                      {activePage === "settings" ? renderSettingsPage() : null}
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -7190,7 +7219,7 @@ function App() {
         </section>
       </div>
       {renderToastStack()}
-      {renderInstallLocalAppPanel()}
+      {!needsAuthorization ? renderInstallLocalAppPanel() : null}
       {renderForceUpdateOverlay()}
       {startupHealth?.safeMode ? (
         <div className="startup-recovery-overlay" role="dialog" aria-modal="true">
@@ -8273,11 +8302,11 @@ export function needsBrowserAuthorization(
   config: UiAgentConfig,
   runtime?: Pick<RuntimeSnapshot, "status"> | null
 ): boolean {
-  return (
-    !config.platform.workspace_id.trim() ||
-    !config.credential_status.relay_token_configured ||
-    runtime?.status === "authorization_required"
-  );
+  return deviceAuthorizationLocksCapabilities(deriveDeviceAuthorizationState({
+    workspaceId: config.platform.workspace_id,
+    relayTokenConfigured: config.credential_status.relay_token_configured,
+    runtimeStatus: runtime?.status
+  }));
 }
 
 function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {

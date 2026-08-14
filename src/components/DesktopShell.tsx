@@ -9,6 +9,7 @@ import {
   X
 } from "lucide-react";
 import bjmLogoLight from "../assets/brand/bjm-logo-light.svg";
+import type { DeviceAuthorizationState } from "../device-authorization-state";
 
 export type DesktopPage = "apps" | "diagnostics" | "settings";
 
@@ -23,6 +24,7 @@ interface DesktopSidebarProps {
   version: string;
   lastError?: string | null;
   refreshing?: boolean;
+  authorizationState: DeviceAuthorizationState;
   onNavigate: (page: DesktopPage) => void;
   onRefresh: () => void;
 }
@@ -48,6 +50,7 @@ export function DesktopSidebar({
   version,
   lastError,
   refreshing = false,
+  authorizationState,
   onNavigate,
   onRefresh
 }: DesktopSidebarProps) {
@@ -95,6 +98,7 @@ export function DesktopSidebar({
   }
 
   const workspaceLabel = workspace || "未授权";
+  const authorizationLocked = authorizationState !== "authorized";
   const hasKnownVersion = Boolean(version && version !== "-");
   const versionLabel = hasKnownVersion ? `v${version}` : "版本未知";
   const versionDescription = hasKnownVersion ? version : "未知";
@@ -105,8 +109,8 @@ export function DesktopSidebar({
         <button
           className="desktop-brand-home"
           onClick={() => onNavigate("apps")}
-          aria-label="打开应用首页"
-          title="打开应用首页"
+          aria-label={authorizationLocked ? "打开设备授权页" : "打开应用首页"}
+          title={authorizationLocked ? "打开设备授权页" : "打开应用首页"}
         >
           <img src={bjmLogoLight} alt="" aria-hidden="true" />
           <House className="desktop-brand-home-icon" size={12} aria-hidden="true" />
@@ -220,6 +224,7 @@ export function DesktopSidebar({
         <span className="desktop-nav-label">工作台</span>
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
+          const authorizationHome = authorizationLocked && item.id === "apps";
           return (
             <button
               key={item.id}
@@ -229,8 +234,8 @@ export function DesktopSidebar({
             >
               <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
               <span>
-                <strong>{item.label}</strong>
-                <small>{item.description}</small>
+                <strong>{authorizationHome ? "授权" : item.label}</strong>
+                <small>{authorizationHome ? "授权后开放本地能力" : item.description}</small>
               </span>
             </button>
           );
@@ -245,6 +250,8 @@ export function DesktopSidebar({
           className={`desktop-nav-item ${activePage === "settings" ? "active" : ""}`}
           onClick={() => onNavigate("settings")}
           aria-current={activePage === "settings" ? "page" : undefined}
+          disabled={authorizationLocked}
+          title={authorizationLocked ? "完成设备授权后开放设置" : undefined}
         >
           <Settings size={18} strokeWidth={1.8} aria-hidden="true" />
           <span>

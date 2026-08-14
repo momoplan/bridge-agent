@@ -2,7 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { DesktopSidebar } from "./DesktopShell";
 
-function renderSidebar(workspace: string, version: string) {
+function renderSidebar(
+  workspace: string,
+  version: string,
+  authorizationState: "unauthorized" | "authorized" = workspace ? "authorized" : "unauthorized"
+) {
   return renderToStaticMarkup(
     <DesktopSidebar
       activePage="apps"
@@ -13,6 +17,7 @@ function renderSidebar(workspace: string, version: string) {
       relay="wss://relay.example.com"
       lastEvent="刚刚"
       version={version}
+      authorizationState={authorizationState}
       onNavigate={vi.fn()}
       onRefresh={vi.fn()}
     />
@@ -33,5 +38,7 @@ describe("DesktopSidebar environment metadata", () => {
 
     expect(markup).toContain("当前工作区 未授权，客户端版本 未知");
     expect(markup).toContain("desktop-environment-version\">版本未知</span>");
+    expect(markup).toContain("授权后开放本地能力");
+    expect(markup).toContain("完成设备授权后开放设置");
   });
 });

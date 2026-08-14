@@ -702,6 +702,109 @@ select {
   gap: var(--ds-space-sm);
 }
 
+.device-authorization-gate {
+  display: grid;
+  width: min(680px, 100%);
+  margin: clamp(28px, 8vh, 88px) auto;
+  padding: clamp(28px, 5vw, 48px);
+  gap: var(--ds-space-lg);
+  border: 1px solid var(--ds-color-border);
+  border-radius: var(--ds-radius-lg);
+  background: var(--ds-color-panel);
+  box-shadow: var(--ds-shadow-panel);
+}
+
+.device-authorization-icon {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border-radius: 18px;
+  color: var(--ds-color-brand-primary);
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.device-authorization-gate.state-reauthorization_required .device-authorization-icon {
+  color: var(--ds-color-warning);
+  background: rgba(155, 103, 0, 0.1);
+}
+
+.device-authorization-copy > span,
+.device-authorization-session span {
+  color: var(--ds-color-text-muted);
+  font-size: var(--ds-font-caption);
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.device-authorization-copy h2 {
+  margin: 6px 0 8px;
+  color: var(--ds-color-text);
+  font-size: clamp(22px, 3vw, 30px);
+}
+
+.device-authorization-copy p,
+.device-authorization-copy small,
+.device-authorization-boundary {
+  color: var(--ds-color-text-secondary);
+  line-height: 1.65;
+}
+
+.device-authorization-copy p,
+.device-authorization-boundary {
+  margin: 0;
+}
+
+.device-authorization-copy small {
+  display: block;
+  margin-top: 8px;
+}
+
+.device-authorization-session {
+  display: grid;
+  gap: var(--ds-space-md);
+  padding: var(--ds-space-lg);
+  border: 1px solid var(--ds-color-border);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-color-muted);
+}
+
+.device-authorization-session > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ds-space-md);
+}
+
+.device-authorization-session strong {
+  color: var(--ds-color-text);
+  font-size: 18px;
+  letter-spacing: 0.08em;
+}
+
+.device-authorization-session input {
+  width: 100%;
+}
+
+.device-authorization-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ds-space-sm);
+}
+
+.device-authorization-actions button {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+}
+
+.device-authorization-boundary {
+  padding-top: var(--ds-space-md);
+  border-top: 1px solid var(--ds-color-border);
+  font-size: var(--ds-font-caption);
+}
+
 .app-attention-stack .notice-banner,
 .local-app-panel > .notice-banner {
   display: flex;
