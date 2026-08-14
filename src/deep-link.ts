@@ -6,7 +6,13 @@ export interface CodexInstallDeepLinkIntent {
   shareId: string | null;
 }
 
-export type BaijimuDeepLinkIntent = CodexInstallDeepLinkIntent;
+export interface DeviceAuthorizationCompleteDeepLinkIntent {
+  kind: "device_authorization_complete";
+}
+
+export type BaijimuDeepLinkIntent =
+  | CodexInstallDeepLinkIntent
+  | DeviceAuthorizationCompleteDeepLinkIntent;
 
 const SHARE_ID_PATTERN = /^[A-Za-z0-9._~-]{1,256}$/;
 
@@ -18,15 +24,19 @@ export function parseBaijimuDeepLink(rawUrl: string): BaijimuDeepLinkIntent | nu
     return null;
   }
 
+  if (url.protocol !== "baijimu:" || url.username || url.password || url.port || url.hash) {
+    return null;
+  }
+
   if (
-    url.protocol !== "baijimu:" ||
-    url.hostname !== "codex" ||
-    url.pathname !== "/install" ||
-    url.username ||
-    url.password ||
-    url.port ||
-    url.hash
+    url.hostname === "bridge-agent" &&
+    url.pathname === "/device-authorization-complete" &&
+    Array.from(url.searchParams.keys()).length === 0
   ) {
+    return { kind: "device_authorization_complete" };
+  }
+
+  if (url.hostname !== "codex" || url.pathname !== "/install") {
     return null;
   }
 

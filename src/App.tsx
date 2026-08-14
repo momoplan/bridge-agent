@@ -23,6 +23,7 @@ import {
   CODEX_CONNECTOR_ID,
   CODEX_MARKET_APP_ID,
   parseBaijimuDeepLink,
+  type BaijimuDeepLinkIntent,
   type CodexInstallDeepLinkIntent
 } from "./deep-link";
 import {
@@ -987,7 +988,7 @@ function App() {
         clientWarn("忽略不支持的百积木客户端链接", rawUrl);
         return;
       }
-      void openCodexDeepLinkIntent(intent);
+      openBaijimuDeepLinkIntent(intent);
     };
 
     async function initializeDeepLinks() {
@@ -1924,6 +1925,19 @@ function App() {
     } else {
       setError("应用市场暂未提供 Codex，请刷新后重试");
     }
+  }
+
+  function openBaijimuDeepLinkIntent(intent: BaijimuDeepLinkIntent) {
+    if (intent.kind === "codex_install") {
+      void openCodexDeepLinkIntent(intent);
+      return;
+    }
+
+    setActivePage("apps");
+    setInstallPanelOpen(false);
+    setSelectedLocalAppId(null);
+    setMessage("设备授权已完成，正在同步连接状态");
+    setError("");
   }
 
   async function refreshConnectorApps(): Promise<ConnectorSummary[]> {
