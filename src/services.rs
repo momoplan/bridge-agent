@@ -442,6 +442,49 @@ impl ServiceRegistry {
         })
     }
 
+    /// Builds the capabilities that are safe to advertise without waiting on any
+    /// external process or network endpoint. Health-checked services are added by
+    /// a later readiness refresh after the relay connection has started.
+    pub fn from_config_initial(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
+        let mut services = BTreeMap::new();
+        let mut local_apps = BTreeMap::new();
+        let shell_executions = ShellExecutionStore::default();
+
+        for service in &config.services {
+            if !service.enabled || service.health_check.is_some() {
+                continue;
+            }
+            let runtime_service =
+                build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
+            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
+                services.insert(service.name.clone(), runtime_service);
+            }
+        }
+
+        for app in &config.local_apps {
+            if !app.enabled || app.health_check.is_some() {
+                continue;
+            }
+            let service = local_app_runtime_config(app);
+            let runtime =
+                build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
+            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+                local_apps.insert(
+                    app.connector_id.clone(),
+                    RuntimeLocalApp {
+                        definition: local_app_definition(app),
+                        runtime,
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            services,
+            local_apps,
+        })
+    }
+
     pub async fn from_config_checked(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
         let mut services = BTreeMap::new();
         let mut local_apps = BTreeMap::new();
@@ -474,7 +517,10 @@ impl ServiceRegistry {
                 continue;
             }
             let service = local_app_runtime_config(app);
-            if !ensure_registered_service_ready(&service, &health_client).await {
+            // Connector lifecycle belongs to the desktop process supervisor. The
+            // registry only observes readiness and must never execute a host-owned
+            // foreground command as if it were a one-shot service start command.
+            if !registered_service_is_healthy(&service, &health_client).await {
                 warn!(
                     connector_id = %app.connector_id,
                     "local app is not healthy; omitting from runtime capabilities"
@@ -665,11 +711,8 @@ async fn ensure_registered_service_ready(service: &ServiceConfig, client: &Clien
         return true;
     };
 
-    match check_registered_service_health(service, health_check, client).await {
-        Ok(()) => return true,
-        Err(err) => {
-            info!(service = %service.name, error = %err, "registered service health check failed");
-        }
+    if registered_service_is_healthy(service, client).await {
+        return true;
     }
 
     let Some(start_command) = service.start_command.as_ref() else {
@@ -723,6 +766,19 @@ async fn ensure_registered_service_ready(service: &ServiceConfig, client: &Clien
     }
 
     false
+}
+
+async fn registered_service_is_healthy(service: &ServiceConfig, client: &Client) -> bool {
+    let Some(health_check) = service.health_check.as_ref() else {
+        return true;
+    };
+    match check_registered_service_health(service, health_check, client).await {
+        Ok(()) => true,
+        Err(err) => {
+            info!(service = %service.name, error = %err, "registered service health check failed");
+            false
+        }
+    }
 }
 
 async fn check_registered_service_health(
@@ -3639,8 +3695,8 @@ mod tests {
         CONNECTOR_START_POLICY_ENV,
     };
     use crate::config::{
-        AgentConfig, EventConfig, HttpBinding, MethodBinding, MethodConfig, ServiceConfig,
-        ServiceHealthCheck, ServiceStartCommand,
+        AgentConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
+        ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
     };
     use crate::protocol::ResponseMode;
     use axum::{
@@ -4274,6 +4330,92 @@ mod tests {
             .await
             .unwrap();
         assert!(!registry.has_event("permissionGatedService", "ready"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checked_registry_observes_local_app_without_executing_its_start_command() {
+        let current_dir = std::env::current_dir().unwrap();
+        let marker_dir = tempdir().unwrap();
+        let marker = marker_dir.path().join("local-app-started");
+        let mut config = AgentConfig::example();
+        config.local_apps.push(LocalAppConfig {
+            connector_id: "com.baijimu.connector.host-owned".to_string(),
+            name: "Host-owned Connector".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Must be started by the desktop process supervisor.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:1/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: Some(ServiceStartCommand::ShellCommand {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("touch '{}'", marker.display()),
+                ],
+                cwd: None,
+                env: BTreeMap::from([(
+                    CONNECTOR_START_POLICY_ENV.to_string(),
+                    "automatic".to_string(),
+                )]),
+                timeout_secs: Some(1),
+            }),
+            stop_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "ready".to_string(),
+                description: "Ready.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
+            .await
+            .unwrap();
+        assert!(!marker.exists());
+        assert!(registry.local_app_definitions().is_empty());
+    }
+
+    #[test]
+    fn initial_registry_omits_health_checked_capabilities() {
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.local_apps.push(LocalAppConfig {
+            connector_id: "com.baijimu.connector.pending".to_string(),
+            name: "Pending Connector".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Waits for its supervised process.".to_string(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:1/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: None,
+            stop_command: None,
+            methods: Vec::new(),
+            events: vec![EventConfig {
+                name: "ready".to_string(),
+                description: "Ready.".to_string(),
+                enabled: true,
+                payload_schema: json!({"type": "object"}),
+            }],
+        });
+
+        let registry = ServiceRegistry::from_config_initial(&config, &current_dir).unwrap();
+        let definitions = registry.definitions();
+        assert!(definitions.iter().any(|service| service.name == "shell"));
+        assert!(registry.local_app_definitions().is_empty());
     }
 
     #[tokio::test]

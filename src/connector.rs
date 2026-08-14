@@ -202,6 +202,19 @@ fn default_connector_start_policy() -> String {
     "automatic".to_string()
 }
 
+pub fn local_app_starts_automatically(app: &LocalAppConfig) -> bool {
+    if !app.enabled {
+        return false;
+    }
+    let Some(ServiceStartCommand::ShellCommand { env, .. }) = app.start_command.as_ref() else {
+        return false;
+    };
+    env.get(CONNECTOR_START_POLICY_ENV)
+        .map(String::as_str)
+        .unwrap_or("automatic")
+        == "automatic"
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorPermission {
@@ -3991,6 +4004,42 @@ mod tests {
     use tempfile::tempdir;
 
     static CONNECTOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn local_app_automatic_start_requires_enabled_lifecycle_command() {
+        let mut app = LocalAppConfig {
+            connector_id: "com.baijimu.connector.test".to_string(),
+            name: "Test".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            enabled: true,
+            health_check: None,
+            start_command: Some(ServiceStartCommand::ShellCommand {
+                command: vec!["test-connector".to_string(), "start".to_string()],
+                cwd: None,
+                env: BTreeMap::from([(
+                    CONNECTOR_START_POLICY_ENV.to_string(),
+                    "automatic".to_string(),
+                )]),
+                timeout_secs: None,
+            }),
+            stop_command: None,
+            methods: Vec::new(),
+            events: Vec::new(),
+        };
+
+        assert!(local_app_starts_automatically(&app));
+        app.enabled = false;
+        assert!(!local_app_starts_automatically(&app));
+        app.enabled = true;
+        let Some(ServiceStartCommand::ShellCommand { env, .. }) = app.start_command.as_mut() else {
+            panic!("expected shell start command");
+        };
+        env.insert(CONNECTOR_START_POLICY_ENV.to_string(), "manual".to_string());
+        assert!(!local_app_starts_automatically(&app));
+        app.start_command = None;
+        assert!(!local_app_starts_automatically(&app));
+    }
 
     struct ConnectorTestEnvGuard {
         _lock: MutexGuard<'static, ()>,

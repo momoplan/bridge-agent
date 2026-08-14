@@ -263,10 +263,10 @@ impl AgentRuntimeManager {
         }
         self.push_log("info", "runtime starting", log_limit).await;
 
-        let registry = match ServiceRegistry::from_config_checked(&config, &config_base_dir).await {
+        let registry = match ServiceRegistry::from_config_initial(&config, &config_base_dir) {
             Ok(registry) => Arc::new(RwLock::new(registry)),
             Err(err) => {
-                let message = format!("runtime preparation failed: {err:#}");
+                let message = format!("initial runtime preparation failed: {err:#}");
                 self.force_stopped_with_error(message.clone()).await;
                 self.push_log("error", &message, log_limit).await;
                 return Err(err);
@@ -370,7 +370,27 @@ impl AgentRuntimeManager {
         state.shutdown = Some(shutdown_tx);
         state.apply = Some(apply_tx);
         state.task = Some(task);
-        Ok(state.snapshot.clone())
+        let snapshot = state.snapshot.clone();
+        drop(state);
+
+        let refresh_manager = self.clone();
+        let refresh_path = config_path.to_path_buf();
+        tokio::spawn(async move {
+            if let Err(err) = refresh_manager
+                .apply_capabilities_from_path(&refresh_path)
+                .await
+            {
+                refresh_manager
+                    .push_log(
+                        "warn",
+                        &format!("post-connect capability readiness refresh failed: {err:#}"),
+                        log_limit,
+                    )
+                    .await;
+            }
+        });
+
+        Ok(snapshot)
     }
 
     pub async fn apply_capabilities_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
@@ -2361,7 +2381,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_reports_starting_while_local_services_are_prepared() {
+    async fn runtime_connects_without_waiting_for_local_service_readiness() {
+        let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay_listener.local_addr().unwrap();
         let health_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let health_addr = health_listener.local_addr().unwrap();
         let health_server = tokio::spawn(async move {
@@ -2375,7 +2397,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
-        config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
+        config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
         config.runtime.event_server_enabled = false;
@@ -2404,34 +2426,35 @@ mod tests {
         }];
 
         let manager = AgentRuntimeManager::new();
-        let mut events = manager.subscribe();
-        let start_manager = manager.clone();
-        let start_path = config_path.clone();
-        let start = tokio::spawn(async move { start_manager.start(config, &start_path).await });
-
-        let starting = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            loop {
-                if let RuntimeEvent::SnapshotChanged(snapshot) = events.recv().await.unwrap() {
-                    if snapshot.status == RuntimeStatus::Starting {
-                        break snapshot;
-                    }
-                }
-            }
-        })
+        let started_at = std::time::Instant::now();
+        let starting = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            manager.start(config, &config_path),
+        )
         .await
-        .expect("runtime did not report starting while service preparation was pending");
-
+        .expect("runtime start waited for local service readiness")
+        .expect("runtime start failed");
+        assert!(started_at.elapsed() < std::time::Duration::from_millis(500));
         assert_eq!(
             starting.agent_id.as_deref(),
             Some("dev_starting_during_service_preparation")
         );
-        assert_eq!(manager.snapshot().await.status, RuntimeStatus::Starting);
+        assert_ne!(manager.snapshot().await.status, RuntimeStatus::Stopped);
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), start)
-            .await
-            .expect("runtime preparation did not finish")
-            .expect("runtime start task panicked")
-            .expect("runtime start failed");
+        let (relay_socket, _) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            relay_listener.accept(),
+        )
+        .await
+        .expect("relay connection waited for local service readiness")
+        .expect("relay listener failed");
+        let _relay_stream = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            accept_async(relay_socket),
+        )
+        .await
+        .expect("relay WebSocket handshake waited for local service readiness")
+        .expect("relay WebSocket handshake failed");
         manager.stop().await.unwrap();
         health_server.abort();
     }

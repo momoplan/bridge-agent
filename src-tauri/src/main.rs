@@ -1468,6 +1468,10 @@ async fn start_agent(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
 ) -> Result<RuntimeSnapshot, CommandError> {
+    state
+        .startup_health
+        .diagnostics
+        .info("manual agent start requested from desktop UI");
     save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
         message: err.to_string(),
     })?;
@@ -6029,6 +6033,7 @@ fn prepare_config_for_auto_start(
 
 fn auto_start_agent(
     runtime: AgentRuntimeManager,
+    connector_processes: ConnectorProcessManager,
     config_path: PathBuf,
     startup_health: StartupHealthManager,
     diagnostics: StartupDiagnostics,
@@ -6081,6 +6086,7 @@ fn auto_start_agent(
             return;
         }
         diagnostics.info("bridge-agent config loaded for auto start");
+        diagnostics.info("automatic agent start requested");
         if let Err(err) = start_runtime_from_saved_config(&runtime, &config_path).await {
             diagnostics.error(format!(
                 "failed to auto start bridge-agent runtime: {err:#}"
@@ -6091,8 +6097,9 @@ fn auto_start_agent(
                 "degraded",
                 Some(err.to_string()),
             );
+            return;
         } else {
-            diagnostics.info("bridge-agent runtime auto start completed");
+            diagnostics.info("automatic agent start request completed");
             if let Some(detail) = connector_sync_failure_detail {
                 startup_health.set_component(
                     "agent_runtime",
@@ -6103,6 +6110,38 @@ fn auto_start_agent(
             } else {
                 startup_health.set_component("agent_runtime", "Agent 运行时", "ready", None);
             }
+        }
+
+        let automatic_connector_ids = config
+            .local_apps
+            .iter()
+            .filter(|app| bridge_agent::local_app_starts_automatically(app))
+            .map(|app| app.connector_id.clone())
+            .collect::<Vec<_>>();
+        for connector_id in automatic_connector_ids {
+            diagnostics.info(format!(
+                "automatic connector start requested: connector_id={connector_id}"
+            ));
+            match start_connector_and_wait(
+                &connector_processes,
+                &config_path,
+                &connector_id,
+                "自动启动应用",
+            )
+            .await
+            {
+                Ok(_) => diagnostics.info(format!(
+                    "automatic connector start completed: connector_id={connector_id}"
+                )),
+                Err(err) => diagnostics.warn(format!(
+                    "automatic connector start failed: connector_id={connector_id} error={err}"
+                )),
+            }
+        }
+        if let Err(err) = runtime.apply_capabilities_from_path(&config_path).await {
+            diagnostics.warn(format!(
+                "failed to refresh capabilities after automatic connector startup: {err:#}"
+            ));
         }
     });
 }
@@ -6455,6 +6494,7 @@ fn main() {
                 bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
                 auto_start_agent(
                     runtime.clone(),
+                    setup_connector_processes.clone(),
                     config_path.clone(),
                     setup_health.clone(),
                     setup_diagnostics.clone(),
