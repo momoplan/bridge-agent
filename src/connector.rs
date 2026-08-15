@@ -2199,9 +2199,26 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
     Ok(pids)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn release_connector_package_processes(package_path: &Path) -> Result<()> {
+    for _ in 0..30 {
+        let remaining = connector_package_processes(package_path)?;
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let remaining = connector_package_processes(package_path)?;
+    bail!(
+        "connector package processes are still running for {}: {:?}",
+        package_path.display(),
+        remaining
+    )
+}
+
+#[cfg(all(not(windows), not(unix)))]
 fn release_connector_package_processes(_package_path: &Path) -> Result<()> {
-    Ok(())
+    bail!("connector package process inspection is unsupported on this platform")
 }
 
 #[cfg(windows)]
@@ -2209,9 +2226,127 @@ fn force_release_connector_package_processes(package_path: &Path) -> Result<()> 
     release_connector_package_processes(package_path)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn force_release_connector_package_processes(package_path: &Path) -> Result<()> {
+    signal_connector_package_processes(package_path, libc::SIGTERM)?;
+    for _ in 0..50 {
+        if connector_package_processes(package_path)?.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    signal_connector_package_processes(package_path, libc::SIGKILL)?;
+    for _ in 0..30 {
+        if connector_package_processes(package_path)?.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let remaining = connector_package_processes(package_path)?;
+    bail!(
+        "connector package processes did not stop for {}: {:?}",
+        package_path.display(),
+        remaining
+    )
+}
+
+#[cfg(unix)]
+fn signal_connector_package_processes(package_path: &Path, signal: i32) -> Result<()> {
+    for pid in connector_package_processes(package_path)? {
+        let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+        if result == 0 {
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            continue;
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "failed to signal connector process {pid} using package {}",
+                package_path.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn connector_package_processes(package_path: &Path) -> Result<Vec<u32>> {
+    let output = Command::new(unix_ps_binary())
+        .args(["-axo", "pid=,command="])
+        .output()
+        .context("failed to inspect Unix processes for connector package use")?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect Unix processes for connector package use\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(parse_unix_connector_package_processes(
+        &String::from_utf8_lossy(&output.stdout),
+        package_path,
+        std::process::id(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn unix_ps_binary() -> &'static str {
+    "/bin/ps"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_ps_binary() -> &'static str {
+    "/usr/bin/ps"
+}
+
+#[cfg(unix)]
+fn parse_unix_connector_package_processes(
+    process_list: &str,
+    package_path: &Path,
+    current_pid: u32,
+) -> Vec<u32> {
+    let mut package_paths = vec![package_path.to_path_buf()];
+    if let Ok(canonical_path) = package_path.canonicalize() {
+        if canonical_path != package_path {
+            package_paths.push(canonical_path);
+        }
+    }
+    let package_prefixes = package_paths
+        .iter()
+        .map(|path| {
+            format!(
+                "{}{}",
+                path.to_string_lossy()
+                    .trim_end_matches(std::path::MAIN_SEPARATOR),
+                std::path::MAIN_SEPARATOR
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut pids = process_list
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let separator = line.find(char::is_whitespace)?;
+            let pid = line[..separator].parse::<u32>().ok()?;
+            let command = line[separator..].trim_start();
+            (pid != current_pid
+                && package_prefixes
+                    .iter()
+                    .any(|package_prefix| command.contains(package_prefix)))
+            .then_some(pid)
+        })
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+#[cfg(all(not(windows), not(unix)))]
 fn force_release_connector_package_processes(_package_path: &Path) -> Result<()> {
-    bail!("forced connector uninstall after a failed stop hook is only supported on Windows")
+    bail!("forced connector uninstall is unsupported on this platform")
 }
 
 fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
@@ -2615,6 +2750,18 @@ fn enrich_start_command_env<'a>(
                 joined_path.to_string_lossy().to_string(),
             );
         }
+    }
+}
+
+fn rehydrate_lifecycle_command_path(env_vars: &mut BTreeMap<String, String>) {
+    let mut path_entries = Vec::new();
+    append_split_path(&mut path_entries, env_vars.get("PATH"));
+    append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
+    if let Ok(joined_path) = env::join_paths(path_entries) {
+        env_vars.insert(
+            "PATH".to_string(),
+            joined_path.to_string_lossy().to_string(),
+        );
     }
 }
 
@@ -3740,14 +3887,17 @@ fn run_start_command(
             if command.is_empty() {
                 bail!("lifecycle command for local app `{connector_id}` is empty");
             }
+            let mut lifecycle_env = env.clone();
+            rehydrate_lifecycle_command_path(&mut lifecycle_env);
+            lifecycle_env.extend(additional_env.clone());
+
             let mut child = Command::new(&command[0]);
             configure_connector_command(&mut child);
             child.args(&command[1..]);
             if let Some(cwd) = cwd.as_deref().filter(|value| !value.trim().is_empty()) {
                 child.current_dir(cwd);
             }
-            child.envs(env);
-            child.envs(additional_env);
+            child.envs(&lifecycle_env);
             let stdout_capture = tempfile::NamedTempFile::new().with_context(|| {
                 format!("failed to create stdout capture for local app `{connector_id}`")
             })?;
@@ -5083,11 +5233,21 @@ mod tests {
         app.stop_command = Some(failing_test_command());
         save_config(&config_path, &config).unwrap();
 
+        let install_root = connectors_dir.join("com.baijimu.connector.force-uninstall-test");
+        #[cfg(unix)]
+        let mut package_worker = {
+            let worker = install_root.join("package").join("worker.sh");
+            fs::write(&worker, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+            let mut permissions = fs::metadata(&worker).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&worker, permissions).unwrap();
+            Command::new(&worker).spawn().unwrap()
+        };
+
         let error = uninstall_connector("com.baijimu.connector.force-uninstall-test", &config_path)
             .unwrap_err();
         assert!(error.to_string().contains("failed to stop connector"));
         assert!(is_connector_package_stop_error(&error));
-        let install_root = connectors_dir.join("com.baijimu.connector.force-uninstall-test");
         assert!(install_root.exists());
 
         let forced = uninstall_connector_with_options(
@@ -5100,12 +5260,60 @@ mod tests {
             forced.unwrap();
             assert!(!install_root.exists());
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            forced.unwrap();
+            assert!(!install_root.exists());
+            assert!(!package_worker.wait().unwrap().success());
+        }
+        #[cfg(all(not(windows), not(unix)))]
         {
             let error = forced.unwrap_err();
-            assert!(error.to_string().contains("only supported on Windows"));
+            assert!(error.to_string().contains("unsupported on this platform"));
             assert!(install_root.exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_inspection_matches_only_the_connector_package_tree() {
+        let package_path = Path::new("/tmp/Bridge Agent/connectors/example/package");
+        let process_list = "\
+  101 /tmp/Bridge Agent/connectors/example/package/bin/worker --daemon\n\
+  102 /usr/bin/python /tmp/Bridge Agent/connectors/example/package/service.py\n\
+  103 /tmp/Bridge Agent/connectors/example/package-other/bin/worker\n\
+  104 /bin/sh -c echo /tmp/Bridge Agent/connectors/example/package\n\
+  105 /usr/bin/unrelated\n";
+
+        assert_eq!(
+            parse_unix_connector_package_processes(process_list, package_path, 102),
+            vec![101]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_command_restores_host_path_for_nested_system_tools() {
+        let command = ServiceStartCommand::ShellCommand {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "command -v env".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::from([("PATH".to_string(), "/connector-only".to_string())]),
+            timeout_secs: Some(5),
+        };
+
+        let result = run_start_command(
+            "com.baijimu.connector.path-test",
+            &command,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
+        assert!(result.stdout.contains("/env"), "{}", result.stdout);
     }
 
     #[test]

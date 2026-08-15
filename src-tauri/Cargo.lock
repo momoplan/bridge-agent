@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "anyhow",
  "axum",
@@ -469,6 +469,7 @@ dependencies = [
  "futures-util",
  "image",
  "keyring",
+ "libc",
  "pep440_rs",
  "reqwest 0.12.28",
  "rustls",
@@ -489,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "anyhow",
  "axum",
