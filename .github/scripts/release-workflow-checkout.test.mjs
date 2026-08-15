@@ -33,8 +33,8 @@ function jobBody(jobName, nextJobName) {
 }
 
 describe("release workflow repository script availability", () => {
-  test("publish-update-service checks out the dispatched workflow commit", () => {
-    const body = jobBody("publish-update-service");
+  test("verify-update-service checks out the dispatched workflow commit", () => {
+    const body = jobBody("verify-update-service");
     const checkoutIndex = body.indexOf("uses: actions/checkout@v4");
     const helperIndex = body.indexOf(
       "node .github/scripts/release-service-url.mjs",
@@ -55,16 +55,20 @@ describe("release workflow repository script availability", () => {
     );
   });
 
-  test("new build assets are public while latest metadata remains manually selected", () => {
-    const publishBody = jobBody("publish-update-service");
+  test("complete asset manifest is registered before automatic publication", () => {
+    const mirrorBody = jobBody("mirror-domestic-release", "verify-update-service");
+    const verifyBody = jobBody("verify-update-service");
 
     expect(workflow).not.toContain("--draft");
     expect(workflow).not.toContain("publish_only:");
-    expect(publishBody).toContain("inputs.repair_assets_only");
-    expect(publishBody).toContain(
+    expect(mirrorBody).toContain("register-release-manifest.mjs");
+    expect(mirrorBody.indexOf("register-release-manifest.mjs")).toBeLessThan(
+      mirrorBody.indexOf('upload_asset "Windows x64"'),
+    );
+    expect(verifyBody).toContain(
       "needs.mirror-domestic-release.result == 'success'",
     );
-    expect(publishBody).not.toContain("github.event_name == 'push'");
+    expect(workflow).not.toContain("/publish");
   });
 
   test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
@@ -95,31 +99,14 @@ describe("release workflow repository script availability", () => {
     expect(workflow).toContain("Installed executable has an invalid Authenticode signature");
   });
 
-  test("metadata repair can atomically raise the minimum supported client version", () => {
-    const body = jobBody("publish-update-service");
-
-    expect(workflow).toContain("minimum_supported_version:");
-    expect(workflow).toContain("force_update_message:");
-    expect(body).toContain("Update minimum supported client version");
-    expect(body).toContain("inputs.minimum_supported_version != ''");
-    expect(body).toContain('"$api/release-policy"');
-    expect(body).toContain('current_policy="$(curl');
-    expect(body).toContain(".releasePageUrl");
-    expect(body).toContain("releasePageUrl: $releasePageUrl");
-    expect(body).toContain(".releasePageUrl == $release_page_url");
-    expect(body).toContain("forceUpdate: false");
-    expect(body).toContain(
-      "Minimum supported version $minimum_version exceeds release version $version",
-    );
-    expect(body).toContain(".forceUpdate == true");
-    expect(body).toContain(".forceUpdate == false");
-    expect(body).toContain(
-      '"${latest_api}?currentVersion=${MINIMUM_SUPPORTED_VERSION}"',
-    );
+  test("external publisher token cannot mutate internal upgrade policy", () => {
+    expect(workflow).not.toContain("minimum_supported_version:");
+    expect(workflow).not.toContain("force_update_message:");
+    expect(workflow).not.toContain("release-policy");
   });
 
   test("published client metadata is verified through the canonical CDN", () => {
-    const body = jobBody("publish-update-service");
+    const body = jobBody("verify-update-service");
 
     expect(body).toContain(
       "^https://download\\\\.baijimu\\\\.com/lowcode/direct-uploads/bridge-agent-release/",

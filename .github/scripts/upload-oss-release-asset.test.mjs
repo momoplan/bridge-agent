@@ -11,7 +11,7 @@ const objectKey =
   "lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/123-Baijimu_0.2.11_amd64.AppImage";
 
 describe("OSS release asset contract", () => {
-  test("accepts only the canonical immutable object and signed receipt", () => {
+  test("accepts only the canonical immutable object and database upload id", () => {
     expect(() =>
       validatePrepareResponse(
         {
@@ -19,7 +19,7 @@ describe("OSS release asset contract", () => {
             "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
           objectKey,
           downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
-          uploadReceipt: "payload.signature",
+          uploadId: "123e4567-e89b-42d3-a456-426614174000",
         },
         "Baijimu_0.2.11_amd64.AppImage",
       ),
@@ -32,7 +32,7 @@ describe("OSS release asset contract", () => {
             "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
           objectKey,
           downloadUrl: `https://example.com/${objectKey}`,
-          uploadReceipt: "payload.signature",
+          uploadId: "123e4567-e89b-42d3-a456-426614174000",
         },
         "Baijimu_0.2.11_amd64.AppImage",
       ),
@@ -45,7 +45,7 @@ describe("OSS release asset contract", () => {
             "https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/object?Expires=1&Signature=x",
           objectKey,
           downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing-internal.aliyuncs.com/${objectKey}`,
-          uploadReceipt: "payload.signature",
+          uploadId: "123e4567-e89b-42d3-a456-426614174000",
         },
         "Baijimu_0.2.11_amd64.AppImage",
       ),
@@ -73,28 +73,16 @@ describe("OSS release asset contract", () => {
     );
   });
 
-  test("completes with the signed permanent identity only", () => {
-    const metadata = {
-      tagName: "bridge-agent-v0.2.11",
-      version: "0.2.11",
-      target: "Linux x64",
-      name: "Baijimu_0.2.11_amd64.AppImage",
-      sha256: "a".repeat(64),
-      contentType: "application/octet-stream",
-      sizeBytes: 42,
-    };
-    const payload = completionPayload(metadata, {
+  test("completes with only the database upload identity", () => {
+    const payload = completionPayload({
+      uploadId: "123e4567-e89b-42d3-a456-426614174000",
       objectKey,
       downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
       resourceUrl: "https://www.baijimu.com/download/",
-      uploadReceipt: "payload.signature",
     });
 
     expect(payload).toEqual({
-      ...metadata,
-      objectKey,
-      downloadUrl: `https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/${objectKey}`,
-      uploadReceipt: "payload.signature",
+      uploadId: "123e4567-e89b-42d3-a456-426614174000",
     });
     expect(payload).not.toHaveProperty("resourceUrl");
   });

@@ -15,16 +15,6 @@ on:
         required: false
         default: false
         type: boolean
-      minimum_supported_version:
-        description: Optional minimum supported client version to publish after repairing release metadata
-        required: false
-        default: ""
-        type: string
-      force_update_message:
-        description: Optional force-update message used with minimum_supported_version
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: write
@@ -1594,21 +1584,27 @@ jobs:
             exit 1
           fi
 
+          node .github/scripts/register-release-manifest.mjs \
+            "$api" "$RELEASE_TAG" \
+            "Windows x64::${windows[0]}::true" \
+            "macOS Universal::${macos_tar[0]}::true" \
+            "macOS Universal::${macos_dmg[0]}::false" \
+            "Linux x64::${linux_deb[0]}::false" \
+            "Linux x64::${linux_appimage[0]}::true"
+
           upload_asset "Windows x64" "${windows[0]}"
           upload_asset "macOS Universal" "${macos_tar[0]}"
           upload_asset "macOS Universal" "${macos_dmg[0]}"
           upload_asset "Linux x64" "${linux_deb[0]}"
           upload_asset "Linux x64" "${linux_appimage[0]}"
 
-  publish-update-service:
-    name: Repair published update service metadata
+  verify-update-service:
+    name: Verify automatically published update metadata
     runs-on: ubuntu-22.04
     needs: mirror-domestic-release
     if: >-
       ${{
         always()
-        && github.event_name == 'workflow_dispatch'
-        && inputs.repair_assets_only
         && needs.mirror-domestic-release.result == 'success'
       }}
     env:
@@ -1631,107 +1627,10 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Publish release to update service
-        shell: bash
-        env:
-          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
-          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "Missing required secret: $name" >&2
-              exit 1
-            fi
-          done
-
-          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
-          version="${RELEASE_TAG#bridge-agent-v}"
-          actor="github-actions:${GITHUB_RUN_ID}"
-
-          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
-            -X POST \
-            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            -H "X-Bridge-Release-Actor: $actor" \
-            -H "Content-Type: application/json" \
-            --data "{\"tagName\":\"$RELEASE_TAG\",\"version\":\"$version\"}" \
-            "$api/releases/$RELEASE_TAG/publish"
-
-      - name: Update minimum supported client version
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.minimum_supported_version != '' }}
-        shell: bash
-        env:
-          BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
-          BRIDGE_AGENT_RELEASE_API_TOKEN: ${{ secrets.BRIDGE_AGENT_RELEASE_API_TOKEN }}
-          MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
-          FORCE_UPDATE_MESSAGE: ${{ inputs.force_update_message }}
-        run: |
-          set -euo pipefail
-          for name in BRIDGE_AGENT_RELEASE_API_URL BRIDGE_AGENT_RELEASE_API_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "Missing required secret: $name" >&2
-              exit 1
-            fi
-          done
-
-          api="$(node .github/scripts/release-service-url.mjs release "$BRIDGE_AGENT_RELEASE_API_URL")"
-          version="${RELEASE_TAG#bridge-agent-v}"
-          minimum_version="$MINIMUM_SUPPORTED_VERSION"
-          if ! [[ "$minimum_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid minimum supported version: $minimum_version" >&2
-            exit 1
-          fi
-          if [ "$(printf '%s\n%s\n' "$minimum_version" "$version" | sort -V | head -n 1)" != "$minimum_version" ]; then
-            echo "Minimum supported version $minimum_version exceeds release version $version" >&2
-            exit 1
-          fi
-
-          force_update_message="$FORCE_UPDATE_MESSAGE"
-          if [ -z "$force_update_message" ]; then
-            force_update_message="必须升级到 ${minimum_version} 后继续使用。"
-          fi
-
-          current_policy="$(curl -fsSL --retry 3 --retry-delay 2 \
-            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            "$api/release-policy")"
-          release_page_url="$(jq -er '
-            .releasePageUrl
-            | strings
-            | select(length > 0)
-          ' <<<"$current_policy")"
-          jq -n \
-            --arg releasePageUrl "$release_page_url" \
-            --arg minimumSupportedVersion "$minimum_version" \
-            --arg forceUpdateMessage "$force_update_message" \
-            --arg updatedBy "github-actions:${GITHUB_RUN_ID}" \
-            '{
-              releasePageUrl: $releasePageUrl,
-              forceUpdate: false,
-              minimumSupportedVersion: $minimumSupportedVersion,
-              forceUpdateMessage: $forceUpdateMessage,
-              updatedBy: $updatedBy
-            }' > release-policy.json
-
-          curl -fsSL --post301 --post302 --post303 --retry 3 --retry-delay 2 \
-            -X PUT \
-            -H "Authorization: Bearer $BRIDGE_AGENT_RELEASE_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @release-policy.json \
-            "$api/release-policy" \
-            | jq -e \
-                --arg release_page_url "$release_page_url" \
-                --arg minimum_version "$minimum_version" '
-                .releasePageUrl == $release_page_url
-                and
-                .forceUpdate == false
-                and .minimumSupportedVersion == $minimum_version
-              ' >/dev/null
-
       - name: Verify published updater metadata and public downloads
         shell: bash
         env:
           BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
-          MINIMUM_SUPPORTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.minimum_supported_version || '' }}
         run: |
           set -euo pipefail
           if [ -z "$BRIDGE_AGENT_UPDATE_API_URL" ]; then
@@ -1753,22 +1652,6 @@ jobs:
                 | test("^https://download\\.baijimu\\.com/lowcode/direct-uploads/bridge-agent-release/"))
             )
           ' <<<"$latest_payload" >/dev/null
-
-          if [ -n "$MINIMUM_SUPPORTED_VERSION" ]; then
-            jq -e --arg minimum_version "$MINIMUM_SUPPORTED_VERSION" '
-              .forceUpdate == true
-              and .minimumSupportedVersion == $minimum_version
-            ' <<<"$latest_payload" >/dev/null
-
-            supported_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
-              --connect-timeout 20 \
-              "${latest_api}?currentVersion=${MINIMUM_SUPPORTED_VERSION}")"
-            jq -e --arg version "$version" --arg minimum_version "$MINIMUM_SUPPORTED_VERSION" '
-              .version == $version
-              and .forceUpdate == false
-              and .minimumSupportedVersion == $minimum_version
-            ' <<<"$supported_payload" >/dev/null
-          fi
 
           for target_arch in darwin:aarch64 windows:x86_64 linux:x86_64; do
             target="${target_arch%%:*}"

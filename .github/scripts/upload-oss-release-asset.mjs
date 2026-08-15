@@ -80,7 +80,7 @@ async function main() {
   );
   await releaseServiceJson(
     `${apiBase}/releases/${encodeURIComponent(tagName)}/assets/complete`,
-    completionPayload(metadata, prepared),
+    completionPayload(prepared),
   );
   console.log(
     `Registered immutable OSS asset ${assetName} (${fileStat.size} bytes, sha256:${sha256})`,
@@ -160,10 +160,12 @@ export function validatePrepareResponse(prepared, expectedName) {
     throw new Error("release service returned an invalid immutable object key");
   }
   if (
-    typeof prepared.uploadReceipt !== "string" ||
-    !prepared.uploadReceipt.includes(".")
+    typeof prepared.uploadId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      prepared.uploadId,
+    )
   ) {
-    throw new Error("release service returned an invalid upload receipt");
+    throw new Error("release service returned an invalid upload id");
   }
   const uploadUrl = new URL(prepared.uploadUrl);
   if (uploadUrl.protocol !== "https:" || !uploadUrl.hostname.endsWith(".aliyuncs.com")) {
@@ -179,13 +181,8 @@ function isPublicAliyunOssObjectHost(hostname) {
   );
 }
 
-export function completionPayload(metadata, prepared) {
-  return {
-    ...metadata,
-    objectKey: prepared.objectKey,
-    downloadUrl: prepared.downloadUrl,
-    uploadReceipt: prepared.uploadReceipt,
-  };
+export function completionPayload(prepared) {
+  return { uploadId: prepared.uploadId };
 }
 
 async function verifyPublicObject(

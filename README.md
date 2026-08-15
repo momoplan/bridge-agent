@@ -897,28 +897,21 @@ GET https://updates.baijimu.com/api/bridge-agent/releases/latest/tauri?target=da
 发布流程调用内部 release service：
 
 - `POST /releases/{tag}`：创建或更新待发布版本
-- `POST /releases/{tag}/assets/prepare`：由 release service 向 project-service 申请单对象短时 OSS PUT 地址
-- `POST /releases/{tag}/assets/complete`：匿名完整下载与 SHA-256 校验通过后，登记永久 OSS URL、对象键和 updater 签名
-- `POST /releases/{tag}/assets/register`：仅用于受控迁移已有永久 OSS/Gitee 资产，不是新版本发布主链
-- `POST /releases/{tag}/publish`：在所有平台产物上传完成后，把这个版本设为可被客户端检查到的最新版本
+- `PUT /releases/{tag}/manifest`：登记这次发布必须完整上传的资产清单
+- `POST /releases/{tag}/assets/prepare`：由 release service 使用环境对象存储资源签发单对象短时 OSS PUT 地址
+- `POST /releases/{tag}/assets/complete`：匿名完整下载与 SHA-256 校验通过后，仅回传数据库 `uploadId`
+
+`prepare` 会把对象键、永久 URL、摘要、大小和 updater 签名写入数据库暂存记录。最后一个清单资产完成后，release service 在单个数据库事务中替换公开资产并自动发布，不再需要单独的 `publish` 调用。
 
 `assets/complete` 请求体示例：
 
 ```json
 {
-  "tagName": "bridge-agent-v0.1.28",
-  "version": "0.1.28",
-  "target": "macOS Universal",
-  "name": "Baijimu_0.1.28_universal.dmg",
-  "sha256": "...",
-  "contentType": "application/x-apple-diskimage",
-  "sizeBytes": 90000000,
-  "objectKey": "lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg",
-  "downloadUrl": "https://baijimu-lowcode-public-20260420.oss-cn-beijing.aliyuncs.com/lowcode/direct-uploads/bridge-agent-release/20260729/anonymous/uuid-Baijimu_0.1.28_universal.dmg"
+  "uploadId": "123e4567-e89b-42d3-a456-426614174000"
 }
 ```
 
-`assets/complete.downloadUrl` 必须是环境公共 OSS 中与 `objectKey` 精确一致的永久公开地址，不能包含 token、签名查询参数或其他临时凭证；release service 对外查询时再投影成同路径的 `download.baijimu.com` CDN 地址。release service 和 GitHub Actions 都不持有 OSS 长期凭据。
+永久地址由 release service 根据环境对象存储资源生成并校验，不能由 GitHub Action 覆盖；对外查询时再投影成同路径的 `download.baijimu.com` CDN 地址。只有 release service 持有环境 OSS 凭据，GitHub Action 只拿短时单对象 PUT 地址。
 
 ## 本地打包验证
 
