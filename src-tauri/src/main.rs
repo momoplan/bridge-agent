@@ -25,16 +25,16 @@ use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
 use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
-    browser_auth_manifest_json, clear_relay_credentials, connector_management_token_path,
-    default_config_path, ensure_browser_auth_agent_id, ensure_config_exists,
-    format_connector_sync_failures, inspect_python_runtime,
+    browser_auth_manifest_json, clear_relay_credentials, connector_icon_data_url,
+    connector_management_token_path, default_config_path, ensure_browser_auth_agent_id,
+    ensure_config_exists, format_connector_sync_failures, inspect_python_runtime,
     install_connector_from_path_with_provenance, install_rustls_crypto_provider,
     is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
     load_connector_manifest, manifest_preview_json, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, sync_installed_connector, sync_installed_connectors_report,
     terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
-    AgentRuntimeManager, ConnectorInstallProvenance, ConnectorInstallRecord,
+    AgentRuntimeManager, ConnectorIcon, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncReport,
     ConnectorTrustLevel, ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent,
     RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceHealthCheck,
@@ -102,10 +102,12 @@ const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
 const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str = "connector.process.host-managed.v1";
 const HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1: &str =
     "connector.managed-tool-dependencies.v1";
+const HOST_CAPABILITY_CONNECTOR_PRESENTATION_ICON_V1: &str = "connector.presentation.icon.v1";
 const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
     HOST_CAPABILITY_CONNECTOR_SETUP_V1,
     HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1,
     HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1,
+    HOST_CAPABILITY_CONNECTOR_PRESENTATION_ICON_V1,
 ];
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
@@ -1194,6 +1196,7 @@ struct MarketConnectorApp {
     capability: String,
     version: String,
     published_at: Option<String>,
+    icon_data_url: Option<String>,
     release_notes: Vec<String>,
     configuration_declaration: String,
     interface_declaration: String,
@@ -4846,6 +4849,13 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let release_notes = market_release_notes(&value.latest_version.manifest);
+        let icon_data_url = value
+            .latest_version
+            .manifest
+            .get("icon")
+            .cloned()
+            .and_then(|icon| serde_json::from_value::<ConnectorIcon>(icon).ok())
+            .and_then(|icon| connector_icon_data_url(&icon).ok());
         let config_schema = value.latest_version.manifest.get("configSchema").cloned();
         let database = market_manifest_database(&value.latest_version.manifest);
         let methods = market_manifest_method_contracts(&value.latest_version.manifest);
@@ -4885,6 +4895,7 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             capability: value.capability,
             version: value.latest_version.version,
             published_at: value.latest_version.published_at,
+            icon_data_url,
             release_notes,
             configuration_declaration,
             interface_declaration,
@@ -6658,6 +6669,7 @@ mod tests {
             capability: String::new(),
             version: "1.0.0".to_string(),
             published_at: None,
+            icon_data_url: None,
             release_notes: Vec::new(),
             configuration_declaration: "undeclared".to_string(),
             interface_declaration: "undeclared".to_string(),

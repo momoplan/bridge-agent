@@ -5,7 +5,9 @@ use crate::config::{
 };
 use crate::protocol::ResponseMode;
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use directories::ProjectDirs;
+use image::ImageFormat;
 use pep440_rs::{Version, VersionSpecifiers};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,11 +46,16 @@ pub(crate) const CONNECTOR_ASSET_UPLOAD_PERMISSION: &str = "assets.upload";
 const HOST_MANAGED_PROCESS_MINIMUM_VERSION: &str = "0.2.40";
 const HOST_MANAGED_PROCESS_CAPABILITY: &str = "connector.process.host-managed.v1";
 const MANAGED_TOOL_DEPENDENCIES_CAPABILITY: &str = "connector.managed-tool-dependencies.v1";
+const CONNECTOR_ICON_CAPABILITY: &str = "connector.presentation.icon.v1";
+const CONNECTOR_ICON_MEDIA_TYPE: &str = "image/png";
+const CONNECTOR_ICON_EDGE_PX: u32 = 256;
+const CONNECTOR_ICON_MAX_BYTES: usize = 128 * 1024;
 const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
     "connector.setup.v1",
     "connector.asset-upload.v1",
     HOST_MANAGED_PROCESS_CAPABILITY,
     MANAGED_TOOL_DEPENDENCIES_CAPABILITY,
+    CONNECTOR_ICON_CAPABILITY,
 ];
 const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 #[cfg(windows)]
@@ -95,6 +102,8 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub managed_tool_dependencies: Vec<ConnectorManagedToolDependency>,
     #[serde(default)]
+    pub icon: Option<ConnectorIcon>,
+    #[serde(default)]
     pub ui: Option<ConnectorUi>,
     #[serde(default)]
     pub config_schema: Option<Value>,
@@ -120,6 +129,13 @@ pub struct ConnectorManifest {
     pub service_registration_files: Vec<String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorIcon {
+    pub media_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,6 +457,7 @@ pub struct ConnectorSummary {
     pub market_app_id: Option<String>,
     pub source_checksum: Option<String>,
     pub package_checksum: Option<String>,
+    pub icon_data_url: Option<String>,
     pub ui: Option<ConnectorUi>,
     pub permissions: Vec<ConnectorPermission>,
     pub start_policy: String,
@@ -1294,6 +1311,9 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         }
     }
     validate_connector_id(&manifest.id)?;
+    if let Some(icon) = manifest.icon.as_ref() {
+        validate_connector_icon(icon)?;
+    }
     if let Some(management) = manifest.management.as_ref() {
         validate_management(management)?;
     }
@@ -1403,6 +1423,40 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         if !permission_ids.insert(permission.id.as_str()) {
             bail!("connector permission id `{}` is duplicated", permission.id);
         }
+    }
+    Ok(())
+}
+
+pub fn connector_icon_data_url(icon: &ConnectorIcon) -> Result<String> {
+    validate_connector_icon(icon)?;
+    Ok(format!(
+        "data:{CONNECTOR_ICON_MEDIA_TYPE};base64,{}",
+        icon.data
+    ))
+}
+
+fn validate_connector_icon(icon: &ConnectorIcon) -> Result<()> {
+    if icon.media_type != CONNECTOR_ICON_MEDIA_TYPE {
+        bail!("connector icon.mediaType must be {CONNECTOR_ICON_MEDIA_TYPE}");
+    }
+    if icon.data.trim() != icon.data || icon.data.is_empty() {
+        bail!("connector icon.data must be non-empty canonical base64");
+    }
+    let bytes = BASE64_STANDARD
+        .decode(&icon.data)
+        .context("connector icon.data must be valid base64")?;
+    if BASE64_STANDARD.encode(&bytes) != icon.data {
+        bail!("connector icon.data must use canonical base64 encoding");
+    }
+    if bytes.is_empty() || bytes.len() > CONNECTOR_ICON_MAX_BYTES {
+        bail!("connector icon PNG must contain 1 to {CONNECTOR_ICON_MAX_BYTES} bytes");
+    }
+    let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+        .context("connector icon.data must contain a valid PNG image")?;
+    if image.width() != CONNECTOR_ICON_EDGE_PX || image.height() != CONNECTOR_ICON_EDGE_PX {
+        bail!(
+            "connector icon PNG must be {CONNECTOR_ICON_EDGE_PX}x{CONNECTOR_ICON_EDGE_PX} pixels"
+        );
     }
     Ok(())
 }
@@ -4044,6 +4098,13 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .collect::<Vec<_>>();
     let method_names = methods.iter().map(|method| method.name.clone()).collect();
     let event_names = events.iter().map(|event| event.name.clone()).collect();
+    let icon_data_url = record
+        .manifest
+        .icon
+        .as_ref()
+        .map(connector_icon_data_url)
+        .transpose()
+        .unwrap_or_default();
     ConnectorSummary {
         id: record.manifest.id,
         name: record.manifest.name,
@@ -4055,6 +4116,7 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         market_app_id: record.market_app_id,
         source_checksum: record.source_checksum,
         package_checksum: record.package_checksum,
+        icon_data_url,
         ui: record.manifest.ui,
         permissions: record.manifest.permissions,
         start_policy,
@@ -4148,12 +4210,30 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::{AgentConfig, MethodBinding};
+    use image::{DynamicImage, Rgba, RgbaImage};
     use serde_json::json;
     use std::ffi::OsString;
+    use std::io::Cursor;
     use std::sync::{Mutex, MutexGuard};
     use tempfile::tempdir;
 
     static CONNECTOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_connector_icon() -> Value {
+        let image = RgbaImage::from_pixel(
+            CONNECTOR_ICON_EDGE_PX,
+            CONNECTOR_ICON_EDGE_PX,
+            Rgba([14, 122, 80, 255]),
+        );
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        json!({
+            "mediaType": CONNECTOR_ICON_MEDIA_TYPE,
+            "data": BASE64_STANDARD.encode(bytes.into_inner())
+        })
+    }
 
     #[test]
     fn local_app_automatic_start_requires_enabled_lifecycle_command() {
@@ -4682,6 +4762,7 @@ mod tests {
                 "id": "com.baijimu.connector.with-ui",
                 "name": "Connector With UI",
                 "version": "0.1.0",
+                "icon": test_connector_icon(),
                 "ui": {
                     "type": "embedded",
                     "entry": "ui/index.html",
@@ -4700,6 +4781,9 @@ mod tests {
         .unwrap();
 
         let manifest = load_connector_manifest(dir.path()).unwrap();
+        assert!(connector_icon_data_url(manifest.icon.as_ref().unwrap())
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
         let ui = manifest.ui.unwrap();
         assert!(ui.default_view);
         assert_eq!(ui.title.as_deref(), Some("个性化设置"));
@@ -4712,6 +4796,58 @@ mod tests {
             dir.path().join("ui/assets/app.js").canonicalize().unwrap()
         );
         assert!(resolve_connector_ui_asset(dir.path(), &ui, Some("../private.txt")).is_err());
+    }
+
+    #[test]
+    fn connector_manifest_rejects_invalid_icon_contracts() {
+        let base = json!({
+            "schemaVersion": "1.1",
+            "id": "com.baijimu.connector.bad-icon",
+            "name": "Bad Icon Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badIconService",
+                "description": "Bad icon test service.",
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }]
+        });
+
+        let mut wrong_media_type = base.clone();
+        wrong_media_type["icon"] = test_connector_icon();
+        wrong_media_type["icon"]["mediaType"] = json!("image/svg+xml");
+        assert!(
+            validate_manifest(&serde_json::from_value(wrong_media_type).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("icon.mediaType")
+        );
+
+        let mut malformed = base.clone();
+        malformed["icon"] = json!({ "mediaType": "image/png", "data": "not-base64" });
+        assert!(
+            validate_manifest(&serde_json::from_value(malformed).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("valid base64")
+        );
+
+        let image = RgbaImage::from_pixel(128, 128, Rgba([14, 122, 80, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let mut wrong_size = base;
+        wrong_size["icon"] = json!({
+            "mediaType": "image/png",
+            "data": BASE64_STANDARD.encode(bytes.into_inner())
+        });
+        assert!(
+            validate_manifest(&serde_json::from_value(wrong_size).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("256x256")
+        );
     }
 
     #[test]
@@ -4800,6 +4936,7 @@ mod tests {
                 "id": "com.baijimu.connector.installed-ui",
                 "name": "Installed UI Connector",
                 "version": "0.1.0",
+                "icon": test_connector_icon(),
                 "ui": {
                     "type": "embedded",
                     "entry": "ui/index.html",
@@ -4825,6 +4962,10 @@ mod tests {
         assert_eq!(serialized["ui"]["type"], "embedded");
         assert!(serialized["ui"].get("uiType").is_none());
         assert_eq!(serialized["ui"]["defaultView"], true);
+        assert!(serialized["iconDataUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
         let ui = summary.ui.expect("installed UI metadata");
         assert_eq!(ui.ui_type, "embedded");
         assert_eq!(ui.entry, "ui/index.html");
@@ -6477,6 +6618,7 @@ bad-python-connector = "bad_python_connector.app:main"
             setup: None,
             host_requirements: None,
             managed_tool_dependencies: Vec::new(),
+            icon: None,
             ui: None,
             config_schema: None,
             upgrade_review: None,
