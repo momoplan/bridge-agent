@@ -26,14 +26,15 @@ pub use config::{
 };
 pub use connector::inspect_python_runtime;
 pub use connector::{
-    connector_asset_upload_token_path, connector_data_dir, connector_management_token_path,
-    connectors_dir, format_connector_sync_failures, install_connector_from_path,
-    install_connector_from_path_with_provenance, install_connector_from_path_with_source_reference,
-    is_connector_package_stop_error, list_connectors, load_connector_manifest,
-    local_app_starts_automatically, prepare_installed_connector_runtime,
-    resolve_connector_ui_asset, resolve_connector_ui_entry, show_connector, start_connector,
-    start_connector_with_env, stop_connector, sync_installed_connector, sync_installed_connectors,
-    sync_installed_connectors_report, uninstall_connector, uninstall_connector_with_options,
+    connector_asset_upload_token_path, connector_data_dir, connector_icon_data_url,
+    connector_management_token_path, connectors_dir, format_connector_sync_failures,
+    install_connector_from_path, install_connector_from_path_with_provenance,
+    install_connector_from_path_with_source_reference, is_connector_package_stop_error,
+    list_connectors, load_connector_manifest, local_app_starts_automatically,
+    prepare_installed_connector_runtime, resolve_connector_ui_asset, resolve_connector_ui_entry,
+    show_connector, start_connector, start_connector_with_env, stop_connector,
+    sync_installed_connector, sync_installed_connectors, sync_installed_connectors_report,
+    uninstall_connector, uninstall_connector_with_options, ConnectorIcon,
     ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
     ConnectorLifecycleResult, ConnectorManagedToolDependency, ConnectorManagedToolDependencyPhase,
     ConnectorManagement, ConnectorManagementOperation, ConnectorManifest,

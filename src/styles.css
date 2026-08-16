@@ -692,6 +692,20 @@ select:focus {
   align-items: flex-start;
 }
 
+.local-app-card-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.local-app-card-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  font-size: 16px;
+}
+
 .local-app-card-top strong {
   font-size: 17px;
   line-height: 1.25;
@@ -1084,6 +1098,24 @@ select:focus {
   line-height: 1.55;
 }
 
+.app-detail-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-detail-heading > div {
+  min-width: 0;
+}
+
+.app-detail-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 15px;
+  font-size: 21px;
+}
+
 .field-error {
   color: var(--muted);
   font-size: 13px;
@@ -1461,22 +1493,29 @@ select:focus {
   opacity: 0.76;
 }
 
-.market-app-icon,
-.market-detail-icon {
+.application-icon {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 10px;
   background: linear-gradient(145deg, #2563eb, #4f46e5);
   color: white !important;
   font-weight: 800;
   line-height: 1;
+  overflow: hidden;
   box-shadow: 0 5px 14px rgba(37, 99, 235, 0.2);
+}
+
+.application-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .market-app-icon {
   width: 42px;
   height: 42px;
+  border-radius: 10px;
   font-size: 16px;
 }
 

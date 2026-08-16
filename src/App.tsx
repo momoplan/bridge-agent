@@ -1,7 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode
+} from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowLeft,
@@ -514,6 +521,7 @@ interface ConnectorSummary {
   marketAppId?: string | null;
   sourceChecksum?: string | null;
   packageChecksum?: string | null;
+  iconDataUrl?: string | null;
   ui?: ConnectorUi | null;
   permissions: ConnectorPermission[];
   startPolicy: "automatic" | "manual";
@@ -678,6 +686,7 @@ interface MarketConnector {
   capability: string;
   version: string;
   publishedAt?: string | null;
+  iconDataUrl?: string | null;
   releaseNotes: string[];
   configurationDeclaration: UpdateContractDeclaration;
   interfaceDeclaration: UpdateContractDeclaration;
@@ -5506,9 +5515,11 @@ function App() {
                       onClick={() => setSelectedMarketAppId(app.id)}
                       aria-pressed={selectedMarketAppId === app.id}
                     >
-                      <span className="market-app-icon" aria-hidden="true">
-                        {app.name.trim().slice(0, 1).toLocaleUpperCase() || "应"}
-                      </span>
+                      <ApplicationIcon
+                        className="market-app-icon"
+                        name={app.name}
+                        src={app.iconDataUrl}
+                      />
                       <span className="market-app-card-copy">
                         <span className="market-app-card-title">
                           <strong>{app.name}</strong>
@@ -5532,9 +5543,11 @@ function App() {
                   {selectedMarket ? (
                     <>
                       <div className="market-detail-hero">
-                        <span className="market-detail-icon" aria-hidden="true">
-                          {selectedMarket.name.trim().slice(0, 1).toLocaleUpperCase() || "应"}
-                        </span>
+                        <ApplicationIcon
+                          className="market-detail-icon"
+                          name={selectedMarket.name}
+                          src={selectedMarket.iconDataUrl}
+                        />
                         <div>
                           <div className="market-detail-title-row">
                             <h4>{selectedMarket.name}</h4>
@@ -5914,6 +5927,7 @@ function App() {
     const hasStartCommand = hasLocalAppStartCommand(app);
     const lifecycle = localAppLifecycle(app);
     const updateStatus = localAppUpdateStatus(app);
+    const iconDataUrl = app.connector?.iconDataUrl ?? marketAppForLocalApp(app)?.iconDataUrl;
     return (
       <button
         className="local-app-card"
@@ -5927,7 +5941,10 @@ function App() {
         }}
       >
         <div className="local-app-card-top">
-          <strong>{app.name}</strong>
+          <span className="local-app-card-identity">
+            <ApplicationIcon className="local-app-card-icon" name={app.name} src={iconDataUrl} />
+            <strong>{app.name}</strong>
+          </span>
           <span className={`sidebar-service-status status-${lifecycle.statusClass}`}>
             {lifecycle.label}
           </span>
@@ -6099,10 +6116,17 @@ function App() {
           onClick={(event) => event.stopPropagation()}
         >
           <div className="install-panel-head">
-            <div>
-              <p className="eyebrow">确认升级</p>
-              <h3 id="local-app-upgrade-title">{app.name}</h3>
-              <p>确认具体改动后，再安装 {updateStatus.latestVersion}。</p>
+            <div className="app-detail-heading">
+              <ApplicationIcon
+                className="app-detail-icon"
+                name={app.name}
+                src={app.connector?.iconDataUrl ?? marketApp.iconDataUrl}
+              />
+              <div>
+                <p className="eyebrow">确认升级</p>
+                <h3 id="local-app-upgrade-title">{app.name}</h3>
+                <p>确认具体改动后，再安装 {updateStatus.latestVersion}。</p>
+              </div>
             </div>
             <button className="icon-button" onClick={closeUpgrade} disabled={upgradeBusy} aria-label="关闭升级确认">
               <X size={18} aria-hidden="true" />
@@ -6165,6 +6189,7 @@ function App() {
     const appIsRunning = lifecycle.state === "running";
     const appCanStop = hasLocalAppStopCommand(app);
     const syncSource = connectorSyncSource(app);
+    const iconDataUrl = app.connector?.iconDataUrl ?? marketApp?.iconDataUrl;
     const closeDetail = () => setSelectedLocalAppId(null);
 
     return (
@@ -6176,10 +6201,13 @@ function App() {
           onClick={(event) => event.stopPropagation()}
         >
           <div className="install-panel-head">
-            <div>
-              <p className="eyebrow">{formatLocalAppKind(app.kind)}</p>
-              <h3>{app.name}</h3>
-              <p>{app.description}</p>
+            <div className="app-detail-heading">
+              <ApplicationIcon className="app-detail-icon" name={app.name} src={iconDataUrl} />
+              <div>
+                <p className="eyebrow">{formatLocalAppKind(app.kind)}</p>
+                <h3>{app.name}</h3>
+                <p>{app.description}</p>
+              </div>
             </div>
             <button className="ghost" onClick={closeDetail}>
               关闭
@@ -6189,33 +6217,57 @@ function App() {
           {app.installTask ? renderLocalAppInstallProgress(app.installTask) : null}
 
           <div className="app-detail-toolbar">
-            <div className="section-tabs">
+            <div className="section-tabs" role="tablist" aria-label={`${app.name} 应用详情`}>
               {embeddedUi && app.connector ? (
                 <button
+                  id="local-app-detail-app-tab"
                   className={`section-tab ${activeLocalAppDetailTab === "app" ? "active" : ""}`}
+                  role="tab"
+                  aria-selected={activeLocalAppDetailTab === "app"}
+                  aria-controls="local-app-detail-app-panel"
+                  tabIndex={activeLocalAppDetailTab === "app" ? 0 : -1}
                   onClick={() => setActiveLocalAppDetailTab("app")}
+                  onKeyDown={handleTabListKeyDown}
                 >
                   {embeddedUi.title?.trim() || "应用"}
                 </button>
               ) : null}
               <button
+                id="local-app-detail-overview-tab"
                 className={`section-tab ${activeLocalAppDetailTab === "overview" ? "active" : ""}`}
+                role="tab"
+                aria-selected={activeLocalAppDetailTab === "overview"}
+                aria-controls="local-app-detail-overview-panel"
+                tabIndex={activeLocalAppDetailTab === "overview" ? 0 : -1}
                 onClick={() => setActiveLocalAppDetailTab("overview")}
+                onKeyDown={handleTabListKeyDown}
               >
                 概览
               </button>
               {!isManagedTool && (app.kind !== "connector" || Boolean(app.connector)) ? (
                 <button
+                  id="local-app-detail-capabilities-tab"
                   className={`section-tab ${activeLocalAppDetailTab === "capabilities" ? "active" : ""}`}
+                  role="tab"
+                  aria-selected={activeLocalAppDetailTab === "capabilities"}
+                  aria-controls="local-app-detail-capabilities-panel"
+                  tabIndex={activeLocalAppDetailTab === "capabilities" ? 0 : -1}
                   onClick={() => setActiveLocalAppDetailTab("capabilities")}
+                  onKeyDown={handleTabListKeyDown}
                 >
                   能力
                 </button>
               ) : null}
               {canShowDeveloperConfig && !isManagedTool ? (
                 <button
+                  id="local-app-detail-config-tab"
                   className={`section-tab ${activeLocalAppDetailTab === "config" ? "active" : ""}`}
+                  role="tab"
+                  aria-selected={activeLocalAppDetailTab === "config"}
+                  aria-controls="local-app-detail-config-panel"
+                  tabIndex={activeLocalAppDetailTab === "config" ? 0 : -1}
                   onClick={() => setActiveLocalAppDetailTab("config")}
+                  onKeyDown={handleTabListKeyDown}
                 >
                   配置
                 </button>
@@ -6298,22 +6350,27 @@ function App() {
           </div>
 
           {activeLocalAppDetailTab === "app" && embeddedUi && app.connector && embeddedView === "mounted" ? (
-            <div className="app-detail-tab-panel embedded-local-app-panel">
+            <div
+              id="local-app-detail-app-panel"
+              className="app-detail-tab-panel embedded-local-app-panel"
+              role="tabpanel"
+              aria-labelledby="local-app-detail-app-tab"
+            >
               <LocalAppEmbeddedUi
                 connectorId={app.connector.id}
                 title={embeddedUi.title?.trim() || app.name}
               />
             </div>
           ) : activeLocalAppDetailTab === "app" && embeddedView === "uninstalling" ? (
-            <div className="app-detail-tab-panel embedded-local-app-panel">
+            <div id="local-app-detail-app-panel" className="app-detail-tab-panel embedded-local-app-panel" role="tabpanel" aria-labelledby="local-app-detail-app-tab">
               <div className="embedded-local-app-loading">正在关闭应用界面并准备卸载…</div>
             </div>
           ) : activeLocalAppDetailTab === "app" && embeddedUi && embeddedView === "transitioning" ? (
-            <div className="app-detail-tab-panel embedded-local-app-panel">
+            <div id="local-app-detail-app-panel" className="app-detail-tab-panel embedded-local-app-panel" role="tabpanel" aria-labelledby="local-app-detail-app-tab">
               <div className="embedded-local-app-loading">{lifecycle.detail}</div>
             </div>
           ) : activeLocalAppDetailTab === "app" && embeddedUi ? (
-            <div className="app-detail-tab-panel embedded-local-app-panel">
+            <div id="local-app-detail-app-panel" className="app-detail-tab-panel embedded-local-app-panel" role="tabpanel" aria-labelledby="local-app-detail-app-tab">
               <div className="empty-state">
                 <strong>{lifecycle.label}</strong>
                 <p>{lifecycle.detail}</p>
@@ -6331,7 +6388,7 @@ function App() {
           ) : null}
 
           {activeLocalAppDetailTab === "overview" ? (
-            <div className="app-detail-tab-panel">
+            <div id="local-app-detail-overview-panel" className="app-detail-tab-panel" role="tabpanel" aria-labelledby="local-app-detail-overview-tab">
               {marketApp && updateStatus?.updateAvailable
                 ? renderLocalAppUpdateChanges(app, marketApp)
                 : null}
@@ -6405,7 +6462,7 @@ function App() {
           ) : null}
 
           {activeLocalAppDetailTab === "capabilities" && !isManagedTool ? (
-            <div className="app-detail-tab-panel">
+            <div id="local-app-detail-capabilities-panel" className="app-detail-tab-panel" role="tabpanel" aria-labelledby="local-app-detail-capabilities-tab">
               <div className="method-advanced-head">
                 <strong>能力</strong>
                 <small>这些能力会在授权后开放给工作区调用。</small>
@@ -6415,7 +6472,7 @@ function App() {
           ) : null}
 
           {activeLocalAppDetailTab === "config" && canShowDeveloperConfig ? (
-            <div className="app-detail-tab-panel developer-config-stack">
+            <div id="local-app-detail-config-panel" className="app-detail-tab-panel developer-config-stack" role="tabpanel" aria-labelledby="local-app-detail-config-tab">
               <div className="method-advanced-head">
                 <strong>开发者配置</strong>
                 <small>内部运行项、启动命令、HTTP 绑定和 JSON 定义。</small>
@@ -7442,6 +7499,42 @@ function defaultLocalAppDetailTab(app: LocalAppItem): LocalAppDetailTab {
   return app.connector?.ui?.type === "embedded" && app.connector.ui.defaultView
     ? "app"
     : "overview";
+}
+
+function ApplicationIcon(props: {
+  className: string;
+  name: string;
+  src?: string | null;
+}) {
+  const fallback = props.name.trim().slice(0, 1).toLocaleUpperCase() || "应";
+  return (
+    <span className={`application-icon ${props.className}`} aria-hidden="true">
+      {props.src ? <img src={props.src} alt="" /> : fallback}
+    </span>
+  );
+}
+
+function handleTabListKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+    return;
+  }
+  const tabList = event.currentTarget.closest<HTMLElement>("[role='tablist']");
+  const tabs = tabList
+    ? Array.from(tabList.querySelectorAll<HTMLButtonElement>("[role='tab']:not(:disabled)"))
+    : [];
+  const currentIndex = tabs.indexOf(event.currentTarget);
+  if (currentIndex < 0 || tabs.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const nextIndex =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[nextIndex]?.focus();
+  tabs[nextIndex]?.click();
 }
 
 function Field(props: {
