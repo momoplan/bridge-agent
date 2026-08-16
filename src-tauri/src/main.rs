@@ -5,6 +5,7 @@ mod connector_process;
 mod macos_installation;
 mod managed_tool;
 mod managed_tool_dependency;
+mod window_layout;
 
 use connector_process::ConnectorProcessManager;
 
@@ -67,6 +68,7 @@ use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_window_state::StateFlags;
 use tokio::process::Command as AsyncCommand;
 use tokio::time::timeout;
+use window_layout::{fit_main_window_to_work_area, WindowLayoutOutcome, WindowLayoutPolicy};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -5825,6 +5827,7 @@ fn show_main_window(
         }
         return;
     };
+    normalize_main_window_layout(&window, diagnostics, WindowLayoutPolicy::Full);
     if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
         if let Some(diagnostics) = diagnostics {
             diagnostics.info(format!(
@@ -5843,6 +5846,28 @@ fn show_main_window(
             window.is_visible().unwrap_or(false),
             window.is_focused().unwrap_or(false)
         ));
+    }
+}
+
+fn normalize_main_window_layout(
+    window: &tauri::WebviewWindow,
+    diagnostics: Option<&StartupDiagnostics>,
+    policy: WindowLayoutPolicy,
+) {
+    match fit_main_window_to_work_area(window, policy) {
+        Ok(outcome @ WindowLayoutOutcome::Applied { .. }) => {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.info(format!("main window work-area normalization {outcome}"));
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.warn(format!(
+                    "failed to normalize main window to the monitor work area: {err:#}"
+                ));
+            }
+        }
     }
 }
 
@@ -6340,6 +6365,7 @@ fn main() {
     let single_instance_diagnostics = diagnostics.clone();
     let setup_diagnostics = diagnostics.clone();
     let page_load_diagnostics = diagnostics.clone();
+    let window_event_diagnostics = diagnostics.clone();
     let setup_health = startup_health.clone();
     let setup_local_app_ui = Arc::clone(&local_app_ui);
     let setup_local_apps = local_apps.clone();
@@ -6531,6 +6557,24 @@ fn main() {
                 }
                 api.prevent_close();
                 hide_to_tray(window);
+            }
+            if window.label() == "main" {
+                let Some(webview_window) = window.app_handle().get_webview_window("main") else {
+                    return;
+                };
+                match event {
+                    WindowEvent::ScaleFactorChanged { .. } => normalize_main_window_layout(
+                        &webview_window,
+                        Some(&window_event_diagnostics),
+                        WindowLayoutPolicy::Full,
+                    ),
+                    WindowEvent::Resized(_) => normalize_main_window_layout(
+                        &webview_window,
+                        Some(&window_event_diagnostics),
+                        WindowLayoutPolicy::OversizedOnly,
+                    ),
+                    _ => {}
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -7544,6 +7588,8 @@ mod tests {
 
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(config["app"]["windows"][0]["visible"], false);
+        assert!(config["app"]["windows"][0].get("minWidth").is_none());
+        assert!(config["app"]["windows"][0].get("minHeight").is_none());
     }
 
     #[test]
