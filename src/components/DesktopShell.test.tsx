@@ -25,10 +25,11 @@ function renderSidebar(
 }
 
 describe("DesktopSidebar environment metadata", () => {
-  it("keeps workspace and client version visible in the sidebar", () => {
+  it("keeps device, workspace and client version visible in the sidebar", () => {
     const markup = renderSidebar("433", "0.2.27");
 
-    expect(markup).toContain("当前工作区 433，客户端版本 0.2.27");
+    expect(markup).toContain("当前设备 测试设备，当前工作区 433，客户端版本 0.2.27");
+    expect(markup).toContain("设备</span><strong title=\"测试设备\">测试设备</strong>");
     expect(markup).toContain("工作区</span><strong>#433</strong>");
     expect(markup).toContain("desktop-environment-version\">v0.2.27</span>");
   });
@@ -36,7 +37,7 @@ describe("DesktopSidebar environment metadata", () => {
   it("uses explicit fallback labels instead of ambiguous punctuation", () => {
     const markup = renderSidebar("", "-");
 
-    expect(markup).toContain("当前工作区 未授权，客户端版本 未知");
+    expect(markup).toContain("当前设备 测试设备，当前工作区 未授权，客户端版本 未知");
     expect(markup).toContain("desktop-environment-version\">版本未知</span>");
     expect(markup).toContain("授权后开放本地能力");
     expect(markup).toContain("完成设备授权后开放设置");

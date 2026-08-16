@@ -263,17 +263,23 @@ export function DesktopSidebar({
 
       <footer
         className="desktop-environment-meta"
-        aria-label={`当前工作区 ${workspaceLabel}，客户端版本 ${versionDescription}`}
-        title={`工作区 ${workspaceLabel} · 客户端 ${versionLabel}`}
+        aria-label={`当前设备 ${deviceName}，当前工作区 ${workspaceLabel}，客户端版本 ${versionDescription}`}
+        title={`设备 ${deviceName} · 工作区 ${workspaceLabel} · 客户端 ${versionLabel}`}
       >
-        <span className="desktop-environment-workspace">
-          <span className="desktop-environment-label">工作区</span>
-          <strong>{workspace ? `#${workspace}` : workspaceLabel}</strong>
+        <span className="desktop-environment-device">
+          <span className="desktop-environment-label">设备</span>
+          <strong title={deviceName}>{deviceName}</strong>
         </span>
-        <span className="desktop-environment-separator" aria-hidden="true">
-          ·
+        <span className="desktop-environment-context">
+          <span className="desktop-environment-workspace">
+            <span className="desktop-environment-label">工作区</span>
+            <strong>{workspace ? `#${workspace}` : workspaceLabel}</strong>
+          </span>
+          <span className="desktop-environment-separator" aria-hidden="true">
+            ·
+          </span>
+          <span className="desktop-environment-version">{versionLabel}</span>
         </span>
-        <span className="desktop-environment-version">{versionLabel}</span>
       </footer>
     </aside>
   );

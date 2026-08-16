@@ -385,9 +385,8 @@ select {
 }
 
 .desktop-environment-meta {
-  display: flex;
-  gap: 6px;
-  align-items: center;
+  display: grid;
+  gap: 3px;
   min-width: 0;
   padding: 10px var(--ds-space-sm) 1px;
   border-top: 1px solid #edf0f3;
@@ -397,11 +396,27 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+.desktop-environment-device,
+.desktop-environment-context,
 .desktop-environment-workspace {
   display: flex;
   gap: 4px;
   min-width: 0;
   align-items: baseline;
+}
+
+.desktop-environment-device strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ds-color-text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-environment-context {
+  gap: 6px;
 }
 
 .desktop-environment-workspace strong,
@@ -1011,16 +1026,22 @@ select {
   }
 
   .desktop-environment-meta {
-    flex-direction: column;
     gap: 2px;
     padding: 9px 0 1px;
     text-align: center;
   }
 
+  .desktop-environment-device,
+  .desktop-environment-context,
   .desktop-environment-workspace {
     flex-direction: column;
     gap: 0;
     align-items: center;
+  }
+
+  .desktop-environment-device strong {
+    max-width: 54px;
+    font-size: 9px;
   }
 
   .desktop-environment-label {
