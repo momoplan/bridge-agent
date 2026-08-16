@@ -10,6 +10,13 @@ const windowsTauriConfig = JSON.parse(
   readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
 );
 const tauriConfig = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+const packageLock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+const cargoManifests = [
+  "Cargo.toml",
+  "src-tauri/Cargo.toml",
+  "tools/windows-uninstaller/Cargo.toml",
+];
 const windowsUninstallerPreparation = readFileSync(
   "scripts/prepare-windows-uninstaller.mjs",
   "utf8",
@@ -33,7 +40,27 @@ function jobBody(jobName, nextJobName) {
   return workflow.slice(start, end);
 }
 
+function cargoPackageVersion(path) {
+  const manifest = readFileSync(path, "utf8");
+  const version = manifest.match(/^version = "([^"]+)"$/m)?.[1];
+  if (version === undefined) {
+    throw new Error(`package version not found: ${path}`);
+  }
+  return version;
+}
+
 describe("release workflow repository script availability", () => {
+  test("all Bridge Agent release package versions remain aligned", () => {
+    const expected = packageJson.version;
+
+    expect(tauriConfig.version).toBe(expected);
+    expect(packageLock.version).toBe(expected);
+    expect(packageLock.packages[""].version).toBe(expected);
+    for (const manifest of cargoManifests) {
+      expect(cargoPackageVersion(manifest)).toBe(expected);
+    }
+  });
+
   test("verify-update-service checks out the dispatched workflow commit", () => {
     const body = jobBody("verify-update-service");
     const checkoutIndex = body.indexOf("uses: actions/checkout@v4");
