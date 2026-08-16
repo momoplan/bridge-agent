@@ -556,6 +556,10 @@ jobs:
           WINDOWS_SIGNING_ENABLED: ${{ env.WINDOWS_SIGNING_ENABLED }}
           WINDOWS_SIGNING_DESCRIPTION: "百积木"
           WINDOWS_SIGNING_LOG_PATH: ${{ runner.temp }}/windows-signing.log
+          # Tauri otherwise adds --skip-jenkins whenever GitHub Actions sets
+          # CI=true, which copies the background asset but omits the Finder
+          # .DS_Store that applies the background and icon positions.
+          TAURI_BUNDLER_DMG_IGNORE_CI: ${{ runner.os == 'macOS' && 'true' || 'false' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -684,6 +688,11 @@ jobs:
           if [ ! -L "$applications_link" ] || [ "$(readlink "$applications_link")" != "/Applications" ]; then
             echo "macOS DMG must contain an Applications symlink for drag-to-install" >&2
             find "$mount_dir" -maxdepth 1 -mindepth 1 -print >&2
+            exit 1
+          fi
+          if [ ! -s "$mount_dir/.DS_Store" ]; then
+            echo "macOS DMG is missing the Finder layout that applies its background and icon positions" >&2
+            find "$mount_dir" -maxdepth 2 -mindepth 1 -print >&2
             exit 1
           fi
           if [ ! -s "$mount_dir/.background/dmg-background.png" ]; then

@@ -150,8 +150,12 @@ describe("release workflow repository script availability", () => {
 
     expect(dmg.background).toBe("./images/dmg-background.png");
     expect(dmg.appPosition.x).toBeLessThan(dmg.applicationFolderPosition.x);
+    expect(releaseBody).toContain(
+      "TAURI_BUNDLER_DMG_IGNORE_CI: ${{ runner.os == 'macOS' && 'true' || 'false' }}",
+    );
     expect(releaseBody).toContain('readlink "$applications_link"');
     expect(releaseBody).toContain('!= "/Applications"');
+    expect(releaseBody).toContain('[ ! -s "$mount_dir/.DS_Store" ]');
     expect(releaseBody).toContain(
       'cmp -s "$mount_dir/.background/dmg-background.png" "src-tauri/images/dmg-background.png"',
     );
