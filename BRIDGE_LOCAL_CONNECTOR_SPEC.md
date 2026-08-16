@@ -44,7 +44,7 @@ Connector 可以在 `connector.json` 顶层声明应用图标：
     "data": "<256x256 PNG 原始字节的标准 Base64>"
   },
   "hostRequirements": {
-    "minimumVersion": "0.2.94",
+    "minimumVersion": "0.2.95",
     "capabilities": ["connector.presentation.icon.v1"]
   }
 }
@@ -57,7 +57,7 @@ Connector 可以在 `connector.json` 顶层声明应用图标：
 - `data` 必须是 PNG 原始字节的标准 Base64，不得包含 `data:` URI 前缀、空白或换行。
 - PNG 必须是 `256 × 256` 正方形，解码后不得超过 `128 KiB`；建议保留透明背景并确保缩放到 32px 时仍可辨认。
 - 图标缺失时宿主使用通用占位图形；不得在宿主运行时按具体 app ID、名称或市场条目硬编码图标。
-- 声明图标的新版本必须要求宿主 `>= 0.2.94` 及能力 `connector.presentation.icon.v1`，确保所有身份位置一致展示。
+- 声明图标的新版本必须要求宿主 `>= 0.2.95` 及能力 `connector.presentation.icon.v1`，确保所有身份位置一致展示。
 
 ## 市场应用的本机管理界面
 
