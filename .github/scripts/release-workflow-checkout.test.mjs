@@ -9,6 +9,7 @@ const workflow = readFileSync(
 const windowsTauriConfig = JSON.parse(
   readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
 );
+const tauriConfig = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
 const windowsUninstallerPreparation = readFileSync(
   "scripts/prepare-windows-uninstaller.mjs",
   "utf8",
@@ -113,6 +114,19 @@ describe("release workflow repository script availability", () => {
     );
     expect(body).not.toContain(
       "^https://[a-z0-9][a-z0-9-]*\\\\.oss-[a-z0-9-]+\\\\.aliyuncs\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
+    );
+  });
+
+  test("macOS DMG remains a quality-gated drag-to-install bundle", () => {
+    const releaseBody = jobBody("release", "mirror-domestic-release");
+    const dmg = tauriConfig.bundle.macOS.dmg;
+
+    expect(dmg.background).toBe("./images/dmg-background.png");
+    expect(dmg.appPosition.x).toBeLessThan(dmg.applicationFolderPosition.x);
+    expect(releaseBody).toContain('readlink "$applications_link"');
+    expect(releaseBody).toContain('!= "/Applications"');
+    expect(releaseBody).toContain(
+      'cmp -s "$mount_dir/.background/dmg-background.png" "src-tauri/images/dmg-background.png"',
     );
   });
 });

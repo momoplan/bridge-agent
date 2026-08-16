@@ -2,6 +2,7 @@
 
 mod codex_skill;
 mod connector_process;
+mod macos_installation;
 mod managed_tool;
 mod managed_tool_dependency;
 
@@ -6283,6 +6284,7 @@ fn main() {
     let diagnostics = StartupDiagnostics::for_config_path(&config_path);
     install_panic_diagnostics(diagnostics.clone());
     log_startup_environment(&diagnostics, &config_path);
+    let macos_installation_required = macos_installation::required_for_current_executable();
     let process_args = std::env::args_os().collect::<Vec<_>>();
     let forced_safe_mode = process_args
         .iter()
@@ -6359,6 +6361,7 @@ fn main() {
             },
         ))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .max_file_size(5 * 1024 * 1024)
@@ -6407,6 +6410,13 @@ fn main() {
         })
         .setup(move |app| {
             setup_diagnostics.info("tauri setup started");
+            if macos_installation_required {
+                setup_diagnostics.warn(
+                    "macOS app is running outside an Applications directory; showing the installation reminder and stopping startup",
+                );
+                macos_installation::show_reminder(app.handle());
+                return Ok(());
+            }
             setup_health.begin_primary(forced_safe_mode, config_path_failure);
             if let Some(detail) = crypto_provider_failure {
                 setup_health.set_component(
@@ -6573,6 +6583,12 @@ fn main() {
         .run(move |app, event| match event {
             tauri::RunEvent::Ready => {
                 diagnostics.info("tauri runtime ready");
+                if macos_installation_required {
+                    diagnostics.info(
+                        "macOS installation reminder is active; suppressing the main window",
+                    );
+                    return;
+                }
                 startup_health.set_component(
                     "desktop_shell",
                     "桌面基础壳",

@@ -680,6 +680,21 @@ jobs:
             echo "Unable to locate app bundle inside ${dmg_files[0]}" >&2
             exit 1
           fi
+          applications_link="$mount_dir/Applications"
+          if [ ! -L "$applications_link" ] || [ "$(readlink "$applications_link")" != "/Applications" ]; then
+            echo "macOS DMG must contain an Applications symlink for drag-to-install" >&2
+            find "$mount_dir" -maxdepth 1 -mindepth 1 -print >&2
+            exit 1
+          fi
+          if [ ! -s "$mount_dir/.background/dmg-background.png" ]; then
+            echo "macOS DMG is missing the branded drag-to-install background" >&2
+            find "$mount_dir" -maxdepth 2 -mindepth 1 -print >&2
+            exit 1
+          fi
+          if ! cmp -s "$mount_dir/.background/dmg-background.png" "src-tauri/images/dmg-background.png"; then
+            echo "macOS DMG drag-to-install background does not match the versioned source asset" >&2
+            exit 1
+          fi
           info_plist="${app_path}/Contents/Info.plist"
 
           version_lte() {
