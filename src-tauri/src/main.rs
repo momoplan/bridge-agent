@@ -1585,6 +1585,7 @@ async fn test_local_app_capability(
     Ok(registry
         .invoke_local_app(
             request_id,
+            None,
             connector_id,
             method,
             arguments,
