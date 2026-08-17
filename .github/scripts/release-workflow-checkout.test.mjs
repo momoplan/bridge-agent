@@ -149,6 +149,7 @@ describe("release workflow repository script availability", () => {
     const dmg = tauriConfig.bundle.macOS.dmg;
 
     expect(dmg.background).toBe("./images/dmg-background.png");
+    expect(dmg.windowSize).toEqual({ width: 660, height: 432 });
     expect(dmg.appPosition.x).toBeLessThan(dmg.applicationFolderPosition.x);
     expect(releaseBody).toContain(
       "TAURI_BUNDLER_DMG_IGNORE_CI: ${{ runner.os == 'macOS' && 'true' || 'false' }}",
