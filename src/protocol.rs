@@ -138,6 +138,8 @@ pub struct InvokeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAppInvokeRequest {
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<u64>,
     pub connector_id: String,
     pub method: String,
     #[serde(default)]

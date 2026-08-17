@@ -36,6 +36,7 @@ use uuid::Uuid;
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
+const BAIJIMU_WORKSPACE_ID_HEADER: &str = "x-baijimu-workspace-id";
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -615,6 +616,7 @@ impl ServiceRegistry {
     pub async fn invoke_local_app(
         &self,
         request_id: String,
+        workspace_id: Option<u64>,
         connector_id: &str,
         method: &str,
         arguments: Value,
@@ -623,7 +625,11 @@ impl ServiceRegistry {
         let started = Instant::now();
         let response = match self.local_apps.get(connector_id) {
             Some(app) => match app.runtime.methods.get(method) {
-                Some(runtime_method) => runtime_method.invoke(arguments, timeout_secs).await,
+                Some(runtime_method) => {
+                    runtime_method
+                        .invoke_local_app(arguments, timeout_secs, workspace_id)
+                        .await
+                }
                 None => Err(anyhow!(
                     "unknown method `{method}` on local app `{connector_id}`"
                 )),
@@ -701,6 +707,23 @@ impl RuntimeMethod {
         match self {
             Self::Shell(method) => method.invoke(arguments, timeout_secs).await,
             Self::Http(method) => method.invoke(arguments, timeout_secs).await,
+            Self::Computer(method) => method.invoke(arguments).await,
+        }
+    }
+
+    async fn invoke_local_app(
+        &self,
+        arguments: Value,
+        timeout_secs: Option<u64>,
+        workspace_id: Option<u64>,
+    ) -> Result<ServiceOutcome> {
+        match self {
+            Self::Http(method) => {
+                method
+                    .invoke_with_workspace(arguments, timeout_secs, workspace_id)
+                    .await
+            }
+            Self::Shell(method) => method.invoke(arguments, timeout_secs).await,
             Self::Computer(method) => method.invoke(arguments).await,
         }
     }
@@ -1520,6 +1543,16 @@ fn current_epoch_ms() -> u64 {
 
 impl HttpMethod {
     async fn invoke(&self, arguments: Value, timeout_secs: Option<u64>) -> Result<ServiceOutcome> {
+        self.invoke_with_workspace(arguments, timeout_secs, None)
+            .await
+    }
+
+    async fn invoke_with_workspace(
+        &self,
+        arguments: Value,
+        timeout_secs: Option<u64>,
+        workspace_id: Option<u64>,
+    ) -> Result<ServiceOutcome> {
         let timeout_secs = timeout_secs.unwrap_or(self.timeout_secs);
         let mut request = self
             .client
@@ -1528,6 +1561,9 @@ impl HttpMethod {
 
         for (key, value) in &self.headers {
             request = request.header(key, value);
+        }
+        if let Some(workspace_id) = workspace_id {
+            request = request.header(BAIJIMU_WORKSPACE_ID_HEADER, workspace_id.to_string());
         }
 
         if matches!(self.http_method, Method::GET | Method::DELETE) {
@@ -3700,6 +3736,7 @@ mod tests {
     };
     use crate::protocol::ResponseMode;
     use axum::{
+        http::HeaderMap,
         routing::{get, post},
         Json, Router,
     };
@@ -4464,6 +4501,72 @@ mod tests {
             .definitions()
             .iter()
             .any(|service| service.name == "healthyTool"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_app_http_binding_forwards_trusted_workspace_context() {
+        async fn capture_workspace(headers: HeaderMap) -> Json<Value> {
+            Json(json!({
+                "ok": true,
+                "data": {
+                    "workspaceId": headers
+                        .get("x-baijimu-workspace-id")
+                        .and_then(|value| value.to_str().ok())
+                }
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/invoke/status", post(capture_workspace)),
+            )
+            .await
+            .unwrap();
+        });
+        let current_dir = std::env::current_dir().unwrap();
+        let mut config = AgentConfig::example();
+        config.local_apps.push(LocalAppConfig {
+            connector_id: "com.baijimu.connector.workspace-aware".to_string(),
+            name: "Workspace-aware app".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Captures trusted workspace context.".to_string(),
+            enabled: true,
+            health_check: None,
+            start_command: None,
+            stop_command: None,
+            methods: vec![MethodConfig {
+                name: "status".to_string(),
+                description: "Status".to_string(),
+                enabled: true,
+                input_schema: json!({"type": "object"}),
+                response_mode: ResponseMode::Cmodel,
+                binding: MethodBinding::Http(HttpBinding {
+                    url: format!("http://{addr}/invoke/status"),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(2),
+                }),
+            }],
+            events: Vec::new(),
+        });
+        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
+        let result = registry
+            .invoke_local_app(
+                "req-workspace".to_string(),
+                Some(642),
+                "com.baijimu.connector.workspace-aware",
+                "status",
+                json!({}),
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["workspaceId"], "642");
         server.abort();
     }
 

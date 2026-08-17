@@ -5,11 +5,11 @@
 
 ## Codex 所有权边界
 
-Codex 本地应用的源码、唯一 `v<version>` 标签、三平台构建与签名、GitHub Release、OSS 上传、市场版本创建、
-提交审核和发布回查，全部由
-[`momoplan/baijimu-connector-codex`](https://github.com/momoplan/baijimu-connector-codex)
-仓库内唯一的 `release.yml` 负责。Bridge Agent 不再保存 Codex 发布 workflow、Jenkinsfile、市场发布脚本或
-Jenkins Job 定义，也不创建第二套 Codex 标签。
+Codex 由三个互不重叠的本地应用发布单元组成：`baijimu-codex-desktop` 负责桌面安装与工作区切换，
+`baijimu-connector-codex` 负责 CLI 与 session/thread/turn 接口，`baijimu-connector-codex-completion`
+负责 OpenAI 兼容补全入口。每个仓库分别拥有唯一 `v<version>` 标签、三平台构建与签名、GitHub Release、
+OSS 上传、市场版本创建、提交审核和发布回查；三者不得共享标签、制品或 `local-app-market` 记录。
+Bridge Agent 不保存这些应用的发布 workflow、Jenkinsfile 或市场发布脚本。
 
 ```text
 oss://baijimu-lowcode-public-20260420/local-app-artifacts/codex/releases/v<version>/<sha256>/<asset>
