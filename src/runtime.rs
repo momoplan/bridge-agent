@@ -1081,6 +1081,7 @@ impl RuntimeRunner {
                                         .await
                                         .invoke_local_app(
                                             request.request_id,
+                                            request.workspace_id,
                                             &connector_id,
                                             &method,
                                             request.arguments,
@@ -2128,12 +2129,13 @@ mod tests {
 
     #[test]
     fn relay_decoder_accepts_local_app_invoke_request() {
-        let message = r#"{"type":"local_app_invoke_request","request_id":"req-1","connector_id":"camera","method":"capture","arguments":{}}"#;
+        let message = r#"{"type":"local_app_invoke_request","request_id":"req-1","workspace_id":642,"connector_id":"camera","method":"capture","arguments":{}}"#;
 
         match decode_relay_message(message).unwrap().unwrap() {
             AgentMessage::LocalAppInvokeRequest(request) => {
                 assert_eq!(request.connector_id, "camera");
                 assert_eq!(request.method, "capture");
+                assert_eq!(request.workspace_id, Some(642));
             }
             other => panic!("expected local_app_invoke_request, got {other:?}"),
         }

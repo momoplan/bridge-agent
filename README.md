@@ -112,7 +112,9 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
 
 Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿主，而应优先作为可安装 Connector 或内置应用：
 
-- Codex：作为独立 Rust 本地应用连接本机 `codex app-server`，同时提供结构化 session/thread/turn/event 能力和“账户与工作区”管理；LLM credential 签发、归属校验、本机配置切换均由 Codex 应用自身执行，Bridge Agent 只通过 Connector 声明的本机管理接口展示结果。
+- Codex 桌面环境：独立本地应用负责桌面安装、桌面凭证档案和用户显式工作区切换，不声明 Relay 远程能力。
+- Codex Connector：独立 Rust 本地应用负责 Codex CLI、`app-server` 和结构化 session/thread/turn/event 能力；Relay 鉴权得到的工作区由 Bridge Agent 作为可信调用上下文传入，Connector 为每个工作区维护独立档案。
+- Codex Completion Connector：保持独立，提供直接使用底层 Codex 能力的 OpenAI 兼容补全接口，不与 session/thread/turn Connector 合并。
 - WeChat Connector：连接本机微信采集器，注册 `wechatLocal` 查询方法和消息事件。
 - Desktop Control：提供截图、点击、键盘、滚动等桌面能力，当前作为内置应用随客户端分发。
 
@@ -141,7 +143,7 @@ Baijimu CLI 由其私有 GitHub 仓库 `momoplan/baijimu-cli-rs` 的唯一
 `release.yml` 工作流独立发布。公开下载统一使用内容寻址 OSS、npm 或本地应用市场；
 Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、签名、镜像或发布 CLI。
 
-Codex 的运行状态与账户状态彼此独立：应用状态来自 Connector 的 health check，账户页单独显示当前工作区、项目和凭证有效性。LLM key 只由 Codex 本地应用处理，不进入 Bridge Agent、前端状态或 relay，也不会作为 `codexSession` 方法暴露给远端。
+`codex` 是继承原线上身份的 Codex Desktop Manager；`codex-connector` 是新的 CLI 与外部接口应用；`codex-completion` 保持独立。三者运行状态彼此独立。LLM key 只由对应本地应用写入自己的私有档案，不进入 Bridge Agent、前端状态或 Relay；桌面当前工作区也不会影响远程 Connector 调用的工作区。
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
