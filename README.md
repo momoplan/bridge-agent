@@ -143,7 +143,7 @@ Baijimu CLI 由其私有 GitHub 仓库 `momoplan/baijimu-cli-rs` 的唯一
 `release.yml` 工作流独立发布。公开下载统一使用内容寻址 OSS、npm 或本地应用市场；
 Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、签名、镜像或发布 CLI。
 
-Codex 桌面状态与 Connector 运行状态彼此独立。LLM key 只由对应本地应用写入自己的私有档案，不进入 Bridge Agent、前端状态或 Relay；桌面当前工作区也不会影响远程 Connector 调用的工作区。
+`codex` 是继承原线上身份的 Codex Desktop Manager；`codex-connector` 是新的 CLI 与外部接口应用；`codex-completion` 保持独立。三者运行状态彼此独立。LLM key 只由对应本地应用写入自己的私有档案，不进入 Bridge Agent、前端状态或 Relay；桌面当前工作区也不会影响远程 Connector 调用的工作区。
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 

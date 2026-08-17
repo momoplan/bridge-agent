@@ -5,8 +5,9 @@
 
 ## Codex 所有权边界
 
-Codex 由三个互不重叠的本地应用发布单元组成：`baijimu-codex-desktop` 负责桌面安装与工作区切换，
-`baijimu-connector-codex` 负责 CLI 与 session/thread/turn 接口，`baijimu-connector-codex-completion`
+Codex 由三个互不重叠的本地应用发布单元组成：app ID `codex`（`com.baijimu.connector.codex`）继承线上
+应用并负责 Desktop Manager 的桌面安装与工作区切换；app ID `codex-connector`
+（`com.baijimu.connector.codex-connector`）负责 CLI 与 session/thread/turn/event 接口；`baijimu-connector-codex-completion`
 负责 OpenAI 兼容补全入口。每个仓库分别拥有唯一 `v<version>` 标签、三平台构建与签名、GitHub Release、
 OSS 上传、市场版本创建、提交审核和发布回查；三者不得共享标签、制品或 `local-app-market` 记录。
 Bridge Agent 不保存这些应用的发布 workflow、Jenkinsfile 或市场发布脚本。

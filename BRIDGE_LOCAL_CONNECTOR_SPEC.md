@@ -76,7 +76,7 @@ Connector 可以在 `connector.json` 顶层声明应用图标：
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 是这一模式的首个实现：独立 Rust 本地应用 `com.baijimu.connector.codex` 同时负责官方 Codex 安装、`codex app-server` 的 session、thread、turn 和 event 能力，以及当前授权工作区的 LLM credential 签发和本机 Codex 配置。平台项目不参与安装和凭证归属。Bridge Agent 只后台安装和启动 Connector、加载 `ui/` 静态资源并代理清单声明的管理操作；Codex 初始化由用户进入应用后启动，步骤、进度、失败和重试都由 Codex 应用自身展示。LLM credential 不经过 Bridge Agent。
+Codex 按状态所有权拆成三个本地应用：`com.baijimu.connector.codex` 继承线上 Desktop Manager 身份、原数据目录和端口，只负责官方桌面应用安装、桌面工作区凭证和用户显式切换；`com.baijimu.connector.codex-connector` 独立安装 Codex CLI，并按 Relay 鉴权得到的工作区上下文提供 session、thread、turn 和 event 能力；`com.baijimu.connector.codex-completion` 继续独立提供 OpenAI 兼容补全接口。平台项目不参与安装和凭证归属。Bridge Agent 只后台安装和启动应用、加载清单声明的 `ui/` 并代理管理操作；LLM credential 不经过 Bridge Agent。
 
 管理接口必须满足：
 
