@@ -21,6 +21,10 @@ const windowsUninstallerPreparation = readFileSync(
   "scripts/prepare-windows-uninstaller.mjs",
   "utf8",
 );
+const linuxDependencyInstaller = readFileSync(
+  ".github/scripts/install-linux-release-dependencies.sh",
+  "utf8",
+);
 
 function jobBody(jobName, nextJobName) {
   const startMarker = `  ${jobName}:\n`;
@@ -142,6 +146,17 @@ describe("release workflow repository script availability", () => {
     expect(body).not.toContain(
       "^https://[a-z0-9][a-z0-9-]*\\\\.oss-[a-z0-9-]+\\\\.aliyuncs\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
     );
+  });
+
+  test("Linux dependency installation has bounded retries and an official mirror fallback", () => {
+    expect(
+      workflow.match(/install-linux-release-dependencies\.sh/g),
+    ).toHaveLength(2);
+    expect(linuxDependencyInstaller).toContain("APT_COMMAND_TIMEOUT_SECONDS");
+    expect(linuxDependencyInstaller).toContain("Acquire::Retries=");
+    expect(linuxDependencyInstaller).toContain("Acquire::http::Timeout=15");
+    expect(linuxDependencyInstaller).toContain("Acquire::https::Timeout=15");
+    expect(linuxDependencyInstaller).toContain("https://archive.ubuntu.com/ubuntu");
   });
 
   test("macOS DMG remains a quality-gated drag-to-install bundle", () => {
