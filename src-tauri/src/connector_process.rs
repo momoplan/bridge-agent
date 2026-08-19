@@ -70,6 +70,15 @@ impl ConnectorProcessManager {
         )
     }
 
+    pub(crate) async fn managed_pid(&self, connector_id: &str) -> Option<u32> {
+        self.inner
+            .lock()
+            .await
+            .get(connector_id)
+            .filter(|handle| handle.exit_rx.borrow().is_none())
+            .map(|handle| handle.pid)
+    }
+
     pub(crate) async fn runtime_active(&self, connector_id: &str) -> bool {
         if let Some(running) = self.managed_running(connector_id).await {
             return running;

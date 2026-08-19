@@ -5,7 +5,10 @@ export function embeddedLocalAppView(
   uninstalling: boolean,
 ): EmbeddedLocalAppView {
   if (uninstalling) return "uninstalling";
-  if (lifecycleState === "running") return "mounted";
-  if (lifecycleState === "starting" || lifecycleState === "stopping") return "transitioning";
+  if (lifecycleState === "ready") return "mounted";
+  if (["installing", "starting", "stopping", "upgrading", "recovering"].includes(lifecycleState)) {
+    return "transitioning";
+  }
+  if (lifecycleState === "uninstalling") return "uninstalling";
   return "unavailable";
 }
