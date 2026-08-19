@@ -1,4 +1,4 @@
-export type LocalAppInstallTaskState =
+export type LocalAppInstallTaskPhase =
   | "queued"
   | "resolving"
   | "downloading"
@@ -15,7 +15,7 @@ export interface LocalAppInstallTask {
   marketAppId?: string | null;
   name: string;
   version?: string | null;
-  state: LocalAppInstallTaskState;
+  phase: LocalAppInstallTaskPhase;
   progressPercent?: number | null;
   downloadedBytes?: number | null;
   totalBytes?: number | null;
@@ -61,7 +61,7 @@ export function reconcileLocalAppInstallSelection(
 
   const taskId = currentSelection.slice(taskPrefix.length);
   const task = tasks.find((candidate) => candidate.taskId === taskId);
-  if (task?.state !== "succeeded" || !task.connectorId) {
+  if (task?.phase !== "succeeded" || !task.connectorId) {
     return null;
   }
 

@@ -8,7 +8,7 @@ import {
 
 function task(
   taskId: string,
-  state: LocalAppInstallTask["state"],
+  phase: LocalAppInstallTask["phase"],
   updatedAtEpochMs: number
 ): LocalAppInstallTask {
   return {
@@ -16,8 +16,8 @@ function task(
     connectorId: "com.baijimu.connector.codex",
     marketAppId: "codex",
     name: "Codex",
-    state,
-    message: state,
+    phase,
+    message: phase,
     createdAtEpochMs: updatedAtEpochMs,
     updatedAtEpochMs
   };

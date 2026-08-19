@@ -1,12 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod codex_skill;
+mod connector_lifecycle;
 mod connector_process;
 mod macos_installation;
 mod managed_tool;
 mod managed_tool_dependency;
 mod window_layout;
 
+use connector_lifecycle::{
+    ConnectorHealthState, ConnectorLifecycleManager, ConnectorLifecycleSnapshot,
+    ConnectorLifecycleState, ConnectorManagementNotReady, ConnectorOperationKind,
+};
 use connector_process::ConnectorProcessManager;
 
 use anyhow::Context as _;
@@ -205,6 +210,7 @@ fn should_restore_main_window_on_macos_reopen(has_visible_windows: bool) -> bool
 
 struct DesktopState {
     runtime: AgentRuntimeManager,
+    connector_lifecycles: ConnectorLifecycleManager,
     connector_processes: ConnectorProcessManager,
     config_path: PathBuf,
     quitting: Arc<AtomicBool>,
@@ -220,7 +226,7 @@ struct DesktopState {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum LocalAppInstallTaskState {
+enum LocalAppInstallTaskPhase {
     Queued,
     Resolving,
     Downloading,
@@ -232,7 +238,7 @@ enum LocalAppInstallTaskState {
     Failed,
 }
 
-impl LocalAppInstallTaskState {
+impl LocalAppInstallTaskPhase {
     fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Failed)
     }
@@ -246,7 +252,7 @@ struct LocalAppInstallTask {
     market_app_id: Option<String>,
     name: String,
     version: Option<String>,
-    state: LocalAppInstallTaskState,
+    phase: LocalAppInstallTaskPhase,
     progress_percent: Option<u8>,
     downloaded_bytes: Option<u64>,
     total_bytes: Option<u64>,
@@ -281,7 +287,7 @@ impl LocalAppInstallTaskManager {
             .write()
             .map_err(|_| "本地应用安装任务状态锁已损坏".to_string())?;
         if let Some(existing) = tasks.values().find(|task| {
-            task.state.is_active()
+            task.phase.is_active()
                 && ((market_app_id.is_some() && task.market_app_id == market_app_id)
                     || (connector_id.is_some() && task.connector_id == connector_id))
         }) {
@@ -294,7 +300,7 @@ impl LocalAppInstallTaskManager {
             market_app_id,
             name,
             version,
-            state: LocalAppInstallTaskState::Queued,
+            phase: LocalAppInstallTaskPhase::Queued,
             progress_percent: Some(0),
             downloaded_bytes: None,
             total_bytes: None,
@@ -357,13 +363,13 @@ struct LocalAppInstallProgressReporter {
 impl LocalAppInstallProgressReporter {
     fn report(
         &self,
-        state: LocalAppInstallTaskState,
+        phase: LocalAppInstallTaskPhase,
         progress_percent: Option<u8>,
         message: impl Into<String>,
     ) {
         let message = message.into();
         self.manager.update(&self.task_id, |task| {
-            task.state = state;
+            task.phase = phase;
             task.progress_percent = progress_percent;
             task.message = message;
             task.error = None;
@@ -374,7 +380,7 @@ impl LocalAppInstallProgressReporter {
 
     fn download(&self, downloaded_bytes: u64, total_bytes: Option<u64>) {
         self.manager.update(&self.task_id, |task| {
-            task.state = LocalAppInstallTaskState::Downloading;
+            task.phase = LocalAppInstallTaskPhase::Downloading;
             task.downloaded_bytes = Some(downloaded_bytes);
             task.total_bytes = total_bytes;
             task.progress_percent = total_bytes.filter(|total| *total > 0).map(|total| {
@@ -817,6 +823,7 @@ struct LocalAppUiHttpState {
     diagnostics: StartupDiagnostics,
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
+    connector_lifecycles: ConnectorLifecycleManager,
     connector_processes: ConnectorProcessManager,
     registered_services: RegisteredServiceMonitor,
     local_apps: LocalAppsChangeNotifier,
@@ -827,6 +834,7 @@ struct LocalAppUiServerDependencies {
     diagnostics: StartupDiagnostics,
     config_path: PathBuf,
     runtime: AgentRuntimeManager,
+    connector_lifecycles: ConnectorLifecycleManager,
     connector_processes: ConnectorProcessManager,
     registered_services: RegisteredServiceMonitor,
     local_apps: LocalAppsChangeNotifier,
@@ -1125,7 +1133,7 @@ struct DesktopPermissionStatus {
     screen_recording_supported: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RegisteredServiceState {
     NotConfigured,
@@ -1788,11 +1796,24 @@ async fn registered_service_statuses(
 async fn local_app_runtime_statuses(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Vec<LocalAppRuntimeStatus>, String> {
-    collect_local_app_runtime_statuses(&state.config_path, &state.connector_processes).await
+    collect_local_app_runtime_statuses(
+        &state.config_path,
+        &state.connector_lifecycles,
+        &state.connector_processes,
+    )
+    .await
+}
+
+#[tauri::command]
+fn connector_lifecycle_snapshots(
+    state: tauri::State<'_, DesktopState>,
+) -> Vec<ConnectorLifecycleSnapshot> {
+    state.connector_lifecycles.list()
 }
 
 async fn collect_local_app_runtime_statuses(
     config_path: &Path,
+    connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
 ) -> Result<Vec<LocalAppRuntimeStatus>, String> {
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
@@ -1804,11 +1825,48 @@ async fn collect_local_app_runtime_statuses(
     let mut statuses = Vec::with_capacity(config.local_apps.len());
     for app in config.local_apps {
         let process_running = connector_processes.managed_running(&app.connector_id).await;
-        if connector_processes.runtime_active(&app.connector_id).await {
-            statuses.push(check_local_app(&client, app, process_running).await);
+        let runtime_active = connector_processes.runtime_active(&app.connector_id).await;
+        let connector_id = app.connector_id.clone();
+        let status = if runtime_active {
+            check_local_app(&client, app, process_running).await
         } else {
-            statuses.push(inactive_local_app_status(app, process_running));
-        }
+            inactive_local_app_status(app, process_running)
+        };
+        let version = show_connector(&connector_id)
+            .ok()
+            .map(|record| record.manifest.version);
+        let pid = connector_processes.managed_pid(&connector_id).await;
+        let (lifecycle, health) = match (runtime_active, status.status) {
+            (false, _) => (
+                ConnectorLifecycleState::Stopped,
+                ConnectorHealthState::Unhealthy,
+            ),
+            (true, RegisteredServiceState::Healthy) => (
+                ConnectorLifecycleState::Ready,
+                ConnectorHealthState::Healthy,
+            ),
+            (true, RegisteredServiceState::Unhealthy) => (
+                ConnectorLifecycleState::Degraded,
+                ConnectorHealthState::Unhealthy,
+            ),
+            (true, RegisteredServiceState::NotConfigured) => (
+                ConnectorLifecycleState::Ready,
+                ConnectorHealthState::NotConfigured,
+            ),
+            (true, RegisteredServiceState::Unknown) => (
+                ConnectorLifecycleState::Recovering,
+                ConnectorHealthState::Unknown,
+            ),
+        };
+        connector_lifecycles.observe(
+            &connector_id,
+            lifecycle,
+            health,
+            version,
+            pid,
+            status.detail.clone(),
+        )?;
+        statuses.push(status);
     }
     Ok(statuses)
 }
@@ -1869,6 +1927,7 @@ fn local_app_runtime_statuses_changed(
 fn start_registered_service_monitor(
     app: tauri::AppHandle,
     config_path: PathBuf,
+    connector_lifecycles: ConnectorLifecycleManager,
     connector_processes: ConnectorProcessManager,
     mut request_rx: tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
 ) {
@@ -1925,7 +1984,13 @@ fn start_registered_service_monitor(
                 let _ = responder.send(result.clone());
             }
 
-            match collect_local_app_runtime_statuses(&config_path, &connector_processes).await {
+            match collect_local_app_runtime_statuses(
+                &config_path,
+                &connector_lifecycles,
+                &connector_processes,
+            )
+            .await
+            {
                 Ok(current) => {
                     let changed = previous_local_apps
                         .as_deref()
@@ -2001,6 +2066,7 @@ fn start_local_app_ui_server(
         diagnostics,
         config_path,
         runtime,
+        connector_lifecycles,
         connector_processes,
         registered_services,
         local_apps,
@@ -2070,6 +2136,7 @@ fn start_local_app_ui_server(
             diagnostics: diagnostics.clone(),
             config_path: config_path.clone(),
             runtime,
+            connector_lifecycles,
             connector_processes,
             registered_services,
             local_apps,
@@ -2253,6 +2320,7 @@ async fn local_app_control_list_handler(
             "apps": apps,
             "syncFailures": [],
             "services": services,
+            "lifecycles": state.connector_lifecycles.list(),
             "runtime": state.runtime.snapshot().await
         }))
     }
@@ -2280,6 +2348,8 @@ async fn local_app_control_show_handler(
         Ok::<_, String>(serde_json::json!({
             "app": record,
             "status": status,
+            "lifecycle": state.connector_lifecycles.list().into_iter()
+                .find(|snapshot| snapshot.connector_id == connector_id.trim()),
             "runtime": state.runtime.snapshot().await
         }))
     }
@@ -2309,6 +2379,7 @@ async fn local_app_control_install_handler(
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_lifecycles,
             &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
@@ -2340,7 +2411,8 @@ async fn local_app_control_start_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    let result = start_connector_and_wait(
+    let result = start_connector_with_lifecycle(
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         connector_id.trim(),
@@ -2359,7 +2431,8 @@ async fn local_app_control_stop_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    let result = stop_connector_and_wait(
+    let result = stop_connector_with_lifecycle(
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         connector_id.trim(),
@@ -2387,6 +2460,7 @@ async fn local_app_control_sync_handler(
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_lifecycles,
             &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
@@ -2419,9 +2493,29 @@ async fn local_app_control_management_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
-    local_app_control_result(
-        invoke_connector_management(connector_id, operation, request.payload).await,
+    match invoke_connector_management_with_context(
+        &state.connector_lifecycles,
+        &state.connector_processes,
+        connector_id,
+        operation,
+        request.payload,
     )
+    .await
+    {
+        Ok(value) => local_app_control_success(value),
+        Err(error) => {
+            let status = if error.code == "connector_not_ready" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(serde_json::json!({ "ok": false, "error": error })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn local_app_control_uninstall_handler(
@@ -2438,6 +2532,7 @@ async fn local_app_control_uninstall_handler(
         let document = uninstall_connector_app_with_context(
             &state.config_path,
             &state.runtime,
+            &state.connector_lifecycles,
             &state.connector_processes,
             &state.registered_services,
             connector_id.clone(),
@@ -2734,8 +2829,84 @@ async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String
     show_connector(id.trim()).map_err(|err| err.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorManagementCommandError {
+    code: &'static str,
+    message: String,
+    lifecycle: Option<ConnectorLifecycleSnapshot>,
+}
+
+impl ConnectorManagementCommandError {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            code: "connector_management_failed",
+            message: message.into(),
+            lifecycle: None,
+        }
+    }
+}
+
+impl From<Box<ConnectorManagementNotReady>> for ConnectorManagementCommandError {
+    fn from(error: Box<ConnectorManagementNotReady>) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            lifecycle: Some(error.lifecycle),
+        }
+    }
+}
+
 #[tauri::command]
 async fn invoke_connector_management(
+    state: tauri::State<'_, DesktopState>,
+    id: String,
+    operation: String,
+    payload: Option<Value>,
+) -> Result<Value, ConnectorManagementCommandError> {
+    invoke_connector_management_with_context(
+        &state.connector_lifecycles,
+        &state.connector_processes,
+        id,
+        operation,
+        payload,
+    )
+    .await
+}
+
+async fn invoke_connector_management_with_context(
+    connector_lifecycles: &ConnectorLifecycleManager,
+    connector_processes: &ConnectorProcessManager,
+    id: String,
+    operation: String,
+    payload: Option<Value>,
+) -> Result<Value, ConnectorManagementCommandError> {
+    let ready = connector_lifecycles
+        .require_management_ready(id.trim())
+        .map_err(ConnectorManagementCommandError::from)?;
+    if connector_processes.managed_running(id.trim()).await == Some(false) {
+        connector_lifecycles
+            .observe(
+                id.trim(),
+                ConnectorLifecycleState::Stopped,
+                ConnectorHealthState::Unhealthy,
+                ready.observed_version,
+                None,
+                Some("宿主管理进程已退出".to_string()),
+            )
+            .map_err(ConnectorManagementCommandError::message)?;
+        return Err(ConnectorManagementCommandError::from(
+            connector_lifecycles
+                .require_management_ready(id.trim())
+                .expect_err("stopped connector must reject management requests"),
+        ));
+    }
+    invoke_connector_management_request(id, operation, payload)
+        .await
+        .map_err(ConnectorManagementCommandError::message)
+}
+
+async fn invoke_connector_management_request(
     id: String,
     operation: String,
     payload: Option<Value>,
@@ -2924,6 +3095,7 @@ async fn install_connector_app(
     let document = install_connector_app_with_context(
         &state.config_path,
         &state.runtime,
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.registered_services,
         ConnectorInstallOptions {
@@ -2986,6 +3158,7 @@ fn start_connector_app_install(
     let task_id = task.task_id.clone();
     let config_path = state.config_path.clone();
     let runtime = state.runtime.clone();
+    let connector_lifecycles = state.connector_lifecycles.clone();
     let connector_processes = state.connector_processes.clone();
     let registered_services = state.registered_services.clone();
     let local_apps = state.local_apps.clone();
@@ -2993,6 +3166,7 @@ fn start_connector_app_install(
         let result = install_connector_app_with_context(
             &config_path,
             &runtime,
+            &connector_lifecycles,
             &connector_processes,
             &registered_services,
             ConnectorInstallOptions {
@@ -3012,7 +3186,7 @@ fn start_connector_app_install(
                     task.connector_id = Some(document.install.connector_id.clone());
                     task.name = document.install.name.clone();
                     task.version = Some(document.install.version.clone());
-                    task.state = LocalAppInstallTaskState::Succeeded;
+                    task.phase = LocalAppInstallTaskPhase::Succeeded;
                     task.progress_percent = Some(100);
                     task.downloaded_bytes = None;
                     task.total_bytes = None;
@@ -3026,7 +3200,7 @@ fn start_connector_app_install(
             }
             Err(error) => {
                 manager.update(&task_id, |task| {
-                    task.state = LocalAppInstallTaskState::Failed;
+                    task.phase = LocalAppInstallTaskPhase::Failed;
                     task.progress_percent = None;
                     task.downloaded_bytes = None;
                     task.total_bytes = None;
@@ -3062,6 +3236,7 @@ fn list_connector_app_install_tasks(
 async fn install_connector_app_with_context(
     config_path: &Path,
     runtime_manager: &AgentRuntimeManager,
+    connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
     options: ConnectorInstallOptions,
@@ -3069,7 +3244,7 @@ async fn install_connector_app_with_context(
     let progress = options.progress.clone();
     if let Some(progress) = progress.as_ref() {
         progress.report(
-            LocalAppInstallTaskState::Resolving,
+            LocalAppInstallTaskPhase::Resolving,
             Some(5),
             "正在解析安装来源",
         );
@@ -3122,7 +3297,7 @@ async fn install_connector_app_with_context(
     .await?;
     if let Some(progress) = progress.as_ref() {
         progress.report(
-            LocalAppInstallTaskState::Verifying,
+            LocalAppInstallTaskPhase::Verifying,
             Some(60),
             "正在校验应用清单与平台身份",
         );
@@ -3178,93 +3353,186 @@ async fn install_connector_app_with_context(
         .map_err(|err| err.to_string())?,
         None => ConnectorInstallProvenance::user_trusted(Some(&resolved_source_text)),
     };
-    if let Some(progress) = progress.as_ref() {
-        progress.report(
-            LocalAppInstallTaskState::Installing,
-            Some(72),
-            "正在安装并注册应用",
-        );
-    }
-    if options.replace {
-        if let Some(connector) = existing.as_ref() {
-            connector_processes
-                .stop_if_managed(&connector.id, config_path)
-                .await?;
-        }
-    }
-    let install = match install_connector_from_path_with_provenance(
-        resolved_source.path(),
-        config_path,
-        options.replace,
-        provenance,
-    ) {
-        Ok(install) => install,
-        Err(err) => {
-            if restart_after_replace {
-                if let Err(restart_err) = start_connector_and_wait(
-                    connector_processes,
-                    config_path,
-                    &candidate_manifest.id,
-                    "恢复旧版应用",
-                )
-                .await
-                {
-                    return Err(format!(
-                        "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
-                    ));
-                }
-            }
-            return Err(err.to_string());
-        }
+    let operation_kind = if existing.is_some() && options.replace {
+        ConnectorOperationKind::Upgrade
+    } else {
+        ConnectorOperationKind::Install
     };
-
-    let should_start = options.start || restart_after_replace;
-    let started = if should_start {
+    let operation = connector_lifecycles.begin(
+        &candidate_manifest.id,
+        operation_kind,
+        Some(candidate_manifest.version.clone()),
+        if operation_kind == ConnectorOperationKind::Upgrade {
+            "正在切换应用版本"
+        } else {
+            "正在安装应用"
+        },
+    )?;
+    let operation_result = async {
         if let Some(progress) = progress.as_ref() {
             progress.report(
-                LocalAppInstallTaskState::Starting,
-                Some(88),
-                "应用已安装，正在启动并检查运行状态",
+                LocalAppInstallTaskPhase::Installing,
+                Some(72),
+                "正在安装并注册应用",
             );
         }
-        let started = start_connector_and_wait(
-            connector_processes,
+        connector_lifecycles.advance(
+            &candidate_manifest.id,
+            &operation.id,
+            operation_kind.lifecycle(),
+            "正在安装并注册应用",
+            Some(72),
+        )?;
+        if options.replace {
+            if let Some(connector) = existing.as_ref() {
+                connector_processes
+                    .stop_if_managed(&connector.id, config_path)
+                    .await?;
+            }
+        }
+        let install = match install_connector_from_path_with_provenance(
+            resolved_source.path(),
             config_path,
-            &install.connector_id,
-            "启动新版应用",
-        )
-        .await
-        .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
-        Some(started)
-    } else {
-        None
-    };
+            options.replace,
+            provenance,
+        ) {
+            Ok(install) => install,
+            Err(err) => {
+                if restart_after_replace {
+                    if let Err(restart_err) = start_connector_and_wait(
+                        connector_processes,
+                        config_path,
+                        &candidate_manifest.id,
+                        "恢复旧版应用",
+                    )
+                    .await
+                    {
+                        return Err(format!(
+                            "应用升级失败: {err:#}；恢复旧版进程也失败: {restart_err:#}"
+                        ));
+                    }
+                }
+                return Err(err.to_string());
+            }
+        };
 
-    if let Some(progress) = progress.as_ref() {
-        progress.report(
-            LocalAppInstallTaskState::Finalizing,
-            Some(96),
+        let should_start = options.start || restart_after_replace;
+        let started = if should_start {
+            if let Some(progress) = progress.as_ref() {
+                progress.report(
+                    LocalAppInstallTaskPhase::Starting,
+                    Some(88),
+                    "应用已安装，正在启动并检查运行状态",
+                );
+            }
+            connector_lifecycles.advance(
+                &candidate_manifest.id,
+                &operation.id,
+                ConnectorLifecycleState::Starting,
+                "应用已安装，正在启动并检查运行状态",
+                Some(88),
+            )?;
+            let started = start_connector_and_wait(
+                connector_processes,
+                config_path,
+                &install.connector_id,
+                "启动新版应用",
+            )
+            .await
+            .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
+            Some(started)
+        } else {
+            None
+        };
+
+        if let Some(progress) = progress.as_ref() {
+            progress.report(
+                LocalAppInstallTaskPhase::Finalizing,
+                Some(96),
+                "正在刷新本地应用能力",
+            );
+        }
+        connector_lifecycles.advance(
+            &candidate_manifest.id,
+            &operation.id,
+            if should_start {
+                ConnectorLifecycleState::Starting
+            } else {
+                operation_kind.lifecycle()
+            },
             "正在刷新本地应用能力",
-        );
+            Some(96),
+        )?;
+        let runtime = runtime_manager
+            .apply_capabilities_from_path(config_path)
+            .await
+            .map_err(|err| err.to_string())?;
+        registered_services.request_refresh();
+        let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+        let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+        Ok(ConnectorAppInstallDocument {
+            install,
+            start: started,
+            setup: None,
+            config: ConfigDocument {
+                config_path: config_path.display().to_string(),
+                manifest_preview,
+                config: config_for_ui(&config)?,
+                runtime,
+            },
+        })
     }
-    let runtime = runtime_manager
-        .apply_capabilities_from_path(config_path)
-        .await
-        .map_err(|err| err.to_string())?;
-    registered_services.request_refresh();
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
-    Ok(ConnectorAppInstallDocument {
-        install,
-        start: started,
-        setup: None,
-        config: ConfigDocument {
-            config_path: config_path.display().to_string(),
-            manifest_preview,
-            config: config_for_ui(&config)?,
-            runtime,
-        },
-    })
+    .await;
+
+    match operation_result {
+        Ok(document) => {
+            if document.start.is_some() {
+                connector_lifecycles.complete_ready(
+                    &candidate_manifest.id,
+                    &operation.id,
+                    Some(document.install.version.clone()),
+                    connector_processes
+                        .managed_pid(&candidate_manifest.id)
+                        .await,
+                    "应用已启动并通过就绪检查",
+                )?;
+            } else {
+                connector_lifecycles.complete_stopped(
+                    &candidate_manifest.id,
+                    &operation.id,
+                    Some(document.install.version.clone()),
+                    "应用已安装，等待启动",
+                )?;
+            }
+            Ok(document)
+        }
+        Err(error) => {
+            let recovered = connector_local_app_is_healthy(
+                config_path,
+                &candidate_manifest.id,
+                connector_processes,
+            )
+            .await
+            .unwrap_or(false);
+            if recovered {
+                let observed_version = show_connector(&candidate_manifest.id)
+                    .ok()
+                    .map(|record| record.manifest.version);
+                connector_lifecycles.complete_ready(
+                    &candidate_manifest.id,
+                    &operation.id,
+                    observed_version,
+                    connector_processes
+                        .managed_pid(&candidate_manifest.id)
+                        .await,
+                    "升级失败，已恢复原运行版本",
+                )?;
+            } else {
+                connector_lifecycles.fail(&candidate_manifest.id, &operation.id, &error)?;
+            }
+            Err(error)
+        }
+    }
 }
 
 fn ensure_connector_lifecycle_command_succeeded(
@@ -3407,6 +3675,41 @@ async fn start_connector_and_wait(
     Ok(result)
 }
 
+async fn start_connector_with_lifecycle(
+    connector_lifecycles: &ConnectorLifecycleManager,
+    connector_processes: &ConnectorProcessManager,
+    config_path: &Path,
+    connector_id: &str,
+    action: &str,
+) -> Result<ConnectorStartResult, String> {
+    let version = show_connector(connector_id)
+        .map_err(|error| error.to_string())?
+        .manifest
+        .version;
+    let operation = connector_lifecycles.begin(
+        connector_id,
+        ConnectorOperationKind::Start,
+        Some(version.clone()),
+        action,
+    )?;
+    match start_connector_and_wait(connector_processes, config_path, connector_id, action).await {
+        Ok(result) => {
+            connector_lifecycles.complete_ready(
+                connector_id,
+                &operation.id,
+                Some(version),
+                connector_processes.managed_pid(connector_id).await,
+                "应用已启动并通过就绪检查",
+            )?;
+            Ok(result)
+        }
+        Err(error) => {
+            connector_lifecycles.fail(connector_id, &operation.id, &error)?;
+            Err(error)
+        }
+    }
+}
+
 async fn cleanup_failed_connector_start(
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
@@ -3433,12 +3736,46 @@ async fn stop_connector_and_wait(
     Ok(result)
 }
 
+async fn stop_connector_with_lifecycle(
+    connector_lifecycles: &ConnectorLifecycleManager,
+    connector_processes: &ConnectorProcessManager,
+    config_path: &Path,
+    connector_id: &str,
+    action: &str,
+) -> Result<ConnectorStartResult, String> {
+    let version = show_connector(connector_id)
+        .ok()
+        .map(|record| record.manifest.version);
+    let operation = connector_lifecycles.begin(
+        connector_id,
+        ConnectorOperationKind::Stop,
+        version.clone(),
+        action,
+    )?;
+    match stop_connector_and_wait(connector_processes, config_path, connector_id, action).await {
+        Ok(result) => {
+            connector_lifecycles.complete_stopped(
+                connector_id,
+                &operation.id,
+                version,
+                "应用已停止",
+            )?;
+            Ok(result)
+        }
+        Err(error) => {
+            connector_lifecycles.fail(connector_id, &operation.id, &error)?;
+            Err(error)
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = start_connector_and_wait(
+    let result = start_connector_with_lifecycle(
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         id.trim(),
@@ -3454,7 +3791,8 @@ async fn stop_connector_app(
     state: tauri::State<'_, DesktopState>,
     id: String,
 ) -> Result<ConnectorStartResult, String> {
-    let result = stop_connector_and_wait(
+    let result = stop_connector_with_lifecycle(
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         id.trim(),
@@ -3475,6 +3813,7 @@ async fn uninstall_connector_app(
     let document = uninstall_connector_app_with_context(
         &state.config_path,
         &state.runtime,
+        &state.connector_lifecycles,
         &state.connector_processes,
         &state.registered_services,
         connector_id.clone(),
@@ -3490,11 +3829,22 @@ async fn uninstall_connector_app(
 async fn uninstall_connector_app_with_context(
     config_path: &Path,
     runtime_manager: &AgentRuntimeManager,
+    connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
     id: String,
     force: bool,
 ) -> Result<ConfigDocument, ConnectorUninstallCommandError> {
+    let connector_id = id.trim().to_string();
+    let operation = connector_lifecycles
+        .begin(
+            &connector_id,
+            ConnectorOperationKind::Uninstall,
+            None,
+            "正在停止并卸载应用",
+        )
+        .map_err(|message| ConnectorUninstallCommandError::Failed { message })?;
+    let result = async {
     let managed_stop = connector_processes
         .stop_if_managed(id.trim(), config_path)
         .await;
@@ -3540,6 +3890,20 @@ async fn uninstall_connector_app_with_context(
             .map_err(|message| ConnectorUninstallCommandError::Failed { message })?,
         runtime,
     })
+    }
+    .await;
+    match result {
+        Ok(document) => {
+            connector_lifecycles
+                .complete_absent(&connector_id, &operation.id)
+                .map_err(|message| ConnectorUninstallCommandError::Failed { message })?;
+            Ok(document)
+        }
+        Err(error) => {
+            let _ = connector_lifecycles.fail(&connector_id, &operation.id, error.message());
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -5335,7 +5699,7 @@ async fn resolve_connector_archive_source(
     }
     if let Some(progress) = progress {
         progress.report(
-            LocalAppInstallTaskState::Verifying,
+            LocalAppInstallTaskPhase::Verifying,
             Some(58),
             "下载完成，正在校验应用包",
         );
@@ -6071,6 +6435,7 @@ fn prepare_config_for_auto_start(
 
 fn auto_start_agent(
     runtime: AgentRuntimeManager,
+    connector_lifecycles: ConnectorLifecycleManager,
     connector_processes: ConnectorProcessManager,
     config_path: PathBuf,
     startup_health: StartupHealthManager,
@@ -6160,7 +6525,8 @@ fn auto_start_agent(
             diagnostics.info(format!(
                 "automatic connector start requested: connector_id={connector_id}"
             ));
-            match start_connector_and_wait(
+            match start_connector_with_lifecycle(
+                &connector_lifecycles,
                 &connector_processes,
                 &config_path,
                 &connector_id,
@@ -6350,6 +6716,7 @@ fn main() {
     let startup_health = StartupHealthManager::new(&config_path, diagnostics.clone());
 
     let runtime = AgentRuntimeManager::new();
+    let connector_lifecycles = ConnectorLifecycleManager::default();
     let connector_processes = ConnectorProcessManager::default();
     let (registered_service_request_tx, registered_service_request_rx) =
         tokio::sync::mpsc::unbounded_channel();
@@ -6371,6 +6738,7 @@ fn main() {
     let setup_local_app_ui = Arc::clone(&local_app_ui);
     let setup_local_apps = local_apps.clone();
     let setup_local_app_install_tasks = local_app_install_tasks.clone();
+    let setup_connector_lifecycles = connector_lifecycles.clone();
     let setup_connector_processes = connector_processes.clone();
     let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
     let page_load_runtime_log_streaming = Arc::clone(&runtime_log_streaming);
@@ -6420,6 +6788,7 @@ fn main() {
         )
         .manage(DesktopState {
             runtime: runtime.clone(),
+            connector_lifecycles: connector_lifecycles.clone(),
             connector_processes: connector_processes.clone(),
             config_path: config_path.clone(),
             quitting: Arc::clone(&quitting),
@@ -6469,6 +6838,7 @@ fn main() {
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
             setup_local_app_install_tasks.attach_event_app(app.handle().clone());
+            setup_connector_lifecycles.attach_event_app(app.handle().clone());
             forward_runtime_events(
                 app.handle().clone(),
                 runtime.clone(),
@@ -6477,6 +6847,7 @@ fn main() {
             start_registered_service_monitor(
                 app.handle().clone(),
                 config_path.clone(),
+                setup_connector_lifecycles.clone(),
                 setup_connector_processes.clone(),
                 registered_service_request_rx,
             );
@@ -6534,6 +6905,7 @@ fn main() {
                         diagnostics: setup_diagnostics.clone(),
                         config_path: config_path.clone(),
                         runtime: runtime.clone(),
+                        connector_lifecycles: setup_connector_lifecycles.clone(),
                         connector_processes: setup_connector_processes.clone(),
                         registered_services: registered_services.clone(),
                         local_apps: setup_local_apps.clone(),
@@ -6542,6 +6914,7 @@ fn main() {
                 bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
                 auto_start_agent(
                     runtime.clone(),
+                    setup_connector_lifecycles.clone(),
                     setup_connector_processes.clone(),
                     config_path.clone(),
                     setup_health.clone(),
@@ -6601,6 +6974,7 @@ fn main() {
             desktop_permission_status,
             registered_service_statuses,
             local_app_runtime_statuses,
+            connector_lifecycle_snapshots,
             start_registered_service,
             stop_registered_service,
             list_connector_apps,
@@ -6745,7 +7119,7 @@ mod tests {
                 Some("1.2.1".to_string()),
             )
             .unwrap();
-        assert_eq!(task.state, LocalAppInstallTaskState::Queued);
+        assert_eq!(task.phase, LocalAppInstallTaskPhase::Queued);
         assert!(manager
             .create(
                 Some("com.baijimu.connector.codex".to_string()),
@@ -6762,13 +7136,13 @@ mod tests {
         };
         reporter.download(50, Some(100));
         let downloading = manager.list().pop().unwrap();
-        assert_eq!(downloading.state, LocalAppInstallTaskState::Downloading);
+        assert_eq!(downloading.phase, LocalAppInstallTaskPhase::Downloading);
         assert_eq!(downloading.progress_percent, Some(32));
         assert_eq!(downloading.downloaded_bytes, Some(50));
         assert_eq!(downloading.total_bytes, Some(100));
 
         manager.update(&task.task_id, |task| {
-            task.state = LocalAppInstallTaskState::Succeeded;
+            task.phase = LocalAppInstallTaskPhase::Succeeded;
             task.progress_percent = Some(100);
         });
         assert!(manager

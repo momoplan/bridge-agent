@@ -24,6 +24,7 @@ commands.allow = [
   "desktop_permission_status",
   "registered_service_statuses",
   "local_app_runtime_statuses",
+  "connector_lifecycle_snapshots",
   "start_registered_service",
   "stop_registered_service",
   "list_connector_apps",
