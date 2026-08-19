@@ -1,10 +1,12 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
 use tauri::Emitter;
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 pub(crate) const CONNECTOR_LIFECYCLE_EVENT: &str = "connector-lifecycle-changed";
 
@@ -132,9 +134,69 @@ pub(crate) struct ConnectorManagementNotReady {
     pub(crate) lifecycle: ConnectorLifecycleSnapshot,
 }
 
+pub(crate) struct ConnectorManagementPermit {
+    pub(crate) lifecycle: ConnectorLifecycleSnapshot,
+    _permit: OwnedRwLockReadGuard<()>,
+}
+
+pub(crate) struct ConnectorLifecycleOperation {
+    pub(crate) snapshot: ConnectorOperationSnapshot,
+    manager: ConnectorLifecycleManager,
+    connector_id: String,
+    armed: bool,
+    _permit: OwnedRwLockWriteGuard<()>,
+}
+
+impl Deref for ConnectorLifecycleOperation {
+    type Target = ConnectorOperationSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
+    }
+}
+
+impl Drop for ConnectorLifecycleOperation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.manager.cancel_if_active(
+                &self.connector_id,
+                &self.snapshot.id,
+                "生命周期操作在完成前被取消",
+            );
+        }
+    }
+}
+
+struct PendingConnectorLifecycleOperation {
+    manager: ConnectorLifecycleManager,
+    connector_id: String,
+    operation_id: String,
+    previous: Option<ConnectorLifecycleSnapshot>,
+    armed: bool,
+}
+
+impl PendingConnectorLifecycleOperation {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingConnectorLifecycleOperation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.manager.restore_if_active(
+                &self.connector_id,
+                &self.operation_id,
+                self.previous.clone(),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ConnectorLifecycleManager {
     entries: Arc<Mutex<BTreeMap<String, ConnectorLifecycleSnapshot>>>,
+    access_gates: Arc<Mutex<BTreeMap<String, Arc<RwLock<()>>>>>,
     next_generation: Arc<AtomicU64>,
     event_app: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
@@ -153,50 +215,69 @@ impl ConnectorLifecycleManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn begin(
+    pub(crate) async fn begin(
         &self,
         connector_id: &str,
         kind: ConnectorOperationKind,
         desired_version: Option<String>,
         phase: impl Into<String>,
-    ) -> Result<ConnectorOperationSnapshot, String> {
+    ) -> Result<ConnectorLifecycleOperation, String> {
         let connector_id = normalized_connector_id(connector_id)?;
+        let access_gate = self.access_gate(&connector_id)?;
         let now = now_ms();
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
-        let entry = entries
-            .entry(connector_id.clone())
-            .or_insert_with(|| ConnectorLifecycleSnapshot::new(&connector_id, now));
-        if let Some(active) = entry.operation.as_ref() {
-            return Err(format!(
-                "应用 `{connector_id}` 正在执行 {:?}（阶段：{}）",
-                active.kind, active.phase
-            ));
-        }
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let operation = ConnectorOperationSnapshot {
-            id: uuid::Uuid::new_v4().to_string(),
-            kind,
-            phase: phase.into(),
-            progress_percent: None,
-            started_at_epoch_ms: now,
-            updated_at_epoch_ms: now,
+        let phase = phase.into();
+        let (operation, previous, snapshot) = {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
+            let previous = entries.get(&connector_id).cloned();
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| ConnectorLifecycleSnapshot::new(&connector_id, now));
+            if let Some(active) = entry.operation.as_ref() {
+                return Err(format!(
+                    "应用 `{connector_id}` 正在执行 {:?}（阶段：{}）",
+                    active.kind, active.phase
+                ));
+            }
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let operation = ConnectorOperationSnapshot {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                phase,
+                progress_percent: None,
+                started_at_epoch_ms: now,
+                updated_at_epoch_ms: now,
+            };
+            entry.lifecycle = kind.lifecycle();
+            entry.operation = Some(operation.clone());
+            entry.desired_generation = generation;
+            if desired_version.is_some() {
+                entry.desired_version = desired_version;
+            }
+            entry.detail = Some(operation.phase.clone());
+            entry.error = None;
+            entry.updated_at_epoch_ms = now;
+            (operation, previous, entry.clone())
         };
-        entry.lifecycle = kind.lifecycle();
-        entry.operation = Some(operation.clone());
-        entry.desired_generation = generation;
-        if desired_version.is_some() {
-            entry.desired_version = desired_version;
-        }
-        entry.detail = Some(operation.phase.clone());
-        entry.error = None;
-        entry.updated_at_epoch_ms = now;
-        let snapshot = entry.clone();
-        drop(entries);
         self.emit(snapshot);
-        Ok(operation)
+        let mut pending = PendingConnectorLifecycleOperation {
+            manager: self.clone(),
+            connector_id: connector_id.clone(),
+            operation_id: operation.id.clone(),
+            previous,
+            armed: true,
+        };
+        let permit = access_gate.write_owned().await;
+        pending.disarm();
+        Ok(ConnectorLifecycleOperation {
+            snapshot: operation,
+            manager: self.clone(),
+            connector_id,
+            armed: true,
+            _permit: permit,
+        })
     }
 
     pub(crate) fn advance(
@@ -222,13 +303,12 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn complete_ready(
         &self,
-        connector_id: &str,
-        operation_id: &str,
+        operation: ConnectorLifecycleOperation,
         observed_version: Option<String>,
         pid: Option<u32>,
         detail: impl Into<String>,
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        self.complete(connector_id, operation_id, move |entry| {
+        self.complete(operation, move |entry| {
             let detail = detail.into();
             entry.lifecycle = ConnectorLifecycleState::Ready;
             entry.health = ConnectorHealthState::Healthy;
@@ -243,12 +323,11 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn complete_stopped(
         &self,
-        connector_id: &str,
-        operation_id: &str,
+        operation: ConnectorLifecycleOperation,
         observed_version: Option<String>,
         detail: impl Into<String>,
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        self.complete(connector_id, operation_id, move |entry| {
+        self.complete(operation, move |entry| {
             entry.lifecycle = ConnectorLifecycleState::Stopped;
             entry.health = ConnectorHealthState::Unhealthy;
             entry.observed_generation = entry.desired_generation;
@@ -261,10 +340,9 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn complete_absent(
         &self,
-        connector_id: &str,
-        operation_id: &str,
+        operation: ConnectorLifecycleOperation,
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        self.complete(connector_id, operation_id, |entry| {
+        self.complete(operation, |entry| {
             entry.lifecycle = ConnectorLifecycleState::Absent;
             entry.health = ConnectorHealthState::NotConfigured;
             entry.observed_generation = entry.desired_generation;
@@ -278,11 +356,10 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn fail(
         &self,
-        connector_id: &str,
-        operation_id: &str,
+        operation: ConnectorLifecycleOperation,
         error: impl Into<String>,
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        self.complete(connector_id, operation_id, move |entry| {
+        self.complete(operation, move |entry| {
             let error = error.into();
             entry.lifecycle = ConnectorLifecycleState::Failed;
             entry.health = ConnectorHealthState::Unknown;
@@ -333,7 +410,7 @@ impl ConnectorLifecycleManager {
         Ok(snapshot)
     }
 
-    pub(crate) fn require_management_ready(
+    fn require_management_ready(
         &self,
         connector_id: &str,
     ) -> Result<ConnectorLifecycleSnapshot, Box<ConnectorManagementNotReady>> {
@@ -354,6 +431,105 @@ impl ConnectorLifecycleManager {
             ),
             lifecycle: snapshot,
         }))
+    }
+
+    pub(crate) fn try_management_permit(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorManagementPermit, Box<ConnectorManagementNotReady>> {
+        let connector_id = connector_id.trim();
+        let permit = self
+            .access_gate(connector_id)
+            .ok()
+            .and_then(|gate| gate.try_read_owned().ok())
+            .ok_or_else(|| self.management_not_ready(connector_id))?;
+        let lifecycle = self.require_management_ready(connector_id)?;
+        Ok(ConnectorManagementPermit {
+            lifecycle,
+            _permit: permit,
+        })
+    }
+
+    fn access_gate(&self, connector_id: &str) -> Result<Arc<RwLock<()>>, String> {
+        let connector_id = normalized_connector_id(connector_id)?;
+        let mut access_gates = self
+            .access_gates
+            .lock()
+            .map_err(|_| "本地应用访问门禁锁已损坏".to_string())?;
+        Ok(access_gates
+            .entry(connector_id)
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone())
+    }
+
+    fn management_not_ready(&self, connector_id: &str) -> Box<ConnectorManagementNotReady> {
+        match self.require_management_ready(connector_id) {
+            Err(error) => error,
+            Ok(lifecycle) => Box::new(ConnectorManagementNotReady {
+                code: "connector_not_ready",
+                message: format!(
+                    "应用 `{}` 正在切换生命周期，本机管理接口暂不可用",
+                    lifecycle.connector_id
+                ),
+                lifecycle,
+            }),
+        }
+    }
+
+    fn restore_if_active(
+        &self,
+        connector_id: &str,
+        operation_id: &str,
+        previous: Option<ConnectorLifecycleSnapshot>,
+    ) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        let is_active = entries
+            .get(connector_id)
+            .and_then(|entry| entry.operation.as_ref())
+            .is_some_and(|operation| operation.id == operation_id);
+        if !is_active {
+            return;
+        }
+        let snapshot = match previous {
+            Some(previous) => {
+                entries.insert(connector_id.to_string(), previous.clone());
+                previous
+            }
+            None => {
+                entries.remove(connector_id);
+                ConnectorLifecycleSnapshot::new(connector_id, now_ms())
+            }
+        };
+        drop(entries);
+        self.emit(snapshot);
+    }
+
+    fn cancel_if_active(&self, connector_id: &str, operation_id: &str, error: &str) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        let Some(entry) = entries.get_mut(connector_id) else {
+            return;
+        };
+        if !entry
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.id == operation_id)
+        {
+            return;
+        }
+        entry.lifecycle = ConnectorLifecycleState::Failed;
+        entry.health = ConnectorHealthState::Unknown;
+        entry.operation = None;
+        entry.pid = None;
+        entry.detail = Some("生命周期操作被取消".to_string());
+        entry.error = Some(error.to_string());
+        entry.updated_at_epoch_ms = now_ms();
+        let snapshot = entry.clone();
+        drop(entries);
+        self.emit(snapshot);
     }
 
     fn update_operation(
@@ -392,33 +568,33 @@ impl ConnectorLifecycleManager {
 
     fn complete(
         &self,
-        connector_id: &str,
-        operation_id: &str,
+        mut lifecycle_operation: ConnectorLifecycleOperation,
         update: impl FnOnce(&mut ConnectorLifecycleSnapshot),
     ) -> Result<ConnectorLifecycleSnapshot, String> {
+        let connector_id = lifecycle_operation.connector_id.clone();
+        let operation_id = lifecycle_operation.snapshot.id.clone();
         let now = now_ms();
         let mut entries = self
             .entries
             .lock()
             .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
         let entry = entries
-            .get_mut(connector_id.trim())
-            .ok_or_else(|| format!("应用 `{}` 没有生命周期记录", connector_id.trim()))?;
+            .get_mut(&connector_id)
+            .ok_or_else(|| format!("应用 `{connector_id}` 没有生命周期记录"))?;
         let operation = entry
             .operation
             .as_ref()
-            .ok_or_else(|| format!("应用 `{}` 当前没有运行中的操作", connector_id.trim()))?;
+            .ok_or_else(|| format!("应用 `{connector_id}` 当前没有运行中的操作"))?;
         if operation.id != operation_id {
-            return Err(format!(
-                "应用 `{}` 的生命周期操作代际已变化",
-                connector_id.trim()
-            ));
+            return Err(format!("应用 `{connector_id}` 的生命周期操作代际已变化"));
         }
         update(entry);
         entry.operation = None;
         entry.updated_at_epoch_ms = now;
         let snapshot = entry.clone();
         drop(entries);
+        lifecycle_operation.armed = false;
+        drop(lifecycle_operation);
         self.emit(snapshot.clone());
         Ok(snapshot)
     }
@@ -456,8 +632,8 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn management_is_available_only_for_the_observed_ready_generation() {
+    #[tokio::test]
+    async fn management_is_available_only_for_the_observed_ready_generation() {
         let manager = ConnectorLifecycleManager::default();
         let operation = manager
             .begin(
@@ -466,6 +642,7 @@ mod tests {
                 Some("1.0.0".to_string()),
                 "starting",
             )
+            .await
             .unwrap();
 
         assert_eq!(
@@ -477,29 +654,27 @@ mod tests {
         );
 
         manager
-            .complete_ready(
-                "connector.test",
-                &operation.id,
-                Some("1.0.0".to_string()),
-                Some(42),
-                "ready",
-            )
+            .complete_ready(operation, Some("1.0.0".to_string()), Some(42), "ready")
             .unwrap();
-        let ready = manager.require_management_ready("connector.test").unwrap();
-        assert_eq!(ready.lifecycle, ConnectorLifecycleState::Ready);
-        assert_eq!(ready.desired_generation, ready.observed_generation);
+        let ready = manager.try_management_permit("connector.test").unwrap();
+        assert_eq!(ready.lifecycle.lifecycle, ConnectorLifecycleState::Ready);
+        assert_eq!(
+            ready.lifecycle.desired_generation,
+            ready.lifecycle.observed_generation
+        );
     }
 
-    #[test]
-    fn active_operation_serializes_lifecycle_changes() {
+    #[tokio::test]
+    async fn active_operation_serializes_lifecycle_changes() {
         let manager = ConnectorLifecycleManager::default();
-        manager
+        let operation = manager
             .begin(
                 "connector.test",
                 ConnectorOperationKind::Upgrade,
                 Some("2.0.0".to_string()),
                 "upgrading",
             )
+            .await
             .unwrap();
 
         let error = manager
@@ -509,20 +684,24 @@ mod tests {
                 None,
                 "starting",
             )
-            .unwrap_err();
+            .await
+            .err()
+            .expect("a second lifecycle operation must be rejected");
         assert!(error.contains("正在执行"));
+        manager.fail(operation, "test cleanup").unwrap();
     }
 
-    #[test]
-    fn health_observation_cannot_overwrite_an_active_transition() {
+    #[tokio::test]
+    async fn health_observation_cannot_overwrite_an_active_transition() {
         let manager = ConnectorLifecycleManager::default();
-        manager
+        let operation = manager
             .begin(
                 "connector.test",
                 ConnectorOperationKind::Upgrade,
                 Some("2.0.0".to_string()),
                 "switching",
             )
+            .await
             .unwrap();
 
         let snapshot = manager
@@ -537,5 +716,128 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.lifecycle, ConnectorLifecycleState::Upgrading);
         assert!(snapshot.operation.is_some());
+        manager.fail(operation, "test cleanup").unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_drains_inflight_management_and_rejects_new_calls() {
+        let manager = ConnectorLifecycleManager::default();
+        let start = manager
+            .begin(
+                "connector.test",
+                ConnectorOperationKind::Start,
+                Some("1.0.0".to_string()),
+                "starting",
+            )
+            .await
+            .unwrap();
+        manager
+            .complete_ready(start, Some("1.0.0".to_string()), Some(42), "ready")
+            .unwrap();
+        let inflight = manager.try_management_permit("connector.test").unwrap();
+
+        let upgrade_manager = manager.clone();
+        let upgrade_task = tokio::spawn(async move {
+            upgrade_manager
+                .begin(
+                    "connector.test",
+                    ConnectorOperationKind::Upgrade,
+                    Some("2.0.0".to_string()),
+                    "upgrading",
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let transitioning = manager
+            .list()
+            .into_iter()
+            .find(|snapshot| snapshot.connector_id == "connector.test")
+            .unwrap();
+        assert_eq!(transitioning.lifecycle, ConnectorLifecycleState::Upgrading);
+        assert!(!upgrade_task.is_finished());
+        assert!(manager.try_management_permit("connector.test").is_err());
+
+        drop(inflight);
+        let upgrade = upgrade_task.await.unwrap().unwrap();
+        assert!(manager.try_management_permit("connector.test").is_err());
+        manager.fail(upgrade, "test cleanup").unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_upgrade_wait_restores_the_previous_ready_state() {
+        let manager = ConnectorLifecycleManager::default();
+        let start = manager
+            .begin(
+                "connector.test",
+                ConnectorOperationKind::Start,
+                Some("1.0.0".to_string()),
+                "starting",
+            )
+            .await
+            .unwrap();
+        manager
+            .complete_ready(start, Some("1.0.0".to_string()), Some(42), "ready")
+            .unwrap();
+        let inflight = manager.try_management_permit("connector.test").unwrap();
+
+        let upgrade_manager = manager.clone();
+        let upgrade_task = tokio::spawn(async move {
+            upgrade_manager
+                .begin(
+                    "connector.test",
+                    ConnectorOperationKind::Upgrade,
+                    Some("2.0.0".to_string()),
+                    "upgrading",
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        upgrade_task.abort();
+        let cancelled = upgrade_task.await;
+        assert!(matches!(cancelled, Err(error) if error.is_cancelled()));
+
+        let restored = manager
+            .list()
+            .into_iter()
+            .find(|snapshot| snapshot.connector_id == "connector.test")
+            .unwrap();
+        assert_eq!(restored.lifecycle, ConnectorLifecycleState::Ready);
+        assert!(restored.operation.is_none());
+        drop(inflight);
+        assert!(manager.try_management_permit("connector.test").is_ok());
+    }
+
+    #[tokio::test]
+    async fn connector_access_gates_are_isolated_by_connector_id() {
+        let manager = ConnectorLifecycleManager::default();
+        let first_start = manager
+            .begin(
+                "connector.first",
+                ConnectorOperationKind::Start,
+                Some("1.0.0".to_string()),
+                "starting",
+            )
+            .await
+            .unwrap();
+        manager
+            .complete_ready(first_start, Some("1.0.0".to_string()), Some(42), "ready")
+            .unwrap();
+        let first_request = manager.try_management_permit("connector.first").unwrap();
+
+        let second_start = manager
+            .begin(
+                "connector.second",
+                ConnectorOperationKind::Start,
+                Some("1.0.0".to_string()),
+                "starting",
+            )
+            .await
+            .unwrap();
+        manager
+            .complete_ready(second_start, Some("1.0.0".to_string()), Some(84), "ready")
+            .unwrap();
+        assert!(manager.try_management_permit("connector.second").is_ok());
+        drop(first_request);
     }
 }

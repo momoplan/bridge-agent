@@ -2881,8 +2881,8 @@ async fn invoke_connector_management_with_context(
     operation: String,
     payload: Option<Value>,
 ) -> Result<Value, ConnectorManagementCommandError> {
-    let ready = connector_lifecycles
-        .require_management_ready(id.trim())
+    let management_permit = connector_lifecycles
+        .try_management_permit(id.trim())
         .map_err(ConnectorManagementCommandError::from)?;
     if connector_processes.managed_running(id.trim()).await == Some(false) {
         connector_lifecycles
@@ -2890,20 +2890,23 @@ async fn invoke_connector_management_with_context(
                 id.trim(),
                 ConnectorLifecycleState::Stopped,
                 ConnectorHealthState::Unhealthy,
-                ready.observed_version,
+                management_permit.lifecycle.observed_version.clone(),
                 None,
                 Some("宿主管理进程已退出".to_string()),
             )
             .map_err(ConnectorManagementCommandError::message)?;
         return Err(ConnectorManagementCommandError::from(
             connector_lifecycles
-                .require_management_ready(id.trim())
-                .expect_err("stopped connector must reject management requests"),
+                .try_management_permit(id.trim())
+                .err()
+                .expect("stopped connector must reject management requests"),
         ));
     }
-    invoke_connector_management_request(id, operation, payload)
+    let result = invoke_connector_management_request(id, operation, payload)
         .await
-        .map_err(ConnectorManagementCommandError::message)
+        .map_err(ConnectorManagementCommandError::message);
+    drop(management_permit);
+    result
 }
 
 async fn invoke_connector_management_request(
@@ -3358,16 +3361,18 @@ async fn install_connector_app_with_context(
     } else {
         ConnectorOperationKind::Install
     };
-    let operation = connector_lifecycles.begin(
-        &candidate_manifest.id,
-        operation_kind,
-        Some(candidate_manifest.version.clone()),
-        if operation_kind == ConnectorOperationKind::Upgrade {
-            "正在切换应用版本"
-        } else {
-            "正在安装应用"
-        },
-    )?;
+    let operation = connector_lifecycles
+        .begin(
+            &candidate_manifest.id,
+            operation_kind,
+            Some(candidate_manifest.version.clone()),
+            if operation_kind == ConnectorOperationKind::Upgrade {
+                "正在切换应用版本"
+            } else {
+                "正在安装应用"
+            },
+        )
+        .await?;
     let operation_result = async {
         if let Some(progress) = progress.as_ref() {
             progress.report(
@@ -3488,8 +3493,7 @@ async fn install_connector_app_with_context(
         Ok(document) => {
             if document.start.is_some() {
                 connector_lifecycles.complete_ready(
-                    &candidate_manifest.id,
-                    &operation.id,
+                    operation,
                     Some(document.install.version.clone()),
                     connector_processes
                         .managed_pid(&candidate_manifest.id)
@@ -3498,8 +3502,7 @@ async fn install_connector_app_with_context(
                 )?;
             } else {
                 connector_lifecycles.complete_stopped(
-                    &candidate_manifest.id,
-                    &operation.id,
+                    operation,
                     Some(document.install.version.clone()),
                     "应用已安装，等待启动",
                 )?;
@@ -3519,8 +3522,7 @@ async fn install_connector_app_with_context(
                     .ok()
                     .map(|record| record.manifest.version);
                 connector_lifecycles.complete_ready(
-                    &candidate_manifest.id,
-                    &operation.id,
+                    operation,
                     observed_version,
                     connector_processes
                         .managed_pid(&candidate_manifest.id)
@@ -3528,7 +3530,7 @@ async fn install_connector_app_with_context(
                     "升级失败，已恢复原运行版本",
                 )?;
             } else {
-                connector_lifecycles.fail(&candidate_manifest.id, &operation.id, &error)?;
+                connector_lifecycles.fail(operation, &error)?;
             }
             Err(error)
         }
@@ -3686,17 +3688,18 @@ async fn start_connector_with_lifecycle(
         .map_err(|error| error.to_string())?
         .manifest
         .version;
-    let operation = connector_lifecycles.begin(
-        connector_id,
-        ConnectorOperationKind::Start,
-        Some(version.clone()),
-        action,
-    )?;
+    let operation = connector_lifecycles
+        .begin(
+            connector_id,
+            ConnectorOperationKind::Start,
+            Some(version.clone()),
+            action,
+        )
+        .await?;
     match start_connector_and_wait(connector_processes, config_path, connector_id, action).await {
         Ok(result) => {
             connector_lifecycles.complete_ready(
-                connector_id,
-                &operation.id,
+                operation,
                 Some(version),
                 connector_processes.managed_pid(connector_id).await,
                 "应用已启动并通过就绪检查",
@@ -3704,7 +3707,7 @@ async fn start_connector_with_lifecycle(
             Ok(result)
         }
         Err(error) => {
-            connector_lifecycles.fail(connector_id, &operation.id, &error)?;
+            connector_lifecycles.fail(operation, &error)?;
             Err(error)
         }
     }
@@ -3746,24 +3749,21 @@ async fn stop_connector_with_lifecycle(
     let version = show_connector(connector_id)
         .ok()
         .map(|record| record.manifest.version);
-    let operation = connector_lifecycles.begin(
-        connector_id,
-        ConnectorOperationKind::Stop,
-        version.clone(),
-        action,
-    )?;
+    let operation = connector_lifecycles
+        .begin(
+            connector_id,
+            ConnectorOperationKind::Stop,
+            version.clone(),
+            action,
+        )
+        .await?;
     match stop_connector_and_wait(connector_processes, config_path, connector_id, action).await {
         Ok(result) => {
-            connector_lifecycles.complete_stopped(
-                connector_id,
-                &operation.id,
-                version,
-                "应用已停止",
-            )?;
+            connector_lifecycles.complete_stopped(operation, version, "应用已停止")?;
             Ok(result)
         }
         Err(error) => {
-            connector_lifecycles.fail(connector_id, &operation.id, &error)?;
+            connector_lifecycles.fail(operation, &error)?;
             Err(error)
         }
     }
@@ -3843,6 +3843,7 @@ async fn uninstall_connector_app_with_context(
             None,
             "正在停止并卸载应用",
         )
+        .await
         .map_err(|message| ConnectorUninstallCommandError::Failed { message })?;
     let result = async {
     let managed_stop = connector_processes
@@ -3895,12 +3896,12 @@ async fn uninstall_connector_app_with_context(
     match result {
         Ok(document) => {
             connector_lifecycles
-                .complete_absent(&connector_id, &operation.id)
+                .complete_absent(operation)
                 .map_err(|message| ConnectorUninstallCommandError::Failed { message })?;
             Ok(document)
         }
         Err(error) => {
-            let _ = connector_lifecycles.fail(&connector_id, &operation.id, error.message());
+            let _ = connector_lifecycles.fail(operation, error.message());
             Err(error)
         }
     }
