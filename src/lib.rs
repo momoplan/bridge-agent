@@ -1,6 +1,5 @@
 pub mod config;
 pub mod connector;
-mod event_outbox;
 mod event_server;
 pub mod logging;
 mod power;

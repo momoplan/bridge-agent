@@ -1,11 +1,10 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
-use crate::event_outbox::EventOutbox;
 use crate::event_server::LocalEventServer;
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, LocalAppEventEmitted,
+    AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted,
     AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
@@ -18,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -27,7 +26,7 @@ use std::sync::{
     Arc,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, sleep, timeout, Duration};
 use tokio_tungstenite::connect_async;
@@ -41,9 +40,9 @@ const RELAY_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 75;
 const RELAY_CONNECT_TIMEOUT_SECS: u64 = 15;
 const LOCAL_EVENT_QUEUE_CAPACITY: usize = 1024;
-const LOCAL_APP_EVENT_RETRY_INTERVAL_SECS: u64 = 30;
 const LOCAL_EVENT_SERVER_RETRY_INTERVAL_SECS: u64 = 2;
 const RUNTIME_LOCK_DIR: &str = ".bridge-agent-locks";
+const RETIRED_EVENT_OUTBOX_DIR: &str = "event-outbox";
 const RUNTIME_STOP_TIMEOUT_SECS: u64 = 15;
 const RUNTIME_ABORT_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_LOG_LIMIT: usize = 500;
@@ -161,6 +160,59 @@ pub(crate) struct RuntimeAuditLog {
     pub(crate) metadata: LogMetadata,
 }
 
+pub(crate) struct LocalAppEventSubmission {
+    pub(crate) event: LocalAppEventEmitted,
+    pub(crate) response: oneshot::Sender<Result<EventAck, String>>,
+}
+
+type PendingEventKey = (String, String);
+type PendingEventWaiters = HashMap<PendingEventKey, Vec<oneshot::Sender<Result<EventAck, String>>>>;
+
+fn register_event_waiter(
+    pending_events: &mut PendingEventWaiters,
+    key: PendingEventKey,
+    waiter: oneshot::Sender<Result<EventAck, String>>,
+) -> bool {
+    match pending_events.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(vec![waiter]);
+            true
+        }
+        Entry::Occupied(mut entry) => {
+            entry.get_mut().retain(|existing| !existing.is_closed());
+            let should_forward = entry.get().is_empty();
+            entry.get_mut().push(waiter);
+            should_forward
+        }
+    }
+}
+
+fn prune_closed_event_waiters(pending_events: &mut PendingEventWaiters) {
+    pending_events.retain(|_, waiters| {
+        waiters.retain(|waiter| !waiter.is_closed());
+        !waiters.is_empty()
+    });
+}
+
+fn remove_retired_event_storage(config_base_dir: &Path) -> Result<()> {
+    let path = config_base_dir.join(RETIRED_EVENT_OUTBOX_DIR);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to inspect retired event storage {}", path.display())
+            });
+        }
+    };
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(&path)
+    } else {
+        fs::remove_file(&path)
+    }
+    .with_context(|| format!("failed to remove retired event storage {}", path.display()))
+}
+
 impl Default for ManagedState {
     fn default() -> Self {
         Self {
@@ -211,6 +263,7 @@ impl AgentRuntimeManager {
         self.stop_if_running().await?;
         let log_limit = config.runtime.log_limit;
         let config_base_dir = resolve_config_base_dir(config_path);
+        remove_retired_event_storage(&config_base_dir)?;
         let runtime_lock = RuntimeInstanceLock::acquire(config_path, &config.relay.agent_id)?;
         let file_log = FileLogSink::from_config(
             &FileLogConfig {
@@ -233,7 +286,6 @@ impl AgentRuntimeManager {
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
-        let event_outbox = EventOutbox::new(&config_base_dir)?;
         let snapshot = RuntimeSnapshot {
             revision: 0,
             status: RuntimeStatus::Starting,
@@ -328,7 +380,6 @@ impl AgentRuntimeManager {
                 config_path: config_path_string,
                 ws_url,
                 registry,
-                event_outbox,
             };
             if let Err(err) = runner
                 .run(shutdown_rx, &mut apply_rx, &mut event_rx, &mut audit_rx)
@@ -599,7 +650,7 @@ struct LocalEventServerRuntime {
     config: AgentConfig,
     config_path: PathBuf,
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalAppEventEmitted>,
+    event_tx: mpsc::Sender<LocalAppEventSubmission>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
 }
@@ -718,7 +769,6 @@ struct RuntimeRunner {
     config_path: String,
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_outbox: EventOutbox,
 }
 
 impl RuntimeRunner {
@@ -726,7 +776,7 @@ impl RuntimeRunner {
         &self,
         mut shutdown_rx: watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
-        event_rx: &mut mpsc::Receiver<LocalAppEventEmitted>,
+        event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         loop {
@@ -854,24 +904,20 @@ impl RuntimeRunner {
         >,
         shutdown_rx: &mut watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
-        event_rx: &mut mpsc::Receiver<LocalAppEventEmitted>,
+        event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         let (mut write, mut read) = stream.split();
         let capabilities = self.current_capabilities().await;
         write_json(&mut write, &capabilities).await?;
-        self.send_pending_local_app_events(&mut write).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
         let heartbeat_timeout = Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS);
         let mut keepalive = interval_at(
             tokio::time::Instant::now() + keepalive_interval,
             keepalive_interval,
         );
-        let mut local_app_event_retry = interval_at(
-            tokio::time::Instant::now() + Duration::from_secs(LOCAL_APP_EVENT_RETRY_INTERVAL_SECS),
-            Duration::from_secs(LOCAL_APP_EVENT_RETRY_INTERVAL_SECS),
-        );
         let mut last_relay_seen = tokio::time::Instant::now();
+        let mut pending_events = PendingEventWaiters::new();
 
         loop {
             tokio::select! {
@@ -884,10 +930,18 @@ impl RuntimeRunner {
                     write_json(&mut write, &capabilities).await?;
                     self.push_log("info", "runtime capabilities updated and sent to relay").await;
                 }
-                Some(event) = event_rx.recv() => {
+                Some(submission) = event_rx.recv() => {
+                    if submission.response.is_closed() {
+                        continue;
+                    }
+                    let event = submission.event;
                     let event_id = event.event_id.clone();
                     let connector_id = event.connector_id.clone();
                     let event_name = event.event.clone();
+                    let event_key = (connector_id.clone(), event_id.clone());
+                    if !register_event_waiter(&mut pending_events, event_key, submission.response) {
+                        continue;
+                    }
                     write_json(&mut write, &AgentMessage::LocalAppEventEmitted(event)).await?;
                     self.push_log_with_metadata(
                         "info",
@@ -899,13 +953,11 @@ impl RuntimeRunner {
                     )
                     .await;
                 }
-                _ = local_app_event_retry.tick() => {
-                    self.send_pending_local_app_events(&mut write).await?;
-                }
                 Some(audit) = audit_rx.recv() => {
                     self.push_audit_log(audit).await;
                 }
                 _ = keepalive.tick() => {
+                    prune_closed_event_waiters(&mut pending_events);
                     if last_relay_seen.elapsed() > heartbeat_timeout {
                         bail!(
                             "relay heartbeat timed out after {}s without server frame",
@@ -942,25 +994,28 @@ impl RuntimeRunner {
                                     .await;
                                 }
                                 AgentMessage::EventAck(ack) => {
-                                    match self.event_outbox.acknowledge(&ack.event_id) {
-                                        Ok(true) => {
-                                            self.push_log_with_metadata(
-                                                "info",
-                                                &format!("local app event {} acknowledged by relay", ack.event_id),
-                                                LogMetadata::category("local_app_event")
-                                                    .event_id(ack.event_id)
-                                                    .outcome(if ack.duplicate { "deduplicated" } else { "acknowledged" }),
-                                            )
-                                            .await;
+                                    let event_key = (ack.connector_id.clone(), ack.event_id.clone());
+                                    if let Some(waiters) = pending_events.remove(&event_key) {
+                                        for waiter in waiters {
+                                            let _ = waiter.send(Ok(ack.clone()));
                                         }
-                                        Ok(false) => {}
-                                        Err(err) => {
-                                            self.push_log(
-                                                "warn",
-                                                &format!("failed to remove acknowledged local app event from outbox: {err:#}"),
-                                            )
-                                            .await;
-                                        }
+                                        self.push_log_with_metadata(
+                                            "info",
+                                            &format!(
+                                                "local app event {} acknowledged by relay with {} matching subscription(s)",
+                                                ack.event_id, ack.matched_subscription_count
+                                            ),
+                                            LogMetadata::category("local_app_event")
+                                                .event_id(ack.event_id)
+                                                .outcome(if ack.matched_subscription_count == 0 {
+                                                    "ignored"
+                                                } else if ack.duplicate {
+                                                    "deduplicated"
+                                                } else {
+                                                    "persisted"
+                                                }),
+                                        )
+                                        .await;
                                     }
                                 }
                                 AgentMessage::InvokeRequest(request) => {
@@ -1140,16 +1195,6 @@ impl RuntimeRunner {
             services: update.services,
             local_apps: update.local_apps,
         })
-    }
-
-    async fn send_pending_local_app_events<S>(&self, sink: &mut S) -> Result<()>
-    where
-        S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-    {
-        for event in self.event_outbox.pending()? {
-            write_json(sink, &AgentMessage::LocalAppEventEmitted(event)).await?;
-        }
-        Ok(())
     }
 
     async fn update_snapshot(
@@ -1836,11 +1881,12 @@ fn process_is_running(_pid: u32) -> bool {
 mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
-        is_relay_authorization_error, process_looks_like_bridge_agent, read_runtime_lock,
+        is_relay_authorization_error, process_looks_like_bridge_agent, prune_closed_event_waiters,
+        read_runtime_lock, register_event_waiter, remove_retired_event_storage,
         runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeEvent, RuntimeInstanceLock,
-        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode, WebSocketError,
-        RELAY_AUTHORIZATION_REQUIRED_MESSAGE,
+        terminate_runtime_lock_owner, AgentRuntimeManager, PendingEventWaiters, RuntimeEvent,
+        RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode,
+        WebSocketError, RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
     };
     use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
     use crate::logging::LogMetadata;
@@ -1856,6 +1902,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     #[test]
@@ -2039,15 +2086,66 @@ mod tests {
 
     #[test]
     fn relay_decoder_accepts_device_event_ack() {
-        let message = r#"{"type":"event_ack","event_id":"evt-1","duplicate":true}"#;
+        let message = r#"{"type":"event_ack","event_id":"evt-1","connector_id":"camera","duplicate":true,"matched_subscription_count":2}"#;
 
         match decode_relay_message(message).unwrap().unwrap() {
             AgentMessage::EventAck(ack) => {
                 assert_eq!(ack.event_id, "evt-1");
+                assert_eq!(ack.connector_id, "camera");
                 assert!(ack.duplicate);
+                assert_eq!(ack.matched_subscription_count, 2);
             }
             other => panic!("expected event_ack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pending_event_waiters_are_scoped_by_connector_and_expired_waiters_can_retry() {
+        let mut pending = PendingEventWaiters::new();
+        let (first_tx, first_rx) = oneshot::channel();
+        assert!(register_event_waiter(
+            &mut pending,
+            ("camera".to_owned(), "evt-1".to_owned()),
+            first_tx,
+        ));
+
+        let (coalesced_tx, coalesced_rx) = oneshot::channel();
+        assert!(!register_event_waiter(
+            &mut pending,
+            ("camera".to_owned(), "evt-1".to_owned()),
+            coalesced_tx,
+        ));
+
+        drop(first_rx);
+        drop(coalesced_rx);
+        let key = ("camera".to_owned(), "evt-1".to_owned());
+        let (retry_tx, _retry_rx) = oneshot::channel();
+        assert!(register_event_waiter(&mut pending, key, retry_tx));
+
+        let (other_connector_tx, _other_connector_rx) = oneshot::channel();
+        assert!(register_event_waiter(
+            &mut pending,
+            ("microphone".to_owned(), "evt-1".to_owned()),
+            other_connector_tx,
+        ));
+
+        prune_closed_event_waiters(&mut pending);
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn runtime_removes_retired_event_storage_without_touching_other_state() {
+        let base = tempfile::tempdir().unwrap();
+        let retired = base.path().join(RETIRED_EVENT_OUTBOX_DIR);
+        fs::create_dir_all(&retired).unwrap();
+        fs::write(retired.join("event.json"), b"sensitive payload").unwrap();
+        let retained = base.path().join("config.toml");
+        fs::write(&retained, b"config").unwrap();
+
+        remove_retired_event_storage(base.path()).unwrap();
+
+        assert!(!retired.exists());
+        assert_eq!(fs::read(retained).unwrap(), b"config");
     }
 
     #[test]

@@ -688,14 +688,18 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 3. Connector 读取独立事件凭证，调用
    `POST /v1/local-app-events`，传入 `connectorId`、`event`、`payload`，可选
    `eventId` 和 `occurredAt`。
-4. Bridge Agent 校验凭证、安装实例和事件声明，先持久化本地 outbox，再返回
-   `202 Accepted`。
-5. Bridge Agent 通过 WebSocket 发送 `local_app_event_emitted`；Relay 校验设备和
-   capability 后写入 Event Center。
-6. Event Center 在一个事务中完成事件去重和投递任务持久化后，Relay 才返回
-   `event_ack`；Bridge Agent 收到 ACK 后删除 outbox。
-7. 订阅、指定设备范围、Webhook 重试和投递记录全部由 Event Center 维护，Relay
+4. Bridge Agent 校验凭证、安装实例和事件声明，通过 WebSocket 同步转发
+   `local_app_event_emitted`；它不保存事件。
+5. Relay 校验设备和 capability 后同步转发给 Event Center，也不保存事件。
+6. Event Center 先匹配订阅：没有匹配项时确认忽略且不保存 payload；存在匹配项时，
+   在一个事务中完成事件去重和投递任务持久化后返回 `event_ack`。
+7. Bridge Agent 收到 `event_ack` 后才返回 `202 Accepted`。断线、超时或下游失败返回
+   非 2xx；Connector 必须保留自己的源游标，并使用同一个 `eventId` 重试。
+8. 订阅、指定设备范围、Webhook 重试和投递记录全部由 Event Center 维护，Relay
    不保存设备事件订阅表，也不直接触发 Webhook。
+
+Bridge Agent 启动时会删除旧版本遗留的专用 `event-outbox` 目录；该目录中的事件不再
+重放。Connector 自己拥有的源游标和源数据不属于此清理范围。
 
 调用示例：
 

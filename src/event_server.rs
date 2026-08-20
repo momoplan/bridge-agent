@@ -5,11 +5,10 @@ use crate::config::{
 use crate::connector::{
     authorize_connector_asset_upload, authorize_connector_event, connector_declares_asset_upload,
 };
-use crate::event_outbox::EventOutbox;
 use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::LocalAppEventEmitted;
-use crate::runtime::{RuntimeAuditLog, RuntimeRegistryUpdate};
+use crate::runtime::{LocalAppEventSubmission, RuntimeAuditLog, RuntimeRegistryUpdate};
 use crate::services::ServiceRegistry;
 #[cfg(windows)]
 use crate::windows_process::{inspect_windows_process, terminate_windows_process};
@@ -35,14 +34,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch, RwLock};
-use tokio::time::sleep;
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 const PORT_RECLAIM_BIND_RETRIES: usize = 20;
 const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
 const MAX_CONNECTOR_ASSET_BYTES: u64 = 5 * 1024 * 1024;
+const LOCAL_APP_EVENT_FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct LocalEventServer {
     bind: SocketAddr,
@@ -53,11 +52,10 @@ pub(crate) struct LocalEventServer {
 #[derive(Clone)]
 struct EventServerState {
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalAppEventEmitted>,
+    event_tx: mpsc::Sender<LocalAppEventSubmission>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
-    outbox: EventOutbox,
     event_enabled: bool,
     service_registration_enabled: bool,
     service_registration_token: Option<String>,
@@ -134,7 +132,9 @@ struct EmitLocalAppEventRequest {
 #[serde(rename_all = "camelCase")]
 struct EmitLocalAppEventResponse {
     accepted: bool,
-    durable: bool,
+    persisted: bool,
+    matched_subscription_count: usize,
+    duplicate: bool,
     event_id: String,
     connector_id: String,
     event: String,
@@ -198,7 +198,7 @@ impl LocalEventServer {
         config: &AgentConfig,
         config_path: PathBuf,
         registry: Arc<RwLock<ServiceRegistry>>,
-        event_tx: mpsc::Sender<LocalAppEventEmitted>,
+        event_tx: mpsc::Sender<LocalAppEventSubmission>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {
@@ -223,7 +223,6 @@ impl LocalEventServer {
             .await
             .with_context(|| format!("failed to bind local event server on {bind}"))?;
         let bind = listener.local_addr()?;
-        let outbox = EventOutbox::new(&resolve_config_base_dir(&config_path))?;
         Ok(Some(Self {
             bind,
             listener,
@@ -233,7 +232,6 @@ impl LocalEventServer {
                 apply_tx,
                 audit_tx,
                 config_path,
-                outbox,
                 event_enabled: config.runtime.event_server_enabled,
                 service_registration_enabled: config.runtime.service_registration_enabled,
                 service_registration_token: config
@@ -617,26 +615,50 @@ async fn emit_local_app_event(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     };
-    state.outbox.enqueue(&event).map_err(internal_error)?;
-    match state.event_tx.try_send(event) {
-        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {}
-    }
+    let (response_tx, response_rx) = oneshot::channel();
+    let ack = timeout(LOCAL_APP_EVENT_FORWARD_TIMEOUT, async {
+        state
+            .event_tx
+            .send(LocalAppEventSubmission {
+                event,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| "relay runtime is not available".to_string())?;
+        response_rx.await.map_err(|_| {
+            "relay connection ended before Event Center acknowledged the event".to_string()
+        })?
+    })
+    .await
+    .map_err(|_| {
+        EventApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "timed out waiting for Event Center acknowledgement",
+        )
+    })?
+    .map_err(|message| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, message))?;
+    let persisted = ack.matched_subscription_count > 0;
 
     emit_audit_log(
         &state,
         "info",
-        format!("local app event {connector_id}.{event_name} accepted durably"),
+        format!(
+            "local app event {connector_id}.{event_name} forwarded; matched {} subscription(s)",
+            ack.matched_subscription_count
+        ),
         LogMetadata::category("local_app_event")
             .event(event_name.to_string())
             .event_id(event_id.clone())
-            .outcome("accepted"),
+            .outcome(if persisted { "persisted" } else { "ignored" }),
     );
 
     Ok((
         StatusCode::ACCEPTED,
         Json(EmitLocalAppEventResponse {
             accepted: true,
-            durable: true,
+            persisted,
+            matched_subscription_count: ack.matched_subscription_count,
+            duplicate: ack.duplicate,
             event_id,
             connector_id: connector_id.to_string(),
             event: event_name.to_string(),

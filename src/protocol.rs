@@ -105,8 +105,11 @@ pub struct LocalAppEventEmitted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventAck {
     pub event_id: String,
+    pub connector_id: String,
     #[serde(default)]
     pub duplicate: bool,
+    #[serde(default)]
+    pub matched_subscription_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

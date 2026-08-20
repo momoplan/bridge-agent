@@ -82,7 +82,7 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
 
 它包含三层：
 
-- Rust core library：负责系统服务、本地应用目录、WebSocket 长连、调用转发、事件 outbox、日志和本地安全策略
+- Rust core library：负责系统服务、本地应用目录、WebSocket 长连、调用与事件转发、日志和本地安全策略
 - CLI：适合服务器、脚本或纯命令行场景
 - Tauri desktop app：适合最终用户安装、管理本地应用并打包分发
 
@@ -216,8 +216,8 @@ runtime `businessId`。
   平台用 `deviceId + connectorId` 唯一识别本地应用
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
 - Connector 发送事件时不直接连 relay；它使用安装时生成的独立事件凭证请求
-  Bridge Agent 本机入口。事件先写本地 outbox，再通过现有 WebSocket 上报；只有
-  Event Center 持久化成功后的 ACK 才会删除 outbox 文件。
+  Bridge Agent 本机入口。Bridge Agent 不保存事件，请求会同步等待 Relay/Event Center
+  的确认；失败或超时返回非 2xx，Connector 必须保留源游标并用同一个 `eventId` 重试。
 
 ## 项目结构
 
@@ -307,9 +307,12 @@ curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
   }'
 ```
 
-返回 `202` 表示事件已经进入本机持久化 outbox。断线或重启后会自动重传；Relay 只有在
-Event Center 完成去重和事务持久化后才 ACK，收到 ACK 后本机才删除该事件。这个链路
-不创建 runtime service，也不生成 `businessId`。
+返回 `202` 表示 Relay/Event Center 已完成订阅匹配：没有匹配订阅时事件被忽略且不保存
+payload；存在匹配订阅时，Event Center 已在一个事务中保存事件和投递任务。Bridge Agent
+和 Relay 都不保存事件。断线、超时或下游失败会返回非 2xx，Connector 必须保持源游标不变，
+并使用同一个 `eventId` 重试。Bridge Agent 升级后会在启动时清除旧版本遗留的专用
+`event-outbox` 目录，不再重放其中的事件。这个链路不创建 runtime service，也不生成
+`businessId`。
 
 ## 本机服务注册
 
