@@ -161,7 +161,6 @@ interface RuntimeConfig {
   log_file_max_files: number;
   event_server_enabled: boolean;
   event_server_bind: string;
-  event_server_token?: string | null;
   service_registration_enabled: boolean;
   service_registration_token?: string | null;
 }
@@ -254,7 +253,6 @@ interface ServiceConfig {
   start_command?: ServiceStartCommand | null;
   stop_command?: ServiceStartCommand | null;
   methods: MethodConfig[];
-  events: EventConfig[];
 }
 
 interface AgentConfig {
@@ -471,12 +469,10 @@ interface UiServiceConfig {
   start_command: UiServiceStartCommand | null;
   stop_command: UiServiceStartCommand | null;
   methods: UiMethodConfig[];
-  events: UiEventConfig[];
 }
 
 interface ServiceCapabilitiesDocument {
   methods: MethodConfig[];
-  events: EventConfig[];
 }
 
 type RegisteredServiceState = "not_configured" | "healthy" | "unhealthy" | "unknown";
@@ -3429,15 +3425,10 @@ function App() {
       if (!Array.isArray(parsed.methods)) {
         throw new Error("能力定义 JSON 必须包含 methods 数组");
       }
-      if (parsed.events != null && !Array.isArray(parsed.events)) {
-        throw new Error("能力定义 JSON 的 events 必须是数组");
-      }
       const methods = parsed.methods.map(toUiMethod);
-      const events = (parsed.events ?? []).map(toUiEvent);
       updateService(serviceIndex, (current) => ({
         ...current,
-        methods,
-        events
+        methods
       }));
       resetServiceJsonDraft(serviceIndex);
     } catch (err) {
@@ -3464,8 +3455,7 @@ function App() {
                 health_check: null,
                 start_command: null,
                 stop_command: null,
-                methods: [createShellMethod()],
-                events: []
+                methods: [createShellMethod()]
               }
             ]
           }
@@ -3506,24 +3496,10 @@ function App() {
     }));
   }
 
-  function addEvent(serviceIndex: number) {
-    updateService(serviceIndex, (service) => ({
-      ...service,
-      events: [...service.events, createEvent()]
-    }));
-  }
-
   function removeMethod(serviceIndex: number, methodIndex: number) {
     updateService(serviceIndex, (service) => ({
       ...service,
       methods: service.methods.filter((_, index) => index !== methodIndex)
-    }));
-  }
-
-  function removeEvent(serviceIndex: number, eventIndex: number) {
-    updateService(serviceIndex, (service) => ({
-      ...service,
-      events: service.events.filter((_, index) => index !== eventIndex)
     }));
   }
 
@@ -3536,19 +3512,6 @@ function App() {
       ...service,
       methods: service.methods.map((method, index) =>
         index === methodIndex ? updater(method) : method
-      )
-    }));
-  }
-
-  function updateEvent(
-    serviceIndex: number,
-    eventIndex: number,
-    updater: (event: UiEventConfig) => UiEventConfig
-  ) {
-    updateService(serviceIndex, (service) => ({
-      ...service,
-      events: service.events.map((event, index) =>
-        index === eventIndex ? updater(event) : event
       )
     }));
   }
@@ -3873,13 +3836,6 @@ function App() {
                 value={config.runtime.event_server_bind}
                 onChange={(event) => updateRuntime("event_server_bind", event.target.value)}
                 placeholder="127.0.0.1:18081"
-              />
-            </Field>
-            <Field label="事件入口 Token" hint="留空时只依赖本机监听地址。">
-              <input
-                type="password"
-                value={config.runtime.event_server_token ?? ""}
-                onChange={(event) => updateRuntime("event_server_token", emptyToNull(event.target.value))}
               />
             </Field>
           </div>
@@ -4502,7 +4458,7 @@ function App() {
       <div className="service-json-section">
         <div className="method-advanced-head">
           <strong>能力定义 JSON</strong>
-          <small>统一编辑 methods 和 events；保存应用时会按同一套配置校验写入。</small>
+          <small>统一编辑 methods；保存应用时会按同一套配置校验写入。</small>
         </div>
         <textarea
           className="json-editor"
@@ -4940,24 +4896,6 @@ function App() {
               </div>
             ))}
           </div>
-          <div className="method-list">
-            {service.events.map((eventConfig, eventIndex) => (
-              <div className="method-card" key={`${service.name}-${eventConfig.name}-event-${eventIndex}`}>
-                <div className="method-topline">
-                  <div className="method-copy">
-                    <div className="method-title-row">
-                      <h4>{eventConfig.name || "未命名事件"}</h4>
-                      <span className="method-badge">Event</span>
-                      <span className={`service-badge ${eventConfig.enabled ? "enabled" : "disabled"}`}>
-                        {eventConfig.enabled ? "启用" : "停用"}
-                      </span>
-                    </div>
-                    <p>{eventConfig.description || "本地自定义应用可通过本机事件入口发送。"}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
       </Card>
     );
@@ -5198,16 +5136,28 @@ function App() {
     if (!config) {
       return <div />;
     }
-    const services: Array<{ serviceIndex: number | null; service: UiServiceConfig }> = app.serviceIndexes
-      .map((serviceIndex) => ({ serviceIndex, service: config.services[serviceIndex] }))
-      .filter((entry): entry is { serviceIndex: number; service: UiServiceConfig } =>
-        Boolean(entry.service)
-      );
+    const services: Array<{
+      serviceIndex: number | null;
+      service: UiServiceConfig;
+      localAppEvents: UiEventConfig[];
+    }> = app.serviceIndexes.flatMap((serviceIndex) => {
+      const service = config.services[serviceIndex];
+      return service
+        ? [
+            {
+              serviceIndex,
+              service,
+              localAppEvents: []
+            }
+          ]
+        : [];
+    });
     if (app.localAppIndex != null) {
       const localApp = config.local_apps[app.localAppIndex];
       if (localApp) {
         services.push({
           serviceIndex: null,
+          localAppEvents: localApp.events.map(toUiEvent),
           service: {
             name: localApp.connectorId,
             description: localApp.description || localApp.name,
@@ -5215,8 +5165,7 @@ function App() {
             health_check: localApp.healthCheck ? toUiServiceHealthCheck(localApp.healthCheck) : null,
             start_command: localApp.startCommand ? toUiServiceStartCommand(localApp.startCommand) : null,
             stop_command: localApp.stopCommand ? toUiServiceStartCommand(localApp.stopCommand) : null,
-            methods: localApp.methods.map(toUiMethod),
-            events: localApp.events.map(toUiEvent)
+            methods: localApp.methods.map(toUiMethod)
           }
         });
       }
@@ -5228,7 +5177,7 @@ function App() {
 
     return (
       <div className="app-ability-list">
-        {services.map(({ serviceIndex, service }) => (
+        {services.map(({ serviceIndex, service, localAppEvents }) => (
           <div className="app-ability-group" key={service.name}>
             <div className="app-ability-group-head">
               <div>
@@ -5346,7 +5295,7 @@ function App() {
                   </div>
                 );
               })}
-              {service.events.map((eventConfig, eventIndex) => (
+              {localAppEvents.map((eventConfig, eventIndex) => (
                 <div
                   className="method-card compact-method-card"
                   key={`${service.name}-${eventConfig.name}-event-${eventIndex}`}
@@ -5365,7 +5314,7 @@ function App() {
                   </div>
                 </div>
               ))}
-              {service.methods.length === 0 && service.events.length === 0 ? (
+              {service.methods.length === 0 && localAppEvents.length === 0 ? (
                 <div className="empty-state compact-empty">当前没有开放能力。</div>
               ) : null}
             </div>
@@ -6669,7 +6618,7 @@ function App() {
     }
     return app.serviceIndexes.reduce((count, serviceIndex) => {
       const service = agentConfig.services[serviceIndex];
-      return service ? count + service.methods.length + service.events.length : count;
+      return service ? count + service.methods.length : count;
     }, 0);
   }
 
@@ -7693,7 +7642,6 @@ function toUiService(service: ServiceConfig): UiServiceConfig {
     health_check: service.health_check ? toUiServiceHealthCheck(service.health_check) : null,
     start_command: service.start_command ? toUiServiceStartCommand(service.start_command) : null,
     stop_command: service.stop_command ? toUiServiceStartCommand(service.stop_command) : null,
-    events: (service.events ?? []).map(toUiEvent),
     methods: service.methods.map(toUiMethod)
   };
 }
@@ -7706,15 +7654,13 @@ function fromUiService(service: UiServiceConfig): ServiceConfig {
     health_check: service.health_check ? fromUiServiceHealthCheck(service.health_check) : null,
     start_command: service.start_command ? fromUiServiceStartCommand(service.start_command) : null,
     stop_command: service.stop_command ? fromUiServiceStartCommand(service.stop_command) : null,
-    events: service.events.map(fromUiEvent),
     methods: service.methods.map(fromUiMethod)
   };
 }
 
 function serviceCapabilitiesJson(service: UiServiceConfig): string {
   const document: ServiceCapabilitiesDocument = {
-    methods: service.methods.map(fromUiMethod),
-    events: service.events.map(fromUiEvent)
+    methods: service.methods.map(fromUiMethod)
   };
   return prettyJson(document);
 }
@@ -7868,15 +7814,6 @@ function createHttpMethod(): UiMethodConfig {
       headers_text: "",
       timeout_secs: ""
     }
-  };
-}
-
-function createEvent(): UiEventConfig {
-  return {
-    name: "jobFinished",
-    description: "Emitted when the local service completes an asynchronous job.",
-    enabled: true,
-    payload_schema_text: prettyJson(EMPTY_OBJECT_SCHEMA)
   };
 }
 

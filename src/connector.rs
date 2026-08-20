@@ -739,8 +739,9 @@ pub fn install_connector_from_path_with_provenance(
             .collect::<Vec<_>>()
     };
     let mut services = registrations
-        .into_iter()
-        .map(ServiceRegistration::into_service_config)
+        .iter()
+        .cloned()
+        .map(ServiceRegistration::into_connector_service_config)
         .collect::<Result<Vec<_>>>()?;
 
     let package_path = installed_connector_package_path(&manifest)?;
@@ -782,7 +783,7 @@ pub fn install_connector_from_path_with_provenance(
         )?;
         cleanup_legacy_connector_autostarts_for_manifest(&manifest);
 
-        let local_app = local_app_from_services(&manifest, &services)?;
+        let local_app = local_app_from_services(&manifest, &services, &registrations)?;
         let method_names = local_app
             .methods
             .iter()
@@ -1124,8 +1125,9 @@ fn sync_installed_connector_record(
             format!("failed to reload service registrations for connector `{connector_id}`")
         })?;
     let mut services = registrations
-        .into_iter()
-        .map(ServiceRegistration::into_service_config)
+        .iter()
+        .cloned()
+        .map(ServiceRegistration::into_connector_service_config)
         .collect::<Result<Vec<_>>>()?;
     resolve_installed_start_commands(
         &mut services,
@@ -1141,7 +1143,7 @@ fn sync_installed_connector_record(
             .iter()
             .any(|service_name| service_name == &service.name)
     });
-    let local_app = local_app_from_services(&record.manifest, &services)?;
+    let local_app = local_app_from_services(&record.manifest, &services, &registrations)?;
     upsert_synced_local_app(&mut config.local_apps, local_app);
 
     record.last_synced_at_epoch_ms = now;
@@ -1842,7 +1844,7 @@ fn load_connector_service_registrations(
             start_command,
             stop_command,
             methods: manifest.methods.clone(),
-            events: manifest.events.clone(),
+            local_app_events: manifest.events.clone(),
             replace: true,
             managed_by: Some(manifest.id.clone()),
         }]);
@@ -3724,6 +3726,7 @@ fn python_bin_dir(env_path: &Path) -> PathBuf {
 fn local_app_from_services(
     manifest: &ConnectorManifest,
     services: &[ServiceConfig],
+    registrations: &[ServiceRegistration],
 ) -> Result<LocalAppConfig> {
     let mut method_names = BTreeSet::new();
     let mut event_names = BTreeSet::new();
@@ -3741,7 +3744,9 @@ fn local_app_from_services(
             }
             methods.push(method.clone());
         }
-        for event in &service.events {
+    }
+    for registration in registrations {
+        for event in &registration.local_app_events {
             if !event_names.insert(event.name.clone()) {
                 bail!(
                     "connector `{}` declares duplicate local app event `{}` across service registrations",
@@ -4089,7 +4094,7 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .collect::<Vec<_>>();
     let events = registrations
         .iter()
-        .flat_map(|registration| registration.events.iter())
+        .flat_map(|registration| registration.local_app_events.iter())
         .map(|event| ConnectorEventContract {
             name: event.name.clone(),
             description: event.description.clone(),

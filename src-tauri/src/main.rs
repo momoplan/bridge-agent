@@ -4954,7 +4954,6 @@ async fn check_local_app(
             start_command: app.start_command,
             stop_command: app.stop_command,
             methods: Vec::new(),
-            events: Vec::new(),
         },
     )
     .await;

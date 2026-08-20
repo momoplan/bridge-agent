@@ -108,8 +108,6 @@ pub struct RuntimeConfig {
     pub event_server_enabled: bool,
     #[serde(default = "default_event_server_bind")]
     pub event_server_bind: String,
-    #[serde(default)]
-    pub event_server_token: Option<String>,
     #[serde(default = "default_service_registration_enabled")]
     pub service_registration_enabled: bool,
     #[serde(default)]
@@ -130,8 +128,6 @@ pub struct ServiceConfig {
     pub stop_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<MethodConfig>,
-    #[serde(default)]
-    pub events: Vec<EventConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,8 +291,6 @@ pub struct BrowserAuthServiceDefinition {
     pub name: String,
     pub description: String,
     pub methods: Vec<BrowserAuthMethodDefinition>,
-    #[serde(default)]
-    pub events: Vec<BrowserAuthEventDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,7 +344,6 @@ impl AgentConfig {
                 log_file_max_files: default_log_file_max_files(),
                 event_server_enabled: default_event_server_enabled(),
                 event_server_bind: default_event_server_bind(),
-                event_server_token: None,
                 service_registration_enabled: true,
                 service_registration_token: Some(generate_registration_token()),
             },
@@ -409,24 +402,10 @@ impl AgentConfig {
             }
         }
         if self.runtime.event_server_enabled {
-            let bind: SocketAddr = self
-                .runtime
+            self.runtime
                 .event_server_bind
-                .parse()
+                .parse::<SocketAddr>()
                 .with_context(|| "runtime.event_server_bind must be a socket address")?;
-            if !bind.ip().is_loopback()
-                && self
-                    .runtime
-                    .event_server_token
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .is_empty()
-            {
-                bail!(
-                    "runtime.event_server_token is required when event_server_bind is not loopback"
-                );
-            }
         }
         if self.runtime.service_registration_enabled {
             let bind: SocketAddr = self
@@ -459,7 +438,6 @@ impl AgentConfig {
             }
 
             let mut method_names = BTreeSet::new();
-            let mut event_names = BTreeSet::new();
             for method in &service.methods {
                 if method.name.trim().is_empty() {
                     bail!("method name cannot be empty in service `{}`", service.name);
@@ -508,25 +486,6 @@ impl AgentConfig {
                     MethodBinding::ComputerUse(_) => {}
                 }
             }
-            for event in &service.events {
-                if event.name.trim().is_empty() {
-                    bail!("event name cannot be empty in service `{}`", service.name);
-                }
-                if !event_names.insert(event.name.as_str()) {
-                    bail!(
-                        "duplicate event `{}` in service `{}`",
-                        event.name,
-                        service.name
-                    );
-                }
-                if method_names.contains(event.name.as_str()) {
-                    bail!(
-                        "event `{}` conflicts with method of the same name in service `{}`",
-                        event.name,
-                        service.name
-                    );
-                }
-            }
         }
 
         let mut connector_ids = BTreeSet::new();
@@ -573,18 +532,8 @@ impl AgentConfig {
                         response_mode: method.response_mode,
                     })
                     .collect(),
-                events: service
-                    .events
-                    .iter()
-                    .filter(|event| event.enabled)
-                    .map(|event| EventDefinition {
-                        name: event.name.clone(),
-                        description: event.description.clone(),
-                        payload_schema: event.payload_schema.clone(),
-                    })
-                    .collect(),
             })
-            .filter(|service| !service.methods.is_empty() || !service.events.is_empty())
+            .filter(|service| !service.methods.is_empty())
             .collect()
     }
 
@@ -650,17 +599,8 @@ impl AgentConfig {
                             description: method.description.clone(),
                         })
                         .collect(),
-                    events: service
-                        .events
-                        .iter()
-                        .filter(|event| event.enabled)
-                        .map(|event| BrowserAuthEventDefinition {
-                            name: event.name.clone(),
-                            description: event.description.clone(),
-                        })
-                        .collect(),
                 })
-                .filter(|service| !service.methods.is_empty() || !service.events.is_empty())
+                .filter(|service| !service.methods.is_empty())
                 .collect(),
             local_apps: self
                 .local_apps
@@ -763,8 +703,8 @@ pub struct ServiceRegistration {
     pub stop_command: Option<ServiceStartCommand>,
     #[serde(default)]
     pub methods: Vec<RegistrationMethod>,
-    #[serde(default)]
-    pub events: Vec<EventConfig>,
+    #[serde(default, rename = "events")]
+    pub local_app_events: Vec<EventConfig>,
     #[serde(default)]
     pub replace: bool,
     #[serde(default)]
@@ -825,11 +765,21 @@ pub struct RegistrationMethod {
 
 impl ServiceRegistration {
     pub fn into_service_config(self) -> Result<ServiceConfig> {
+        self.into_service_config_inner(false)
+    }
+
+    pub(crate) fn into_connector_service_config(self) -> Result<ServiceConfig> {
+        self.into_service_config_inner(true)
+    }
+
+    fn into_service_config_inner(self, allow_event_only_connector: bool) -> Result<ServiceConfig> {
         if self.name.trim().is_empty() {
             bail!("service name cannot be empty");
         }
-        if self.methods.is_empty() && self.events.is_empty() {
-            bail!("service registration must include at least one method or event");
+        if self.methods.is_empty()
+            && (!allow_event_only_connector || self.local_app_events.is_empty())
+        {
+            bail!("service registration must include at least one method");
         }
 
         let (methods, health_check) = match self.transport {
@@ -856,7 +806,6 @@ impl ServiceRegistration {
             start_command: self.start_command,
             stop_command: self.stop_command,
             methods,
-            events: self.events,
         })
     }
 }
@@ -1394,13 +1343,12 @@ fn is_legacy_default_local_java_service(service: &ServiceConfig) -> bool {
         || service.start_command.is_some()
         || service.stop_command.is_some()
         || service.methods.len() != 1
-        || service.events.len() != 1
     {
         return false;
     }
 
     let method = &service.methods[0];
-    let method_matches = method.name == "invokeApi"
+    method.name == "invokeApi"
         && method.description == "Forward invocation arguments to a local HTTP service."
         && method.enabled
         && method.input_schema == default_object_schema()
@@ -1415,15 +1363,7 @@ fn is_legacy_default_local_java_service(service: &ServiceConfig) -> bool {
                 && http_method == "POST"
                 && headers.is_empty()
                 && *timeout_secs == Some(20)
-        );
-
-    let event = &service.events[0];
-    let event_matches = event.name == "jobFinished"
-        && event.description == "Emitted when the local service completes an asynchronous job."
-        && event.enabled
-        && event.payload_schema == default_object_schema();
-
-    method_matches && event_matches
+        )
 }
 
 pub fn manifest_preview_json(config: &AgentConfig) -> Result<String> {
@@ -1645,7 +1585,6 @@ fn default_computer_service() -> ServiceConfig {
                 ComputerUseAction::Wait,
             ),
         ],
-        events: Vec::new(),
     }
 }
 
@@ -1658,7 +1597,6 @@ fn default_shell_service() -> ServiceConfig {
         start_command: None,
         stop_command: None,
         methods: default_shell_methods(),
-        events: Vec::new(),
     }
 }
 
@@ -2068,9 +2006,9 @@ mod tests {
     use super::{
         browser_auth_manifest_json, config_file_name_for_build, default_shell_exec_allow_commands,
         ensure_browser_auth_agent_id, format_default_device_name, load_config,
-        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, EventConfig,
-        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
-        ServiceRegistration, ServiceStartCommand,
+        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, HttpBinding,
+        MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration,
+        ServiceStartCommand,
     };
     use crate::protocol::ResponseMode;
     use serde_json::json;
@@ -2409,13 +2347,6 @@ mod tests {
                     timeout_secs: Some(20),
                 }),
             }],
-            events: vec![EventConfig {
-                name: "jobFinished".to_string(),
-                description: "Emitted when the local service completes an asynchronous job."
-                    .to_string(),
-                enabled: true,
-                payload_schema: super::default_object_schema(),
-            }],
         }
     }
 
@@ -2477,20 +2408,6 @@ mod tests {
                     timeout_secs: Some(20),
                 }),
             }],
-            events: vec![EventConfig {
-                name: "thingDone".to_string(),
-                description: "Thing completed".to_string(),
-                enabled: true,
-                payload_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "payload-only text"
-                        }
-                    }
-                }),
-            }],
         });
 
         let payload = browser_auth_manifest_json(&config).unwrap();
@@ -2503,11 +2420,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(service["methods"][0]["name"], "doThing");
-        assert_eq!(service["events"][0]["name"], "thingDone");
         assert!(service["methods"][0].get("input_schema").is_none());
-        assert!(service["events"][0].get("payload_schema").is_none());
         assert!(!payload.contains("schema-only text"));
-        assert!(!payload.contains("payload-only text"));
     }
 
     #[test]
@@ -2539,40 +2453,6 @@ mod tests {
             query_execution_method.input_schema["properties"]["executionId"]["type"],
             "string"
         );
-    }
-
-    #[test]
-    fn event_only_service_is_exposed_in_manifest() {
-        let mut config = AgentConfig::example();
-        config.services.push(ServiceConfig {
-            name: "asyncJob".to_string(),
-            description: "Async job events.".to_string(),
-            enabled: true,
-            health_check: None,
-            start_command: None,
-            stop_command: None,
-            methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "finished".to_string(),
-                description: "Job finished.".to_string(),
-                enabled: true,
-                payload_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "jobId": { "type": "string" }
-                    }
-                }),
-            }],
-        });
-
-        let manifest = config.manifest_preview();
-        let service = manifest
-            .services
-            .iter()
-            .find(|service| service.name == "asyncJob")
-            .unwrap();
-        assert!(service.methods.is_empty());
-        assert_eq!(service.events[0].name, "finished");
     }
 
     #[test]
@@ -2624,7 +2504,10 @@ mod tests {
         let service = registration.into_service_config().unwrap();
         assert!(replace);
         assert_eq!(service.name, "reportTool");
-        assert_eq!(service.events[0].name, "finished");
+        assert!(serde_json::to_value(&service)
+            .unwrap()
+            .get("events")
+            .is_none());
         match service.health_check.as_ref().unwrap() {
             ServiceHealthCheck::Http {
                 url,
@@ -2765,7 +2648,6 @@ mod tests {
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.runtime.event_server_bind = "0.0.0.0:18081".to_string();
-        config.runtime.event_server_token = Some("event-secret".to_string());
         config.runtime.service_registration_token = None;
         save_config(&path, &config).unwrap();
 

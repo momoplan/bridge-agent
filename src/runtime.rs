@@ -1,11 +1,11 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
 use crate::event_outbox::EventOutbox;
-use crate::event_server::{LocalEventEmitRequest, LocalEventServer};
+use crate::event_server::LocalEventServer;
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, EventEmitted,
+    AgentCapabilities, AgentMessage, LocalAppEventEmitted,
     AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
@@ -599,7 +599,7 @@ struct LocalEventServerRuntime {
     config: AgentConfig,
     config_path: PathBuf,
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalEventEmitRequest>,
+    event_tx: mpsc::Sender<LocalAppEventEmitted>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
 }
@@ -726,7 +726,7 @@ impl RuntimeRunner {
         &self,
         mut shutdown_rx: watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
-        event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
+        event_rx: &mut mpsc::Receiver<LocalAppEventEmitted>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         loop {
@@ -854,7 +854,7 @@ impl RuntimeRunner {
         >,
         shutdown_rx: &mut watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
-        event_rx: &mut mpsc::Receiver<LocalEventEmitRequest>,
+        event_rx: &mut mpsc::Receiver<LocalAppEventEmitted>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
         let (mut write, mut read) = stream.split();
@@ -885,49 +885,19 @@ impl RuntimeRunner {
                     self.push_log("info", "runtime capabilities updated and sent to relay").await;
                 }
                 Some(event) = event_rx.recv() => {
-                    match event {
-                        LocalEventEmitRequest::Service {
-                            event_id,
-                            service,
-                            event,
-                            payload,
-                            occurred_at,
-                        } => {
-                            let message = AgentMessage::EventEmitted(EventEmitted {
-                                event_id: Some(event_id.clone()),
-                                service: service.clone(),
-                                event: event.clone(),
-                                payload,
-                                occurred_at,
-                            });
-                            write_json(&mut write, &message).await?;
-                            self.push_log_with_metadata(
-                                "info",
-                                &format!("event {service}.{event} sent to relay"),
-                                LogMetadata::category("event")
-                                    .service(service)
-                                    .event(event)
-                                    .event_id(event_id)
-                                    .outcome("sent"),
-                            )
-                            .await;
-                        }
-                        LocalEventEmitRequest::LocalApp(event) => {
-                            let event_id = event.event_id.clone();
-                            let connector_id = event.connector_id.clone();
-                            let event_name = event.event.clone();
-                            write_json(&mut write, &AgentMessage::LocalAppEventEmitted(event)).await?;
-                            self.push_log_with_metadata(
-                                "info",
-                                &format!("local app event {connector_id}.{event_name} sent to relay"),
-                                LogMetadata::category("local_app_event")
-                                    .event(event_name)
-                                    .event_id(event_id)
-                                    .outcome("sent"),
-                            )
-                            .await;
-                        }
-                    }
+                    let event_id = event.event_id.clone();
+                    let connector_id = event.connector_id.clone();
+                    let event_name = event.event.clone();
+                    write_json(&mut write, &AgentMessage::LocalAppEventEmitted(event)).await?;
+                    self.push_log_with_metadata(
+                        "info",
+                        &format!("local app event {connector_id}.{event_name} sent to relay"),
+                        LogMetadata::category("local_app_event")
+                            .event(event_name)
+                            .event_id(event_id)
+                            .outcome("sent"),
+                    )
+                    .await;
                 }
                 _ = local_app_event_retry.tick() => {
                     self.send_pending_local_app_events(&mut write).await?;
@@ -1116,7 +1086,6 @@ impl RuntimeRunner {
                                 AgentMessage::Capabilities(_)
                                 | AgentMessage::InvokeResult(_)
                                 | AgentMessage::LocalAppInvokeResult(_)
-                                | AgentMessage::EventEmitted(_)
                                 | AgentMessage::LocalAppEventEmitted(_) => {}
                             }
                         }
@@ -1343,7 +1312,6 @@ fn relay_message_type_is_supported(message_type: &str) -> bool {
             | "registered_ack"
             | "invoke_request"
             | "invoke_result"
-            | "event_emitted"
             | "local_app_invoke_request"
             | "local_app_invoke_result"
             | "local_app_event_emitted"
@@ -1874,7 +1842,7 @@ mod tests {
         RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode, WebSocketError,
         RELAY_AUTHORIZATION_REQUIRED_MESSAGE,
     };
-    use crate::config::{AgentConfig, EventConfig, ServiceConfig, ServiceHealthCheck};
+    use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
     use crate::logging::LogMetadata;
     use crate::protocol::AgentMessage;
     use futures_util::{SinkExt, StreamExt};
@@ -1942,7 +1910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_stays_online_while_event_server_rebinds_and_forwards_events() {
+    async fn relay_stays_online_while_event_server_rebinds() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let occupied_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1981,21 +1949,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            loop {
-                let message =
-                    tokio::time::timeout(std::time::Duration::from_secs(15), socket.next())
-                        .await
-                        .expect("relay did not receive forwarded event")
-                        .expect("relay websocket closed before forwarded event")
-                        .unwrap();
-                let Message::Text(message) = message else {
-                    continue;
-                };
-                let message: Value = serde_json::from_str(message.as_str()).unwrap();
-                if message["type"] == "event_emitted" {
-                    return message;
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         });
 
         let mut config = AgentConfig::example();
@@ -2006,21 +1960,6 @@ mod tests {
         config.runtime.event_server_bind = event_addr.to_string();
         config.runtime.event_server_enabled = true;
         config.runtime.service_registration_enabled = false;
-        config.services = vec![ServiceConfig {
-            name: "diagnostics".to_string(),
-            description: "Remote diagnostics events.".to_string(),
-            enabled: true,
-            health_check: None,
-            start_command: None,
-            stop_command: None,
-            methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "ready".to_string(),
-                description: "Diagnostics event is ready.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
-        }];
 
         let manager = AgentRuntimeManager::new();
         manager.start(config, &config_path).await.unwrap();
@@ -2068,29 +2007,13 @@ mod tests {
         .await
         .expect("local event server did not recover after the port was released");
 
-        let response = client
-            .post(format!("http://{event_addr}/v1/events"))
-            .json(&json!({
-                "service": "diagnostics",
-                "event": "ready",
-                "payload": {"source": "recovered-local-listener"}
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-
-        let forwarded = relay_task.await.unwrap();
-        assert_eq!(forwarded["service"], "diagnostics");
-        assert_eq!(forwarded["event"], "ready");
-        assert_eq!(forwarded["payload"]["source"], "recovered-local-listener");
-
         let logs = manager.logs(200).await;
         assert!(logs.iter().any(|entry| {
             entry.metadata.category.as_deref() == Some("event_server")
                 && entry.metadata.outcome.as_deref() == Some("recovered")
         }));
         manager.stop().await.unwrap();
+        relay_task.abort();
     }
 
     #[test]
@@ -2419,12 +2342,6 @@ mod tests {
             start_command: None,
             stop_command: None,
             methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "changed".to_string(),
-                description: "Changed.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
         }];
 
         let manager = AgentRuntimeManager::new();

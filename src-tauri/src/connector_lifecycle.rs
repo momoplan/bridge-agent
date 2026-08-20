@@ -513,10 +513,11 @@ impl ConnectorLifecycleManager {
         let Some(entry) = entries.get_mut(connector_id) else {
             return;
         };
-        if !entry
+        if entry
             .operation
             .as_ref()
-            .is_some_and(|operation| operation.id == operation_id)
+            .map(|operation| operation.id.as_str())
+            != Some(operation_id)
         {
             return;
         }

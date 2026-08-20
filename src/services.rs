@@ -77,12 +77,12 @@ pub struct ServiceRegistry {
 struct RuntimeService {
     definition: ServiceDefinition,
     methods: BTreeMap<String, RuntimeMethod>,
-    events: BTreeSet<String>,
 }
 
 struct RuntimeLocalApp {
     definition: LocalAppDefinition,
     runtime: RuntimeService,
+    events: BTreeSet<String>,
 }
 
 enum RuntimeMethod {
@@ -414,7 +414,7 @@ impl ServiceRegistry {
             }
             let runtime_service =
                 build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
+            if !runtime_service.methods.is_empty() {
                 services.insert(service.name.clone(), runtime_service);
             }
         }
@@ -426,12 +426,14 @@ impl ServiceRegistry {
             let service = local_app_runtime_config(app);
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+            let events = local_app_events(app);
+            if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
                     app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
+                        events,
                     },
                 );
             }
@@ -457,7 +459,7 @@ impl ServiceRegistry {
             }
             let runtime_service =
                 build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
+            if !runtime_service.methods.is_empty() {
                 services.insert(service.name.clone(), runtime_service);
             }
         }
@@ -469,12 +471,14 @@ impl ServiceRegistry {
             let service = local_app_runtime_config(app);
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+            let events = local_app_events(app);
+            if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
                     app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
+                        events,
                     },
                 );
             }
@@ -508,7 +512,7 @@ impl ServiceRegistry {
             }
             let runtime_service =
                 build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime_service.methods.is_empty() || !runtime_service.events.is_empty() {
+            if !runtime_service.methods.is_empty() {
                 services.insert(service.name.clone(), runtime_service);
             }
         }
@@ -530,12 +534,14 @@ impl ServiceRegistry {
             }
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime.methods.is_empty() || !runtime.events.is_empty() {
+            let events = local_app_events(app);
+            if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
                     app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
+                        events,
                     },
                 );
             }
@@ -561,17 +567,10 @@ impl ServiceRegistry {
             .collect()
     }
 
-    pub fn has_event(&self, service: &str, event: &str) -> bool {
-        self.services
-            .get(service)
-            .map(|service_definition| service_definition.events.contains(event))
-            .unwrap_or(false)
-    }
-
     pub fn has_local_app_event(&self, connector_id: &str, event: &str) -> bool {
         self.local_apps
             .get(connector_id)
-            .map(|app| app.runtime.events.contains(event))
+            .map(|app| app.events.contains(event))
             .unwrap_or(false)
     }
 
@@ -668,8 +667,15 @@ fn local_app_runtime_config(app: &LocalAppConfig) -> ServiceConfig {
         start_command: app.start_command.clone(),
         stop_command: app.stop_command.clone(),
         methods: app.methods.clone(),
-        events: app.events.clone(),
     }
+}
+
+fn local_app_events(app: &LocalAppConfig) -> BTreeSet<String> {
+    app.events
+        .iter()
+        .filter(|event| event.enabled)
+        .map(|event| event.name.clone())
+        .collect()
 }
 
 fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
@@ -1780,8 +1786,6 @@ fn build_runtime_service(
 ) -> Result<RuntimeService> {
     let mut methods = BTreeMap::new();
     let mut method_definitions = Vec::new();
-    let mut events = BTreeSet::new();
-    let mut event_definitions = Vec::new();
 
     for method in &service.methods {
         if !method.enabled {
@@ -1803,27 +1807,13 @@ fn build_runtime_service(
         });
     }
 
-    for event in &service.events {
-        if !event.enabled {
-            continue;
-        }
-        events.insert(event.name.clone());
-        event_definitions.push(EventDefinition {
-            name: event.name.clone(),
-            description: event.description.clone(),
-            payload_schema: event.payload_schema.clone(),
-        });
-    }
-
     Ok(RuntimeService {
         definition: ServiceDefinition {
             name: service.name.clone(),
             description: service.description.clone(),
             methods: method_definitions,
-            events: event_definitions,
         },
         methods,
-        events,
     })
 }
 
@@ -4252,34 +4242,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_exposes_event_only_service_definitions() {
-        let current_dir = std::env::current_dir().unwrap();
-        let mut config = AgentConfig::example();
-        config.services.push(ServiceConfig {
-            name: "asyncJob".to_string(),
-            description: "Async job events.".to_string(),
-            enabled: true,
-            health_check: None,
-            start_command: None,
-            stop_command: None,
-            methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "finished".to_string(),
-                description: "Job finished.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
-        });
-
-        let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
-        let definitions = registry.definitions();
-        assert!(registry.has_event("asyncJob", "finished"));
-        assert!(definitions.iter().any(|service| service.name == "asyncJob"
-            && service.methods.is_empty()
-            && service.events.iter().any(|event| event.name == "finished")));
-    }
-
-    #[tokio::test]
     async fn checked_registry_omits_unhealthy_registered_service() {
         let current_dir = std::env::current_dir().unwrap();
         let mut config = AgentConfig::example();
@@ -4310,12 +4272,6 @@ mod tests {
                     timeout_secs: Some(1),
                 }),
             }],
-            events: vec![EventConfig {
-                name: "messageReceived".to_string(),
-                description: "Message received.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
         });
 
         let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
@@ -4325,7 +4281,6 @@ mod tests {
             .definitions()
             .iter()
             .any(|service| service.name == "wechatLocal"));
-        assert!(!registry.has_event("wechatLocal", "messageReceived"));
     }
 
     #[tokio::test]
@@ -4355,18 +4310,15 @@ mod tests {
             }),
             stop_command: None,
             methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "ready".to_string(),
-                description: "Ready.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
         });
 
         let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
             .await
             .unwrap();
-        assert!(!registry.has_event("permissionGatedService", "ready"));
+        assert!(registry
+            .definitions()
+            .iter()
+            .all(|service| service.name != "permissionGatedService"));
     }
 
     #[cfg(unix)]
@@ -4484,19 +4436,24 @@ mod tests {
             }),
             start_command: None,
             stop_command: None,
-            methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "finished".to_string(),
-                description: "Finished.".to_string(),
+            methods: vec![MethodConfig {
+                name: "status".to_string(),
+                description: "Read status.".to_string(),
                 enabled: true,
-                payload_schema: json!({"type": "object"}),
+                input_schema: json!({"type": "object"}),
+                response_mode: ResponseMode::Cmodel,
+                binding: MethodBinding::Http(HttpBinding {
+                    url: format!("http://{addr}/status"),
+                    http_method: "POST".to_string(),
+                    headers: BTreeMap::new(),
+                    timeout_secs: Some(1),
+                }),
             }],
         });
 
         let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
             .await
             .unwrap();
-        assert!(registry.has_event("healthyTool", "finished"));
         assert!(registry
             .definitions()
             .iter()
@@ -4903,7 +4860,6 @@ mod tests {
                     timeout_secs: Some(5),
                 }),
             }],
-            events: Vec::new(),
         }
     }
 }

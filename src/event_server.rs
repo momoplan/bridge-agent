@@ -44,18 +44,6 @@ const PORT_RECLAIM_BIND_RETRIES: usize = 20;
 const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
 const MAX_CONNECTOR_ASSET_BYTES: u64 = 5 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub(crate) enum LocalEventEmitRequest {
-    Service {
-        event_id: String,
-        service: String,
-        event: String,
-        payload: Value,
-        occurred_at: Option<String>,
-    },
-    LocalApp(LocalAppEventEmitted),
-}
-
 pub(crate) struct LocalEventServer {
     bind: SocketAddr,
     listener: TcpListener,
@@ -65,13 +53,12 @@ pub(crate) struct LocalEventServer {
 #[derive(Clone)]
 struct EventServerState {
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalEventEmitRequest>,
+    event_tx: mpsc::Sender<LocalAppEventEmitted>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
     outbox: EventOutbox,
     event_enabled: bool,
-    event_token: Option<String>,
     service_registration_enabled: bool,
     service_registration_token: Option<String>,
     upload_prepare_url: Option<String>,
@@ -131,18 +118,6 @@ struct PrepareAssetUploadResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct EmitEventRequest {
-    service: String,
-    event: String,
-    #[serde(default)]
-    payload: Value,
-    #[serde(default, alias = "eventId")]
-    event_id: Option<String>,
-    #[serde(default, alias = "occurredAt")]
-    occurred_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EmitLocalAppEventRequest {
     connector_id: String,
@@ -153,15 +128,6 @@ struct EmitLocalAppEventRequest {
     event_id: Option<String>,
     #[serde(default)]
     occurred_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EmitEventResponse {
-    accepted: bool,
-    event_id: String,
-    service: String,
-    event: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,7 +198,7 @@ impl LocalEventServer {
         config: &AgentConfig,
         config_path: PathBuf,
         registry: Arc<RwLock<ServiceRegistry>>,
-        event_tx: mpsc::Sender<LocalEventEmitRequest>,
+        event_tx: mpsc::Sender<LocalAppEventEmitted>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {
@@ -258,14 +224,6 @@ impl LocalEventServer {
             .with_context(|| format!("failed to bind local event server on {bind}"))?;
         let bind = listener.local_addr()?;
         let outbox = EventOutbox::new(&resolve_config_base_dir(&config_path))?;
-        let token = config
-            .runtime
-            .event_server_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-
         Ok(Some(Self {
             bind,
             listener,
@@ -277,7 +235,6 @@ impl LocalEventServer {
                 config_path,
                 outbox,
                 event_enabled: config.runtime.event_server_enabled,
-                event_token: token,
                 service_registration_enabled: config.runtime.service_registration_enabled,
                 service_registration_token: config
                     .runtime
@@ -304,7 +261,6 @@ impl LocalEventServer {
         let state = self.state;
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
-            .route("/v1/events", post(emit_event))
             .route("/v1/local-app-events", post(emit_local_app_event))
             .route("/v1/local-app-assets", post(upload_local_app_asset))
             .route("/v1/services", get(list_services).post(register_service))
@@ -615,97 +571,6 @@ fn split_endpoint(endpoint: &str) -> Option<(&str, u16)> {
     Some((host, port.parse().ok()?))
 }
 
-async fn emit_event(
-    State(state): State<EventServerState>,
-    headers: HeaderMap,
-    Json(request): Json<EmitEventRequest>,
-) -> Result<(StatusCode, Json<EmitEventResponse>), EventApiError> {
-    if !state.event_enabled {
-        return Err(EventApiError::new(
-            StatusCode::NOT_FOUND,
-            "local event API is disabled",
-        ));
-    }
-    authorize_token(&state.event_token, &headers, "event server")?;
-
-    let service = request.service.trim();
-    let event = request.event.trim();
-    if service.is_empty() {
-        return Err(EventApiError::new(
-            StatusCode::BAD_REQUEST,
-            "service cannot be empty",
-        ));
-    }
-    if event.is_empty() {
-        return Err(EventApiError::new(
-            StatusCode::BAD_REQUEST,
-            "event cannot be empty",
-        ));
-    }
-
-    if !state.registry.read().await.has_event(service, event) {
-        return Err(EventApiError::new(
-            StatusCode::NOT_FOUND,
-            format!("event `{service}.{event}` is not declared or not enabled"),
-        ));
-    }
-
-    let event_id = request
-        .event_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let emit_request = LocalEventEmitRequest::Service {
-        event_id: event_id.clone(),
-        service: service.to_string(),
-        event: event.to_string(),
-        payload: request.payload,
-        occurred_at: request
-            .occurred_at
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-    };
-
-    state
-        .event_tx
-        .try_send(emit_request)
-        .map_err(|err| match err {
-            TrySendError::Closed(_) => EventApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "runtime is not accepting events",
-            ),
-            TrySendError::Full(_) => EventApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "event queue is full; retry later",
-            ),
-        })?;
-
-    emit_audit_log(
-        &state,
-        "info",
-        format!("local event {service}.{event} accepted"),
-        LogMetadata::category("local_event")
-            .service(service.to_string())
-            .event(event.to_string())
-            .event_id(event_id.clone())
-            .outcome("accepted"),
-    );
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(EmitEventResponse {
-            accepted: true,
-            event_id,
-            service: service.to_string(),
-            event: event.to_string(),
-        }),
-    ))
-}
-
 async fn emit_local_app_event(
     State(state): State<EventServerState>,
     headers: HeaderMap,
@@ -753,10 +618,7 @@ async fn emit_local_app_event(
             .map(ToOwned::to_owned),
     };
     state.outbox.enqueue(&event).map_err(internal_error)?;
-    match state
-        .event_tx
-        .try_send(LocalEventEmitRequest::LocalApp(event))
-    {
+    match state.event_tx.try_send(event) {
         Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {}
     }
 
@@ -1073,6 +935,11 @@ fn service_request_parts(
 ) -> Result<(ServiceConfig, bool), EventApiError> {
     match request {
         RegisterServiceRequest::Public(registration) => {
+            if !registration.local_app_events.is_empty() {
+                return Err(bad_request(
+                    "Service custom events are retired; declare Connector events in local_apps instead",
+                ));
+            }
             let replace = registration.replace;
             let service = registration.into_service_config().map_err(bad_request)?;
             Ok((service, replace))
@@ -1232,9 +1099,9 @@ fn emit_audit_log(
 mod tests {
     use super::{
         content_type_matches_bytes, local_endpoint_covers_bind, parse_lsof_listening_owner,
-        windows_listener_matches, LocalEventEmitRequest, LocalEventServer,
+        windows_listener_matches, LocalEventServer,
     };
-    use crate::config::{save_config, AgentConfig, EventConfig, ServiceConfig};
+    use crate::config::{save_config, AgentConfig};
     use crate::services::ServiceRegistry;
     use serde_json::json;
     use std::net::SocketAddr;
@@ -1261,78 +1128,6 @@ mod tests {
             "image/jpeg",
             b"\x89PNG\r\n\x1a\n"
         ));
-    }
-
-    #[tokio::test]
-    async fn event_server_accepts_declared_event() {
-        let mut config = AgentConfig::example();
-        config.runtime.event_server_bind = "127.0.0.1:0".to_string();
-        config.services.push(ServiceConfig {
-            name: "asyncJob".to_string(),
-            description: "Async job events.".to_string(),
-            enabled: true,
-            health_check: None,
-            start_command: None,
-            stop_command: None,
-            methods: Vec::new(),
-            events: vec![EventConfig {
-                name: "finished".to_string(),
-                description: "Job finished.".to_string(),
-                enabled: true,
-                payload_schema: json!({"type": "object"}),
-            }],
-        });
-
-        let current_dir = std::env::current_dir().unwrap();
-        let registry = Arc::new(RwLock::new(
-            ServiceRegistry::from_config(&config, &current_dir).unwrap(),
-        ));
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (apply_tx, _apply_rx) = mpsc::unbounded_channel();
-        let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
-        let config_path = current_dir.join("agent-config.json");
-        let server =
-            LocalEventServer::bind(&config, config_path, registry, event_tx, apply_tx, audit_tx)
-                .await
-                .unwrap()
-                .unwrap();
-        let addr = server.bind_addr();
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let task = tokio::spawn(server.serve(shutdown_rx));
-
-        let response = reqwest::Client::new()
-            .post(format!("http://{addr}/v1/events"))
-            .json(&json!({
-                "service": "asyncJob",
-                "event": "finished",
-                "payload": {
-                    "jobId": "job-1"
-                }
-            }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status().as_u16(), 202);
-        let event = event_rx.recv().await.unwrap();
-        match event {
-            LocalEventEmitRequest::Service {
-                event_id,
-                service,
-                event,
-                payload,
-                ..
-            } => {
-                assert_eq!(service, "asyncJob");
-                assert_eq!(event, "finished");
-                assert_eq!(payload["jobId"], "job-1");
-                assert!(!event_id.is_empty());
-            }
-            LocalEventEmitRequest::LocalApp(_) => panic!("expected service event"),
-        }
-
-        shutdown_tx.send(true).unwrap();
-        task.await.unwrap().unwrap();
     }
 
     #[test]
@@ -1449,7 +1244,38 @@ n*:18081
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(server.serve(shutdown_rx));
 
-        let response = reqwest::Client::new()
+        let client = reqwest::Client::new();
+        let retired_event_response = client
+            .post(format!("http://{addr}/v1/services"))
+            .bearer_auth("secret")
+            .json(&json!({
+                "name": "retiredEventTool",
+                "description": "Must not restore retired Service events.",
+                "transport": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:39127"
+                },
+                "methods": [{
+                    "name": "generate",
+                    "description": "Generate a report.",
+                    "path": "/invoke/generate"
+                }],
+                "events": [{
+                    "name": "finished",
+                    "description": "Retired Service event."
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retired_event_response.status().as_u16(), 400);
+        assert!(retired_event_response
+            .text()
+            .await
+            .unwrap()
+            .contains("Service custom events are retired"));
+
+        let response = client
             .post(format!("http://{addr}/v1/services"))
             .bearer_auth("secret")
             .json(&json!({

@@ -258,9 +258,8 @@ cargo run -- init-config
 - `runtime.log_file_dir`（可选；留空时使用系统默认日志目录）
 - `runtime.event_server_enabled`（默认启用）
 - `runtime.event_server_bind`（默认 `127.0.0.1:18081`）
-- `runtime.event_server_token`（可选；如果监听非 loopback 地址则必须配置）
 - `services[].methods[].binding`
-- `services[].events[]`
+- `local_apps[].events[]`
 
 `binding.type` 只存在于本地配置里，用来决定本机怎么执行方法，不会进入 relay 协议。
 
@@ -311,60 +310,6 @@ curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
 返回 `202` 表示事件已经进入本机持久化 outbox。断线或重启后会自动重传；Relay 只有在
 Event Center 完成去重和事务持久化后才 ACK，收到 ACK 后本机才删除该事件。这个链路
 不创建 runtime service，也不生成 `businessId`。
-
-## 自定义服务事件
-
-设备上的服务可以在配置里声明事件：
-
-```json
-{
-  "name": "reportTool",
-  "description": "Local report generation service.",
-  "enabled": true,
-  "methods": [],
-  "events": [
-    {
-      "name": "finished",
-      "description": "Emitted when report generation finishes.",
-      "enabled": true,
-      "payload_schema": {
-        "type": "object",
-        "additionalProperties": true
-      }
-    }
-  ]
-}
-```
-
-运行时 bridge-agent 会在本机启动事件入口，默认地址是 `127.0.0.1:18081`。自定义服务发送事件：
-
-本地事件入口与 relay WebSocket 是两个独立子系统。事件端口绑定失败不会阻止 Agent 连接 relay；
-运行时会记录 `event_server.bind_failed` 并持续重试。端口恢复后会记录 `event_server.recovered`，随后本地
-服务和 Connector 可以继续向固定入口发送事件，无需重启 Agent。
-
-```bash
-curl -X POST http://127.0.0.1:18081/v1/events \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "service": "reportTool",
-    "event": "finished",
-    "payload": {
-      "jobId": "job-1",
-      "status": "success"
-    }
-  }'
-```
-
-如果配置了 `runtime.event_server_token`，请求需要带：
-
-```bash
-curl -X POST http://127.0.0.1:18081/v1/events \
-  -H 'Authorization: Bearer <event-server-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"service":"reportTool","event":"finished","payload":{}}'
-```
-
-bridge-agent 只接受已声明且已启用的 `service.event`，接收后返回 `202 Accepted`，并通过 agent 与 relay 的 websocket 发送 `event_emitted` 消息。后续由 relay 按订阅关系把事件投递到订阅方 URL。
 
 ## 本机服务注册
 

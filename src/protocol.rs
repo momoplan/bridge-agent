@@ -13,7 +13,6 @@ pub enum AgentMessage {
     RegisteredAck(RegisteredAck),
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
-    EventEmitted(EventEmitted),
     LocalAppInvokeRequest(LocalAppInvokeRequest),
     LocalAppInvokeResult(InvokeResult),
     LocalAppEventEmitted(LocalAppEventEmitted),
@@ -52,8 +51,6 @@ pub struct ServiceDefinition {
     pub name: String,
     pub description: String,
     pub methods: Vec<MethodDefinition>,
-    #[serde(default)]
-    pub events: Vec<EventDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,18 +89,6 @@ pub struct LocalAppDefinition {
     pub methods: Vec<MethodDefinition>,
     #[serde(default)]
     pub events: Vec<EventDefinition>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventEmitted {
-    #[serde(default)]
-    pub event_id: Option<String>,
-    pub service: String,
-    pub event: String,
-    #[serde(default)]
-    pub payload: Value,
-    #[serde(default)]
-    pub occurred_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
