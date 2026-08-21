@@ -1031,7 +1031,7 @@ const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
 #[derive(Debug, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 enum CommandError {
-    RuntimeAlreadyRunning { conflict: RuntimeLockConflict },
+    RuntimeAlreadyRunning { conflict: Box<RuntimeLockConflict> },
     Message { message: String },
 }
 
@@ -1056,7 +1056,7 @@ impl From<anyhow::Error> for CommandError {
     fn from(err: anyhow::Error) -> Self {
         if let Some(conflict) = err.downcast_ref::<RuntimeLockConflict>() {
             return Self::RuntimeAlreadyRunning {
-                conflict: conflict.clone(),
+                conflict: Box::new(conflict.clone()),
             };
         }
         Self::Message {
@@ -2910,7 +2910,7 @@ async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String
 struct ConnectorManagementCommandError {
     code: &'static str,
     message: String,
-    lifecycle: Option<ConnectorLifecycleSnapshot>,
+    lifecycle: Option<Box<ConnectorLifecycleSnapshot>>,
 }
 
 impl ConnectorManagementCommandError {
@@ -2928,7 +2928,7 @@ impl From<Box<ConnectorManagementNotReady>> for ConnectorManagementCommandError 
         Self {
             code: error.code,
             message: error.message,
-            lifecycle: Some(error.lifecycle),
+            lifecycle: Some(Box::new(error.lifecycle)),
         }
     }
 }
@@ -5683,12 +5683,7 @@ fn split_source_revision(source: &str) -> (String, Option<String>) {
 }
 
 fn normalized_platform() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "windows" => "windows",
-        "linux" => "linux",
-        _ => std::env::consts::OS,
-    }
+    std::env::consts::OS
 }
 
 fn is_git_connector_source(source: &str) -> bool {
@@ -7121,6 +7116,50 @@ fn main() {
 mod tests {
     use super::*;
     use bridge_agent::ConnectorLifecycleResult;
+
+    #[test]
+    fn boxed_command_error_payloads_preserve_the_ipc_contract() {
+        let conflict = RuntimeLockConflict {
+            pid: 42,
+            agent_id: "agent-test".to_string(),
+            config_path: "/tmp/config.toml".to_string(),
+            lock_path: "/tmp/runtime.lock".to_string(),
+            process: bridge_agent::RuntimeProcessInfo {
+                pid: 42,
+                parent_pid: Some(1),
+                name: Some("bridge-agent".to_string()),
+                executable_path: Some("/tmp/bridge-agent".to_string()),
+                command_line: None,
+                running: true,
+            },
+        };
+        let runtime_error = serde_json::to_value(CommandError::from(anyhow::Error::new(conflict)))
+            .expect("runtime command error should serialize");
+        assert_eq!(runtime_error["code"], "runtime_already_running");
+        assert_eq!(runtime_error["conflict"]["pid"], 42);
+        assert_eq!(runtime_error["conflict"]["process"]["running"], true);
+
+        let lifecycle_error = ConnectorLifecycleManager::default()
+            .try_management_permit("connector.test")
+            .err()
+            .expect("absent connector must reject management requests");
+        let management_error =
+            serde_json::to_value(ConnectorManagementCommandError::from(lifecycle_error))
+                .expect("management command error should serialize");
+        assert_eq!(management_error["code"], "connector_not_ready");
+        assert_eq!(
+            management_error["lifecycle"]["connectorId"],
+            "connector.test"
+        );
+
+        assert!(std::mem::size_of::<CommandError>() <= 64);
+        assert!(std::mem::size_of::<ConnectorManagementCommandError>() <= 64);
+    }
+
+    #[test]
+    fn normalized_platform_uses_the_rust_target_os_contract() {
+        assert_eq!(normalized_platform(), std::env::consts::OS);
+    }
 
     fn market_connector(checksum: Option<&str>) -> MarketConnectorApp {
         MarketConnectorApp {
