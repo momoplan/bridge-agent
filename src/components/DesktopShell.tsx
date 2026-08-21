@@ -4,7 +4,6 @@ import {
   Blocks,
   ChevronDown,
   House,
-  RefreshCw,
   Settings,
   X
 } from "lucide-react";
@@ -23,10 +22,8 @@ interface DesktopSidebarProps {
   lastEvent: string;
   version: string;
   lastError?: string | null;
-  refreshing?: boolean;
   authorizationState: DeviceAuthorizationState;
   onNavigate: (page: DesktopPage) => void;
-  onRefresh: () => void;
 }
 
 const NAV_ITEMS: Array<{
@@ -49,10 +46,8 @@ export function DesktopSidebar({
   lastEvent,
   version,
   lastError,
-  refreshing = false,
   authorizationState,
-  onNavigate,
-  onRefresh
+  onNavigate
 }: DesktopSidebarProps) {
   const [connectionOpen, setConnectionOpen] = useState(false);
   const connectionAreaRef = useRef<HTMLDivElement>(null);
@@ -203,14 +198,6 @@ export function DesktopSidebar({
             ) : null}
 
             <footer className="desktop-connection-actions">
-              <button className="ghost button-with-icon" onClick={onRefresh} disabled={refreshing}>
-                <RefreshCw
-                  size={14}
-                  className={refreshing ? "spin" : undefined}
-                  aria-hidden="true"
-                />
-                {refreshing ? "刷新中" : "刷新状态"}
-              </button>
               <button className="secondary button-with-icon" onClick={openDiagnostics}>
                 <Activity size={14} aria-hidden="true" />
                 打开诊断

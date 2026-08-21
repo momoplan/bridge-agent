@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import {
@@ -39,11 +39,12 @@ import {
   type CodexInstallDeepLinkIntent
 } from "./deep-link";
 import {
+  formatLocalAppInstallTaskPhase,
   latestLocalAppInstallTasks,
   reconcileLocalAppInstallSelection,
   shouldShowLocalAppInstallTask,
   type LocalAppInstallTask,
-  type LocalAppInstallTaskPhase
+  type LocalAppInstallTaskOperation
 } from "./local-app-install-tasks";
 import { isConnectorUninstallStopError } from "./local-app-uninstall";
 import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
@@ -536,7 +537,7 @@ interface ConnectorSummary {
 
 interface LocalAppsChangedEvent {
   revision: number;
-  operation: "install" | "sync" | "uninstall";
+  operation: "install" | "upgrade" | "sync" | "uninstall";
   connectorId: string;
 }
 
@@ -552,22 +553,6 @@ interface ConnectorUi {
   entry: string;
   title?: string | null;
   defaultView: boolean;
-}
-
-interface ConnectorInstallResult {
-  connectorId: string;
-  name: string;
-  version: string;
-  packagePath: string;
-  methodNames: string[];
-  eventNames: string[];
-}
-
-interface ConnectorAppInstallDocument {
-  install: ConnectorInstallResult;
-  start?: ConnectorStartResult | null;
-  setup?: Record<string, unknown> | null;
-  config: ConfigDocument;
 }
 
 interface ConnectorLifecycleResult {
@@ -695,6 +680,18 @@ interface LocalAppItem {
   connector?: ConnectorSummary;
   managedTool?: ManagedToolStatus;
   installTask?: LocalAppInstallTask;
+}
+
+interface StartConnectorAppInstallRequest {
+  operation: LocalAppInstallTaskOperation;
+  source: string;
+  replace: boolean;
+  checksum: string | null;
+  allowGit: boolean;
+  marketAppId: string | null;
+  connectorId: string | null;
+  name: string | null;
+  version: string | null;
 }
 
 interface MarketConnector {
@@ -1097,25 +1094,6 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    let unlisten: (() => void) | null = null;
-    const applyTask = (task: LocalAppInstallTask) => {
-      setLocalAppInstallTasks((current) => {
-        const next = current.filter((candidate) => candidate.taskId !== task.taskId);
-        next.push(task);
-        return next.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs);
-      });
-    };
-    void listen<LocalAppInstallTask>("local-app-install-task-changed", (event) => {
-      if (active) {
-        applyTask(event.payload);
-      }
-    }).then((dispose) => {
-      if (active) {
-        unlisten = dispose;
-      } else {
-        dispose();
-      }
-    }).catch((err) => clientWarn("订阅本地应用安装进度失败", err));
     void invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks")
       .then((tasks) => {
         if (active) {
@@ -1125,7 +1103,6 @@ function App() {
       .catch((err) => clientWarn("读取本地应用安装任务失败", err));
     return () => {
       active = false;
-      unlisten?.();
     };
   }, []);
 
@@ -2169,6 +2146,27 @@ function App() {
     }
   }
 
+  function applyLocalAppInstallTask(task: LocalAppInstallTask) {
+    setLocalAppInstallTasks((current) => {
+      const next = current.filter((candidate) => candidate.taskId !== task.taskId);
+      next.push(task);
+      return next.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs);
+    });
+  }
+
+  async function startLocalAppInstallTask(
+    request: StartConnectorAppInstallRequest
+  ): Promise<LocalAppInstallTask> {
+    const onEvent = new Channel<LocalAppInstallTask>();
+    onEvent.onmessage = applyLocalAppInstallTask;
+    const task = await invoke<LocalAppInstallTask>("start_connector_app_install", {
+      request,
+      onEvent
+    });
+    applyLocalAppInstallTask(task);
+    return task;
+  }
+
   async function installLocalApp() {
     const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
     if (installSourceMode === "market" && selectedMarket?.compatible === false) {
@@ -2197,22 +2195,17 @@ function App() {
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const task = await invoke<LocalAppInstallTask>("start_connector_app_install", {
-        request: {
-          source,
-          replace: true,
-          checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
-          allowGit: installSourceMode === "custom",
-          marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null,
-          connectorId: installSourceMode === "market" ? selectedMarket?.connectorId ?? null : null,
-          name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
-          version: installSourceMode === "market" ? selectedMarket?.version ?? null : null
-        }
+      const task = await startLocalAppInstallTask({
+        operation: "install",
+        source,
+        replace: true,
+        checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
+        allowGit: installSourceMode === "custom",
+        marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null,
+        connectorId: installSourceMode === "market" ? selectedMarket?.connectorId ?? null : null,
+        name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
+        version: installSourceMode === "market" ? selectedMarket?.version ?? null : null
       });
-      setLocalAppInstallTasks((current) => [
-        ...current.filter((candidate) => candidate.taskId !== task.taskId),
-        task
-      ]);
       setSelectedLocalAppId(`install-task:${task.taskId}`);
       setActivePage("apps");
       setInstallPanelOpen(false);
@@ -2432,30 +2425,20 @@ function App() {
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
+      const task = await startLocalAppInstallTask({
+        operation: "upgrade",
         source: marketApp.source,
         replace: true,
         checksum: marketApp.checksum ?? null,
         allowGit: false,
-        marketAppId: marketApp.id
+        marketAppId: marketApp.id,
+        connectorId: app.connector.id,
+        name: marketApp.name,
+        version: marketApp.version
       });
-      applyConfigDocument(document.config);
-      await refreshConnectorApps();
-      await refreshRegisteredServiceStatuses();
-      setConnectorUpdateStatuses((current) => ({
-        ...current,
-        [document.install.connectorId]: {
-          connectorId: document.install.connectorId,
-          name: document.install.name,
-          currentVersion: document.install.version,
-          latestVersion: document.install.version,
-          updateAvailable: false,
-          source: marketApp.source
-        }
-      }));
-      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
       setPendingUpgradeAppId(null);
-      setMessage(`应用 ${document.install.name} 已升级到 ${document.install.version}`);
+      setSelectedLocalAppId(`connector:${app.connector.id}`);
+      setMessage(`应用 ${task.name} 已开始后台升级，可关闭详情并在应用卡片查看进度`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -2489,23 +2472,24 @@ function App() {
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const document = await invoke<ConnectorAppInstallDocument>("install_connector_app", {
+      const task = await startLocalAppInstallTask({
+        operation: "sync",
         source,
         replace: true,
         checksum: null,
         allowGit: true,
-        marketAppId: null
+        marketAppId: null,
+        connectorId: app.connector.id,
+        name: app.name,
+        version: app.connector.version
       });
-      applyConfigDocument(document.config);
-      await refreshConnectorApps();
-      await refreshRegisteredServiceStatuses();
       setConnectorUpdateStatuses((current) => {
         const next = { ...current };
-        delete next[document.install.connectorId];
+        delete next[app.connector!.id];
         return next;
       });
-      setSelectedLocalAppId(`connector:${document.install.connectorId}`);
-      setMessage(`应用 ${document.install.name} 已重新同步到 ${document.install.version}`);
+      setSelectedLocalAppId(`connector:${app.connector.id}`);
+      setMessage(`应用 ${task.name} 已开始后台同步，可关闭详情并在应用卡片查看进度`);
     } catch (err) {
       handleCommandError(err);
     } finally {
@@ -4340,9 +4324,6 @@ function App() {
             <strong>桌面控制权限</strong>
             <small>桌面控制启用后，截图需要屏幕录制；点击、输入和拖拽需要辅助功能。</small>
           </div>
-          <button className="ghost" onClick={() => void refreshDesktopPermissions()}>
-            刷新状态
-          </button>
         </div>
         <div className="status-detail-grid">
           <InfoRow
@@ -5943,7 +5924,7 @@ function App() {
           {app.managedTool ? (
             <span>版本 {app.managedTool.installedVersion ?? "未安装"}</span>
           ) : app.installTask && !app.connector ? (
-            <span>{formatLocalAppInstallTaskPhase(app.installTask.phase)}</span>
+            <span>{formatLocalAppInstallTaskPhase(app.installTask)}</span>
           ) : (
             <span>{countLocalAppCapabilities(app, config)} 项能力</span>
           )}
@@ -5966,7 +5947,7 @@ function App() {
         aria-label={`${task.name}：${task.error || task.message}`}
       >
         <div className="local-app-install-progress-head">
-          <strong>{formatLocalAppInstallTaskPhase(task.phase)}</strong>
+          <strong>{formatLocalAppInstallTaskPhase(task)}</strong>
           <span>{percent == null ? "" : `${Math.round(percent)}%`}</span>
         </div>
         {task.phase !== "failed" ? (
@@ -6087,11 +6068,7 @@ function App() {
       return null;
     }
     const upgradeBusy = connectorUpdateBusy === app.id || (app.kind === "managed_tool" && managedToolBusy);
-    const closeUpgrade = () => {
-      if (!upgradeBusy) {
-        setPendingUpgradeAppId(null);
-      }
-    };
+    const closeUpgrade = () => setPendingUpgradeAppId(null);
 
     return (
       <div className="modal-backdrop local-app-upgrade-backdrop" role="presentation" onClick={closeUpgrade}>
@@ -6115,7 +6092,7 @@ function App() {
                 <p>确认具体改动后，再安装 {updateStatus.latestVersion}。</p>
               </div>
             </div>
-            <button className="icon-button" onClick={closeUpgrade} disabled={upgradeBusy} aria-label="关闭升级确认">
+            <button className="icon-button" onClick={closeUpgrade} aria-label="关闭升级确认">
               <X size={18} aria-hidden="true" />
             </button>
           </div>
@@ -6130,7 +6107,7 @@ function App() {
             </div>
           </div>
           <div className="install-panel-actions">
-            <button className="secondary" onClick={closeUpgrade} disabled={upgradeBusy}>取消</button>
+            <button className="secondary" onClick={closeUpgrade}>{upgradeBusy ? "关闭" : "取消"}</button>
             <button
               className="primary accent"
               onClick={() => void upgradeLocalAppVersion(app)}
@@ -6261,14 +6238,14 @@ function App() {
               ) : null}
             </div>
             <div className="service-actions">
-              {app.installTask && !["succeeded", "failed"].includes(app.installTask.phase) ? null : isManagedTool && app.managedTool?.state !== "ready" ? (
+              {app.installTask && !["succeeded", "failed"].includes(app.installTask.phase) ? null : isManagedTool && app.managedTool?.state !== "ready" && !managedToolBusy ? (
                 <>
                   <button
                     className="primary accent"
                     onClick={() => void upgradeManagedTool(app)}
-                    disabled={managedToolBusy || !marketApp}
+                    disabled={!marketApp}
                   >
-                    {managedToolBusy ? "处理中" : "安装应用"}
+                    安装应用
                   </button>
                 </>
               ) : marketApp ? (
@@ -6529,7 +6506,10 @@ function App() {
         return formatLocalAppLifecycle("failed", app.installTask.error || app.installTask.message);
       }
       if (app.installTask.phase !== "succeeded") {
-        return formatLocalAppLifecycle("installing", app.installTask.message);
+        return formatLocalAppLifecycle(
+          app.installTask.operation === "install" ? "installing" : "upgrading",
+          app.installTask.message
+        );
       }
       if (!app.connector) {
         return formatLocalAppLifecycle("stopped", app.installTask.message);
@@ -7223,10 +7203,8 @@ function App() {
           lastEvent={runtime ? formatTime(runtime.last_event_at) : "-"}
           version={currentVersion}
           lastError={needsAuthorization ? null : runtime?.last_error}
-          refreshing={refreshing}
           authorizationState={authorizationState}
           onNavigate={navigateToPage}
-          onRefresh={() => void refreshAll()}
         />
 
         <section className="main-panel">
@@ -8098,21 +8076,6 @@ function formatRegisteredServiceStatus(status: RegisteredServiceState): string {
     unknown: "未知"
   };
   return labels[status];
-}
-
-function formatLocalAppInstallTaskPhase(phase: LocalAppInstallTaskPhase): string {
-  const labels: Record<LocalAppInstallTaskPhase, string> = {
-    queued: "等待安装",
-    resolving: "解析来源",
-    downloading: "下载安装包",
-    verifying: "校验安装包",
-    installing: "安装应用",
-    starting: "启动应用",
-    finalizing: "刷新应用能力",
-    succeeded: "安装完成",
-    failed: "安装失败"
-  };
-  return labels[phase];
 }
 
 function formatLocalAppLifecycle(

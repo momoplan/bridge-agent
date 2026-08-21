@@ -33,7 +33,6 @@ commands.allow = [
   "show_connector_app",
   "invoke_connector_management",
   "check_connector_app_update",
-  "install_connector_app",
   "start_connector_app_install",
   "list_connector_app_install_tasks",
   "start_connector_app",

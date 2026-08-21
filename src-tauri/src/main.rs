@@ -104,7 +104,6 @@ const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
 const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
 const LOCAL_APP_RUNTIME_EVENT: &str = "local-app-runtime-changed";
 const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
-const LOCAL_APP_INSTALL_TASK_EVENT: &str = "local-app-install-task-changed";
 const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
 const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str = "connector.process.host-managed.v1";
 const HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1: &str =
@@ -238,6 +237,79 @@ enum LocalAppInstallTaskPhase {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LocalAppInstallTaskOperation {
+    Install,
+    Upgrade,
+    Sync,
+}
+
+impl LocalAppInstallTaskOperation {
+    fn active_label(self) -> &'static str {
+        match self {
+            Self::Install => "安装",
+            Self::Upgrade => "升级",
+            Self::Sync => "同步",
+        }
+    }
+
+    fn queued_message(self) -> &'static str {
+        match self {
+            Self::Install => "等待开始安装",
+            Self::Upgrade => "等待开始升级",
+            Self::Sync => "等待开始同步",
+        }
+    }
+
+    fn succeeded_message(self) -> &'static str {
+        match self {
+            Self::Install => "应用已安装，可进入应用完成初始化",
+            Self::Upgrade => "应用已升级，可继续使用",
+            Self::Sync => "应用已同步到最新来源，可继续使用",
+        }
+    }
+
+    fn failed_message(self) -> &'static str {
+        match self {
+            Self::Install => "应用安装失败",
+            Self::Upgrade => "应用升级失败",
+            Self::Sync => "应用同步失败",
+        }
+    }
+
+    fn phase_message(self, phase: LocalAppInstallTaskPhase) -> Option<&'static str> {
+        match (self, phase) {
+            (Self::Install, LocalAppInstallTaskPhase::Resolving) => Some("正在解析安装来源"),
+            (Self::Install, LocalAppInstallTaskPhase::Verifying) => {
+                Some("正在校验应用清单与平台身份")
+            }
+            (Self::Install, LocalAppInstallTaskPhase::Installing) => Some("正在安装并注册应用"),
+            (Self::Install, LocalAppInstallTaskPhase::Starting) => {
+                Some("应用已安装，正在启动并检查运行状态")
+            }
+            (Self::Upgrade, LocalAppInstallTaskPhase::Resolving) => Some("正在解析升级来源"),
+            (Self::Upgrade, LocalAppInstallTaskPhase::Verifying) => {
+                Some("正在校验升级包与平台身份")
+            }
+            (Self::Upgrade, LocalAppInstallTaskPhase::Installing) => {
+                Some("正在安装新版本并更新应用注册")
+            }
+            (Self::Upgrade, LocalAppInstallTaskPhase::Starting) => {
+                Some("新版本已安装，正在启动并检查运行状态")
+            }
+            (Self::Sync, LocalAppInstallTaskPhase::Resolving) => Some("正在解析同步来源"),
+            (Self::Sync, LocalAppInstallTaskPhase::Verifying) => Some("正在校验来源包与应用身份"),
+            (Self::Sync, LocalAppInstallTaskPhase::Installing) => Some("正在同步并更新应用注册"),
+            (Self::Sync, LocalAppInstallTaskPhase::Starting) => {
+                Some("应用已同步，正在启动并检查运行状态")
+            }
+            (_, LocalAppInstallTaskPhase::Finalizing) => Some("正在刷新本地应用能力"),
+            _ => None,
+        }
+    }
+}
+
 impl LocalAppInstallTaskPhase {
     fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Failed)
@@ -248,6 +320,7 @@ impl LocalAppInstallTaskPhase {
 #[serde(rename_all = "camelCase")]
 struct LocalAppInstallTask {
     task_id: String,
+    operation: LocalAppInstallTaskOperation,
     connector_id: Option<String>,
     market_app_id: Option<String>,
     name: String,
@@ -265,18 +338,12 @@ struct LocalAppInstallTask {
 #[derive(Clone, Default)]
 struct LocalAppInstallTaskManager {
     tasks: Arc<RwLock<BTreeMap<String, LocalAppInstallTask>>>,
-    event_app: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl LocalAppInstallTaskManager {
-    fn attach_event_app(&self, app: tauri::AppHandle) {
-        if let Ok(mut current) = self.event_app.lock() {
-            *current = Some(app);
-        }
-    }
-
     fn create(
         &self,
+        operation: LocalAppInstallTaskOperation,
         connector_id: Option<String>,
         market_app_id: Option<String>,
         name: String,
@@ -291,11 +358,16 @@ impl LocalAppInstallTaskManager {
                 && ((market_app_id.is_some() && task.market_app_id == market_app_id)
                     || (connector_id.is_some() && task.connector_id == connector_id))
         }) {
-            return Err(format!("应用 {} 已在安装中", existing.name));
+            return Err(format!(
+                "应用 {} 已在{}中",
+                existing.name,
+                existing.operation.active_label()
+            ));
         }
         let timestamp = now_ms();
         let task = LocalAppInstallTask {
             task_id: uuid::Uuid::new_v4().to_string(),
+            operation,
             connector_id,
             market_app_id,
             name,
@@ -304,14 +376,12 @@ impl LocalAppInstallTaskManager {
             progress_percent: Some(0),
             downloaded_bytes: None,
             total_bytes: None,
-            message: "等待开始安装".to_string(),
+            message: operation.queued_message().to_string(),
             error: None,
             created_at_epoch_ms: timestamp,
             updated_at_epoch_ms: timestamp,
         };
         tasks.insert(task.task_id.clone(), task.clone());
-        drop(tasks);
-        self.emit(&task);
         Ok(task)
     }
 
@@ -325,8 +395,6 @@ impl LocalAppInstallTaskManager {
         update(task);
         task.updated_at_epoch_ms = now_ms();
         let snapshot = task.clone();
-        drop(tasks);
-        self.emit(&snapshot);
         Some(snapshot)
     }
 
@@ -336,42 +404,49 @@ impl LocalAppInstallTaskManager {
             .map(|tasks| tasks.values().cloned().collect())
             .unwrap_or_default()
     }
-
-    fn emit(&self, task: &LocalAppInstallTask) {
-        let app = self
-            .event_app
-            .lock()
-            .ok()
-            .and_then(|current| current.clone());
-        if let Some(app) = app {
-            if let Err(err) = app.emit(LOCAL_APP_INSTALL_TASK_EVENT, task.clone()) {
-                log::warn!(
-                    "failed to emit local app install task: task_id={} error={err}",
-                    task.task_id
-                );
-            }
-        }
-    }
 }
 
 #[derive(Clone)]
 struct LocalAppInstallProgressReporter {
     manager: LocalAppInstallTaskManager,
     task_id: String,
+    on_event: Option<tauri::ipc::Channel<LocalAppInstallTask>>,
 }
 
 impl LocalAppInstallProgressReporter {
+    fn send(&self, task: LocalAppInstallTask) {
+        let Some(on_event) = self.on_event.as_ref() else {
+            return;
+        };
+        if let Err(err) = on_event.send(task) {
+            log::warn!(
+                "failed to send local app task progress: task_id={} error={err}",
+                self.task_id
+            );
+        }
+    }
+
+    fn update(&self, update: impl FnOnce(&mut LocalAppInstallTask)) {
+        if let Some(task) = self.manager.update(&self.task_id, update) {
+            self.send(task);
+        }
+    }
+
     fn report(
         &self,
         phase: LocalAppInstallTaskPhase,
         progress_percent: Option<u8>,
         message: impl Into<String>,
     ) {
-        let message = message.into();
-        self.manager.update(&self.task_id, |task| {
+        let fallback_message = message.into();
+        self.update(|task| {
             task.phase = phase;
             task.progress_percent = progress_percent;
-            task.message = message;
+            task.message = task
+                .operation
+                .phase_message(phase)
+                .unwrap_or(fallback_message.as_str())
+                .to_string();
             task.error = None;
             task.downloaded_bytes = None;
             task.total_bytes = None;
@@ -379,7 +454,7 @@ impl LocalAppInstallProgressReporter {
     }
 
     fn download(&self, downloaded_bytes: u64, total_bytes: Option<u64>) {
-        self.manager.update(&self.task_id, |task| {
+        self.update(|task| {
             task.phase = LocalAppInstallTaskPhase::Downloading;
             task.downloaded_bytes = Some(downloaded_bytes);
             task.total_bytes = total_bytes;
@@ -399,7 +474,7 @@ impl LocalAppInstallProgressReporter {
     }
 
     fn identity(&self, connector_id: &str, name: &str, version: &str) {
-        self.manager.update(&self.task_id, |task| {
+        self.update(|task| {
             task.connector_id = Some(connector_id.to_string());
             task.name = name.to_string();
             task.version = Some(version.to_string());
@@ -431,6 +506,7 @@ struct LocalAppsChangedEvent {
 #[serde(rename_all = "snake_case")]
 enum LocalAppsChangeOperation {
     Install,
+    Upgrade,
     Sync,
     Uninstall,
 }
@@ -3087,44 +3163,13 @@ async fn check_connector_app_update(
 }
 
 #[tauri::command]
-async fn install_connector_app(
-    state: tauri::State<'_, DesktopState>,
-    source: String,
-    replace: bool,
-    checksum: Option<String>,
-    allow_git: Option<bool>,
-    market_app_id: Option<String>,
-) -> Result<ConnectorAppInstallDocument, String> {
-    let document = install_connector_app_with_context(
-        &state.config_path,
-        &state.runtime,
-        &state.connector_lifecycles,
-        &state.connector_processes,
-        &state.registered_services,
-        ConnectorInstallOptions {
-            source,
-            replace,
-            checksum,
-            allow_git,
-            market_app_id,
-            start: true,
-            progress: None,
-        },
-    )
-    .await?;
-    state.local_apps.notify(
-        LocalAppsChangeOperation::Install,
-        &document.install.connector_id,
-    );
-    Ok(document)
-}
-
-#[tauri::command]
 fn start_connector_app_install(
     state: tauri::State<'_, DesktopState>,
     request: StartConnectorAppInstallRequest,
+    on_event: tauri::ipc::Channel<LocalAppInstallTask>,
 ) -> Result<LocalAppInstallTask, String> {
     let StartConnectorAppInstallRequest {
+        operation,
         source,
         replace,
         checksum,
@@ -3148,6 +3193,7 @@ fn start_connector_app_install(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let task = state.local_app_install_tasks.create(
+        operation,
         connector_id,
         market_app_id.clone(),
         display_name,
@@ -3155,10 +3201,11 @@ fn start_connector_app_install(
     )?;
     let manager = state.local_app_install_tasks.clone();
     let reporter = LocalAppInstallProgressReporter {
-        manager: manager.clone(),
+        manager,
         task_id: task.task_id.clone(),
+        on_event: Some(on_event),
     };
-    let task_id = task.task_id.clone();
+    reporter.send(task.clone());
     let config_path = state.config_path.clone();
     let runtime = state.runtime.clone();
     let connector_lifecycles = state.connector_lifecycles.clone();
@@ -3179,13 +3226,13 @@ fn start_connector_app_install(
                 allow_git,
                 market_app_id,
                 start: true,
-                progress: Some(reporter),
+                progress: Some(reporter.clone()),
             },
         )
         .await;
         match result {
             Ok(document) => {
-                manager.update(&task_id, |task| {
+                reporter.update(|task| {
                     task.connector_id = Some(document.install.connector_id.clone());
                     task.name = document.install.name.clone();
                     task.version = Some(document.install.version.clone());
@@ -3193,21 +3240,25 @@ fn start_connector_app_install(
                     task.progress_percent = Some(100);
                     task.downloaded_bytes = None;
                     task.total_bytes = None;
-                    task.message = "应用已安装，可进入应用完成初始化".to_string();
+                    task.message = task.operation.succeeded_message().to_string();
                     task.error = None;
                 });
                 local_apps.notify(
-                    LocalAppsChangeOperation::Install,
+                    match operation {
+                        LocalAppInstallTaskOperation::Install => LocalAppsChangeOperation::Install,
+                        LocalAppInstallTaskOperation::Upgrade => LocalAppsChangeOperation::Upgrade,
+                        LocalAppInstallTaskOperation::Sync => LocalAppsChangeOperation::Sync,
+                    },
                     &document.install.connector_id,
                 );
             }
             Err(error) => {
-                manager.update(&task_id, |task| {
+                reporter.update(|task| {
                     task.phase = LocalAppInstallTaskPhase::Failed;
                     task.progress_percent = None;
                     task.downloaded_bytes = None;
                     task.total_bytes = None;
-                    task.message = "应用安装失败".to_string();
+                    task.message = task.operation.failed_message().to_string();
                     task.error = Some(error);
                 });
             }
@@ -3219,6 +3270,7 @@ fn start_connector_app_install(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartConnectorAppInstallRequest {
+    operation: LocalAppInstallTaskOperation,
     source: String,
     replace: bool,
     checksum: Option<String>,
@@ -6737,7 +6789,6 @@ fn main() {
     let setup_health = startup_health.clone();
     let setup_local_app_ui = Arc::clone(&local_app_ui);
     let setup_local_apps = local_apps.clone();
-    let setup_local_app_install_tasks = local_app_install_tasks.clone();
     let setup_connector_lifecycles = connector_lifecycles.clone();
     let setup_connector_processes = connector_processes.clone();
     let page_load_runtime_log_streaming_requested = Arc::clone(&runtime_log_streaming_requested);
@@ -6837,7 +6888,6 @@ fn main() {
             }
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
-            setup_local_app_install_tasks.attach_event_app(app.handle().clone());
             setup_connector_lifecycles.attach_event_app(app.handle().clone());
             forward_runtime_events(
                 app.handle().clone(),
@@ -6983,7 +7033,6 @@ fn main() {
             show_connector_app,
             invoke_connector_management,
             check_connector_app_update,
-            install_connector_app,
             start_connector_app_install,
             list_connector_app_install_tasks,
             start_connector_app,
@@ -7113,6 +7162,7 @@ mod tests {
         let manager = LocalAppInstallTaskManager::default();
         let task = manager
             .create(
+                LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
                 Some("codex".to_string()),
                 "Codex".to_string(),
@@ -7120,20 +7170,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(task.phase, LocalAppInstallTaskPhase::Queued);
+        assert_eq!(task.operation, LocalAppInstallTaskOperation::Upgrade);
+        assert_eq!(task.message, "等待开始升级");
         assert!(manager
             .create(
+                LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
                 Some("codex".to_string()),
                 "Codex".to_string(),
                 Some("1.2.1".to_string()),
             )
             .unwrap_err()
-            .contains("已在安装中"));
+            .contains("已在升级中"));
 
         let reporter = LocalAppInstallProgressReporter {
             manager: manager.clone(),
             task_id: task.task_id.clone(),
+            on_event: None,
         };
+        reporter.report(
+            LocalAppInstallTaskPhase::Resolving,
+            Some(5),
+            "fallback message",
+        );
+        let resolving = manager.list().pop().unwrap();
+        assert_eq!(resolving.message, "正在解析升级来源");
         reporter.download(50, Some(100));
         let downloading = manager.list().pop().unwrap();
         assert_eq!(downloading.phase, LocalAppInstallTaskPhase::Downloading);
@@ -7147,6 +7208,7 @@ mod tests {
         });
         assert!(manager
             .create(
+                LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
                 Some("codex".to_string()),
                 "Codex".to_string(),
@@ -7517,12 +7579,18 @@ mod tests {
             LocalAppsChangeOperation::Install,
             "com.baijimu.connector.test",
         );
+        let upgraded = notifier.notify(
+            LocalAppsChangeOperation::Upgrade,
+            "com.baijimu.connector.test",
+        );
         let synced = notifier.notify(LocalAppsChangeOperation::Sync, "com.baijimu.connector.test");
 
         assert_eq!(installed.revision, 1);
         assert_eq!(installed.operation, LocalAppsChangeOperation::Install);
         assert_eq!(installed.connector_id, "com.baijimu.connector.test");
-        assert_eq!(synced.revision, 2);
+        assert_eq!(upgraded.revision, 2);
+        assert_eq!(upgraded.operation, LocalAppsChangeOperation::Upgrade);
+        assert_eq!(synced.revision, 3);
         assert_eq!(synced.operation, LocalAppsChangeOperation::Sync);
     }
 

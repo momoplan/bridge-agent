@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatLocalAppInstallTaskPhase,
   latestLocalAppInstallTasks,
   reconcileLocalAppInstallSelection,
   shouldShowLocalAppInstallTask,
@@ -13,6 +14,7 @@ function task(
 ): LocalAppInstallTask {
   return {
     taskId,
+    operation: "install",
     connectorId: "com.baijimu.connector.codex",
     marketAppId: "codex",
     name: "Codex",
@@ -24,6 +26,22 @@ function task(
 }
 
 describe("local app install task selection", () => {
+  it("uses operation-specific progress labels", () => {
+    expect(formatLocalAppInstallTaskPhase(task("install", "downloading", 10))).toBe("下载安装包");
+    expect(
+      formatLocalAppInstallTaskPhase({
+        ...task("upgrade", "downloading", 10),
+        operation: "upgrade"
+      })
+    ).toBe("下载升级包");
+    expect(
+      formatLocalAppInstallTaskPhase({
+        ...task("sync", "succeeded", 10),
+        operation: "sync"
+      })
+    ).toBe("同步完成");
+  });
+
   it("keeps only the latest attempt for the same application", () => {
     expect(
       latestLocalAppInstallTasks([
