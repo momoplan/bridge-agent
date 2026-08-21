@@ -19,7 +19,6 @@ function renderSidebar(
       version={version}
       authorizationState={authorizationState}
       onNavigate={vi.fn()}
-      onRefresh={vi.fn()}
     />
   );
 }
