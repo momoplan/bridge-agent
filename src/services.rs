@@ -2857,6 +2857,20 @@ fn round_f64_to_i32(value: f64, label: &str) -> Result<i32> {
     Ok(rounded as i32)
 }
 
+#[cfg(any(windows, test))]
+fn bgra_to_rgba(bgra: &[u8]) -> Result<Vec<u8>> {
+    let (pixels, remainder) = bgra.as_chunks::<4>();
+    if !remainder.is_empty() {
+        bail!("BGRA image buffer length must be divisible by four");
+    }
+
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for &[blue, green, red, _alpha] in pixels {
+        rgba.extend_from_slice(&[red, green, blue, 255]);
+    }
+    Ok(rgba)
+}
+
 #[cfg(windows)]
 fn capture_windows_monitor_png(display_id: Option<u32>) -> Result<WindowsMonitorCapture> {
     let bounds = windows_monitor_bounds(display_id)?;
@@ -2948,13 +2962,7 @@ fn capture_windows_monitor_png(display_id: Option<u32>) -> Result<WindowsMonitor
     let _ = memory_dc_guard;
     let _ = screen_dc_guard;
 
-    let mut rgba = vec![0u8; bgra.len()];
-    for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = 255;
-    }
+    let rgba = bgra_to_rgba(&bgra)?;
 
     let image = image::RgbaImage::from_raw(width_u32, height_u32, rgba)
         .ok_or_else(|| anyhow!("failed to build RGBA image"))?;
@@ -3716,8 +3724,8 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env, shell_exec_path,
-        PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
+        bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env,
+        shell_exec_path, PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
         CONNECTOR_START_POLICY_ENV,
     };
     use crate::config::{
@@ -3746,6 +3754,15 @@ mod tests {
     #[test]
     fn allowlist_accepts_wildcard() {
         assert!(is_command_allowed("bash", &[String::from("*")]));
+    }
+
+    #[test]
+    fn bgra_conversion_swaps_color_channels_and_rejects_partial_pixels() {
+        assert_eq!(
+            bgra_to_rgba(&[10, 20, 30, 40, 50, 60, 70, 80]).unwrap(),
+            vec![30, 20, 10, 255, 70, 60, 50, 255]
+        );
+        assert!(bgra_to_rgba(&[10, 20, 30]).is_err());
     }
 
     #[test]
