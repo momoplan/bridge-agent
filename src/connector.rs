@@ -3,6 +3,9 @@ use crate::config::{
     RegistrationMethod, RegistrationTransport, RuntimeConfig, ServiceConfig, ServiceRegistration,
     ServiceStartCommand,
 };
+use crate::process_environment::{
+    current_user_command_path, enrich_user_command_environment_with_path,
+};
 use crate::protocol::ResponseMode;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -2593,7 +2596,6 @@ fn resolve_installed_start_commands(
         python_scripts: &python_scripts,
         python_env: python_env.as_deref(),
         node_path: &node_path,
-        include_host_environment: runtime_preparation == ConnectorRuntimePreparation::Prepare,
     };
     for service in services {
         if service.stop_command.is_none() {
@@ -2668,7 +2670,6 @@ struct InstalledCommandRuntime<'a> {
     python_scripts: &'a BTreeMap<String, String>,
     python_env: Option<&'a Path>,
     node_path: &'a Option<PathBuf>,
-    include_host_environment: bool,
 }
 
 fn resolve_installed_shell_command(
@@ -2687,7 +2688,6 @@ fn resolve_installed_shell_command(
 
     if let Some(direct_path) = native_command_path(runtime.package_path, executable) {
         command[0] = direct_path.display().to_string();
-        enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2699,7 +2699,6 @@ fn resolve_installed_shell_command(
             command[0] = python_script_path(env_path, executable)
                 .display()
                 .to_string();
-            enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
             prepend_path_entry(env, python_bin_dir(env_path));
             if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
                 *cwd = Some(runtime.package_path.display().to_string());
@@ -2722,7 +2721,6 @@ fn resolve_installed_shell_command(
                 .display()
                 .to_string(),
         );
-        enrich_start_command_env(env, [runtime.node_path], runtime.include_host_environment);
         if cwd.as_deref().map(str::trim).unwrap_or_default().is_empty() {
             *cwd = Some(runtime.package_path.display().to_string());
         }
@@ -2780,47 +2778,6 @@ fn prepend_path_entry(env_vars: &mut BTreeMap<String, String>, entry: PathBuf) {
     }
 }
 
-fn enrich_start_command_env<'a>(
-    env_vars: &mut BTreeMap<String, String>,
-    executable_paths: impl IntoIterator<Item = &'a Option<PathBuf>>,
-    include_host_environment: bool,
-) {
-    if include_host_environment {
-        let mut path_entries = Vec::new();
-        for executable_path in executable_paths
-            .into_iter()
-            .filter_map(|path| path.as_ref())
-        {
-            if let Some(parent) = executable_path.parent() {
-                push_unique_path_entry(&mut path_entries, parent.to_path_buf());
-            }
-        }
-        append_split_path(&mut path_entries, env_vars.get("PATH"));
-        append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
-        if let Some(shell_path) = login_shell_path() {
-            append_split_path(&mut path_entries, Some(&shell_path));
-        }
-        if let Ok(joined_path) = env::join_paths(path_entries) {
-            env_vars.insert(
-                "PATH".to_string(),
-                joined_path.to_string_lossy().to_string(),
-            );
-        }
-    }
-}
-
-fn rehydrate_lifecycle_command_path(env_vars: &mut BTreeMap<String, String>) {
-    let mut path_entries = Vec::new();
-    append_split_path(&mut path_entries, env_vars.get("PATH"));
-    append_split_path(&mut path_entries, env::var("PATH").ok().as_ref());
-    if let Ok(joined_path) = env::join_paths(path_entries) {
-        env_vars.insert(
-            "PATH".to_string(),
-            joined_path.to_string_lossy().to_string(),
-        );
-    }
-}
-
 fn append_split_path(entries: &mut Vec<PathBuf>, value: Option<&String>) {
     let Some(value) = value else {
         return;
@@ -2847,7 +2804,8 @@ fn resolve_command_path(executable: &str, runtime_config: &RuntimeConfig) -> Opt
 fn discover_command_path(executable: &str) -> Option<PathBuf> {
     find_command_in_path(executable, env::var("PATH").ok().as_ref())
         .or_else(|| {
-            login_shell_path().and_then(|path| find_command_in_path(executable, Some(&path)))
+            current_user_command_path()
+                .and_then(|path| find_command_in_path(executable, Some(&path)))
         })
         .or_else(|| bundled_runtime_command_path(executable))
 }
@@ -2968,29 +2926,6 @@ fn windows_command_extensions_from(value: Option<&str>) -> Vec<String> {
         extensions = SUPPORTED.iter().map(|value| (*value).to_string()).collect();
     }
     extensions
-}
-
-fn login_shell_path() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("/bin/zsh")
-            .args(["-lc", "printf %s \"$PATH\""])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if path.is_empty() {
-            None
-        } else {
-            Some(path)
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
 }
 
 fn read_package_bins(package_path: &Path) -> Result<BTreeMap<String, String>> {
@@ -3364,7 +3299,7 @@ fn find_python_commands_in_paths() -> Vec<PathBuf> {
     if let Ok(path) = env::var("PATH") {
         append_split_path(&mut search_paths, Some(&path));
     }
-    if let Some(path) = login_shell_path() {
+    if let Some(path) = current_user_command_path() {
         append_split_path(&mut search_paths, Some(&path));
     }
     let mut candidates = Vec::new();
@@ -3936,6 +3871,16 @@ fn run_start_command(
     command: &ServiceStartCommand,
     additional_env: &BTreeMap<String, String>,
 ) -> Result<ConnectorLifecycleResult> {
+    let user_path = current_user_command_path();
+    run_start_command_with_user_path(connector_id, command, additional_env, user_path.as_deref())
+}
+
+fn run_start_command_with_user_path(
+    connector_id: &str,
+    command: &ServiceStartCommand,
+    additional_env: &BTreeMap<String, String>,
+    user_path: Option<&str>,
+) -> Result<ConnectorLifecycleResult> {
     match command {
         ServiceStartCommand::ShellCommand {
             command,
@@ -3947,8 +3892,12 @@ fn run_start_command(
                 bail!("lifecycle command for local app `{connector_id}` is empty");
             }
             let mut lifecycle_env = env.clone();
-            rehydrate_lifecycle_command_path(&mut lifecycle_env);
             lifecycle_env.extend(additional_env.clone());
+            enrich_user_command_environment_with_path(
+                command.first().map(String::as_str),
+                &mut lifecycle_env,
+                user_path,
+            );
 
             let mut child = Command::new(&command[0]);
             configure_connector_command(&mut child);
@@ -5535,10 +5484,11 @@ mod tests {
         };
         let started_at = Instant::now();
 
-        let result = run_start_command(
+        let result = run_start_command_with_user_path(
             "com.baijimu.connector.pipe-regression",
             &command,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
 
@@ -5855,14 +5805,7 @@ mod tests {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "node".to_string());
         assert_eq!(prepared_command[0], expected_node);
-        if let Some(node_dir) = Path::new(&expected_node)
-            .parent()
-            .filter(|dir| !dir.as_os_str().is_empty())
-        {
-            assert!(prepared_env
-                .get("PATH")
-                .is_some_and(|path| env::split_paths(path).any(|entry| entry == node_dir)));
-        }
+        assert!(!prepared_env.contains_key("PATH"));
     }
 
     #[test]
@@ -6035,9 +5978,7 @@ mod tests {
             ..
         } = prepared_service.start_command.as_ref().unwrap();
         assert_eq!(prepared_command[0], configured_node.display().to_string());
-        assert!(prepared_env
-            .get("PATH")
-            .is_some_and(|path| { env::split_paths(path).any(|entry| entry == dir.path()) }));
+        assert!(!prepared_env.contains_key("PATH"));
     }
 
     #[test]
@@ -6174,7 +6115,6 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             python_scripts: &scripts,
             python_env: Some(&env_path),
             node_path: &None,
-            include_host_environment: true,
         };
         resolve_installed_shell_command(&mut command, &mut cwd, &mut env_vars, &command_runtime);
 
@@ -6247,15 +6187,6 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
             resolve_command_file(&script, true, &[".exe".to_string(), ".cmd".to_string()]),
             None
         );
-    }
-
-    #[test]
-    fn host_runtime_enrichment_does_not_add_codex_override() {
-        let mut env_vars = BTreeMap::new();
-
-        enrich_start_command_env(&mut env_vars, [&None], true);
-
-        assert!(!env_vars.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
     }
 
     #[test]
