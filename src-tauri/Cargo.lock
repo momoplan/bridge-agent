@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -486,11 +486,12 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "winreg 0.55.0",
 ]
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "axum",

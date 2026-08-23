@@ -110,6 +110,13 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
 完整进程树。Windows 的运行、停止和环境准备命令统一无控制台窗口；macOS 仍由已签名的
 百积木桌面宿主直接派生进程，避免把受保护数据权限漂移到临时 Python 启动器。
 
+宿主在每次执行 Connector 或自定义服务的生命周期命令时动态构造用户命令环境，不直接
+使用 Finder、Launch Services 或后台进程继承的不完整 `PATH`。macOS/Linux 从操作系统
+账户读取实际登录 shell，通过带超时和输出边界的交互式登录探测取得最终 `PATH`；Windows
+从当前用户和机器环境登记读取。最终路径按“入口可执行文件目录、清单声明、当前用户、宿主”
+合并并去重，只把 `PATH` 注入子进程，不复制交互式 shell 中的凭证或其他环境变量。动态
+设备路径不会写入 `agent-config.json`，Connector 及其后代进程在每次启动时取得当前值。
+
 Codex、Claude Code、WeChat、Desktop Control 等能力不应都硬编码进宿主，而应优先作为可安装 Connector 或内置应用：
 
 - Codex 桌面环境：独立本地应用负责桌面安装、桌面凭证档案和用户显式工作区切换，不声明 Relay 远程能力。
@@ -937,7 +944,7 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 - 超时限制
 - 环境变量白名单
 
-桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。`shell` 会在保留安全环境白名单的同时补入常见本机工具链目录，包括 Homebrew、Volta、nvm、fnm、pyenv、asdf、mise、conda、Cargo、Bun、Deno 和用户本地 `bin` 目录，避免 `node`、`python3` 这类命令因为 GUI 环境缺少 PATH 而找不到。Connector 列表和客户端初始化只读取安装记录，不探测或准备本机运行环境；只有用户明确启动 Connector 时，宿主才按该 Connector 的声明发现命令、校验 Python 版本并准备隔离环境。macOS 自动发现会排除 Apple 的 `/usr/bin/python3` 开发者工具 shim，避免在普通用户设备上触发 Command Line Tools 安装提示；需要 Python 的 Connector 应使用 Homebrew、pyenv、conda 或 python.org 提供的独立解释器。
+桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。Connector 和自定义服务的生命周期命令统一使用宿主在执行边界动态解析的当前用户命令环境；`shell` 方法仍在保留安全环境白名单的同时补入其受支持的本机工具链目录。Connector 列表和客户端初始化只读取安装记录，不探测或准备本机运行环境；只有用户明确启动 Connector 时，宿主才按该 Connector 的声明发现命令、校验 Python 版本并准备隔离环境。macOS 自动发现会排除 Apple 的 `/usr/bin/python3` 开发者工具 shim，避免在普通用户设备上触发 Command Line Tools 安装提示；需要 Python 的 Connector 应使用独立解释器。
 
 对外调用参数统一使用 argv 数组形式：
 

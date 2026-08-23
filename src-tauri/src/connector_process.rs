@@ -1,7 +1,8 @@
 use bridge_agent::{
-    connector_data_dir, load_config, prepare_installed_connector_runtime, show_connector,
-    start_connector_with_env, stop_connector, ConnectorLifecycleResult, ConnectorProcessOwnership,
-    ConnectorStartResult, ServiceStartCommand,
+    connector_data_dir, load_config, prepare_installed_connector_runtime,
+    process_environment::enrich_user_command_environment, show_connector, start_connector_with_env,
+    stop_connector, ConnectorLifecycleResult, ConnectorProcessOwnership, ConnectorStartResult,
+    ServiceStartCommand,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -363,12 +364,13 @@ fn spawn_foreground_process(
     let ServiceStartCommand::ShellCommand {
         command,
         cwd,
-        env,
+        mut env,
         timeout_secs: _,
     } = start_command;
     if command.is_empty() || command[0].trim().is_empty() {
         return Err(format!("本地应用 `{connector_id}` 的前台启动命令为空"));
     }
+    enrich_user_command_environment(command.first().map(String::as_str), &mut env);
     let mut process = Command::new(&command[0]);
     process
         .args(command.iter().skip(1))
@@ -591,5 +593,42 @@ mod tests {
         // Unix reports signal-based termination without a numeric exit code.
         // The ownership contract only requires the complete process group to exit.
         assert!(exit.detail.contains("进程已退出"), "{}", exit.detail);
+    }
+
+    #[tokio::test]
+    async fn foreground_process_receives_the_current_user_command_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("resolved-command.txt");
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(temporary.path().join("runtime.stdout.log"))
+            .unwrap();
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(temporary.path().join("runtime.stderr.log"))
+            .unwrap();
+        let command = ServiceStartCommand::ShellCommand {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "command -v env > \"$RESULT_FILE\"".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::from([
+                ("PATH".to_string(), "/connector-only".to_string()),
+                ("RESULT_FILE".to_string(), output.display().to_string()),
+            ]),
+            timeout_secs: None,
+        };
+
+        let mut child =
+            spawn_foreground_process("com.baijimu.connector.path-test", command, stdout, stderr)
+                .unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        let resolved = std::fs::read_to_string(output).unwrap();
+        assert!(resolved.trim().ends_with("/env"), "{resolved}");
     }
 }

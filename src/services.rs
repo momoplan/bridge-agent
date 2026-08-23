@@ -4,6 +4,7 @@ use crate::config::{
 };
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::{ComputerUseAction, UploadConfig};
+use crate::process_environment::enrich_user_command_environment;
 use crate::protocol::{
     EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode, ServiceDefinition,
 };
@@ -894,11 +895,13 @@ async fn run_registered_service_start_command(
                 Some(cwd) => PathBuf::from(cwd),
                 None => std::env::current_dir().context("resolve current directory")?,
             };
-            let path_for_diagnostics = std::env::var("PATH").unwrap_or_default();
+            let mut command_env = env.clone();
+            enrich_user_command_environment(command.first().map(String::as_str), &mut command_env);
+            let path_for_diagnostics = command_env.get("PATH").cloned().unwrap_or_default();
             let prepared = PreparedShellExec {
                 command_args: command.clone(),
                 cwd,
-                env: env.clone(),
+                env: command_env,
                 stdin: None,
                 timeout_secs: Some(timeout_secs.unwrap_or(15).max(1)),
                 path_for_diagnostics,

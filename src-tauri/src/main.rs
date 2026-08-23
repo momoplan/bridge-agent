@@ -36,7 +36,8 @@ use bridge_agent::{
     ensure_config_exists, format_connector_sync_failures, inspect_python_runtime,
     install_connector_from_path_with_provenance, install_rustls_crypto_provider,
     is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
-    load_connector_manifest, manifest_preview_json, reset_invalid_config,
+    load_connector_manifest, manifest_preview_json,
+    process_environment::enrich_user_command_environment, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, sync_installed_connector, sync_installed_connectors_report,
     terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
@@ -5068,12 +5069,13 @@ async fn run_start_command(
         ServiceStartCommand::ShellCommand {
             command,
             cwd,
-            env,
+            mut env,
             timeout_secs,
         } => {
             if command.is_empty() || command[0].trim().is_empty() {
                 return Err(format!("服务 `{service}` 的启动命令为空"));
             }
+            enrich_user_command_environment(command.first().map(String::as_str), &mut env);
             let mut process = AsyncCommand::new(&command[0]);
             #[cfg(windows)]
             process.creation_flags(WINDOWS_CREATE_NO_WINDOW);
