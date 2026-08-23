@@ -301,7 +301,7 @@ fn windows_user_command_path() -> Result<String> {
 }
 
 #[cfg(windows)]
-fn windows_registry_path_value(hive: winreg::enums::HKEY, key: &str) -> Option<String> {
+fn windows_registry_path_value(hive: winreg::HKEY, key: &str) -> Option<String> {
     let key = RegKey::predef(hive).open_subkey(key).ok()?;
     key.get_value::<String, _>("Path")
         .ok()
