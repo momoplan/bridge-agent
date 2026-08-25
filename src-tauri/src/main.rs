@@ -97,6 +97,8 @@ const CONNECTOR_DOWNLOAD_USER_AGENT: &str = concat!(
     " Wget/1.21.4"
 );
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
+const UNIFIED_APP_ID_MIGRATION_BOUNDARY: &str = "0.6.0";
+const UNIFIED_APP_ID_MIGRATION_BINARY: &str = "bridge-agent-unified-app-id-migration";
 const RUNTIME_SNAPSHOT_EVENT: &str = "runtime-snapshot-changed";
 const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
 const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
@@ -4575,7 +4577,11 @@ async fn install_app_update(
             downloaded_path: None,
         });
     };
+    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|err| format!("当前版本号无效: {err}"))?;
     let update_version = update.version.to_string();
+    let target_version =
+        Version::parse(&update_version).map_err(|err| format!("目标版本号无效: {err}"))?;
     let asset_name = update
         .download_url
         .path_segments()
@@ -4629,6 +4635,22 @@ async fn install_app_update(
         )
         .await
         .map_err(|err| format!("下载或校验官方更新失败: {err}"))?;
+
+    if update_crosses_unified_app_id_boundary(&current_version, &target_version)? {
+        emit_app_update_progress(
+            &app,
+            AppUpdateProgress {
+                phase: "migrating_local_apps".to_string(),
+                message: "更新包签名校验通过，正在迁移本地应用登录态和授权配置".to_string(),
+                version: Some(update_version.clone()),
+                asset_name: asset_name.clone(),
+                downloaded_bytes: None,
+                total_bytes: None,
+                downloaded_path: None,
+            },
+        );
+        run_unified_app_id_migration(&state.config_path).await?;
+    }
 
     emit_app_update_progress(
         &app,
@@ -4690,6 +4712,62 @@ async fn install_app_update(
         asset_name,
         downloaded_path: None,
     })
+}
+
+fn update_crosses_unified_app_id_boundary(
+    current_version: &Version,
+    target_version: &Version,
+) -> Result<bool, String> {
+    let boundary = Version::parse(UNIFIED_APP_ID_MIGRATION_BOUNDARY)
+        .map_err(|err| format!("统一 appId 迁移边界版本无效: {err}"))?;
+    Ok(current_version < &boundary && target_version >= &boundary)
+}
+
+async fn run_unified_app_id_migration(config_path: &Path) -> Result<(), String> {
+    let binary = bundled_unified_app_id_migration_path().ok_or_else(|| {
+        format!(
+            "缺少统一 appId 迁移制品 {}，已拒绝安装更新",
+            unified_app_id_migration_binary_name()
+        )
+    })?;
+    let config_dir = resolve_config_base_dir(config_path);
+    let output = timeout(
+        Duration::from_secs(180),
+        AsyncCommand::new(&binary)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .arg("--config")
+            .arg(config_path)
+            .arg("--leave-host-running")
+            .output(),
+    )
+    .await
+    .map_err(|_| "统一 appId 迁移超过 180 秒，已拒绝安装更新".to_string())?
+    .map_err(|err| format!("无法启动统一 appId 迁移制品 {}: {err}", binary.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        return Err(format!(
+            "统一 appId 迁移失败，退出状态为 {}；已拒绝安装更新",
+            output.status
+        ));
+    }
+    Err(format!("统一 appId 迁移失败，已拒绝安装更新: {detail}"))
+}
+
+fn bundled_unified_app_id_migration_path() -> Option<PathBuf> {
+    bundled_resource_binary_path(unified_app_id_migration_binary_name())
+}
+
+fn unified_app_id_migration_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "bridge-agent-unified-app-id-migration.exe"
+    } else {
+        UNIFIED_APP_ID_MIGRATION_BINARY
+    }
 }
 
 fn emit_app_update_progress(app: &tauri::AppHandle, progress: AppUpdateProgress) {
@@ -6604,6 +6682,15 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
 }
 
 fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
+    if unified_app_id_managed_cli_root().is_dir() && !legacy_managed_cli_root().exists() {
+        let skill_path = codex_skill::install_bundled()?;
+        diagnostics.info(format!(
+            "managed Baijimu CLI bootstrap skipped after unified app ID migration: root={} codex_skill={}",
+            unified_app_id_managed_cli_root().display(),
+            skill_path.display()
+        ));
+        return Ok(());
+    }
     let source = bundled_baijimu_cli_path();
     let status = managed_tool::bootstrap_bundled(source.as_deref())?;
     let skill_path = codex_skill::install_bundled()?;
@@ -6615,6 +6702,29 @@ fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Resu
         skill_path.display()
     ));
     Ok(())
+}
+
+fn legacy_managed_cli_root() -> PathBuf {
+    managed_cli_root_for_app_id("com.baijimu.cli")
+}
+
+fn unified_app_id_managed_cli_root() -> PathBuf {
+    managed_cli_root_for_app_id("baijimu-cli")
+}
+
+fn managed_cli_root_for_app_id(app_id: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("Baijimu")
+            .join("apps")
+            .join(app_id);
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("baijimu")
+        .join("apps")
+        .join(app_id)
 }
 
 fn bootstrap_bundled_baijimu_cli(
@@ -6639,7 +6749,10 @@ fn bootstrap_bundled_baijimu_cli(
 }
 
 fn bundled_baijimu_cli_path() -> Option<PathBuf> {
-    let binary_name = baijimu_cli_binary_name();
+    bundled_resource_binary_path(baijimu_cli_binary_name())
+}
+
+fn bundled_resource_binary_path(binary_name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok();
     let mut candidates = Vec::new();
     if let Some(exe) = exe.as_ref() {
@@ -7675,6 +7788,23 @@ mod tests {
             &release,
             &Version::parse("0.1.72").unwrap()
         ));
+    }
+
+    #[test]
+    fn unified_app_id_migration_runs_only_when_an_update_crosses_the_boundary() {
+        let requires = |current: &str, target: &str| {
+            update_crosses_unified_app_id_boundary(
+                &Version::parse(current).unwrap(),
+                &Version::parse(target).unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert!(requires("0.5.6", "0.6.0"));
+        assert!(requires("0.5.6", "0.7.0"));
+        assert!(!requires("0.5.5", "0.5.6"));
+        assert!(!requires("0.6.0", "0.6.1"));
+        assert!(!requires("0.6.1", "0.6.0"));
     }
 
     #[test]

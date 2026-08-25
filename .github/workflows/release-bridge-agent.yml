@@ -116,10 +116,7 @@ jobs:
                   "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
                   | jq -er '
                     .[]
-                    | select(
-                        .connectorId == "com.baijimu.cli"
-                        and .latestVersion.manifest.applicationType == "managed_tool"
-                      )
+                    | select(.latestVersion.manifest.applicationType == "managed_tool")
                     | select(.latestVersion.repo == "momoplan/baijimu-cli-rs")
                     | select(.latestVersion.revision == ("v" + .latestVersion.version))
                     | select(all(.latestVersion.manifest.artifacts[];
@@ -199,10 +196,13 @@ jobs:
           cargo fmt --all -- --check
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
           cargo fmt --manifest-path tools/windows-uninstaller/Cargo.toml -- --check
+          cargo fmt --manifest-path migration-artifacts/unified-app-id/Cargo.toml -- --check
           cargo test --workspace
           cargo test --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml --all-targets -- -D warnings
           cargo check --release --manifest-path src-tauri/Cargo.toml
 
   windows-quality-gate:
@@ -261,6 +261,9 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml managed_tool::tests::windows_registry_path_registration_round_trips -- --exact
           cargo fmt --manifest-path tools/windows-uninstaller/Cargo.toml -- --check
           cargo test --locked --manifest-path tools/windows-uninstaller/Cargo.toml
+          cargo fmt --manifest-path migration-artifacts/unified-app-id/Cargo.toml -- --check
+          cargo test --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml
+          cargo clippy --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml --all-targets -- -D warnings
 
   release:
     name: ${{ matrix.name }}
@@ -329,6 +332,41 @@ jobs:
         run: |
           set -euo pipefail
           ./tools/baijimu-cli/prepare-bundled-cli.sh
+
+      - name: Prepare unified app ID migration artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="migration-artifacts/unified-app-id/Cargo.toml"
+          target_dir="$RUNNER_TEMP/unified-app-id-migration"
+          output_dir="src-tauri/resources/bin"
+          mkdir -p "$output_dir"
+          case "$RUNNER_OS" in
+            macOS)
+              CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --manifest-path "$manifest" --target x86_64-apple-darwin
+              CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --manifest-path "$manifest" --target aarch64-apple-darwin
+              lipo -create \
+                "$target_dir/x86_64-apple-darwin/release/bridge-agent-unified-app-id-migration" \
+                "$target_dir/aarch64-apple-darwin/release/bridge-agent-unified-app-id-migration" \
+                -output "$output_dir/bridge-agent-unified-app-id-migration"
+              chmod 755 "$output_dir/bridge-agent-unified-app-id-migration"
+              ;;
+            Windows)
+              CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --manifest-path "$manifest"
+              cp "$target_dir/release/bridge-agent-unified-app-id-migration.exe" \
+                "$output_dir/bridge-agent-unified-app-id-migration.exe"
+              ;;
+            Linux)
+              CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --manifest-path "$manifest"
+              install -m 755 \
+                "$target_dir/release/bridge-agent-unified-app-id-migration" \
+                "$output_dir/bridge-agent-unified-app-id-migration"
+              ;;
+            *)
+              echo "Unsupported runner OS: $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Configure Windows signing
         if: runner.os == 'Windows'
@@ -431,6 +469,21 @@ jobs:
             throw "osslsigncode version check failed with exit code $LASTEXITCODE"
           }
 
+      - name: Sign unified app ID migration artifact on Windows
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
+          WINDOWS_SIGNING_ENABLED: "true"
+          WINDOWS_SIGNING_DESCRIPTION: "百积木"
+          WINDOWS_SIGNING_LOG_PATH: ${{ runner.temp }}/windows-signing.log
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "src-tauri/scripts/sign-windows-artifact.ps1" -FilePath "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe"
+
       - name: Prepare Apple notarization credentials
         if: runner.os == 'macOS'
         env:
@@ -451,7 +504,7 @@ jobs:
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY}.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
 
-      - name: Sign bundled Baijimu CLI
+      - name: Sign bundled macOS resource binaries
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -467,11 +520,16 @@ jobs:
             fi
           done
 
-          cli_path="src-tauri/resources/bin/baijimu"
-          if [ ! -x "$cli_path" ]; then
-            echo "Bundled Baijimu CLI is missing or not executable: $cli_path" >&2
-            exit 1
-          fi
+          resource_binaries=(
+            "src-tauri/resources/bin/baijimu"
+            "src-tauri/resources/bin/bridge-agent-unified-app-id-migration"
+          )
+          for binary in "${resource_binaries[@]}"; do
+            if [ ! -x "$binary" ]; then
+              echo "Bundled resource is missing or not executable: $binary" >&2
+              exit 1
+            fi
+          done
 
           certificate_path="$RUNNER_TEMP/baijimu-cli-signing-certificate.p12"
           keychain_path="$RUNNER_TEMP/baijimu-cli-signing.keychain-db"
@@ -492,10 +550,12 @@ jobs:
             -k "$keychain_password" \
             "$keychain_path"
 
-          bash .github/scripts/sign-macos-with-retry.sh \
-            "$cli_path" \
-            "$APPLE_SIGNING_IDENTITY"
-          lipo -info "$cli_path"
+          for binary in "${resource_binaries[@]}"; do
+            bash .github/scripts/sign-macos-with-retry.sh \
+              "$binary" \
+              "$APPLE_SIGNING_IDENTITY"
+            lipo -info "$binary"
+          done
 
       - name: Validate release tag
         shell: bash
@@ -751,6 +811,7 @@ jobs:
 
           verify_macho_min "${app_path}/Contents/MacOS/bridge-agent-desktop" "bridge-agent-desktop"
           verify_macho_min "${app_path}/Contents/Resources/resources/bin/baijimu" "bundled baijimu CLI"
+          verify_macho_min "${app_path}/Contents/Resources/resources/bin/bridge-agent-unified-app-id-migration" "unified app ID migration"
 
       - name: Normalize public bundle names
         shell: bash
@@ -850,9 +911,10 @@ jobs:
 
           $requiredSignedExecutables = @(
             Get-ChildItem -Path "src-tauri/binaries" -Filter "bridge-agent-uninstaller-*.exe" -File -ErrorAction Stop
+            Get-Item -LiteralPath "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe" -ErrorAction Stop
           )
-          if ($requiredSignedExecutables.Count -ne 1) {
-            throw "Expected one signed Windows uninstaller sidecar, found $($requiredSignedExecutables.Count)"
+          if ($requiredSignedExecutables.Count -ne 2) {
+            throw "Expected the signed Windows uninstaller and migration resource, found $($requiredSignedExecutables.Count)"
           }
           foreach ($file in $requiredSignedExecutables) {
             $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
@@ -940,6 +1002,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $cli = Resolve-Path "src-tauri/resources/bin/baijimu.exe"
+          $migration = Resolve-Path "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe"
           $msi = Get-ChildItem `
             -Path "src-tauri/target/release/bundle/msi" `
             -Filter "*.msi" `
@@ -949,7 +1012,7 @@ jobs:
           if (-not $msi) {
             throw "Windows MSI artifact was not found for Defender scan"
           }
-          $files = @($cli.Path, $msi.FullName)
+          $files = @($cli.Path, $migration.Path, $msi.FullName)
           & "src-tauri/scripts/verify-windows-defender.ps1" `
             -FilePath $files
 
@@ -975,7 +1038,8 @@ jobs:
 
           $executables = @(
             (Resolve-Path "src-tauri/target/release/bridge-agent-desktop.exe").Path,
-            (Resolve-Path "src-tauri/resources/bin/baijimu.exe").Path
+            (Resolve-Path "src-tauri/resources/bin/baijimu.exe").Path,
+            (Resolve-Path "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe").Path
           )
           foreach ($executable in $executables) {
             $imports = (& $dumpbin.FullName /DEPENDENTS $executable 2>&1) -join "`n"
