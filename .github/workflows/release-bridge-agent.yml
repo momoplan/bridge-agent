@@ -1405,7 +1405,7 @@ jobs:
           $programData = "C:\ProgramData\Baijimu\BridgeAgent"
           $roamingData = Join-Path $env:APPDATA "baijimu\bridge-agent"
           $tauriData = Join-Path $env:LOCALAPPDATA "com.baijimu.bridgeagent"
-          $managedCliRoot = Join-Path $env:LOCALAPPDATA "Baijimu\apps\com.baijimu.cli"
+          $managedCliRoot = Join-Path $env:LOCALAPPDATA "Baijimu\apps\baijimu-cli"
           $managedBin = Join-Path $env:LOCALAPPDATA "Baijimu\bin"
           $managedLauncher = Join-Path $managedBin "baijimu.exe"
 

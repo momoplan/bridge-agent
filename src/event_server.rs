@@ -70,7 +70,7 @@ struct EventServerState {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UploadLocalAppAssetRequest {
-    connector_id: String,
+    app_id: String,
     local_path: String,
     purpose: String,
     content_type: String,
@@ -118,7 +118,7 @@ struct PrepareAssetUploadResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EmitLocalAppEventRequest {
-    connector_id: String,
+    app_id: String,
     event: String,
     #[serde(default)]
     payload: Value,
@@ -136,7 +136,7 @@ struct EmitLocalAppEventResponse {
     matched_subscription_count: usize,
     duplicate: bool,
     event_id: String,
-    connector_id: String,
+    app_id: String,
     event: String,
 }
 
@@ -207,7 +207,7 @@ impl LocalEventServer {
                 .local_apps
                 .iter()
                 .filter(|app| app.enabled)
-                .filter_map(|app| connector_declares_asset_upload(&app.connector_id).ok())
+                .filter_map(|app| connector_declares_asset_upload(&app.app_id).ok())
                 .any(|declared| declared);
             if !asset_upload_enabled {
                 return Ok(None);
@@ -580,12 +580,12 @@ async fn emit_local_app_event(
             "local event API is disabled",
         ));
     }
-    let connector_id = request.connector_id.trim();
+    let app_id = request.app_id.trim();
     let event_name = request.event.trim();
-    if connector_id.is_empty() || event_name.is_empty() {
+    if app_id.is_empty() || event_name.is_empty() {
         return Err(EventApiError::new(
             StatusCode::BAD_REQUEST,
-            "connectorId and event are required",
+            "appId and event are required",
         ));
     }
     let token = bearer_token(&headers).ok_or_else(|| {
@@ -594,7 +594,7 @@ async fn emit_local_app_event(
             "connector event credential is required",
         )
     })?;
-    authorize_connector_event(&state.config_path, connector_id, event_name, &token)
+    authorize_connector_event(&state.config_path, app_id, event_name, &token)
         .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
     let event_id = request
         .event_id
@@ -605,7 +605,7 @@ async fn emit_local_app_event(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let event = LocalAppEventEmitted {
         event_id: event_id.clone(),
-        connector_id: connector_id.to_string(),
+        app_id: app_id.to_string(),
         event: event_name.to_string(),
         payload: request.payload,
         occurred_at: request
@@ -643,7 +643,7 @@ async fn emit_local_app_event(
         &state,
         "info",
         format!(
-            "local app event {connector_id}.{event_name} forwarded; matched {} subscription(s)",
+            "local app event {app_id}.{event_name} forwarded; matched {} subscription(s)",
             ack.matched_subscription_count
         ),
         LogMetadata::category("local_app_event")
@@ -660,7 +660,7 @@ async fn emit_local_app_event(
             matched_subscription_count: ack.matched_subscription_count,
             duplicate: ack.duplicate,
             event_id,
-            connector_id: connector_id.to_string(),
+            app_id: app_id.to_string(),
             event: event_name.to_string(),
         }),
     ))
@@ -671,13 +671,13 @@ async fn upload_local_app_asset(
     headers: HeaderMap,
     Json(request): Json<UploadLocalAppAssetRequest>,
 ) -> Result<Json<UploadLocalAppAssetResponse>, EventApiError> {
-    let connector_id = request.connector_id.trim();
+    let app_id = request.app_id.trim();
     let purpose = request.purpose.trim();
     let content_type = request.content_type.trim();
-    if connector_id.is_empty() || purpose.is_empty() || request.local_path.trim().is_empty() {
+    if app_id.is_empty() || purpose.is_empty() || request.local_path.trim().is_empty() {
         return Err(EventApiError::new(
             StatusCode::BAD_REQUEST,
-            "connectorId, localPath and purpose are required",
+            "appId, localPath and purpose are required",
         ));
     }
     if purpose.len() > 64
@@ -702,7 +702,7 @@ async fn upload_local_app_asset(
             "connector asset upload credential is required",
         )
     })?;
-    let data_dir = authorize_connector_asset_upload(&state.config_path, connector_id, &token)
+    let data_dir = authorize_connector_asset_upload(&state.config_path, app_id, &token)
         .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
 
     let canonical_data_dir = fs::canonicalize(&data_dir).map_err(internal_error)?;
@@ -754,7 +754,7 @@ async fn upload_local_app_asset(
         .to_string();
     let scoped_purpose = format!(
         "connector_{}_{}",
-        connector_id
+        app_id
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
             .collect::<String>(),
@@ -823,7 +823,7 @@ async fn upload_local_app_asset(
     emit_audit_log(
         &state,
         "info",
-        format!("connector asset {connector_id}.{purpose} uploaded"),
+        format!("connector asset {app_id}.{purpose} uploaded"),
         LogMetadata::category("local_app_asset").outcome("uploaded"),
     );
     Ok(Json(UploadLocalAppAssetResponse {
