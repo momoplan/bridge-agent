@@ -618,7 +618,12 @@ jobs:
               exit 1
             fi
           done
-          npm run tauri -- build ${{ matrix.tauri_args }}
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            bash .github/scripts/tauri-build-with-notary-retry.sh \
+              npm run tauri -- build ${{ matrix.tauri_args }}
+          else
+            npm run tauri -- build ${{ matrix.tauri_args }}
+          fi
 
       - name: Diagnose Windows bundle failure
         if: ${{ failure() && runner.os == 'Windows' && steps.build_release_bundles.outcome == 'failure' }}
