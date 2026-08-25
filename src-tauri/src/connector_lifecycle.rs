@@ -86,7 +86,7 @@ pub(crate) struct ConnectorOperationSnapshot {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectorLifecycleSnapshot {
     pub(crate) schema_version: u32,
-    pub(crate) app_id: String,
+    pub(crate) connector_id: String,
     pub(crate) lifecycle: ConnectorLifecycleState,
     pub(crate) operation: Option<ConnectorOperationSnapshot>,
     pub(crate) health: ConnectorHealthState,
@@ -101,10 +101,10 @@ pub(crate) struct ConnectorLifecycleSnapshot {
 }
 
 impl ConnectorLifecycleSnapshot {
-    fn new(app_id: &str, now: u64) -> Self {
+    fn new(connector_id: &str, now: u64) -> Self {
         Self {
             schema_version: 1,
-            app_id: app_id.to_string(),
+            connector_id: connector_id.to_string(),
             lifecycle: ConnectorLifecycleState::Absent,
             operation: None,
             health: ConnectorHealthState::Unknown,
@@ -142,7 +142,7 @@ pub(crate) struct ConnectorManagementPermit {
 pub(crate) struct ConnectorLifecycleOperation {
     pub(crate) snapshot: ConnectorOperationSnapshot,
     manager: ConnectorLifecycleManager,
-    app_id: String,
+    connector_id: String,
     armed: bool,
     _permit: OwnedRwLockWriteGuard<()>,
 }
@@ -159,7 +159,7 @@ impl Drop for ConnectorLifecycleOperation {
     fn drop(&mut self) {
         if self.armed {
             self.manager.cancel_if_active(
-                &self.app_id,
+                &self.connector_id,
                 &self.snapshot.id,
                 "生命周期操作在完成前被取消",
             );
@@ -169,7 +169,7 @@ impl Drop for ConnectorLifecycleOperation {
 
 struct PendingConnectorLifecycleOperation {
     manager: ConnectorLifecycleManager,
-    app_id: String,
+    connector_id: String,
     operation_id: String,
     previous: Option<ConnectorLifecycleSnapshot>,
     armed: bool,
@@ -184,8 +184,11 @@ impl PendingConnectorLifecycleOperation {
 impl Drop for PendingConnectorLifecycleOperation {
     fn drop(&mut self) {
         if self.armed {
-            self.manager
-                .restore_if_active(&self.app_id, &self.operation_id, self.previous.clone());
+            self.manager.restore_if_active(
+                &self.connector_id,
+                &self.operation_id,
+                self.previous.clone(),
+            );
         }
     }
 }
@@ -214,13 +217,13 @@ impl ConnectorLifecycleManager {
 
     pub(crate) async fn begin(
         &self,
-        app_id: &str,
+        connector_id: &str,
         kind: ConnectorOperationKind,
         desired_version: Option<String>,
         phase: impl Into<String>,
     ) -> Result<ConnectorLifecycleOperation, String> {
-        let app_id = normalized_app_id(app_id)?;
-        let access_gate = self.access_gate(&app_id)?;
+        let connector_id = normalized_connector_id(connector_id)?;
+        let access_gate = self.access_gate(&connector_id)?;
         let now = now_ms();
         let phase = phase.into();
         let (operation, previous, snapshot) = {
@@ -228,13 +231,13 @@ impl ConnectorLifecycleManager {
                 .entries
                 .lock()
                 .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
-            let previous = entries.get(&app_id).cloned();
+            let previous = entries.get(&connector_id).cloned();
             let entry = entries
-                .entry(app_id.clone())
-                .or_insert_with(|| ConnectorLifecycleSnapshot::new(&app_id, now));
+                .entry(connector_id.clone())
+                .or_insert_with(|| ConnectorLifecycleSnapshot::new(&connector_id, now));
             if let Some(active) = entry.operation.as_ref() {
                 return Err(format!(
-                    "应用 `{app_id}` 正在执行 {:?}（阶段：{}）",
+                    "应用 `{connector_id}` 正在执行 {:?}（阶段：{}）",
                     active.kind, active.phase
                 ));
             }
@@ -261,7 +264,7 @@ impl ConnectorLifecycleManager {
         self.emit(snapshot);
         let mut pending = PendingConnectorLifecycleOperation {
             manager: self.clone(),
-            app_id: app_id.clone(),
+            connector_id: connector_id.clone(),
             operation_id: operation.id.clone(),
             previous,
             armed: true,
@@ -271,7 +274,7 @@ impl ConnectorLifecycleManager {
         Ok(ConnectorLifecycleOperation {
             snapshot: operation,
             manager: self.clone(),
-            app_id,
+            connector_id,
             armed: true,
             _permit: permit,
         })
@@ -279,7 +282,7 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn advance(
         &self,
-        app_id: &str,
+        connector_id: &str,
         operation_id: &str,
         lifecycle: ConnectorLifecycleState,
         phase: impl Into<String>,
@@ -288,7 +291,7 @@ impl ConnectorLifecycleManager {
         if !lifecycle.operation_active() {
             return Err("运行中操作只能进入生命周期过渡态".to_string());
         }
-        self.update_operation(app_id, operation_id, |entry, operation, now| {
+        self.update_operation(connector_id, operation_id, |entry, operation, now| {
             let phase = phase.into();
             entry.lifecycle = lifecycle;
             entry.detail = Some(phase.clone());
@@ -368,22 +371,22 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn observe(
         &self,
-        app_id: &str,
+        connector_id: &str,
         lifecycle: ConnectorLifecycleState,
         health: ConnectorHealthState,
         version: Option<String>,
         pid: Option<u32>,
         detail: Option<String>,
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        let app_id = normalized_app_id(app_id)?;
+        let connector_id = normalized_connector_id(connector_id)?;
         let now = now_ms();
         let mut entries = self
             .entries
             .lock()
             .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
         let entry = entries
-            .entry(app_id.clone())
-            .or_insert_with(|| ConnectorLifecycleSnapshot::new(&app_id, now));
+            .entry(connector_id.clone())
+            .or_insert_with(|| ConnectorLifecycleSnapshot::new(&connector_id, now));
         if entry.operation.is_some() {
             return Ok(entry.clone());
         }
@@ -409,14 +412,14 @@ impl ConnectorLifecycleManager {
 
     fn require_management_ready(
         &self,
-        app_id: &str,
+        connector_id: &str,
     ) -> Result<ConnectorLifecycleSnapshot, Box<ConnectorManagementNotReady>> {
         let snapshot = self
             .entries
             .lock()
             .ok()
-            .and_then(|entries| entries.get(app_id.trim()).cloned())
-            .unwrap_or_else(|| ConnectorLifecycleSnapshot::new(app_id.trim(), now_ms()));
+            .and_then(|entries| entries.get(connector_id.trim()).cloned())
+            .unwrap_or_else(|| ConnectorLifecycleSnapshot::new(connector_id.trim(), now_ms()));
         if snapshot.management_ready() {
             return Ok(snapshot);
         }
@@ -424,7 +427,7 @@ impl ConnectorLifecycleManager {
             code: "connector_not_ready",
             message: format!(
                 "应用 `{}` 当前为 {:?}，本机管理接口尚未就绪",
-                snapshot.app_id, snapshot.lifecycle
+                snapshot.connector_id, snapshot.lifecycle
             ),
             lifecycle: snapshot,
         }))
@@ -432,41 +435,41 @@ impl ConnectorLifecycleManager {
 
     pub(crate) fn try_management_permit(
         &self,
-        app_id: &str,
+        connector_id: &str,
     ) -> Result<ConnectorManagementPermit, Box<ConnectorManagementNotReady>> {
-        let app_id = app_id.trim();
+        let connector_id = connector_id.trim();
         let permit = self
-            .access_gate(app_id)
+            .access_gate(connector_id)
             .ok()
             .and_then(|gate| gate.try_read_owned().ok())
-            .ok_or_else(|| self.management_not_ready(app_id))?;
-        let lifecycle = self.require_management_ready(app_id)?;
+            .ok_or_else(|| self.management_not_ready(connector_id))?;
+        let lifecycle = self.require_management_ready(connector_id)?;
         Ok(ConnectorManagementPermit {
             lifecycle,
             _permit: permit,
         })
     }
 
-    fn access_gate(&self, app_id: &str) -> Result<Arc<RwLock<()>>, String> {
-        let app_id = normalized_app_id(app_id)?;
+    fn access_gate(&self, connector_id: &str) -> Result<Arc<RwLock<()>>, String> {
+        let connector_id = normalized_connector_id(connector_id)?;
         let mut access_gates = self
             .access_gates
             .lock()
             .map_err(|_| "本地应用访问门禁锁已损坏".to_string())?;
         Ok(access_gates
-            .entry(app_id)
+            .entry(connector_id)
             .or_insert_with(|| Arc::new(RwLock::new(())))
             .clone())
     }
 
-    fn management_not_ready(&self, app_id: &str) -> Box<ConnectorManagementNotReady> {
-        match self.require_management_ready(app_id) {
+    fn management_not_ready(&self, connector_id: &str) -> Box<ConnectorManagementNotReady> {
+        match self.require_management_ready(connector_id) {
             Err(error) => error,
             Ok(lifecycle) => Box::new(ConnectorManagementNotReady {
                 code: "connector_not_ready",
                 message: format!(
                     "应用 `{}` 正在切换生命周期，本机管理接口暂不可用",
-                    lifecycle.app_id
+                    lifecycle.connector_id
                 ),
                 lifecycle,
             }),
@@ -475,7 +478,7 @@ impl ConnectorLifecycleManager {
 
     fn restore_if_active(
         &self,
-        app_id: &str,
+        connector_id: &str,
         operation_id: &str,
         previous: Option<ConnectorLifecycleSnapshot>,
     ) {
@@ -483,7 +486,7 @@ impl ConnectorLifecycleManager {
             return;
         };
         let is_active = entries
-            .get(app_id)
+            .get(connector_id)
             .and_then(|entry| entry.operation.as_ref())
             .is_some_and(|operation| operation.id == operation_id);
         if !is_active {
@@ -491,23 +494,23 @@ impl ConnectorLifecycleManager {
         }
         let snapshot = match previous {
             Some(previous) => {
-                entries.insert(app_id.to_string(), previous.clone());
+                entries.insert(connector_id.to_string(), previous.clone());
                 previous
             }
             None => {
-                entries.remove(app_id);
-                ConnectorLifecycleSnapshot::new(app_id, now_ms())
+                entries.remove(connector_id);
+                ConnectorLifecycleSnapshot::new(connector_id, now_ms())
             }
         };
         drop(entries);
         self.emit(snapshot);
     }
 
-    fn cancel_if_active(&self, app_id: &str, operation_id: &str, error: &str) {
+    fn cancel_if_active(&self, connector_id: &str, operation_id: &str, error: &str) {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
-        let Some(entry) = entries.get_mut(app_id) else {
+        let Some(entry) = entries.get_mut(connector_id) else {
             return;
         };
         if entry
@@ -532,7 +535,7 @@ impl ConnectorLifecycleManager {
 
     fn update_operation(
         &self,
-        app_id: &str,
+        connector_id: &str,
         operation_id: &str,
         update: impl FnOnce(&mut ConnectorLifecycleSnapshot, &mut ConnectorOperationSnapshot, u64),
     ) -> Result<ConnectorLifecycleSnapshot, String> {
@@ -542,15 +545,18 @@ impl ConnectorLifecycleManager {
             .lock()
             .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
         let entry = entries
-            .get_mut(app_id.trim())
-            .ok_or_else(|| format!("应用 `{}` 没有生命周期记录", app_id.trim()))?;
+            .get_mut(connector_id.trim())
+            .ok_or_else(|| format!("应用 `{}` 没有生命周期记录", connector_id.trim()))?;
         let mut operation = entry
             .operation
             .take()
-            .ok_or_else(|| format!("应用 `{}` 当前没有运行中的操作", app_id.trim()))?;
+            .ok_or_else(|| format!("应用 `{}` 当前没有运行中的操作", connector_id.trim()))?;
         if operation.id != operation_id {
             entry.operation = Some(operation);
-            return Err(format!("应用 `{}` 的生命周期操作代际已变化", app_id.trim()));
+            return Err(format!(
+                "应用 `{}` 的生命周期操作代际已变化",
+                connector_id.trim()
+            ));
         }
         update(entry, &mut operation, now);
         entry.operation = Some(operation);
@@ -566,7 +572,7 @@ impl ConnectorLifecycleManager {
         mut lifecycle_operation: ConnectorLifecycleOperation,
         update: impl FnOnce(&mut ConnectorLifecycleSnapshot),
     ) -> Result<ConnectorLifecycleSnapshot, String> {
-        let app_id = lifecycle_operation.app_id.clone();
+        let connector_id = lifecycle_operation.connector_id.clone();
         let operation_id = lifecycle_operation.snapshot.id.clone();
         let now = now_ms();
         let mut entries = self
@@ -574,14 +580,14 @@ impl ConnectorLifecycleManager {
             .lock()
             .map_err(|_| "本地应用生命周期状态锁已损坏".to_string())?;
         let entry = entries
-            .get_mut(&app_id)
-            .ok_or_else(|| format!("应用 `{app_id}` 没有生命周期记录"))?;
+            .get_mut(&connector_id)
+            .ok_or_else(|| format!("应用 `{connector_id}` 没有生命周期记录"))?;
         let operation = entry
             .operation
             .as_ref()
-            .ok_or_else(|| format!("应用 `{app_id}` 当前没有运行中的操作"))?;
+            .ok_or_else(|| format!("应用 `{connector_id}` 当前没有运行中的操作"))?;
         if operation.id != operation_id {
-            return Err(format!("应用 `{app_id}` 的生命周期操作代际已变化"));
+            return Err(format!("应用 `{connector_id}` 的生命周期操作代际已变化"));
         }
         update(entry);
         entry.operation = None;
@@ -608,12 +614,12 @@ impl ConnectorLifecycleManager {
     }
 }
 
-fn normalized_app_id(app_id: &str) -> Result<String, String> {
-    let app_id = app_id.trim();
-    if app_id.is_empty() {
+fn normalized_connector_id(connector_id: &str) -> Result<String, String> {
+    let connector_id = connector_id.trim();
+    if connector_id.is_empty() {
         return Err("本地应用 ID 不能为空".to_string());
     }
-    Ok(app_id.to_string())
+    Ok(connector_id.to_string())
 }
 
 fn now_ms() -> u64 {
@@ -747,7 +753,7 @@ mod tests {
         let transitioning = manager
             .list()
             .into_iter()
-            .find(|snapshot| snapshot.app_id == "connector.test")
+            .find(|snapshot| snapshot.connector_id == "connector.test")
             .unwrap();
         assert_eq!(transitioning.lifecycle, ConnectorLifecycleState::Upgrading);
         assert!(!upgrade_task.is_finished());
@@ -795,7 +801,7 @@ mod tests {
         let restored = manager
             .list()
             .into_iter()
-            .find(|snapshot| snapshot.app_id == "connector.test")
+            .find(|snapshot| snapshot.connector_id == "connector.test")
             .unwrap();
         assert_eq!(restored.lifecycle, ConnectorLifecycleState::Ready);
         assert!(restored.operation.is_none());
@@ -804,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_access_gates_are_isolated_by_app_id() {
+    async fn connector_access_gates_are_isolated_by_connector_id() {
         let manager = ConnectorLifecycleManager::default();
         let first_start = manager
             .begin(

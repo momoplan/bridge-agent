@@ -5,7 +5,7 @@ use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
     AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted,
-    AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2,
+    AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
 use crate::services::ServiceRegistry;
@@ -936,16 +936,16 @@ impl RuntimeRunner {
                     }
                     let event = submission.event;
                     let event_id = event.event_id.clone();
-                    let app_id = event.app_id.clone();
+                    let connector_id = event.connector_id.clone();
                     let event_name = event.event.clone();
-                    let event_key = (app_id.clone(), event_id.clone());
+                    let event_key = (connector_id.clone(), event_id.clone());
                     if !register_event_waiter(&mut pending_events, event_key, submission.response) {
                         continue;
                     }
                     write_json(&mut write, &AgentMessage::LocalAppEventEmitted(event)).await?;
                     self.push_log_with_metadata(
                         "info",
-                        &format!("local app event {app_id}.{event_name} sent to relay"),
+                        &format!("local app event {connector_id}.{event_name} sent to relay"),
                         LogMetadata::category("local_app_event")
                             .event(event_name)
                             .event_id(event_id)
@@ -994,7 +994,7 @@ impl RuntimeRunner {
                                     .await;
                                 }
                                 AgentMessage::EventAck(ack) => {
-                                    let event_key = (ack.app_id.clone(), ack.event_id.clone());
+                                    let event_key = (ack.connector_id.clone(), ack.event_id.clone());
                                     if let Some(waiters) = pending_events.remove(&event_key) {
                                         for waiter in waiters {
                                             let _ = waiter.send(Ok(ack.clone()));
@@ -1086,13 +1086,13 @@ impl RuntimeRunner {
                                     write_json(&mut write, &response).await?;
                                 }
                                 AgentMessage::LocalAppInvokeRequest(request) => {
-                                    let app_id = request.app_id.clone();
+                                    let connector_id = request.connector_id.clone();
                                     let method = request.method.clone();
                                     let request_id = request.request_id.clone();
                                     self.push_log_with_metadata(
                                         "info",
                                         &format!(
-                                            "local app invoke {app_id}.{method} started"
+                                            "local app invoke {connector_id}.{method} started"
                                         ),
                                         LogMetadata::category("local_app_invoke")
                                             .method(method.clone())
@@ -1107,7 +1107,7 @@ impl RuntimeRunner {
                                         .invoke_local_app(
                                             request.request_id,
                                             request.workspace_id,
-                                            &app_id,
+                                            &connector_id,
                                             &method,
                                             request.arguments,
                                             request.timeout_secs,
@@ -1118,7 +1118,7 @@ impl RuntimeRunner {
                                     self.push_log_with_metadata(
                                         if result.success { "info" } else { "warn" },
                                         &format!(
-                                            "local app invoke {app_id}.{method} {outcome} in {}ms",
+                                            "local app invoke {connector_id}.{method} {outcome} in {}ms",
                                             result.duration_ms
                                         ),
                                         LogMetadata::category("local_app_invoke")
@@ -1168,11 +1168,11 @@ impl RuntimeRunner {
         let registry = self.registry.read().await;
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
-            protocol_version: AGENT_PROTOCOL_VERSION.to_string(),
+            protocol_version: AGENT_PROTOCOL_VERSION,
             protocol_features: vec![
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
-                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
-                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2.to_string(),
             ],
             services: registry.definitions(),
             local_apps: registry.local_app_definitions(),
@@ -1186,11 +1186,11 @@ impl RuntimeRunner {
         }
         AgentMessage::Capabilities(AgentCapabilities {
             agent_id: self.config.relay.agent_id.clone(),
-            protocol_version: AGENT_PROTOCOL_VERSION.to_string(),
+            protocol_version: AGENT_PROTOCOL_VERSION,
             protocol_features: vec![
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
-                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
-                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V1.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V2.to_string(),
             ],
             services: update.services,
             local_apps: update.local_apps,
@@ -2086,12 +2086,12 @@ mod tests {
 
     #[test]
     fn relay_decoder_accepts_device_event_ack() {
-        let message = r#"{"type":"event_ack","eventId":"evt-1","appId":"camera","duplicate":true,"matchedSubscriptionCount":2}"#;
+        let message = r#"{"type":"event_ack","event_id":"evt-1","connector_id":"camera","duplicate":true,"matched_subscription_count":2}"#;
 
         match decode_relay_message(message).unwrap().unwrap() {
             AgentMessage::EventAck(ack) => {
                 assert_eq!(ack.event_id, "evt-1");
-                assert_eq!(ack.app_id, "camera");
+                assert_eq!(ack.connector_id, "camera");
                 assert!(ack.duplicate);
                 assert_eq!(ack.matched_subscription_count, 2);
             }
@@ -2150,11 +2150,11 @@ mod tests {
 
     #[test]
     fn relay_decoder_accepts_local_app_invoke_request() {
-        let message = r#"{"type":"local_app_invoke_request","requestId":"req-1","workspaceId":642,"appId":"camera","method":"capture","arguments":{}}"#;
+        let message = r#"{"type":"local_app_invoke_request","request_id":"req-1","workspace_id":642,"connector_id":"camera","method":"capture","arguments":{}}"#;
 
         match decode_relay_message(message).unwrap().unwrap() {
             AgentMessage::LocalAppInvokeRequest(request) => {
-                assert_eq!(request.app_id, "camera");
+                assert_eq!(request.connector_id, "camera");
                 assert_eq!(request.method, "capture");
                 assert_eq!(request.workspace_id, Some(642));
             }

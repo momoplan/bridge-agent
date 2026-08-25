@@ -30,7 +30,7 @@ mod windows_uninstaller {
     const PRODUCT_CODE_VALUE: &str = "ProductCode";
     const AUTOSTART_REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const AUTOSTART_VALUE: &str = "BaijimuBridgeAgent";
-    const MANAGED_CLI_ID: &str = "baijimu-cli";
+    const MANAGED_CLI_ID: &str = "com.baijimu.cli";
     const APP_IDENTIFIER: &str = "com.baijimu.bridgeagent";
     const DESKTOP_EXECUTABLE: &str = "bridge-agent-desktop.exe";
     const UNINSTALLER_EXECUTABLE: &str = "bridge-agent-uninstaller.exe";

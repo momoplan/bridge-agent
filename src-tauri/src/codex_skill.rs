@@ -222,9 +222,7 @@ mod tests {
 
     #[test]
     fn installs_bundled_skill_in_user_skill_directory() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("BAIJIMU_AGENT_SKILLS_DIR", temp.path().join("skills"));
         std::env::set_var(
@@ -248,9 +246,7 @@ mod tests {
 
     #[test]
     fn bundled_install_is_idempotent_and_repairs_modified_content() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("BAIJIMU_AGENT_SKILLS_DIR", temp.path().join("skills"));
         std::env::set_var(
@@ -271,9 +267,7 @@ mod tests {
 
     #[test]
     fn migrates_duplicate_legacy_skills_out_of_discovery_roots() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let skills_root = temp.path().join(".agents").join("skills");
         let legacy_codex_root = temp.path().join(".codex").join("skills");

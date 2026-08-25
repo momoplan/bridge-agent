@@ -34,17 +34,15 @@ const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const CONNECTOR_INSTALL_RECORD_FILE: &str = "install.json";
 const CONNECTOR_PYTHON_ENV_DIR: &str = ".bridge-agent-python";
 const CONNECTOR_PYTHON_ENV_MARKER: &str = ".install-ok";
-const LOCAL_APP_ID_ENV: &str = "BAIJIMU_LOCAL_APP_ID";
-const LOCAL_APP_DATA_DIR_ENV: &str = "BAIJIMU_LOCAL_APP_DATA_DIR";
-const LOCAL_APP_START_POLICY_ENV: &str = "BAIJIMU_LOCAL_APP_START_POLICY";
+const CONNECTOR_DATA_DIR_ENV: &str = "BAIJIMU_CONNECTOR_DATA_DIR";
+const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 const CONNECTOR_MANAGEMENT_TOKEN_FILE: &str = "management-token";
-const LOCAL_APP_TOKEN_FILE_ENV: &str = "BAIJIMU_LOCAL_APP_TOKEN_FILE";
 const CONNECTOR_EVENT_TOKEN_FILE: &str = "event-publisher-token";
 const CONNECTOR_ASSET_UPLOAD_TOKEN_FILE: &str = "asset-upload-token";
-const LOCAL_APP_EVENT_TOKEN_FILE_ENV: &str = "BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE";
-const LOCAL_APP_EVENT_ENDPOINT_ENV: &str = "BAIJIMU_LOCAL_APP_EVENT_ENDPOINT";
-const LOCAL_APP_ASSET_UPLOAD_TOKEN_FILE_ENV: &str = "BAIJIMU_LOCAL_APP_ASSET_UPLOAD_TOKEN_FILE";
-const LOCAL_APP_ASSET_UPLOAD_ENDPOINT_ENV: &str = "BAIJIMU_LOCAL_APP_ASSET_UPLOAD_ENDPOINT";
+const CONNECTOR_EVENT_TOKEN_FILE_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE";
+const CONNECTOR_EVENT_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_EVENT_ENDPOINT";
+const CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV: &str = "BAIJIMU_CONNECTOR_ASSET_UPLOAD_TOKEN_FILE";
+const CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV: &str = "BAIJIMU_CONNECTOR_ASSET_UPLOAD_ENDPOINT";
 const DEFAULT_LOCAL_APP_EVENT_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-events";
 const DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT: &str = "http://127.0.0.1:18081/v1/local-app-assets";
 pub(crate) const CONNECTOR_ASSET_UPLOAD_PERMISSION: &str = "assets.upload";
@@ -84,10 +82,10 @@ pub struct PythonRuntimeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectorManifest {
     pub schema_version: String,
-    pub app_id: String,
+    pub id: String,
     pub name: String,
     pub version: String,
     #[serde(default)]
@@ -128,6 +126,10 @@ pub struct ConnectorManifest {
     pub methods: Vec<RegistrationMethod>,
     #[serde(default)]
     pub events: Vec<crate::config::EventConfig>,
+    #[serde(default)]
+    pub services: Vec<ServiceRegistration>,
+    #[serde(default)]
+    pub service_registration_files: Vec<String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, String>,
 }
@@ -226,7 +228,7 @@ pub fn local_app_starts_automatically(app: &LocalAppConfig) -> bool {
     let Some(ServiceStartCommand::ShellCommand { env, .. }) = app.start_command.as_ref() else {
         return false;
     };
-    env.get(LOCAL_APP_START_POLICY_ENV)
+    env.get(CONNECTOR_START_POLICY_ENV)
         .map(String::as_str)
         .unwrap_or("automatic")
         == "automatic"
@@ -376,38 +378,60 @@ pub struct ConnectorInstallRecord {
     pub source_path: String,
     #[serde(default)]
     pub source_reference: Option<String>,
-    pub review_status: String,
+    #[serde(default)]
+    pub trust_level: ConnectorTrustLevel,
+    #[serde(default)]
+    pub market_app_id: Option<String>,
     #[serde(default)]
     pub source_checksum: Option<String>,
     #[serde(default)]
     pub package_checksum: Option<String>,
+    #[serde(default, alias = "serviceNames", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_service_names: Vec<String>,
     pub installed_at_epoch_ms: u64,
     #[serde(default)]
     pub last_synced_at_epoch_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorTrustLevel {
+    PlatformTrusted,
+    #[default]
+    UserTrusted,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ConnectorInstallProvenance {
     source_reference: Option<String>,
-    review_status: String,
-    source_checksum: String,
+    trust_level: ConnectorTrustLevel,
+    market_app_id: Option<String>,
+    source_checksum: Option<String>,
 }
 
 impl ConnectorInstallProvenance {
-    pub fn registered(
+    pub fn user_trusted(source_reference: Option<&str>) -> Self {
+        Self {
+            source_reference: normalized_optional_text(source_reference),
+            ..Self::default()
+        }
+    }
+
+    pub fn platform_trusted(
         source_reference: &str,
-        review_status: &str,
+        market_app_id: &str,
         source_checksum: &str,
     ) -> Result<Self> {
         let source_reference = normalized_optional_text(Some(source_reference))
-            .context("registered connector source is required")?;
-        let review_status = normalized_optional_text(Some(review_status))
-            .context("registered connector review status is required")?;
+            .context("platform-trusted connector source is required")?;
+        let market_app_id = normalized_optional_text(Some(market_app_id))
+            .context("platform-trusted connector market app id is required")?;
         let source_checksum = normalize_sha256_checksum(source_checksum)?;
         Ok(Self {
             source_reference: Some(source_reference),
-            review_status,
-            source_checksum,
+            trust_level: ConnectorTrustLevel::PlatformTrusted,
+            market_app_id: Some(market_app_id),
+            source_checksum: Some(source_checksum),
         })
     }
 }
@@ -415,7 +439,7 @@ impl ConnectorInstallProvenance {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorInstallResult {
-    pub app_id: String,
+    pub connector_id: String,
     pub name: String,
     pub version: String,
     pub package_path: String,
@@ -426,13 +450,14 @@ pub struct ConnectorInstallResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorSummary {
-    pub app_id: String,
+    pub id: String,
     pub name: String,
     pub version: String,
     pub package_path: String,
     pub source_path: String,
     pub source_reference: Option<String>,
-    pub review_status: String,
+    pub trust_level: ConnectorTrustLevel,
+    pub market_app_id: Option<String>,
     pub source_checksum: Option<String>,
     pub package_checksum: Option<String>,
     pub icon_data_url: Option<String>,
@@ -453,7 +478,7 @@ pub struct ConnectorSummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorSyncFailure {
-    pub app_id: String,
+    pub connector_id: String,
     pub name: String,
     pub error: String,
 }
@@ -468,14 +493,14 @@ pub struct ConnectorSyncReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorStartResult {
-    pub app_id: String,
+    pub connector_id: String,
     pub lifecycle: ConnectorLifecycleResult,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorLifecycleResult {
-    pub app_id: String,
+    pub connector_id: String,
     pub configured: bool,
     pub exit_code: Option<i32>,
     pub stdout: String,
@@ -483,40 +508,40 @@ pub struct ConnectorLifecycleResult {
 }
 
 pub fn connectors_dir() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("BRIDGE_AGENT_LOCAL_APPS_DIR") {
+    if let Some(path) = std::env::var_os("BRIDGE_AGENT_CONNECTORS_DIR") {
         return Ok(PathBuf::from(path));
     }
     if let Some(dirs) = ProjectDirs::from("com", "baijimu", "bridge-agent") {
-        return Ok(dirs.config_dir().join("local-apps"));
+        return Ok(dirs.config_dir().join("connectors"));
     }
     bail!("failed to resolve BridgeAgent config directory")
 }
 
-pub fn connector_data_dir(app_id: &str) -> Result<PathBuf> {
-    validate_app_id(app_id)?;
-    if let Some(path) = std::env::var_os("BRIDGE_AGENT_LOCAL_APP_DATA_DIR") {
-        return Ok(PathBuf::from(path).join(app_id));
+pub fn connector_data_dir(connector_id: &str) -> Result<PathBuf> {
+    validate_connector_id(connector_id)?;
+    if let Some(path) = std::env::var_os("BRIDGE_AGENT_CONNECTOR_DATA_DIR") {
+        return Ok(PathBuf::from(path).join(connector_id));
     }
     if let Some(dirs) = ProjectDirs::from("com", "baijimu", "bridge-agent") {
-        return Ok(dirs.config_dir().join("app-data").join(app_id));
+        return Ok(dirs.config_dir().join("connector-data").join(connector_id));
     }
     bail!("failed to resolve BridgeAgent connector data directory")
 }
 
-pub fn connector_management_token_path(app_id: &str) -> Result<PathBuf> {
-    Ok(connector_data_dir(app_id)?.join(CONNECTOR_MANAGEMENT_TOKEN_FILE))
+pub fn connector_management_token_path(connector_id: &str) -> Result<PathBuf> {
+    Ok(connector_data_dir(connector_id)?.join(CONNECTOR_MANAGEMENT_TOKEN_FILE))
 }
 
-pub fn connector_event_token_path(app_id: &str) -> Result<PathBuf> {
-    Ok(connector_data_dir(app_id)?.join(CONNECTOR_EVENT_TOKEN_FILE))
+pub fn connector_event_token_path(connector_id: &str) -> Result<PathBuf> {
+    Ok(connector_data_dir(connector_id)?.join(CONNECTOR_EVENT_TOKEN_FILE))
 }
 
-pub fn connector_asset_upload_token_path(app_id: &str) -> Result<PathBuf> {
-    Ok(connector_data_dir(app_id)?.join(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE))
+pub fn connector_asset_upload_token_path(connector_id: &str) -> Result<PathBuf> {
+    Ok(connector_data_dir(connector_id)?.join(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE))
 }
 
-pub(crate) fn connector_declares_asset_upload(app_id: &str) -> Result<bool> {
-    let record = load_install_record(app_id)?;
+pub(crate) fn connector_declares_asset_upload(connector_id: &str) -> Result<bool> {
+    let record = load_install_record(connector_id)?;
     Ok(connector_permission_is_active(
         &record.manifest,
         CONNECTOR_ASSET_UPLOAD_PERMISSION,
@@ -525,14 +550,14 @@ pub(crate) fn connector_declares_asset_upload(app_id: &str) -> Result<bool> {
 
 pub fn authorize_connector_asset_upload(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     token: &str,
 ) -> Result<PathBuf> {
-    let record = load_install_record(app_id)?;
+    let record = load_install_record(connector_id)?;
     if !connector_permission_is_active(&record.manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION) {
-        bail!("connector `{app_id}` does not declare assets.upload permission");
+        bail!("connector `{connector_id}` does not declare assets.upload permission");
     }
-    let expected_token_path = connector_asset_upload_token_path(app_id)?;
+    let expected_token_path = connector_asset_upload_token_path(connector_id)?;
     let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
         format!(
             "failed to read connector asset upload credential {}",
@@ -546,11 +571,11 @@ pub fn authorize_connector_asset_upload(
     if !config
         .local_apps
         .iter()
-        .any(|app| app.app_id == app_id && app.enabled)
+        .any(|app| app.connector_id == connector_id && app.enabled)
     {
-        bail!("connector `{app_id}` is not enabled");
+        bail!("connector `{connector_id}` is not enabled");
     }
-    connector_data_dir(app_id)
+    connector_data_dir(connector_id)
 }
 
 fn connector_permission_is_active(manifest: &ConnectorManifest, permission_id: &str) -> bool {
@@ -566,12 +591,12 @@ fn connector_permission_is_active(manifest: &ConnectorManifest, permission_id: &
 
 pub fn authorize_connector_event(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     event_name: &str,
     token: &str,
 ) -> Result<()> {
-    load_install_record(app_id)?;
-    let expected_token_path = connector_event_token_path(app_id)?;
+    load_install_record(connector_id)?;
+    let expected_token_path = connector_event_token_path(connector_id)?;
     let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
         format!(
             "failed to read connector event credential {}",
@@ -587,14 +612,14 @@ pub fn authorize_connector_event(
     let declared = config
         .local_apps
         .iter()
-        .find(|app| app.app_id == app_id && app.enabled)
+        .find(|app| app.connector_id == connector_id && app.enabled)
         .is_some_and(|app| {
             app.events
                 .iter()
                 .any(|event| event.enabled && event.name == event_name)
         });
     if !declared {
-        bail!("local app event `{event_name}` is not declared by connector `{app_id}`");
+        bail!("local app event `{event_name}` is not declared by connector `{connector_id}`");
     }
     Ok(())
 }
@@ -668,39 +693,25 @@ pub fn resolve_connector_ui_asset(
     Ok(resolved)
 }
 
-#[cfg(test)]
 pub fn install_connector_from_path(
     source: &Path,
     config_path: &Path,
     replace: bool,
 ) -> Result<ConnectorInstallResult> {
-    install_connector_from_path_with_provenance(
-        source,
-        config_path,
-        replace,
-        ConnectorInstallProvenance::registered(
-            &source.display().to_string(),
-            "DRAFT",
-            &"0".repeat(64),
-        )?,
-    )
+    install_connector_from_path_with_source_reference(source, config_path, replace, None)
 }
 
-#[cfg(test)]
 pub fn install_connector_from_path_with_source_reference(
     source: &Path,
     config_path: &Path,
     replace: bool,
     source_reference: Option<&str>,
 ) -> Result<ConnectorInstallResult> {
-    let source_reference = source_reference
-        .map(str::to_string)
-        .unwrap_or_else(|| source.display().to_string());
     install_connector_from_path_with_provenance(
         source,
         config_path,
         replace,
-        ConnectorInstallProvenance::registered(&source_reference, "DRAFT", &"0".repeat(64))?,
+        ConnectorInstallProvenance::user_trusted(source_reference),
     )
 }
 
@@ -719,12 +730,17 @@ pub fn install_connector_from_path_with_provenance(
     let manifest = load_connector_manifest(&source)?;
     let registrations = load_connector_service_registrations(&source, &manifest)?;
     if registrations.is_empty() {
-        bail!(
-            "connector `{}` does not declare any services",
-            manifest.app_id
-        );
+        bail!("connector `{}` does not declare any services", manifest.id);
     }
 
+    let legacy_service_names = if manifest.schema_version == "2.0" {
+        Vec::new()
+    } else {
+        registrations
+            .iter()
+            .map(|registration| registration.name.trim().to_string())
+            .collect::<Vec<_>>()
+    };
     let mut services = registrations
         .iter()
         .cloned()
@@ -745,9 +761,9 @@ pub fn install_connector_from_path_with_provenance(
             package_path.display()
         );
     }
-    let previous_record = load_install_record(&manifest.app_id).ok();
+    let previous_record = load_install_record(&manifest.id).ok();
     if package_path.exists() && previous_record.is_some() {
-        stop_connector_for_package_change(&manifest.app_id, &config)?;
+        stop_connector_for_package_change(&manifest.id, &config)?;
     }
     let replaced_package = if package_path.exists() {
         Some(prepare_connector_package_destination(
@@ -781,6 +797,15 @@ pub fn install_connector_from_path_with_provenance(
             .iter()
             .map(|event| event.name.clone())
             .collect::<Vec<_>>();
+        let previous_service_names = previous_record
+            .as_ref()
+            .map(|record| record.legacy_service_names.clone())
+            .unwrap_or_default();
+        config.services.retain(|service| {
+            !previous_service_names
+                .iter()
+                .any(|service_name| service_name == &service.name)
+        });
         upsert_local_app(&mut config.local_apps, local_app, replace)?;
         save_config(config_path, &config)?;
         config_saved = true;
@@ -795,16 +820,18 @@ pub fn install_connector_from_path_with_provenance(
             package_path: package_path.display().to_string(),
             source_path: source.display().to_string(),
             source_reference: provenance.source_reference.clone(),
-            review_status: provenance.review_status.clone(),
-            source_checksum: Some(provenance.source_checksum.clone()),
+            trust_level: provenance.trust_level,
+            market_app_id: provenance.market_app_id.clone(),
+            source_checksum: provenance.source_checksum.clone(),
             package_checksum: Some(package_checksum),
+            legacy_service_names: legacy_service_names.clone(),
             installed_at_epoch_ms,
             last_synced_at_epoch_ms: now,
         };
         save_install_record(&record)?;
 
         Ok(ConnectorInstallResult {
-            app_id: manifest.app_id.clone(),
+            connector_id: manifest.id.clone(),
             name: manifest.name.clone(),
             version: manifest.version.clone(),
             package_path: package_path.display().to_string(),
@@ -819,7 +846,7 @@ pub fn install_connector_from_path_with_provenance(
                 if let Err(err) = fs::remove_dir_all(&replaced_package) {
                     tracing::warn!(
                         "installed connector {} but failed to remove replaced package {}: {err:#}",
-                        manifest.app_id,
+                        manifest.id,
                         replaced_package.display()
                     );
                 }
@@ -889,20 +916,24 @@ pub fn is_connector_package_stop_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<ConnectorPackageStopError>())
 }
 
-pub fn uninstall_connector(app_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
-    uninstall_connector_with_options(app_id, config_path, ConnectorUninstallOptions::default())
+pub fn uninstall_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorSummary> {
+    uninstall_connector_with_options(
+        connector_id,
+        config_path,
+        ConnectorUninstallOptions::default(),
+    )
 }
 
 pub fn uninstall_connector_with_options(
-    app_id: &str,
+    connector_id: &str,
     config_path: &Path,
     options: ConnectorUninstallOptions,
 ) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
-    let record = load_install_record(app_id)?;
+    let record = load_install_record(connector_id)?;
     let summary = summary_from_record(record.clone());
     let mut config = load_config(config_path)?;
-    match stop_connector_for_package_change(app_id, &config) {
+    match stop_connector_for_package_change(connector_id, &config) {
         Ok(()) => release_connector_package_processes(Path::new(&record.package_path))?,
         Err(stop_error) if options.force => {
             if let Err(recovery_error) =
@@ -917,13 +948,19 @@ pub fn uninstall_connector_with_options(
     }
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
 
+    config.services.retain(|service| {
+        !record
+            .legacy_service_names
+            .iter()
+            .any(|name| name == &service.name)
+    });
     config
         .local_apps
-        .retain(|app| app.app_id != record.manifest.app_id);
+        .retain(|app| app.connector_id != record.manifest.id);
 
-    let install_root = install_record_path(app_id)?
+    let install_root = install_record_path(connector_id)?
         .parent()
-        .with_context(|| format!("connector `{app_id}` install root is missing"))?
+        .with_context(|| format!("connector `{connector_id}` install root is missing"))?
         .to_path_buf();
     let uninstalling_root = if install_root.exists() {
         Some(quarantine_connector_install_root(&install_root)?)
@@ -934,7 +971,7 @@ pub fn uninstall_connector_with_options(
         if let Some(uninstalling_root) = uninstalling_root.as_deref() {
             if let Err(restore_err) = fs::rename(uninstalling_root, &install_root) {
                 bail!(
-                    "failed to update config while uninstalling connector `{app_id}`: {config_err:#}; failed to restore installation {}: {restore_err}",
+                    "failed to update config while uninstalling connector `{connector_id}`: {config_err:#}; failed to restore installation {}: {restore_err}",
                     install_root.display()
                 );
             }
@@ -944,7 +981,7 @@ pub fn uninstall_connector_with_options(
     if let Some(uninstalling_root) = uninstalling_root {
         if let Err(err) = fs::remove_dir_all(&uninstalling_root) {
             tracing::warn!(
-                "uninstalled connector {app_id} but failed to remove quarantined installation {}: {err:#}",
+                "uninstalled connector {connector_id} but failed to remove quarantined installation {}: {err:#}",
                 uninstalling_root.display()
             );
         }
@@ -958,12 +995,12 @@ pub fn list_connectors() -> Result<Vec<ConnectorSummary>> {
         .into_iter()
         .map(summary_from_record)
         .collect::<Vec<_>>();
-    connectors.sort_by(|left, right| left.app_id.cmp(&right.app_id));
+    connectors.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(connectors)
 }
 
-pub fn show_connector(app_id: &str) -> Result<ConnectorInstallRecord> {
-    load_install_record(app_id)
+pub fn show_connector(connector_id: &str) -> Result<ConnectorInstallRecord> {
+    load_install_record(connector_id)
 }
 
 pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSummary>> {
@@ -974,10 +1011,13 @@ pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSumm
     Ok(report.summaries)
 }
 
-pub fn sync_installed_connector(config_path: &Path, app_id: &str) -> Result<ConnectorSummary> {
+pub fn sync_installed_connector(
+    config_path: &Path,
+    connector_id: &str,
+) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
     let mut config = load_config(config_path)?;
-    let record = load_install_record(app_id)?;
+    let record = load_install_record(connector_id)?;
     let summary = sync_installed_connector_record(
         &mut config,
         record,
@@ -990,11 +1030,11 @@ pub fn sync_installed_connector(config_path: &Path, app_id: &str) -> Result<Conn
 
 pub fn prepare_installed_connector_runtime(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
 ) -> Result<ConnectorSummary> {
     ensure_config_exists(config_path)?;
     let mut config = load_config(config_path)?;
-    let record = load_install_record(app_id)?;
+    let record = load_install_record(connector_id)?;
     let summary = sync_installed_connector_record(
         &mut config,
         record,
@@ -1021,7 +1061,7 @@ pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorS
     let mut failures = Vec::new();
 
     for record in records {
-        let app_id = record.manifest.app_id.clone();
+        let connector_id = record.manifest.id.clone();
         let name = record.manifest.name.clone();
         match sync_installed_connector_record(
             &mut config,
@@ -1033,13 +1073,13 @@ pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorS
             Err(err) => {
                 let error = format!("{err:#}");
                 tracing::warn!(
-                    app_id = %app_id,
+                    connector_id = %connector_id,
                     name = %name,
                     error = %error,
                     "failed to sync installed connector"
                 );
                 failures.push(ConnectorSyncFailure {
-                    app_id,
+                    connector_id,
                     name,
                     error,
                 });
@@ -1063,7 +1103,7 @@ pub fn format_connector_sync_failures(failures: &[ConnectorSyncFailure]) -> Stri
         .map(|failure| {
             format!(
                 "{} ({}) failed: {}",
-                failure.name, failure.app_id, failure.error
+                failure.name, failure.connector_id, failure.error
             )
         })
         .collect::<Vec<_>>()
@@ -1082,10 +1122,10 @@ fn sync_installed_connector_record(
 ) -> Result<ConnectorSummary> {
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
     let package_path = PathBuf::from(&record.package_path);
-    let app_id = record.manifest.app_id.clone();
+    let connector_id = record.manifest.id.clone();
     let registrations = load_connector_service_registrations(&package_path, &record.manifest)
         .with_context(|| {
-            format!("failed to reload service registrations for connector `{app_id}`")
+            format!("failed to reload service registrations for connector `{connector_id}`")
         })?;
     let mut services = registrations
         .iter()
@@ -1100,6 +1140,12 @@ fn sync_installed_connector_record(
         runtime_preparation,
     )?;
 
+    config.services.retain(|service| {
+        !record
+            .legacy_service_names
+            .iter()
+            .any(|service_name| service_name == &service.name)
+    });
     let local_app = local_app_from_services(&record.manifest, &services, &registrations)?;
     upsert_synced_local_app(&mut config.local_apps, local_app);
 
@@ -1108,18 +1154,18 @@ fn sync_installed_connector_record(
     Ok(summary_from_record(record))
 }
 
-pub fn start_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
-    start_connector_with_env(app_id, config_path, &BTreeMap::new())
+pub fn start_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
+    start_connector_with_env(connector_id, config_path, &BTreeMap::new())
 }
 
 pub fn start_connector_with_env(
-    app_id: &str,
+    connector_id: &str,
     config_path: &Path,
     additional_env: &BTreeMap<String, String>,
 ) -> Result<ConnectorStartResult> {
     ensure_config_exists(config_path)?;
-    prepare_installed_connector_runtime(config_path, app_id)?;
-    let record = load_install_record(app_id)?;
+    prepare_installed_connector_runtime(config_path, connector_id)?;
+    let record = load_install_record(connector_id)?;
     if record
         .manifest
         .runtime
@@ -1127,15 +1173,18 @@ pub fn start_connector_with_env(
         .is_some_and(|runtime| runtime.process_ownership == ConnectorProcessOwnership::Host)
     {
         bail!(
-            "connector `{app_id}` declares runtime.processOwnership=host and must be started by the Bridge Agent desktop process supervisor"
+            "connector `{connector_id}` declares runtime.processOwnership=host and must be started by the Bridge Agent desktop process supervisor"
         );
     }
     let config = load_config(config_path)?;
-    let app = config.local_apps.iter().find(|app| app.app_id == app_id);
+    let app = config
+        .local_apps
+        .iter()
+        .find(|app| app.connector_id == connector_id);
     let lifecycle = match app.and_then(|app| app.start_command.as_ref()) {
-        Some(command) => run_start_command(app_id, command, additional_env)?,
+        Some(command) => run_start_command(connector_id, command, additional_env)?,
         None => ConnectorLifecycleResult {
-            app_id: app_id.to_string(),
+            connector_id: connector_id.to_string(),
             configured: false,
             exit_code: None,
             stdout: String::new(),
@@ -1143,20 +1192,23 @@ pub fn start_connector_with_env(
         },
     };
     Ok(ConnectorStartResult {
-        app_id: record.manifest.app_id,
+        connector_id: record.manifest.id,
         lifecycle,
     })
 }
 
-pub fn stop_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
+pub fn stop_connector(connector_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
     ensure_config_exists(config_path)?;
-    let record = load_install_record(app_id)?;
+    let record = load_install_record(connector_id)?;
     let config = load_config(config_path)?;
-    let app = config.local_apps.iter().find(|app| app.app_id == app_id);
+    let app = config
+        .local_apps
+        .iter()
+        .find(|app| app.connector_id == connector_id);
     let lifecycle = match app.and_then(|app| app.stop_command.as_ref()) {
-        Some(command) => run_start_command(app_id, command, &BTreeMap::new())?,
+        Some(command) => run_start_command(connector_id, command, &BTreeMap::new())?,
         None => ConnectorLifecycleResult {
-            app_id: app_id.to_string(),
+            connector_id: connector_id.to_string(),
             configured: false,
             exit_code: None,
             stdout: String::new(),
@@ -1164,89 +1216,106 @@ pub fn stop_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStart
         },
     };
     Ok(ConnectorStartResult {
-        app_id: record.manifest.app_id,
+        connector_id: record.manifest.id,
         lifecycle,
     })
 }
 
 fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
-    let schema_version = semver::Version::parse(&manifest.schema_version)
-        .context("connector schemaVersion must be strict SemVer")?;
-    if schema_version != semver::Version::new(3, 0, 0)
-        || schema_version.to_string() != manifest.schema_version
-    {
+    if !matches!(
+        manifest.schema_version.as_str(),
+        "1.0" | "1.1" | "1.2" | "2.0"
+    ) {
         bail!(
-            "connector schemaVersion `{}` is not supported; expected 3.0.0",
+            "connector schemaVersion `{}` is not supported; expected 1.0, 1.1, 1.2 or 2.0",
             manifest.schema_version
         );
     }
-    if manifest.app_id.trim().is_empty() {
-        bail!("connector appId cannot be empty");
+    if manifest.id.trim().is_empty() {
+        bail!("connector id cannot be empty");
     }
     if manifest.name.trim().is_empty() {
         bail!("connector name cannot be empty");
     }
-    let version = semver::Version::parse(&manifest.version)
-        .context("connector version must be strict SemVer")?;
-    if version.to_string() != manifest.version {
-        bail!("connector version must use canonical SemVer");
+    if manifest.version.trim().is_empty() {
+        bail!("connector version cannot be empty");
     }
-    if manifest.transport.is_none() {
-        bail!("connector schemaVersion 3.0.0 requires transport");
-    }
-    if manifest.methods.is_empty() && manifest.events.is_empty() {
-        bail!("connector must declare at least one method or event");
-    }
-    let runtime = manifest
-        .runtime
-        .as_ref()
-        .context("connector schemaVersion 3.0.0 requires runtime")?;
-    if runtime.runtime_type != "process" {
-        bail!("connector runtime.type must be process");
-    }
-    if runtime
-        .command
-        .as_deref()
-        .is_none_or(|command| command.trim().is_empty())
-    {
-        bail!("connector runtime.command cannot be empty");
-    }
-    if runtime.process_ownership == ConnectorProcessOwnership::Host {
-        if runtime.args.is_empty() {
-            bail!("host-managed connector runtime.args must declare a foreground process command");
-        }
-        if runtime.stop_args.is_empty() {
+    let is_v2 = manifest.schema_version == "2.0";
+    if is_v2 {
+        if !manifest.services.is_empty() || !manifest.service_registration_files.is_empty() {
             bail!(
+                "connector schemaVersion 2.0 declares methods and events directly; services and serviceRegistrationFiles are not allowed"
+            );
+        }
+        if manifest.transport.is_none() {
+            bail!("connector schemaVersion 2.0 requires transport");
+        }
+        if manifest.methods.is_empty() && manifest.events.is_empty() {
+            bail!("connector must declare at least one method or event");
+        }
+        let runtime = manifest
+            .runtime
+            .as_ref()
+            .context("connector schemaVersion 2.0 requires runtime")?;
+        if runtime.runtime_type != "process" {
+            bail!("connector runtime.type must be process");
+        }
+        if runtime
+            .command
+            .as_deref()
+            .is_none_or(|command| command.trim().is_empty())
+        {
+            bail!("connector runtime.command cannot be empty");
+        }
+        if runtime.process_ownership == ConnectorProcessOwnership::Host {
+            if runtime.args.is_empty() {
+                bail!(
+                    "host-managed connector runtime.args must declare a foreground process command"
+                );
+            }
+            if runtime.stop_args.is_empty() {
+                bail!(
                     "host-managed connector runtime.stopArgs must declare an idempotent graceful shutdown command"
                 );
-        }
-        let requirements = manifest.host_requirements.as_ref().context(
+            }
+            let requirements = manifest.host_requirements.as_ref().context(
                 "host-managed connector requires hostRequirements with an explicit minimumVersion and capability",
             )?;
-        let minimum_version = requirements
-            .minimum_version
-            .as_deref()
-            .context("host-managed connector hostRequirements.minimumVersion is required")?;
-        let minimum_version = semver::Version::parse(minimum_version).with_context(|| {
-            "host-managed connector hostRequirements.minimumVersion must be valid SemVer"
-        })?;
-        let contract_version = semver::Version::parse(HOST_MANAGED_PROCESS_MINIMUM_VERSION)?;
-        if minimum_version < contract_version {
-            bail!(
+            let minimum_version = requirements
+                .minimum_version
+                .as_deref()
+                .context("host-managed connector hostRequirements.minimumVersion is required")?;
+            let minimum_version = semver::Version::parse(minimum_version).with_context(|| {
+                "host-managed connector hostRequirements.minimumVersion must be valid SemVer"
+            })?;
+            let contract_version = semver::Version::parse(HOST_MANAGED_PROCESS_MINIMUM_VERSION)?;
+            if minimum_version < contract_version {
+                bail!(
                     "host-managed connector requires hostRequirements.minimumVersion >= {HOST_MANAGED_PROCESS_MINIMUM_VERSION}"
                 );
-        }
-        if !requirements
-            .capabilities
-            .iter()
-            .any(|capability| capability == HOST_MANAGED_PROCESS_CAPABILITY)
-        {
-            bail!(
+            }
+            if !requirements
+                .capabilities
+                .iter()
+                .any(|capability| capability == HOST_MANAGED_PROCESS_CAPABILITY)
+            {
+                bail!(
                     "host-managed connector requires host capability `{HOST_MANAGED_PROCESS_CAPABILITY}`"
                 );
+            }
+        }
+    } else {
+        if manifest.services.is_empty() && manifest.service_registration_files.is_empty() {
+            bail!("connector must declare services or serviceRegistrationFiles");
+        }
+        if manifest.transport.is_some()
+            || !manifest.methods.is_empty()
+            || !manifest.events.is_empty()
+        {
+            bail!("top-level transport, methods and events require connector schemaVersion 2.0");
         }
     }
-    validate_app_id(&manifest.app_id)?;
+    validate_connector_id(&manifest.id)?;
     if let Some(icon) = manifest.icon.as_ref() {
         validate_connector_icon(icon)?;
     }
@@ -1254,6 +1323,9 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         validate_management(management)?;
     }
     if let Some(setup) = manifest.setup.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector setup requires schemaVersion 2.0");
+        }
         let management = manifest
             .management
             .as_ref()
@@ -1261,6 +1333,9 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         validate_setup(setup, management)?;
     }
     if let Some(requirements) = manifest.host_requirements.as_ref() {
+        if !matches!(manifest.schema_version.as_str(), "1.2" | "2.0") {
+            bail!("connector hostRequirements requires schemaVersion 1.2 or 2.0");
+        }
         if requirements.minimum_version.is_none() && requirements.capabilities.is_empty() {
             bail!("connector hostRequirements must declare minimumVersion or capabilities");
         }
@@ -1302,6 +1377,9 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     }
     validate_managed_tool_dependencies(manifest)?;
     if let Some(ui) = manifest.ui.as_ref() {
+        if manifest.schema_version == "1.0" {
+            bail!("connector ui requires schemaVersion 1.1 or newer");
+        }
         validate_connector_ui(ui)?;
     }
     let start_policy = manifest
@@ -1312,10 +1390,25 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
     if !matches!(start_policy, "automatic" | "manual") {
         bail!("connector runtime.startPolicy must be automatic or manual");
     }
+    if !matches!(manifest.schema_version.as_str(), "1.2" | "2.0")
+        && (!manifest.permissions.is_empty()
+            || !manifest.legacy_autostart_labels.is_empty()
+            || start_policy == "manual")
+    {
+        bail!(
+            "connector permissions, legacyAutostartLabels and manual startPolicy require schemaVersion 1.2"
+        );
+    }
     if let Some(database) = manifest.database.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector database contract requires schemaVersion 2.0");
+        }
         validate_database_contract(database)?;
     }
     if let Some(review) = manifest.upgrade_review.as_ref() {
+        if manifest.schema_version != "2.0" {
+            bail!("connector upgradeReview requires schemaVersion 2.0");
+        }
         validate_upgrade_review_contract(manifest, review)?;
     }
     let mut permission_ids = BTreeSet::new();
@@ -1377,6 +1470,9 @@ fn validate_managed_tool_dependencies(manifest: &ConnectorManifest) -> Result<()
     if manifest.managed_tool_dependencies.is_empty() {
         return Ok(());
     }
+    if manifest.schema_version != "2.0" {
+        bail!("connector managedToolDependencies requires schemaVersion 2.0");
+    }
     let requirements = manifest.host_requirements.as_ref().context(
         "connector managedToolDependencies requires hostRequirements with the managed-tool dependency capability",
     )?;
@@ -1401,7 +1497,7 @@ fn validate_managed_tool_dependencies(manifest: &ConnectorManifest) -> Result<()
         if dependency.id.trim().is_empty() || dependency.id.trim() != dependency.id {
             bail!("connector managedToolDependencies[].id must be a non-empty canonical id");
         }
-        validate_app_id(&dependency.id)
+        validate_connector_id(&dependency.id)
             .context("connector managedToolDependencies[].id is invalid")?;
         if !ids.insert(dependency.id.clone()) {
             bail!(
@@ -1553,7 +1649,7 @@ fn validate_upgrade_review_contract(
         );
     }
     if review.interfaces != "declared" {
-        bail!("connector upgradeReview.interfaces must be declared for schemaVersion 3.0.0");
+        bail!("connector upgradeReview.interfaces must be declared for schemaVersion 2.0");
     }
     if (review.database == "declared") != manifest.database.is_some() {
         bail!("connector upgradeReview.database must be declared exactly when database is present");
@@ -1601,12 +1697,12 @@ fn validated_connector_ui_relative_path(value: &str, field: &str) -> Result<Path
     Ok(path.to_path_buf())
 }
 
-fn validate_app_id(app_id: &str) -> Result<()> {
-    let app_id = app_id.trim();
-    if app_id.is_empty()
-        || app_id == "."
-        || app_id == ".."
-        || sanitize_path_component(app_id) != app_id
+fn validate_connector_id(connector_id: &str) -> Result<()> {
+    let connector_id = connector_id.trim();
+    if connector_id.is_empty()
+        || connector_id == "."
+        || connector_id == ".."
+        || sanitize_path_component(connector_id) != connector_id
     {
         bail!("connector id contains unsupported characters")
     }
@@ -1705,71 +1801,84 @@ fn connector_manifest_path(source: &Path) -> PathBuf {
 }
 
 fn load_connector_service_registrations(
-    _source: &Path,
+    source: &Path,
     manifest: &ConnectorManifest,
 ) -> Result<Vec<ServiceRegistration>> {
-    let runtime = manifest
-        .runtime
-        .as_ref()
-        .context("connector schemaVersion 3.0.0 requires runtime")?;
-    let command = runtime
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-        .context("connector runtime.command cannot be empty")?;
-    let start_command = Some(ServiceStartCommand::ShellCommand {
-        command: std::iter::once(command.to_string())
-            .chain(runtime.args.iter().cloned())
-            .collect(),
-        cwd: None,
-        env: runtime.env.clone(),
-        timeout_secs: None,
-    });
-    let stop_command = if runtime.stop_args.is_empty() {
-        derive_stop_command_from_start(start_command.as_ref())
-    } else {
-        Some(ServiceStartCommand::ShellCommand {
+    if manifest.schema_version == "2.0" {
+        let runtime = manifest
+            .runtime
+            .as_ref()
+            .context("connector schemaVersion 2.0 requires runtime")?;
+        let command = runtime
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .context("connector runtime.command cannot be empty")?;
+        let start_command = Some(ServiceStartCommand::ShellCommand {
             command: std::iter::once(command.to_string())
-                .chain(runtime.stop_args.iter().cloned())
+                .chain(runtime.args.iter().cloned())
                 .collect(),
             cwd: None,
             env: runtime.env.clone(),
             timeout_secs: None,
-        })
-    };
-    Ok(vec![ServiceRegistration {
-        name: manifest.app_id.clone(),
-        description: manifest.description.clone(),
-        enabled: true,
-        transport: manifest
-            .transport
-            .clone()
-            .context("connector schemaVersion 3.0.0 requires transport")?,
-        health_check: runtime.health_check.clone(),
-        start_command,
-        stop_command,
-        methods: manifest.methods.clone(),
-        local_app_events: manifest.events.clone(),
-        replace: true,
-        managed_by: Some(manifest.app_id.clone()),
-    }])
+        });
+        let stop_command = if runtime.stop_args.is_empty() {
+            derive_stop_command_from_start(start_command.as_ref())
+        } else {
+            Some(ServiceStartCommand::ShellCommand {
+                command: std::iter::once(command.to_string())
+                    .chain(runtime.stop_args.iter().cloned())
+                    .collect(),
+                cwd: None,
+                env: runtime.env.clone(),
+                timeout_secs: None,
+            })
+        };
+        return Ok(vec![ServiceRegistration {
+            name: manifest.id.clone(),
+            description: manifest.description.clone(),
+            enabled: true,
+            transport: manifest
+                .transport
+                .clone()
+                .context("connector schemaVersion 2.0 requires transport")?,
+            health_check: runtime.health_check.clone(),
+            start_command,
+            stop_command,
+            methods: manifest.methods.clone(),
+            local_app_events: manifest.events.clone(),
+            replace: true,
+            managed_by: Some(manifest.id.clone()),
+        }]);
+    }
+
+    let mut registrations = manifest.services.clone();
+    for file in &manifest.service_registration_files {
+        let path = source.join(file);
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read service registration {}", path.display()))?;
+        let registration: ServiceRegistration = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse service registration {}", path.display()))?;
+        registrations.push(registration);
+    }
+    Ok(registrations)
 }
 
 fn installed_connector_package_path(manifest: &ConnectorManifest) -> Result<PathBuf> {
     Ok(connectors_dir()?
-        .join(sanitize_path_component(&manifest.app_id))
+        .join(sanitize_path_component(&manifest.id))
         .join("package"))
 }
 
-fn install_record_path(app_id: &str) -> Result<PathBuf> {
+fn install_record_path(connector_id: &str) -> Result<PathBuf> {
     Ok(connectors_dir()?
-        .join(sanitize_path_component(app_id))
+        .join(sanitize_path_component(connector_id))
         .join(CONNECTOR_INSTALL_RECORD_FILE))
 }
 
 fn save_install_record(record: &ConnectorInstallRecord) -> Result<()> {
-    let path = install_record_path(&record.manifest.app_id)?;
+    let path = install_record_path(&record.manifest.id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create connector dir {}", parent.display()))?;
@@ -1852,12 +1961,12 @@ fn load_install_records() -> Result<Vec<ConnectorInstallRecord>> {
             Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
         }
     }
-    records.sort_by(|left, right| left.manifest.app_id.cmp(&right.manifest.app_id));
+    records.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
     Ok(records)
 }
 
-fn load_install_record(app_id: &str) -> Result<ConnectorInstallRecord> {
-    let path = install_record_path(app_id)?;
+fn load_install_record(connector_id: &str) -> Result<ConnectorInstallRecord> {
+    let path = install_record_path(connector_id)?;
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read connector install record {}", path.display()))?;
     serde_json::from_str(&content).with_context(|| {
@@ -2019,18 +2128,22 @@ fn connector_path_error_is_retryable(error: &std::io::Error) -> bool {
 }
 
 fn stop_connector_for_package_change(
-    app_id: &str,
+    connector_id: &str,
     config: &crate::config::AgentConfig,
 ) -> Result<()> {
-    let Some(app) = config.local_apps.iter().find(|app| app.app_id == app_id) else {
+    let Some(app) = config
+        .local_apps
+        .iter()
+        .find(|app| app.connector_id == connector_id)
+    else {
         return Ok(());
     };
     match (&app.start_command, &app.stop_command) {
         (_, Some(command)) => {
-            let result = run_start_command(app_id, command, &BTreeMap::new()).map_err(|error| {
+            let result = run_start_command(connector_id, command, &BTreeMap::new()).map_err(|error| {
                 anyhow::Error::new(ConnectorPackageStopError {
                     message: format!(
-                        "failed to stop connector `{app_id}` before package change: {error:#}"
+                        "failed to stop connector `{connector_id}` before package change: {error:#}"
                     ),
                 })
             })?;
@@ -2042,7 +2155,7 @@ fn stop_connector_for_package_change(
                 };
                 return Err(anyhow::Error::new(ConnectorPackageStopError {
                     message: format!(
-                        "failed to stop connector `{app_id}` before package change: {detail}"
+                        "failed to stop connector `{connector_id}` before package change: {detail}"
                     ),
                 }));
             }
@@ -2050,7 +2163,7 @@ fn stop_connector_for_package_change(
         }
         (Some(_), None) => Err(anyhow::Error::new(ConnectorPackageStopError {
             message: format!(
-                "connector `{app_id}` has a start command but no stop command; refusing to change a package that may still be running"
+                "connector `{connector_id}` has a start command but no stop command; refusing to change a package that may still be running"
             ),
         })),
         (None, None) => Ok(()),
@@ -2100,7 +2213,7 @@ fn connector_package_processes(package_path: &Path) -> Result<Vec<u32>> {
         .unwrap_or_else(|_| package_path.to_path_buf());
     let script = r#"
 $prefix = [System.IO.Path]::GetFullPath(
-  $env:BAIJIMU_LOCAL_APP_PACKAGE_TO_RELEASE
+  $env:BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE
 ).TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
   [System.IO.Path]::DirectorySeparatorChar
 Get-CimInstance Win32_Process -ErrorAction Stop |
@@ -2118,7 +2231,7 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
     let output = inspect
         .args(["-NoProfile", "-Command", script])
         .env(
-            "BAIJIMU_LOCAL_APP_PACKAGE_TO_RELEASE",
+            "BAIJIMU_CONNECTOR_PACKAGE_TO_RELEASE",
             package_path.as_os_str(),
         )
         .output()
@@ -2425,7 +2538,7 @@ fn resolve_installed_start_commands(
     manifest: &ConnectorManifest,
     runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<()> {
-    let data_dir = connector_data_dir(&manifest.app_id)?;
+    let data_dir = connector_data_dir(&manifest.id)?;
     let start_policy = manifest
         .runtime
         .as_ref()
@@ -2435,7 +2548,7 @@ fn resolve_installed_start_commands(
     if !matches!(start_policy, "automatic" | "manual") {
         bail!(
             "connector `{}` has unsupported runtime.startPolicy `{start_policy}`",
-            manifest.app_id
+            manifest.id
         );
     }
     if runtime_preparation == ConnectorRuntimePreparation::Prepare {
@@ -2449,22 +2562,17 @@ fn resolve_installed_start_commands(
         fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
     }
     let event_token_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
-        ensure_connector_event_token(&manifest.app_id)?
+        ensure_connector_event_token(&manifest.id)?
     } else {
-        connector_event_token_path(&manifest.app_id)?
-    };
-    let local_app_token_path = if runtime_preparation == ConnectorRuntimePreparation::Prepare {
-        ensure_connector_management_token(&manifest.app_id)?
-    } else {
-        connector_management_token_path(&manifest.app_id)?
+        connector_event_token_path(&manifest.id)?
     };
     let asset_upload_token_path =
         connector_permission_is_active(manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION)
             .then(|| {
                 if runtime_preparation == ConnectorRuntimePreparation::Prepare {
-                    ensure_connector_asset_upload_token(&manifest.app_id)
+                    ensure_connector_asset_upload_token(&manifest.id)
                 } else {
-                    connector_asset_upload_token_path(&manifest.app_id)
+                    connector_asset_upload_token_path(&manifest.id)
                 }
             })
             .transpose()?;
@@ -2500,34 +2608,29 @@ fn resolve_installed_start_commands(
             else {
                 continue;
             };
-            env.insert(LOCAL_APP_ID_ENV.to_string(), manifest.app_id.clone());
             env.insert(
-                LOCAL_APP_DATA_DIR_ENV.to_string(),
+                CONNECTOR_DATA_DIR_ENV.to_string(),
                 data_dir.display().to_string(),
             );
             env.insert(
-                LOCAL_APP_START_POLICY_ENV.to_string(),
+                CONNECTOR_START_POLICY_ENV.to_string(),
                 start_policy.to_string(),
             );
             env.insert(
-                LOCAL_APP_TOKEN_FILE_ENV.to_string(),
-                local_app_token_path.display().to_string(),
-            );
-            env.insert(
-                LOCAL_APP_EVENT_TOKEN_FILE_ENV.to_string(),
+                CONNECTOR_EVENT_TOKEN_FILE_ENV.to_string(),
                 event_token_path.display().to_string(),
             );
             env.insert(
-                LOCAL_APP_EVENT_ENDPOINT_ENV.to_string(),
+                CONNECTOR_EVENT_ENDPOINT_ENV.to_string(),
                 DEFAULT_LOCAL_APP_EVENT_ENDPOINT.to_string(),
             );
             if let Some(asset_upload_token_path) = asset_upload_token_path.as_ref() {
                 env.insert(
-                    LOCAL_APP_ASSET_UPLOAD_TOKEN_FILE_ENV.to_string(),
+                    CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV.to_string(),
                     asset_upload_token_path.display().to_string(),
                 );
                 env.insert(
-                    LOCAL_APP_ASSET_UPLOAD_ENDPOINT_ENV.to_string(),
+                    CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV.to_string(),
                     DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT.to_string(),
                 );
             }
@@ -3570,7 +3673,7 @@ fn local_app_from_services(
             if !method_names.insert(method.name.clone()) {
                 bail!(
                     "connector `{}` declares duplicate local app method `{}` across service registrations",
-                    manifest.app_id,
+                    manifest.id,
                     method.name
                 );
             }
@@ -3582,7 +3685,7 @@ fn local_app_from_services(
             if !event_names.insert(event.name.clone()) {
                 bail!(
                     "connector `{}` declares duplicate local app event `{}` across service registrations",
-                    manifest.app_id,
+                    manifest.id,
                     event.name
                 );
             }
@@ -3593,12 +3696,12 @@ fn local_app_from_services(
     if methods.is_empty() && events.is_empty() {
         bail!(
             "connector `{}` must declare at least one local app method or event",
-            manifest.app_id
+            manifest.id
         );
     }
 
     Ok(LocalAppConfig {
-        app_id: manifest.app_id.clone(),
+        connector_id: manifest.id.clone(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         description: manifest.description.clone(),
@@ -3607,21 +3710,21 @@ fn local_app_from_services(
             services
                 .iter()
                 .filter_map(|service| service.health_check.as_ref()),
-            &manifest.app_id,
+            &manifest.id,
             "healthCheck",
         )?,
         start_command: common_lifecycle_value(
             services
                 .iter()
                 .filter_map(|service| service.start_command.as_ref()),
-            &manifest.app_id,
+            &manifest.id,
             "startCommand",
         )?,
         stop_command: common_lifecycle_value(
             services
                 .iter()
                 .filter_map(|service| service.stop_command.as_ref()),
-            &manifest.app_id,
+            &manifest.id,
             "stopCommand",
         )?,
         methods,
@@ -3631,7 +3734,7 @@ fn local_app_from_services(
 
 fn common_lifecycle_value<'a, T>(
     values: impl Iterator<Item = &'a T>,
-    app_id: &str,
+    connector_id: &str,
     field: &str,
 ) -> Result<Option<T>>
 where
@@ -3648,7 +3751,7 @@ where
         .any(|candidate| serde_json::to_value(candidate).ok().as_ref() != Some(&expected))
     {
         bail!(
-            "connector `{app_id}` declares conflicting `{field}` values; lifecycle belongs to the local app and must be identical across registrations"
+            "connector `{connector_id}` declares conflicting `{field}` values; lifecycle belongs to the local app and must be identical across registrations"
         );
     }
     Ok(Some((*first).clone()))
@@ -3661,7 +3764,7 @@ fn upsert_local_app(
 ) -> Result<()> {
     match local_apps
         .iter()
-        .position(|candidate| candidate.app_id == local_app.app_id)
+        .position(|candidate| candidate.connector_id == local_app.connector_id)
     {
         Some(index) if replace => {
             local_apps[index] = local_app;
@@ -3669,7 +3772,7 @@ fn upsert_local_app(
         }
         Some(_) => bail!(
             "local app `{}` already exists; pass --replace to overwrite",
-            local_app.app_id
+            local_app.connector_id
         ),
         None => {
             local_apps.push(local_app);
@@ -3681,7 +3784,7 @@ fn upsert_local_app(
 fn upsert_synced_local_app(local_apps: &mut Vec<LocalAppConfig>, mut local_app: LocalAppConfig) {
     match local_apps
         .iter()
-        .position(|candidate| candidate.app_id == local_app.app_id)
+        .position(|candidate| candidate.connector_id == local_app.connector_id)
     {
         Some(index) => {
             local_app.enabled = local_apps[index].enabled;
@@ -3703,7 +3806,7 @@ fn legacy_autostart_labels_for_manifest(manifest: &ConnectorManifest) -> Vec<Str
     // not record it in connector.json. Keep the migration explicit so an
     // upgraded Bridge Agent can remove the old unsigned Python launcher before
     // the Connector package itself is upgraded.
-    if manifest.app_id == "com.baijimu.connector.wechat"
+    if manifest.id == "com.baijimu.connector.wechat"
         && !labels
             .iter()
             .any(|label| label == "com.baijimu.wechat-bridge-collector")
@@ -3712,8 +3815,8 @@ fn legacy_autostart_labels_for_manifest(manifest: &ConnectorManifest) -> Vec<Str
     }
     for value in manifest.hooks.values() {
         if value.contains("install-autostart") {
-            if !labels.contains(&manifest.app_id) {
-                labels.push(manifest.app_id.clone());
+            if !labels.contains(&manifest.id) {
+                labels.push(manifest.id.clone());
             }
             break;
         }
@@ -3764,16 +3867,16 @@ fn cleanup_legacy_autostart_label(label: &str) {
 }
 
 fn run_start_command(
-    app_id: &str,
+    connector_id: &str,
     command: &ServiceStartCommand,
     additional_env: &BTreeMap<String, String>,
 ) -> Result<ConnectorLifecycleResult> {
     let user_path = current_user_command_path();
-    run_start_command_with_user_path(app_id, command, additional_env, user_path.as_deref())
+    run_start_command_with_user_path(connector_id, command, additional_env, user_path.as_deref())
 }
 
 fn run_start_command_with_user_path(
-    app_id: &str,
+    connector_id: &str,
     command: &ServiceStartCommand,
     additional_env: &BTreeMap<String, String>,
     user_path: Option<&str>,
@@ -3786,7 +3889,7 @@ fn run_start_command_with_user_path(
             timeout_secs,
         } => {
             if command.is_empty() {
-                bail!("lifecycle command for local app `{app_id}` is empty");
+                bail!("lifecycle command for local app `{connector_id}` is empty");
             }
             let mut lifecycle_env = env.clone();
             lifecycle_env.extend(additional_env.clone());
@@ -3804,32 +3907,32 @@ fn run_start_command_with_user_path(
             }
             child.envs(&lifecycle_env);
             let stdout_capture = tempfile::NamedTempFile::new().with_context(|| {
-                format!("failed to create stdout capture for local app `{app_id}`")
+                format!("failed to create stdout capture for local app `{connector_id}`")
             })?;
             let stderr_capture = tempfile::NamedTempFile::new().with_context(|| {
-                format!("failed to create stderr capture for local app `{app_id}`")
+                format!("failed to create stderr capture for local app `{connector_id}`")
             })?;
             child
                 .stdout(Stdio::from(stdout_capture.reopen().with_context(|| {
-                    format!("failed to open stdout capture for local app `{app_id}`")
+                    format!("failed to open stdout capture for local app `{connector_id}`")
                 })?))
                 .stderr(Stdio::from(stderr_capture.reopen().with_context(|| {
-                    format!("failed to open stderr capture for local app `{app_id}`")
+                    format!("failed to open stderr capture for local app `{connector_id}`")
                 })?));
             let mut child = child.spawn().with_context(|| {
-                format!("failed to run lifecycle command for local app `{app_id}`")
+                format!("failed to run lifecycle command for local app `{connector_id}`")
             })?;
             let deadline = Instant::now() + Duration::from_secs(timeout_secs.unwrap_or(20).max(1));
             let (status, timed_out) = loop {
                 if let Some(status) = child.try_wait().with_context(|| {
-                    format!("failed to wait for local app `{app_id}` lifecycle command")
+                    format!("failed to wait for local app `{connector_id}` lifecycle command")
                 })? {
                     break (status, false);
                 }
                 if Instant::now() >= deadline {
                     terminate_lifecycle_process_tree(&mut child);
                     let status = child.wait().with_context(|| {
-                        format!("failed to reap timed out local app `{app_id}` command")
+                        format!("failed to reap timed out local app `{connector_id}` command")
                     })?;
                     break (status, true);
                 }
@@ -3842,8 +3945,8 @@ fn run_start_command_with_user_path(
             // owns the write end. Regular files make launcher completion and
             // output collection independent, and the bounded read prevents an
             // untrusted lifecycle command from exhausting host memory.
-            let stdout = read_lifecycle_capture(app_id, "stdout", &stdout_capture)?;
-            let mut stderr = read_lifecycle_capture(app_id, "stderr", &stderr_capture)?;
+            let stdout = read_lifecycle_capture(connector_id, "stdout", &stdout_capture)?;
+            let mut stderr = read_lifecycle_capture(connector_id, "stderr", &stderr_capture)?;
             if timed_out {
                 stderr.extend_from_slice(
                     format!(
@@ -3854,7 +3957,7 @@ fn run_start_command_with_user_path(
                 );
             }
             Ok(ConnectorLifecycleResult {
-                app_id: app_id.to_string(),
+                connector_id: connector_id.to_string(),
                 configured: true,
                 exit_code: if timed_out { None } else { status.code() },
                 stdout: String::from_utf8_lossy(&stdout).to_string(),
@@ -3865,17 +3968,19 @@ fn run_start_command_with_user_path(
 }
 
 fn read_lifecycle_capture(
-    app_id: &str,
+    connector_id: &str,
     stream_name: &str,
     capture: &tempfile::NamedTempFile,
 ) -> Result<Vec<u8>> {
     let file = capture.reopen().with_context(|| {
-        format!("failed to read {stream_name} capture for local app `{app_id}`")
+        format!("failed to read {stream_name} capture for local app `{connector_id}`")
     })?;
     let mut bytes = Vec::new();
     file.take(LIFECYCLE_OUTPUT_MAX_BYTES + 1)
         .read_to_end(&mut bytes)
-        .with_context(|| format!("failed to collect {stream_name} for local app `{app_id}`"))?;
+        .with_context(|| {
+            format!("failed to collect {stream_name} for local app `{connector_id}`")
+        })?;
     if bytes.len() as u64 > LIFECYCLE_OUTPUT_MAX_BYTES {
         bytes.truncate(LIFECYCLE_OUTPUT_MAX_BYTES as usize);
         bytes.extend_from_slice(b"\n[output truncated by Bridge Agent]");
@@ -3955,13 +4060,14 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .transpose()
         .unwrap_or_default();
     ConnectorSummary {
-        app_id: record.manifest.app_id,
+        id: record.manifest.id,
         name: record.manifest.name,
         version: record.manifest.version,
         package_path: record.package_path,
         source_path: record.source_path,
         source_reference: record.source_reference,
-        review_status: record.review_status,
+        trust_level: record.trust_level,
+        market_app_id: record.market_app_id,
         source_checksum: record.source_checksum,
         package_checksum: record.package_checksum,
         icon_data_url,
@@ -3980,8 +4086,8 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
     }
 }
 
-fn ensure_connector_event_token(app_id: &str) -> Result<PathBuf> {
-    let path = connector_event_token_path(app_id)?;
+fn ensure_connector_event_token(connector_id: &str) -> Result<PathBuf> {
+    let path = connector_event_token_path(connector_id)?;
     if path.exists() {
         return Ok(path);
     }
@@ -4001,44 +4107,8 @@ fn ensure_connector_event_token(app_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn ensure_connector_management_token(app_id: &str) -> Result<PathBuf> {
-    let path = connector_management_token_path(app_id)?;
-    if path.exists() {
-        let token = fs::read_to_string(&path).with_context(|| {
-            format!(
-                "failed to read connector management token {}",
-                path.display()
-            )
-        })?;
-        if token.trim().len() < 32 {
-            bail!("connector management token is invalid: {}", path.display());
-        }
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        return Ok(path);
-    }
-    let parent = path
-        .parent()
-        .context("connector management token path has no parent")?;
-    fs::create_dir_all(parent)?;
-    let token = format!(
-        "bjm_app_{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
-    fs::write(&path, format!("{token}\n")).with_context(|| {
-        format!(
-            "failed to write connector management token {}",
-            path.display()
-        )
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    Ok(path)
-}
-
-fn ensure_connector_asset_upload_token(app_id: &str) -> Result<PathBuf> {
-    let path = connector_asset_upload_token_path(app_id)?;
+fn ensure_connector_asset_upload_token(connector_id: &str) -> Result<PathBuf> {
+    let path = connector_asset_upload_token_path(connector_id)?;
     if path.exists() {
         return Ok(path);
     }
@@ -4093,7 +4163,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AgentConfig;
+    use crate::config::{AgentConfig, MethodBinding};
     use image::{DynamicImage, Rgba, RgbaImage};
     use serde_json::json;
     use std::ffi::OsString;
@@ -4119,38 +4189,10 @@ mod tests {
         })
     }
 
-    fn test_manifest(app_id: &str, name: &str, version: &str) -> Value {
-        #[cfg(windows)]
-        let (command, args): (&str, &[&str]) = ("cmd.exe", &["/C", "exit", "0"]);
-        #[cfg(not(windows))]
-        let (command, args): (&str, &[&str]) = ("/usr/bin/true", &["--"]);
-        let mut manifest = test_manifest_with_command(app_id, name, version, command, args);
-        manifest["runtime"]["stopArgs"] = json!(args);
-        manifest
-    }
-
-    fn test_manifest_with_command(
-        app_id: &str,
-        name: &str,
-        version: &str,
-        command: &str,
-        args: &[&str],
-    ) -> Value {
-        json!({
-            "schemaVersion": "3.0.0",
-            "appId": app_id,
-            "name": name,
-            "version": version,
-            "runtime": { "type": "process", "command": command, "args": args },
-            "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
-            "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
-        })
-    }
-
     #[test]
     fn local_app_automatic_start_requires_enabled_lifecycle_command() {
         let mut app = LocalAppConfig {
-            app_id: "com.baijimu.connector.test".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
             name: "Test".to_string(),
             version: "1.0.0".to_string(),
             description: String::new(),
@@ -4160,7 +4202,7 @@ mod tests {
                 command: vec!["test-connector".to_string(), "start".to_string()],
                 cwd: None,
                 env: BTreeMap::from([(
-                    LOCAL_APP_START_POLICY_ENV.to_string(),
+                    CONNECTOR_START_POLICY_ENV.to_string(),
                     "automatic".to_string(),
                 )]),
                 timeout_secs: None,
@@ -4177,7 +4219,7 @@ mod tests {
         let Some(ServiceStartCommand::ShellCommand { env, .. }) = app.start_command.as_mut() else {
             panic!("expected shell start command");
         };
-        env.insert(LOCAL_APP_START_POLICY_ENV.to_string(), "manual".to_string());
+        env.insert(CONNECTOR_START_POLICY_ENV.to_string(), "manual".to_string());
         assert!(!local_app_starts_automatically(&app));
         app.start_command = None;
         assert!(!local_app_starts_automatically(&app));
@@ -4192,27 +4234,25 @@ mod tests {
     impl Drop for ConnectorTestEnvGuard {
         fn drop(&mut self) {
             if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var("BRIDGE_AGENT_LOCAL_APPS_DIR", previous);
+                std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", previous);
             } else {
-                std::env::remove_var("BRIDGE_AGENT_LOCAL_APPS_DIR");
+                std::env::remove_var("BRIDGE_AGENT_CONNECTORS_DIR");
             }
             if let Some(previous) = self.previous_data.as_ref() {
-                std::env::set_var("BRIDGE_AGENT_LOCAL_APP_DATA_DIR", previous);
+                std::env::set_var("BRIDGE_AGENT_CONNECTOR_DATA_DIR", previous);
             } else {
-                std::env::remove_var("BRIDGE_AGENT_LOCAL_APP_DATA_DIR");
+                std::env::remove_var("BRIDGE_AGENT_CONNECTOR_DATA_DIR");
             }
         }
     }
 
     fn connector_test_env(path: impl AsRef<Path>) -> ConnectorTestEnvGuard {
-        let lock = CONNECTOR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var_os("BRIDGE_AGENT_LOCAL_APPS_DIR");
-        let previous_data = std::env::var_os("BRIDGE_AGENT_LOCAL_APP_DATA_DIR");
-        std::env::set_var("BRIDGE_AGENT_LOCAL_APPS_DIR", path.as_ref());
+        let lock = CONNECTOR_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("BRIDGE_AGENT_CONNECTORS_DIR");
+        let previous_data = std::env::var_os("BRIDGE_AGENT_CONNECTOR_DATA_DIR");
+        std::env::set_var("BRIDGE_AGENT_CONNECTORS_DIR", path.as_ref());
         std::env::set_var(
-            "BRIDGE_AGENT_LOCAL_APP_DATA_DIR",
+            "BRIDGE_AGENT_CONNECTOR_DATA_DIR",
             path.as_ref().join("data"),
         );
         ConnectorTestEnvGuard {
@@ -4223,13 +4263,13 @@ mod tests {
     }
 
     #[test]
-    fn connector_manifest_rejects_retired_service_registration_files() {
+    fn connector_manifest_loads_service_registration_files() {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.test",
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.test",
                 "name": "Test Connector",
                 "version": "0.1.0",
                 "serviceRegistrationFiles": ["service-registration.json"]
@@ -4237,27 +4277,69 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let error = load_connector_manifest(dir.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("serviceRegistrationFiles"));
+        fs::write(
+            dir.path().join("service-registration.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "testService",
+                "description": "Test service.",
+                "transport": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18082"
+                },
+                "methods": [{
+                    "name": "ping",
+                    "description": "Ping.",
+                    "path": "/invoke/ping"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = load_connector_manifest(dir.path()).unwrap();
+        let registrations = load_connector_service_registrations(dir.path(), &manifest).unwrap();
+        assert_eq!(registrations.len(), 1);
+        let service = registrations
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_service_config()
+            .unwrap();
+        assert_eq!(service.name, "testService");
+        match &service.methods[0].binding {
+            MethodBinding::Http(binding) => {
+                assert_eq!(binding.url, "http://127.0.0.1:18082/invoke/ping");
+            }
+            other => panic!("unexpected binding: {other:?}"),
+        }
     }
 
     #[test]
     fn connector_manifest_accepts_loopback_management_operations() {
         let dir = tempdir().unwrap();
-        let mut document = test_manifest(
-            "com.baijimu.connector.managed",
-            "Managed Connector",
-            "0.1.0",
-        );
-        document["management"] = json!({
-            "type": "http",
-            "baseUrl": "http://127.0.0.1:18110",
-            "auth": { "type": "connector_token" },
-            "operations": { "state": { "method": "GET", "path": "/management/v1/state" } }
-        });
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&document).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.managed",
+                "name": "Managed Connector",
+                "version": "0.1.0",
+                "management": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18110",
+                    "auth": { "type": "connector_token" },
+                    "operations": {
+                        "state": { "method": "GET", "path": "/management/v1/state" }
+                    }
+                },
+                "services": [{
+                    "name": "managedService",
+                    "description": "Managed service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -4273,8 +4355,8 @@ mod tests {
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.setup",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.setup",
                 "name": "Setup Connector",
                 "version": "1.0.0",
                 "runtime": {
@@ -4312,8 +4394,8 @@ mod tests {
     #[test]
     fn connector_manifest_rejects_setup_without_declared_status_operation() {
         let manifest: ConnectorManifest = serde_json::from_value(json!({
-            "schemaVersion": "3.0.0",
-            "appId": "com.baijimu.connector.bad-setup",
+            "schemaVersion": "2.0",
+            "id": "com.baijimu.connector.bad-setup",
             "name": "Bad Setup Connector",
             "version": "1.0.0",
             "runtime": { "type": "process", "command": "bad-setup" },
@@ -4342,8 +4424,8 @@ mod tests {
     fn connector_manifest_enforces_host_version_and_capabilities() {
         let manifest = |requirements: Value| {
             serde_json::from_value::<ConnectorManifest>(json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.host-requirements",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-requirements",
                 "name": "Host Requirements Connector",
                 "version": "1.0.0",
                 "runtime": { "type": "process", "command": "example" },
@@ -4377,8 +4459,8 @@ mod tests {
     fn connector_manifest_validates_managed_tool_dependencies() {
         let manifest = |dependency: Value, capabilities: Value, runtime_env: Value| {
             serde_json::from_value::<ConnectorManifest>(json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.managed-tool",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.managed-tool",
                 "name": "Managed Tool Connector",
                 "version": "1.0.0",
                 "runtime": {
@@ -4397,7 +4479,7 @@ mod tests {
             .unwrap()
         };
         let dependency = json!({
-            "id": "baijimu-cli",
+            "id": "com.baijimu.cli",
             "minimumVersion": "0.1.45",
             "requiredFor": ["install", "start"],
             "executablePathEnv": "CODEX_CONNECTOR_BAIJIMU_BINARY"
@@ -4438,8 +4520,8 @@ mod tests {
     fn connector_manifest_validates_host_managed_process_contract() {
         let manifest = |stop_args: Value| {
             serde_json::from_value::<ConnectorManifest>(json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.host-managed",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-managed",
                 "name": "Host Managed Connector",
                 "version": "1.0.0",
                 "runtime": {
@@ -4477,8 +4559,8 @@ mod tests {
     fn connector_manifest_validates_database_migration_contract() {
         let manifest = |database: Value| {
             serde_json::from_value::<ConnectorManifest>(json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.database-contract",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.database-contract",
                 "name": "Database Contract Connector",
                 "version": "1.0.0",
                 "runtime": { "type": "process", "command": "database-contract" },
@@ -4546,8 +4628,8 @@ mod tests {
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.host-start",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.host-start",
                 "name": "Host Start Connector",
                 "version": "1.0.0",
                 "runtime": {
@@ -4576,8 +4658,8 @@ mod tests {
     #[test]
     fn connector_manifest_accepts_existing_camel_case_permission_id() {
         let manifest: ConnectorManifest = serde_json::from_value(json!({
-            "schemaVersion": "3.0.0",
-            "appId": "com.baijimu.connector.wecom",
+            "schemaVersion": "2.0",
+            "id": "com.baijimu.connector.wecom",
             "name": "WeCom Connector",
             "version": "1.0.2",
             "runtime": { "type": "process", "command": "wecom-bridge-collector-python" },
@@ -4602,8 +4684,8 @@ mod tests {
             "macos.fullDiskAccess/legacy",
         ] {
             let manifest: ConnectorManifest = serde_json::from_value(json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.invalid-permission",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.invalid-permission",
                 "name": "Invalid Permission Connector",
                 "version": "1.0.0",
                 "runtime": { "type": "process", "command": "invalid-permission" },
@@ -4627,21 +4709,28 @@ mod tests {
         fs::write(dir.path().join("ui/index.html"), "<main>settings</main>").unwrap();
         fs::write(dir.path().join("ui/assets/app.js"), "window.loaded = true;").unwrap();
         fs::write(dir.path().join("private.txt"), "not a UI asset").unwrap();
-        let mut document = test_manifest(
-            "com.baijimu.connector.with-ui",
-            "Connector With UI",
-            "0.1.0",
-        );
-        document["icon"] = test_connector_icon();
-        document["ui"] = json!({
-            "type": "embedded",
-            "entry": "ui/index.html",
-            "title": "个性化设置",
-            "defaultView": true
-        });
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&document).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.1",
+                "id": "com.baijimu.connector.with-ui",
+                "name": "Connector With UI",
+                "version": "0.1.0",
+                "icon": test_connector_icon(),
+                "ui": {
+                    "type": "embedded",
+                    "entry": "ui/index.html",
+                    "title": "个性化设置",
+                    "defaultView": true
+                },
+                "services": [{
+                    "name": "withUiService",
+                    "description": "UI test service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -4665,11 +4754,18 @@ mod tests {
 
     #[test]
     fn connector_manifest_rejects_invalid_icon_contracts() {
-        let base = test_manifest(
-            "com.baijimu.connector.bad-icon",
-            "Bad Icon Connector",
-            "0.1.0",
-        );
+        let base = json!({
+            "schemaVersion": "1.1",
+            "id": "com.baijimu.connector.bad-icon",
+            "name": "Bad Icon Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badIconService",
+                "description": "Bad icon test service.",
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }]
+        });
 
         let mut wrong_media_type = base.clone();
         wrong_media_type["icon"] = test_connector_icon();
@@ -4712,7 +4808,18 @@ mod tests {
     fn connector_manifest_rejects_missing_or_escaping_ui_entry() {
         let dir = tempdir().unwrap();
         let manifest_path = dir.path().join(CONNECTOR_MANIFEST_FILE);
-        let base = test_manifest("com.baijimu.connector.bad-ui", "Bad UI Connector", "0.1.0");
+        let base = json!({
+            "schemaVersion": "1.1",
+            "id": "com.baijimu.connector.bad-ui",
+            "name": "Bad UI Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badUiService",
+                "description": "Bad UI service.",
+                "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+            }]
+        });
 
         let mut missing = base.clone();
         missing["ui"] = json!({ "type": "embedded", "entry": "ui/missing.html" });
@@ -4750,6 +4857,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("dedicated UI directory"));
+
+        let mut legacy_schema = base;
+        legacy_schema["schemaVersion"] = json!("1.0");
+        legacy_schema["ui"] = json!({ "type": "embedded", "entry": "ui/index.html" });
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&legacy_schema).unwrap(),
+        )
+        .unwrap();
+        assert!(load_connector_manifest(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("requires schemaVersion 1.1 or newer"));
     }
 
     #[test]
@@ -4763,21 +4883,28 @@ mod tests {
             "<!doctype html><title>UI</title>",
         )
         .unwrap();
-        let mut document = test_manifest(
-            "com.baijimu.connector.installed-ui",
-            "Installed UI Connector",
-            "0.1.0",
-        );
-        document["icon"] = test_connector_icon();
-        document["ui"] = json!({
-            "type": "embedded",
-            "entry": "ui/index.html",
-            "title": "设置",
-            "defaultView": true
-        });
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&document).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.1",
+                "id": "com.baijimu.connector.installed-ui",
+                "name": "Installed UI Connector",
+                "version": "0.1.0",
+                "icon": test_connector_icon(),
+                "ui": {
+                    "type": "embedded",
+                    "entry": "ui/index.html",
+                    "title": "设置",
+                    "defaultView": true
+                },
+                "services": [{
+                    "name": "installedUiService",
+                    "description": "Installed UI service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
         )
         .unwrap();
         let config_path = dir.path().join("agent-config.json");
@@ -4798,33 +4925,39 @@ mod tests {
         assert_eq!(ui.entry, "ui/index.html");
         assert_eq!(ui.title.as_deref(), Some("设置"));
         assert!(ui.default_view);
-        assert_eq!(summary.review_status, "DRAFT");
+        assert_eq!(summary.trust_level, ConnectorTrustLevel::UserTrusted);
         assert!(summary
             .package_checksum
             .as_deref()
             .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71));
 
         let market_checksum = format!("sha256:{}", "a".repeat(64));
-        let provenance = ConnectorInstallProvenance::registered(
+        let provenance = ConnectorInstallProvenance::platform_trusted(
             "https://downloads.example.test/connector.zip",
-            "PUBLISHED",
+            "market-app-1",
             &market_checksum,
         )
         .unwrap();
         install_connector_from_path_with_provenance(&source, &config_path, true, provenance)
             .unwrap();
         let trusted = list_connectors().unwrap().remove(0);
-        assert_eq!(trusted.app_id, "com.baijimu.connector.installed-ui");
-        assert_eq!(trusted.review_status, "PUBLISHED");
+        assert_eq!(trusted.trust_level, ConnectorTrustLevel::PlatformTrusted);
+        assert_eq!(trusted.market_app_id.as_deref(), Some("market-app-1"));
         assert_eq!(
             trusted.source_checksum.as_deref(),
             Some(market_checksum.as_str())
         );
 
-        assert_eq!(
-            show_connector(&trusted.app_id).unwrap().manifest.app_id,
-            trusted.app_id
-        );
+        let mut legacy = serde_json::to_value(show_connector(&trusted.id).unwrap()).unwrap();
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("trustLevel");
+        legacy.remove("marketAppId");
+        legacy.remove("sourceChecksum");
+        legacy.remove("packageChecksum");
+        let legacy: ConnectorInstallRecord =
+            serde_json::from_value(serde_json::Value::Object(legacy.clone())).unwrap();
+        assert_eq!(legacy.trust_level, ConnectorTrustLevel::UserTrusted);
+        assert!(legacy.market_app_id.is_none());
     }
 
     #[test]
@@ -4836,8 +4969,8 @@ mod tests {
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.review-contract",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.review-contract",
                 "name": "Review Contract Connector",
                 "version": "1.0.0",
                 "runtime": { "type": "process", "command": "review-contract" },
@@ -4886,36 +5019,45 @@ mod tests {
     }
 
     #[test]
-    fn registered_provenance_requires_review_status_source_and_sha256_evidence() {
-        assert!(ConnectorInstallProvenance::registered(
+    fn platform_trusted_provenance_requires_complete_sha256_evidence() {
+        assert!(ConnectorInstallProvenance::platform_trusted(
             "https://downloads.example.test/connector.zip",
-            "PUBLISHED",
+            "market-app-1",
             "invalid",
         )
         .is_err());
-        assert!(ConnectorInstallProvenance::registered("", "PUBLISHED", &"a".repeat(64)).is_err());
-        assert!(ConnectorInstallProvenance::registered(
-            "https://downloads.example.test/connector.zip",
-            "",
-            &"a".repeat(64),
-        )
-        .is_err());
+        assert!(
+            ConnectorInstallProvenance::platform_trusted("", "market-app-1", &"a".repeat(64),)
+                .is_err()
+        );
     }
 
     #[test]
     fn connector_manifest_rejects_remote_management_url() {
         let dir = tempdir().unwrap();
-        let mut document =
-            test_manifest("com.baijimu.connector.unsafe", "Unsafe Connector", "0.1.0");
-        document["management"] = json!({
-            "type": "http",
-            "baseUrl": "https://example.com",
-            "auth": { "type": "connector_token" },
-            "operations": { "state": { "method": "GET", "path": "/management/v1/state" } }
-        });
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&document).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.unsafe",
+                "name": "Unsafe Connector",
+                "version": "0.1.0",
+                "management": {
+                    "type": "http",
+                    "baseUrl": "https://example.com",
+                    "auth": { "type": "connector_token" },
+                    "operations": {
+                        "state": { "method": "GET", "path": "/management/v1/state" }
+                    }
+                },
+                "services": [{
+                    "name": "unsafeService",
+                    "description": "Unsafe service.",
+                    "transport": { "type": "http", "baseUrl": "http://127.0.0.1:18110" },
+                    "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }]
+                }]
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -4952,49 +5094,65 @@ mod tests {
         save_config(&config_path, &AgentConfig::example()).unwrap();
         let source = dir.path().join("connector");
         fs::create_dir_all(&source).unwrap();
-        let mut document = test_manifest_with_command(
-            "com.baijimu.connector.inline",
-            "Inline Connector",
-            "0.1.0",
-            "connector-test",
-            &["start"],
-        );
-        document["hostRequirements"] = json!({
-            "minimumVersion": env!("CARGO_PKG_VERSION"),
-            "capabilities": ["connector.asset-upload.v1"]
-        });
-        document["permissions"] = json!([{ "id": "assets.upload", "title": "Upload assets" }]);
-        document["transport"] = json!({ "type": "http", "baseUrl": "http://127.0.0.1:18082" });
-        document["methods"] =
-            json!([{ "name": "invoke", "description": "Invoke.", "path": "/invoke" }]);
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&document).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.2",
+                "id": "com.baijimu.connector.inline",
+                "name": "Inline Connector",
+                "version": "0.1.0",
+                "hostRequirements": {
+                    "minimumVersion": env!("CARGO_PKG_VERSION"),
+                    "capabilities": ["connector.asset-upload.v1"]
+                },
+                "permissions": [{
+                    "id": "assets.upload",
+                    "title": "Upload assets"
+                }],
+                "services": [{
+                    "name": "inlineService",
+                    "description": "Inline service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["connector-test", "start"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
+            .unwrap(),
         )
         .unwrap();
 
         let result = install_connector_from_path(&source, &config_path, false).unwrap();
-        assert_eq!(result.app_id, "com.baijimu.connector.inline");
+        assert_eq!(result.connector_id, "com.baijimu.connector.inline");
         assert_eq!(result.method_names, vec!["invoke".to_string()]);
         let config = load_config(&config_path).unwrap();
         assert!(config
             .local_apps
             .iter()
-            .any(|app| app.app_id == "com.baijimu.connector.inline"));
+            .any(|app| app.connector_id == "com.baijimu.connector.inline"));
         let app = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.inline")
+            .find(|app| app.connector_id == "com.baijimu.connector.inline")
             .unwrap();
         let crate::config::ServiceStartCommand::ShellCommand { env, .. } =
             app.start_command.as_ref().unwrap();
         assert_eq!(
-            env.get(LOCAL_APP_ASSET_UPLOAD_ENDPOINT_ENV)
+            env.get(CONNECTOR_ASSET_UPLOAD_ENDPOINT_ENV)
                 .map(String::as_str),
             Some(DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT)
         );
         let token_path = env
-            .get(LOCAL_APP_ASSET_UPLOAD_TOKEN_FILE_ENV)
+            .get(CONNECTOR_ASSET_UPLOAD_TOKEN_FILE_ENV)
             .map(PathBuf::from)
             .unwrap();
         assert!(
@@ -5011,7 +5169,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_installs_one_local_app_without_runtime_service() {
+    fn schema_v2_installs_one_local_app_without_runtime_service() {
         let dir = tempdir().unwrap();
         let _env = connector_test_env(dir.path().join("connectors"));
         let config_path = dir.path().join("agent-config.json");
@@ -5021,8 +5179,8 @@ mod tests {
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
             serde_json::to_string_pretty(&json!({
-                "schemaVersion": "3.0.0",
-                "appId": "com.baijimu.connector.v2-test",
+                "schemaVersion": "2.0",
+                "id": "com.baijimu.connector.v2-test",
                 "name": "V2 Connector",
                 "version": "1.0.0",
                 "runtime": {
@@ -5049,7 +5207,7 @@ mod tests {
         .unwrap();
 
         let result = install_connector_from_path(&source, &config_path, false).unwrap();
-        assert_eq!(result.app_id, "com.baijimu.connector.v2-test");
+        assert_eq!(result.connector_id, "com.baijimu.connector.v2-test");
         assert_eq!(result.method_names, vec!["invoke".to_string()]);
         assert_eq!(result.event_names, vec!["changed".to_string()]);
 
@@ -5058,7 +5216,7 @@ mod tests {
             config
                 .local_apps
                 .iter()
-                .filter(|app| app.app_id == "com.baijimu.connector.v2-test")
+                .filter(|app| app.connector_id == "com.baijimu.connector.v2-test")
                 .count(),
             1
         );
@@ -5072,7 +5230,7 @@ mod tests {
         );
 
         let record = load_install_record("com.baijimu.connector.v2-test").unwrap();
-        assert_eq!(record.manifest.app_id, "com.baijimu.connector.v2-test");
+        assert!(record.legacy_service_names.is_empty());
     }
 
     #[test]
@@ -5086,11 +5244,25 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest(
-                "com.baijimu.connector.uninstall-test",
-                "Uninstall Test Connector",
-                "0.1.0",
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.uninstall-test",
+                "name": "Uninstall Test Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "uninstallTestService",
+                    "description": "Uninstall test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18121"
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5108,7 +5280,7 @@ mod tests {
             .unwrap()
             .local_apps
             .iter()
-            .any(|app| app.app_id == "com.baijimu.connector.uninstall-test"));
+            .any(|app| app.connector_id == "com.baijimu.connector.uninstall-test"));
     }
 
     #[test]
@@ -5122,11 +5294,25 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest(
-                "com.baijimu.connector.force-uninstall-test",
-                "Force Uninstall Test Connector",
-                "0.1.0",
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.force-uninstall-test",
+                "name": "Force Uninstall Test Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "forceUninstallTestService",
+                    "description": "Force uninstall test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18131"
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5136,7 +5322,7 @@ mod tests {
         let app = config
             .local_apps
             .iter_mut()
-            .find(|app| app.app_id == "com.baijimu.connector.force-uninstall-test")
+            .find(|app| app.connector_id == "com.baijimu.connector.force-uninstall-test")
             .unwrap();
         app.start_command = Some(failing_test_command());
         app.stop_command = Some(failing_test_command());
@@ -5377,13 +5563,29 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         let manifest_path = source.join(CONNECTOR_MANIFEST_FILE);
         let manifest = |version: &str| {
-            test_manifest_with_command(
-                "com.baijimu.connector.lifecycle-test",
-                "Lifecycle Test Connector",
-                version,
-                "connector-test",
-                &["start"],
-            )
+            json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.lifecycle-test",
+                "name": "Lifecycle Test Connector",
+                "version": version,
+                "services": [{
+                    "name": "lifecycleTestService",
+                    "description": "Lifecycle test service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18122"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["connector-test", "start"]
+                    },
+                    "methods": [{
+                        "name": "ping",
+                        "description": "Ping.",
+                        "path": "/invoke/ping"
+                    }]
+                }]
+            })
         };
         fs::write(
             &manifest_path,
@@ -5450,11 +5652,25 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest(
-                "com.baijimu.connector.resync",
-                "Resync Connector",
-                "0.1.0",
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.resync",
+                "name": "Resync Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "resyncService",
+                    "description": "Resync service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5486,7 +5702,7 @@ mod tests {
         let summary = list_connectors()
             .unwrap()
             .into_iter()
-            .find(|connector| connector.app_id == "com.baijimu.connector.resync")
+            .find(|connector| connector.id == "com.baijimu.connector.resync")
             .unwrap();
         assert_eq!(summary.source_reference, second.source_reference);
         assert_eq!(
@@ -5517,13 +5733,29 @@ mod tests {
         fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.bin",
-                "Bin Connector",
-                "0.1.0",
-                "test-connector",
-                &["--port", "18082"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.bin",
+                "name": "Bin Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "binService",
+                    "description": "Bin service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5534,7 +5766,7 @@ mod tests {
         let service = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.bin")
+            .find(|app| app.connector_id == "com.baijimu.connector.bin")
             .unwrap();
         let ServiceStartCommand::ShellCommand {
             command, cwd, env, ..
@@ -5547,17 +5779,13 @@ mod tests {
         assert_eq!(command[2], "--port");
         assert_eq!(cwd.as_deref(), Some(package_path.to_str().unwrap()));
         assert_eq!(
-            env.get(LOCAL_APP_DATA_DIR_ENV).map(String::as_str),
+            env.get(CONNECTOR_DATA_DIR_ENV).map(String::as_str),
             Some(
                 connector_data_dir("com.baijimu.connector.bin")
                     .unwrap()
                     .to_str()
                     .unwrap()
             )
-        );
-        assert_eq!(
-            env.get(LOCAL_APP_ID_ENV).map(String::as_str),
-            Some("com.baijimu.connector.bin")
         );
         assert!(!env.contains_key("PATH"));
 
@@ -5566,7 +5794,7 @@ mod tests {
         let prepared_service = prepared
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.bin")
+            .find(|app| app.connector_id == "com.baijimu.connector.bin")
             .unwrap();
         let ServiceStartCommand::ShellCommand {
             command: prepared_command,
@@ -5617,13 +5845,29 @@ mod tests {
         .unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.native",
-                "Native Connector",
-                "0.1.0",
-                "native-connector",
-                &["start"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.native",
+                "name": "Native Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "nativeService",
+                    "description": "Native service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["native-connector", "start"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5634,7 +5878,7 @@ mod tests {
         let service = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.native")
+            .find(|app| app.connector_id == "com.baijimu.connector.native")
             .unwrap();
         let ServiceStartCommand::ShellCommand { command, cwd, .. } =
             service.start_command.as_ref().unwrap();
@@ -5681,13 +5925,29 @@ mod tests {
         fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.configured-node",
-                "Configured Node Connector",
-                "0.1.0",
-                "test-connector",
-                &["--port", "18082"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.configured-node",
+                "name": "Configured Node Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "configuredNodeService",
+                    "description": "Configured Node service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5697,7 +5957,7 @@ mod tests {
         let service = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.configured-node")
+            .find(|app| app.connector_id == "com.baijimu.connector.configured-node")
             .unwrap();
         let ServiceStartCommand::ShellCommand { command, env, .. } =
             service.start_command.as_ref().unwrap();
@@ -5710,7 +5970,7 @@ mod tests {
         let prepared_service = prepared
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.configured-node")
+            .find(|app| app.connector_id == "com.baijimu.connector.configured-node")
             .unwrap();
         let ServiceStartCommand::ShellCommand {
             command: prepared_command,
@@ -5743,13 +6003,29 @@ mod tests {
         fs::write(source.join("bin").join("start.js"), "console.log('ok');\n").unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.daemon",
-                "Daemon Connector",
-                "0.1.0",
-                "test-connector",
-                &["start", "--daemon", "--port", "18082"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.daemon",
+                "name": "Daemon Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "daemonService",
+                    "description": "Daemon service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["test-connector", "start", "--daemon", "--port", "18082"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -5760,7 +6036,7 @@ mod tests {
         let service = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.daemon")
+            .find(|app| app.connector_id == "com.baijimu.connector.daemon")
             .unwrap();
         let ServiceStartCommand::ShellCommand { command, cwd, .. } =
             service.stop_command.as_ref().unwrap();
@@ -5992,13 +6268,29 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.sync",
-                "Sync Connector",
-                "0.1.0",
-                "/bin/sh",
-                &["-c", "sleep 60"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.sync",
+                "name": "Sync Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "syncService",
+                    "description": "Sync service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["/bin/sh", "-c", "sleep 60"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -6008,7 +6300,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let service = config
             .local_apps
             .iter_mut()
-            .find(|app| app.app_id == "com.baijimu.connector.sync")
+            .find(|app| app.connector_id == "com.baijimu.connector.sync")
             .unwrap();
         service.enabled = false;
         service.start_command = None;
@@ -6019,7 +6311,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let service = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.sync")
+            .find(|app| app.connector_id == "com.baijimu.connector.sync")
             .unwrap();
         assert!(!service.enabled);
         assert!(service.start_command.is_some());
@@ -6027,7 +6319,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let mut config = load_config(&config_path).unwrap();
         config
             .local_apps
-            .retain(|app| app.app_id != "com.baijimu.connector.sync");
+            .retain(|app| app.connector_id != "com.baijimu.connector.sync");
         save_config(&config_path, &config).unwrap();
 
         sync_installed_connector(&config_path, "com.baijimu.connector.sync").unwrap();
@@ -6035,7 +6327,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         let restored = config
             .local_apps
             .iter()
-            .find(|app| app.app_id == "com.baijimu.connector.sync")
+            .find(|app| app.connector_id == "com.baijimu.connector.sync")
             .expect("installed connector must restore missing derived config");
         assert!(restored.enabled);
         assert!(restored.start_command.is_some());
@@ -6069,13 +6361,29 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest_with_command(
-                "com.baijimu.connector.lazy-python",
-                "Lazy Python Connector",
-                "0.1.0",
-                "lazy-python-connector",
-                &["start"],
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.lazy-python",
+                "name": "Lazy Python Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "lazyPythonService",
+                    "description": "Lazy Python service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18084"
+                    },
+                    "startCommand": {
+                        "type": "shell_command",
+                        "command": ["lazy-python-connector", "start"]
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -6119,23 +6427,53 @@ lazy-python-connector = "lazy_python_connector.app:main"
         fs::create_dir_all(&good_source).unwrap();
         fs::write(
             good_source.join(CONNECTOR_MANIFEST_FILE),
-            serde_json::to_string_pretty(&test_manifest(
-                "com.baijimu.connector.good",
-                "Good Connector",
-                "0.1.0",
-            ))
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": "1.0",
+                "id": "com.baijimu.connector.good",
+                "name": "Good Connector",
+                "version": "0.1.0",
+                "services": [{
+                    "name": "goodService",
+                    "description": "Good service.",
+                    "transport": {
+                        "type": "http",
+                        "baseUrl": "http://127.0.0.1:18082"
+                    },
+                    "methods": [{
+                        "name": "invoke",
+                        "description": "Invoke.",
+                        "path": "/invoke"
+                    }]
+                }]
+            }))
             .unwrap(),
         )
         .unwrap();
         install_connector_from_path(&good_source, &config_path, false).unwrap();
 
-        let bad_manifest: ConnectorManifest = serde_json::from_value(test_manifest_with_command(
-            "com.baijimu.connector.bad-python",
-            "Bad Python Connector",
-            "0.1.0",
-            "bad-python-connector",
-            &["start"],
-        ))
+        let bad_manifest: ConnectorManifest = serde_json::from_value(json!({
+            "schemaVersion": "1.0",
+            "id": "com.baijimu.connector.bad-python",
+            "name": "Bad Python Connector",
+            "version": "0.1.0",
+            "services": [{
+                "name": "badPythonService",
+                "description": "Bad Python service.",
+                "transport": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18083"
+                },
+                "startCommand": {
+                    "type": "shell_command",
+                    "command": ["bad-python-connector", "start"]
+                },
+                "methods": [{
+                    "name": "invoke",
+                    "description": "Invoke.",
+                    "path": "/invoke"
+                }]
+            }]
+        }))
         .unwrap();
         let bad_package_path = installed_connector_package_path(&bad_manifest).unwrap();
         fs::create_dir_all(&bad_package_path).unwrap();
@@ -6160,9 +6498,11 @@ bad-python-connector = "bad_python_connector.app:main"
                 .display()
                 .to_string(),
             source_reference: None,
-            review_status: "DRAFT".to_string(),
+            trust_level: ConnectorTrustLevel::UserTrusted,
+            market_app_id: None,
             source_checksum: None,
             package_checksum: None,
+            legacy_service_names: vec!["badPythonService".to_string()],
             installed_at_epoch_ms: 1,
             last_synced_at_epoch_ms: 1,
         })
@@ -6172,11 +6512,11 @@ bad-python-connector = "bad_python_connector.app:main"
         assert!(report
             .summaries
             .iter()
-            .any(|summary| summary.app_id == "com.baijimu.connector.good"));
+            .any(|summary| summary.id == "com.baijimu.connector.good"));
         assert!(report
             .summaries
             .iter()
-            .any(|summary| summary.app_id == "com.baijimu.connector.bad-python"));
+            .any(|summary| summary.id == "com.baijimu.connector.bad-python"));
         assert!(report.failures.is_empty());
 
         sync_installed_connectors(&config_path).unwrap();
@@ -6202,8 +6542,8 @@ bad-python-connector = "bad_python_connector.app:main"
     #[test]
     fn legacy_autostart_cleanup_uses_manifest_labels() {
         let manifest = ConnectorManifest {
-            schema_version: "3.0.0".to_string(),
-            app_id: "com.baijimu.connector.wechat".to_string(),
+            schema_version: "1.0".to_string(),
+            id: "com.baijimu.connector.wechat".to_string(),
             name: "WeChat Connector".to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
@@ -6225,6 +6565,8 @@ bad-python-connector = "bad_python_connector.app:main"
             transport: None,
             methods: Vec::new(),
             events: Vec::new(),
+            services: Vec::new(),
+            service_registration_files: Vec::new(),
             hooks: BTreeMap::from([(
                 "installAutostart".to_string(),
                 "wechat-bridge-collector install-autostart".to_string(),

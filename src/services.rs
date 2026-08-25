@@ -36,7 +36,7 @@ use uuid::Uuid;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
-const LOCAL_APP_START_POLICY_ENV: &str = "BAIJIMU_LOCAL_APP_START_POLICY";
+const CONNECTOR_START_POLICY_ENV: &str = "BAIJIMU_CONNECTOR_START_POLICY";
 const BAIJIMU_WORKSPACE_ID_HEADER: &str = "x-baijimu-workspace-id";
 
 #[cfg(target_os = "macos")]
@@ -424,13 +424,13 @@ impl ServiceRegistry {
             if !app.enabled {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_config(app);
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
             if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
-                    app.app_id.clone(),
+                    app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
@@ -469,13 +469,13 @@ impl ServiceRegistry {
             if !app.enabled || app.health_check.is_some() {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_config(app);
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
             if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
-                    app.app_id.clone(),
+                    app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
@@ -522,13 +522,13 @@ impl ServiceRegistry {
             if !app.enabled {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_config(app);
             // Connector lifecycle belongs to the desktop process supervisor. The
             // registry only observes readiness and must never execute a host-owned
             // foreground command as if it were a one-shot service start command.
             if !registered_service_is_healthy(&service, &health_client).await {
                 warn!(
-                    app_id = %app.app_id,
+                    connector_id = %app.connector_id,
                     "local app is not healthy; omitting from runtime capabilities"
                 );
                 continue;
@@ -538,7 +538,7 @@ impl ServiceRegistry {
             let events = local_app_events(app);
             if !runtime.methods.is_empty() || !events.is_empty() {
                 local_apps.insert(
-                    app.app_id.clone(),
+                    app.connector_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
@@ -568,9 +568,9 @@ impl ServiceRegistry {
             .collect()
     }
 
-    pub fn has_local_app_event(&self, app_id: &str, event: &str) -> bool {
+    pub fn has_local_app_event(&self, connector_id: &str, event: &str) -> bool {
         self.local_apps
-            .get(app_id)
+            .get(connector_id)
             .map(|app| app.events.contains(event))
             .unwrap_or(false)
     }
@@ -617,22 +617,24 @@ impl ServiceRegistry {
         &self,
         request_id: String,
         workspace_id: Option<u64>,
-        app_id: &str,
+        connector_id: &str,
         method: &str,
         arguments: Value,
         timeout_secs: Option<u64>,
     ) -> InvokeResult {
         let started = Instant::now();
-        let response = match self.local_apps.get(app_id) {
+        let response = match self.local_apps.get(connector_id) {
             Some(app) => match app.runtime.methods.get(method) {
                 Some(runtime_method) => {
                     runtime_method
                         .invoke_local_app(arguments, timeout_secs, workspace_id)
                         .await
                 }
-                None => Err(anyhow!("unknown method `{method}` on local app `{app_id}`")),
+                None => Err(anyhow!(
+                    "unknown method `{method}` on local app `{connector_id}`"
+                )),
             },
-            None => Err(anyhow!("unknown local app `{app_id}`")),
+            None => Err(anyhow!("unknown local app `{connector_id}`")),
         };
 
         match response {
@@ -657,63 +659,15 @@ impl ServiceRegistry {
     }
 }
 
-fn local_app_runtime_config(app: &LocalAppConfig) -> Result<ServiceConfig> {
-    let mut service = ServiceConfig {
-        name: app.app_id.clone(),
+fn local_app_runtime_config(app: &LocalAppConfig) -> ServiceConfig {
+    ServiceConfig {
+        name: app.connector_id.clone(),
         description: app.description.clone(),
         enabled: app.enabled,
         health_check: app.health_check.clone(),
         start_command: app.start_command.clone(),
         stop_command: app.stop_command.clone(),
         methods: app.methods.clone(),
-    };
-    let token_path = local_app_token_path(app)?;
-    let token = fs::read_to_string(&token_path).with_context(|| {
-        format!(
-            "failed to read private runtime token for local app `{}` from {}",
-            app.app_id,
-            token_path.display()
-        )
-    })?;
-    let token = token.trim();
-    if token.len() < 32 {
-        bail!(
-            "private runtime token for local app `{}` is invalid: {}",
-            app.app_id,
-            token_path.display()
-        );
-    }
-    inject_local_app_bearer_token(&mut service, token);
-    Ok(service)
-}
-
-fn local_app_token_path(app: &LocalAppConfig) -> Result<PathBuf> {
-    for command in [&app.start_command, &app.stop_command] {
-        if let Some(ServiceStartCommand::ShellCommand { env, .. }) = command {
-            if let Some(path) = env
-                .get("BAIJIMU_LOCAL_APP_TOKEN_FILE")
-                .map(String::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(PathBuf::from(path));
-            }
-        }
-    }
-    crate::connector::connector_management_token_path(&app.app_id)
-}
-
-fn inject_local_app_bearer_token(service: &mut ServiceConfig, token: &str) {
-    let authorization = format!("Bearer {token}");
-    if let Some(ServiceHealthCheck::Http { headers, .. }) = service.health_check.as_mut() {
-        headers.insert("Authorization".to_string(), authorization.clone());
-    }
-    for method in &mut service.methods {
-        if let MethodBinding::Http(binding) = &mut method.binding {
-            binding
-                .headers
-                .insert("Authorization".to_string(), authorization.clone());
-        }
     }
 }
 
@@ -727,7 +681,7 @@ fn local_app_events(app: &LocalAppConfig) -> BTreeSet<String> {
 
 fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
     LocalAppDefinition {
-        app_id: app.app_id.clone(),
+        connector_id: app.connector_id.clone(),
         name: app.name.clone(),
         version: app.version.clone(),
         description: app.description.clone(),
@@ -798,7 +752,7 @@ async fn ensure_registered_service_ready(service: &ServiceConfig, client: &Clien
     if matches!(
         start_command,
         ServiceStartCommand::ShellCommand { env, .. }
-            if env.get(LOCAL_APP_START_POLICY_ENV).map(String::as_str) == Some("manual")
+            if env.get(CONNECTOR_START_POLICY_ENV).map(String::as_str) == Some("manual")
     ) {
         info!(
             service = %service.name,
@@ -3775,7 +3729,7 @@ mod tests {
     use super::{
         bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env,
         shell_exec_path, PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
-        LOCAL_APP_START_POLICY_ENV,
+        CONNECTOR_START_POLICY_ENV,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
@@ -4369,7 +4323,7 @@ mod tests {
                 command: vec!["this-command-must-never-run".to_string()],
                 cwd: None,
                 env: BTreeMap::from([(
-                    LOCAL_APP_START_POLICY_ENV.to_string(),
+                    CONNECTOR_START_POLICY_ENV.to_string(),
                     "manual".to_string(),
                 )]),
                 timeout_secs: Some(1),
@@ -4393,11 +4347,9 @@ mod tests {
         let current_dir = std::env::current_dir().unwrap();
         let marker_dir = tempdir().unwrap();
         let marker = marker_dir.path().join("local-app-started");
-        let token_path = marker_dir.path().join("management-token");
-        fs::write(&token_path, "bjm_app_test_host_owned_private_runtime_token").unwrap();
         let mut config = AgentConfig::example();
         config.local_apps.push(LocalAppConfig {
-            app_id: "com.baijimu.connector.host-owned".to_string(),
+            connector_id: "com.baijimu.connector.host-owned".to_string(),
             name: "Host-owned Connector".to_string(),
             version: "1.0.0".to_string(),
             description: "Must be started by the desktop process supervisor.".to_string(),
@@ -4417,16 +4369,10 @@ mod tests {
                     format!("touch '{}'", marker.display()),
                 ],
                 cwd: None,
-                env: BTreeMap::from([
-                    (
-                        LOCAL_APP_START_POLICY_ENV.to_string(),
-                        "automatic".to_string(),
-                    ),
-                    (
-                        "BAIJIMU_LOCAL_APP_TOKEN_FILE".to_string(),
-                        token_path.display().to_string(),
-                    ),
-                ]),
+                env: BTreeMap::from([(
+                    CONNECTOR_START_POLICY_ENV.to_string(),
+                    "automatic".to_string(),
+                )]),
                 timeout_secs: Some(1),
             }),
             stop_command: None,
@@ -4451,7 +4397,7 @@ mod tests {
         let current_dir = std::env::current_dir().unwrap();
         let mut config = AgentConfig::example();
         config.local_apps.push(LocalAppConfig {
-            app_id: "com.baijimu.connector.pending".to_string(),
+            connector_id: "com.baijimu.connector.pending".to_string(),
             name: "Pending Connector".to_string(),
             version: "1.0.0".to_string(),
             description: "Waits for its supervised process.".to_string(),
@@ -4543,9 +4489,6 @@ mod tests {
                 "data": {
                     "workspaceId": headers
                         .get("x-baijimu-workspace-id")
-                        .and_then(|value| value.to_str().ok()),
-                    "authorization": headers
-                        .get("authorization")
                         .and_then(|value| value.to_str().ok())
                 }
             }))
@@ -4562,27 +4505,15 @@ mod tests {
             .unwrap();
         });
         let current_dir = std::env::current_dir().unwrap();
-        let token_dir = tempdir().unwrap();
-        let token_path = token_dir.path().join("management-token");
-        let token = "bjm_app_test_workspace_private_runtime_token";
-        fs::write(&token_path, token).unwrap();
         let mut config = AgentConfig::example();
         config.local_apps.push(LocalAppConfig {
-            app_id: "com.baijimu.connector.workspace-aware".to_string(),
+            connector_id: "com.baijimu.connector.workspace-aware".to_string(),
             name: "Workspace-aware app".to_string(),
             version: "1.0.0".to_string(),
             description: "Captures trusted workspace context.".to_string(),
             enabled: true,
             health_check: None,
-            start_command: Some(ServiceStartCommand::ShellCommand {
-                command: vec!["unused-local-app-start".to_string()],
-                cwd: None,
-                env: BTreeMap::from([(
-                    "BAIJIMU_LOCAL_APP_TOKEN_FILE".to_string(),
-                    token_path.display().to_string(),
-                )]),
-                timeout_secs: Some(1),
-            }),
+            start_command: None,
             stop_command: None,
             methods: vec![MethodConfig {
                 name: "status".to_string(),
@@ -4599,9 +4530,7 @@ mod tests {
             }],
             events: Vec::new(),
         });
-        assert!(!serde_json::to_string(&config).unwrap().contains(token));
         let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();
-        assert!(!serde_json::to_string(&config).unwrap().contains(token));
         let result = registry
             .invoke_local_app(
                 "req-workspace".to_string(),
@@ -4614,9 +4543,7 @@ mod tests {
             .await;
 
         assert!(result.success);
-        let data = result.data.unwrap();
-        assert_eq!(data["workspaceId"], "642");
-        assert_eq!(data["authorization"], format!("Bearer {token}"));
+        assert_eq!(result.data.unwrap()["workspaceId"], "642");
         server.abort();
     }
 

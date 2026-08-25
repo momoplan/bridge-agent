@@ -52,8 +52,8 @@ impl ConnectorProcessManager {
         self.changed.notified().await;
     }
 
-    pub(crate) async fn managed_running(&self, app_id: &str) -> Option<bool> {
-        let record = show_connector(app_id).ok()?;
+    pub(crate) async fn managed_running(&self, connector_id: &str) -> Option<bool> {
+        let record = show_connector(connector_id).ok()?;
         if record
             .manifest
             .runtime
@@ -66,48 +66,52 @@ impl ConnectorProcessManager {
         let processes = self.inner.lock().await;
         Some(
             processes
-                .get(app_id)
+                .get(connector_id)
                 .is_some_and(|handle| handle.exit_rx.borrow().is_none()),
         )
     }
 
-    pub(crate) async fn managed_pid(&self, app_id: &str) -> Option<u32> {
+    pub(crate) async fn managed_pid(&self, connector_id: &str) -> Option<u32> {
         self.inner
             .lock()
             .await
-            .get(app_id)
+            .get(connector_id)
             .filter(|handle| handle.exit_rx.borrow().is_none())
             .map(|handle| handle.pid)
     }
 
-    pub(crate) async fn runtime_active(&self, app_id: &str) -> bool {
-        if let Some(running) = self.managed_running(app_id).await {
+    pub(crate) async fn runtime_active(&self, connector_id: &str) -> bool {
+        if let Some(running) = self.managed_running(connector_id).await {
             return running;
         }
-        self.legacy_started.lock().await.contains(app_id)
+        self.legacy_started.lock().await.contains(connector_id)
     }
 
     pub(crate) async fn start(
         &self,
-        app_id: &str,
+        connector_id: &str,
         config_path: &Path,
         dependency_env: std::collections::BTreeMap<String, String>,
     ) -> Result<ConnectorStartResult, String> {
-        let app_id = app_id.trim().to_string();
-        if app_id.is_empty() {
+        let connector_id = connector_id.trim().to_string();
+        if connector_id.is_empty() {
             return Err("本地应用 ID 不能为空".to_string());
         }
-        let record = show_connector(&app_id).map_err(|err| err.to_string())?;
+        let record = show_connector(&connector_id).map_err(|err| err.to_string())?;
         if record
             .manifest
             .runtime
             .as_ref()
             .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
         {
-            let result =
-                run_legacy_start(app_id.clone(), config_path.to_path_buf(), dependency_env).await?;
+            let result = run_legacy_start(
+                connector_id.clone(),
+                config_path.to_path_buf(),
+                dependency_env,
+            )
+            .await?;
             if lifecycle_succeeded(&result) {
-                self.legacy_started.lock().await.insert(app_id);
+                self.legacy_started.lock().await.insert(connector_id);
                 self.changed.notify_waiters();
             }
             return Ok(result);
@@ -115,45 +119,46 @@ impl ConnectorProcessManager {
 
         {
             let mut processes = self.inner.lock().await;
-            if let Some(handle) = processes.get(&app_id) {
+            if let Some(handle) = processes.get(&connector_id) {
                 if handle.exit_rx.borrow().is_none() {
                     return Ok(lifecycle_result(
-                        &app_id,
+                        &connector_id,
                         Some(0),
                         format!("Bridge Agent 已托管该进程（PID {}）", handle.pid),
                         String::new(),
                     ));
                 }
             }
-            processes.remove(&app_id);
+            processes.remove(&connector_id);
         }
 
-        prepare_installed_connector_runtime(config_path, &app_id).map_err(|err| err.to_string())?;
+        prepare_installed_connector_runtime(config_path, &connector_id)
+            .map_err(|err| err.to_string())?;
 
         // The process map is intentionally in-memory. After a host crash or an
         // interrupted upgrade, a previous connector process can still be alive
         // even though this Bridge Agent instance has no handle for it. The host
         // ownership contract requires an idempotent stop command, so reconcile
         // that external state before starting the one process we will supervise.
-        let cleanup = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await?;
-        ensure_lifecycle_succeeded(&app_id, "启动前清理遗留进程", &cleanup)?;
+        let cleanup = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
+        ensure_lifecycle_succeeded(&connector_id, "启动前清理遗留进程", &cleanup)?;
 
-        let mut command = resolved_start_command(config_path, &app_id)?;
+        let mut command = resolved_start_command(config_path, &connector_id)?;
         inject_dependency_env(&mut command, dependency_env);
-        let data_dir = connector_data_dir(&app_id).map_err(|err| err.to_string())?;
+        let data_dir = connector_data_dir(&connector_id).map_err(|err| err.to_string())?;
         fs::create_dir_all(&data_dir)
             .map_err(|err| format!("创建本地应用运行目录 {} 失败: {err}", data_dir.display()))?;
         let stdout = append_log_file(&data_dir.join("runtime.stdout.log"))?;
         let stderr = append_log_file(&data_dir.join("runtime.stderr.log"))?;
-        let mut child = spawn_foreground_process(&app_id, command, stdout, stderr)?;
+        let mut child = spawn_foreground_process(&connector_id, command, stdout, stderr)?;
         let pid = child
             .id()
-            .ok_or_else(|| format!("本地应用 `{app_id}` 启动后没有进程 ID"))?;
+            .ok_or_else(|| format!("本地应用 `{connector_id}` 启动后没有进程 ID"))?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let (stop_tx, stop_rx) = oneshot::channel();
         let (exit_tx, exit_rx) = watch::channel(None);
         self.inner.lock().await.insert(
-            app_id.clone(),
+            connector_id.clone(),
             ManagedConnectorHandle {
                 generation,
                 pid,
@@ -165,7 +170,7 @@ impl ConnectorProcessManager {
 
         let inner = Arc::clone(&self.inner);
         let changed = Arc::clone(&self.changed);
-        let supervised_id = app_id.clone();
+        let supervised_id = connector_id.clone();
         tauri::async_runtime::spawn(async move {
             let exit = supervise_process(&mut child, pid, stop_rx).await;
             let _ = exit_tx.send(Some(exit));
@@ -181,7 +186,7 @@ impl ConnectorProcessManager {
         });
 
         Ok(lifecycle_result(
-            &app_id,
+            &connector_id,
             Some(0),
             format!("Bridge Agent 已启动并托管进程（PID {pid}）"),
             String::new(),
@@ -190,35 +195,35 @@ impl ConnectorProcessManager {
 
     pub(crate) async fn stop(
         &self,
-        app_id: &str,
+        connector_id: &str,
         config_path: &Path,
     ) -> Result<ConnectorStartResult, String> {
-        let app_id = app_id.trim().to_string();
-        let record = show_connector(&app_id).map_err(|err| err.to_string())?;
+        let connector_id = connector_id.trim().to_string();
+        let record = show_connector(&connector_id).map_err(|err| err.to_string())?;
         if record
             .manifest
             .runtime
             .as_ref()
             .is_none_or(|runtime| runtime.process_ownership != ConnectorProcessOwnership::Host)
         {
-            let result = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await?;
+            let result = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
             if lifecycle_succeeded(&result) {
-                self.legacy_started.lock().await.remove(&app_id);
+                self.legacy_started.lock().await.remove(&connector_id);
                 self.changed.notify_waiters();
             }
             return Ok(result);
         }
 
-        let Some(mut handle) = self.inner.lock().await.remove(&app_id) else {
+        let Some(mut handle) = self.inner.lock().await.remove(&connector_id) else {
             // The connector shutdown command is deliberately idempotent. Running it also
             // cleans up a process left by an older Bridge Agent version.
-            let result = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await?;
-            ensure_lifecycle_succeeded(&app_id, "清理未托管的遗留进程", &result)?;
+            let result = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await?;
+            ensure_lifecycle_succeeded(&connector_id, "清理未托管的遗留进程", &result)?;
             return Ok(result);
         };
         self.changed.notify_waiters();
 
-        let graceful = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await;
+        let graceful = run_legacy_stop(connector_id.clone(), config_path.to_path_buf()).await;
         if wait_for_exit(&mut handle.exit_rx, GRACEFUL_STOP_TIMEOUT)
             .await
             .is_none()
@@ -231,7 +236,7 @@ impl ConnectorProcessManager {
             .await
             .ok_or_else(|| {
                 format!(
-                    "Bridge Agent 无法在超时时间内停止本地应用 `{app_id}` 的进程树（PID {}）",
+                    "Bridge Agent 无法在超时时间内停止本地应用 `{connector_id}` 的进程树（PID {}）",
                     handle.pid
                 )
             })?;
@@ -250,7 +255,7 @@ impl ConnectorProcessManager {
             Err(err) => format!("优雅停止命令失败，已由宿主回收进程树: {err}"),
         };
         Ok(lifecycle_result(
-            &app_id,
+            &connector_id,
             Some(0),
             format!("{}；原始退出码 {:?}", exit.detail, exit.code),
             graceful_stderr,
@@ -259,10 +264,10 @@ impl ConnectorProcessManager {
 
     pub(crate) async fn stop_if_managed(
         &self,
-        app_id: &str,
+        connector_id: &str,
         config_path: &Path,
     ) -> Result<bool, String> {
-        let record = match show_connector(app_id) {
+        let record = match show_connector(connector_id) {
             Ok(record) => record,
             Err(_) => return Ok(false),
         };
@@ -271,17 +276,17 @@ impl ConnectorProcessManager {
                 runtime.process_ownership == ConnectorProcessOwnership::Host
             });
         if managed {
-            self.stop(app_id, config_path).await?;
+            self.stop(connector_id, config_path).await?;
         }
         Ok(managed)
     }
 
     pub(crate) async fn stop_all(&self, config_path: &Path) -> Vec<String> {
-        let app_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        let connector_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
         let mut failures = Vec::new();
-        for app_id in app_ids {
-            if let Err(err) = self.stop(&app_id, config_path).await {
-                failures.push(format!("{app_id}: {err}"));
+        for connector_id in connector_ids {
+            if let Err(err) = self.stop(&connector_id, config_path).await {
+                failures.push(format!("{connector_id}: {err}"));
             }
         }
         failures
@@ -289,7 +294,7 @@ impl ConnectorProcessManager {
 }
 
 fn ensure_lifecycle_succeeded(
-    app_id: &str,
+    connector_id: &str,
     action: &str,
     result: &ConnectorStartResult,
 ) -> Result<(), String> {
@@ -303,21 +308,24 @@ fn ensure_lifecycle_succeeded(
     } else {
         format!("退出码 {:?}", result.lifecycle.exit_code)
     };
-    Err(format!("本地应用 `{app_id}` {action}失败: {detail}"))
+    Err(format!("本地应用 `{connector_id}` {action}失败: {detail}"))
 }
 
 fn lifecycle_succeeded(result: &ConnectorStartResult) -> bool {
     result.lifecycle.configured && result.lifecycle.exit_code == Some(0)
 }
 
-fn resolved_start_command(config_path: &Path, app_id: &str) -> Result<ServiceStartCommand, String> {
+fn resolved_start_command(
+    config_path: &Path,
+    connector_id: &str,
+) -> Result<ServiceStartCommand, String> {
     let config = load_config(config_path).map_err(|err| err.to_string())?;
     config
         .local_apps
         .into_iter()
-        .find(|app| app.app_id == app_id)
+        .find(|app| app.connector_id == connector_id)
         .and_then(|app| app.start_command)
-        .ok_or_else(|| format!("本地应用 `{app_id}` 没有配置前台启动命令"))
+        .ok_or_else(|| format!("本地应用 `{connector_id}` 没有配置前台启动命令"))
 }
 
 fn append_log_file(path: &Path) -> Result<std::fs::File, String> {
@@ -348,7 +356,7 @@ fn append_log_file(path: &Path) -> Result<std::fs::File, String> {
 }
 
 fn spawn_foreground_process(
-    app_id: &str,
+    connector_id: &str,
     start_command: ServiceStartCommand,
     stdout: std::fs::File,
     stderr: std::fs::File,
@@ -360,14 +368,14 @@ fn spawn_foreground_process(
         timeout_secs: _,
     } = start_command;
     if command.is_empty() || command[0].trim().is_empty() {
-        return Err(format!("本地应用 `{app_id}` 的前台启动命令为空"));
+        return Err(format!("本地应用 `{connector_id}` 的前台启动命令为空"));
     }
     enrich_user_command_environment(command.first().map(String::as_str), &mut env);
     let mut process = Command::new(&command[0]);
     process
         .args(command.iter().skip(1))
         .envs(env)
-        .env("BAIJIMU_LOCAL_APP_PROCESS_OWNER", "bridge-agent")
+        .env("BAIJIMU_CONNECTOR_PROCESS_OWNER", "bridge-agent")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -380,7 +388,7 @@ fn spawn_foreground_process(
     process.creation_flags(WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP);
     process
         .spawn()
-        .map_err(|err| format!("启动本地应用 `{app_id}` 的前台进程失败: {err}"))
+        .map_err(|err| format!("启动本地应用 `{connector_id}` 的前台进程失败: {err}"))
 }
 
 async fn supervise_process(
@@ -466,12 +474,12 @@ async fn wait_for_exit(
 }
 
 async fn run_legacy_start(
-    app_id: String,
+    connector_id: String,
     config_path: PathBuf,
     dependency_env: std::collections::BTreeMap<String, String>,
 ) -> Result<ConnectorStartResult, String> {
     tokio::task::spawn_blocking(move || {
-        start_connector_with_env(&app_id, &config_path, &dependency_env)
+        start_connector_with_env(&connector_id, &config_path, &dependency_env)
     })
     .await
     .map_err(|err| format!("启动本地应用任务失败: {err}"))?
@@ -487,25 +495,25 @@ fn inject_dependency_env(
 }
 
 async fn run_legacy_stop(
-    app_id: String,
+    connector_id: String,
     config_path: PathBuf,
 ) -> Result<ConnectorStartResult, String> {
-    tokio::task::spawn_blocking(move || stop_connector(&app_id, &config_path))
+    tokio::task::spawn_blocking(move || stop_connector(&connector_id, &config_path))
         .await
         .map_err(|err| format!("停止本地应用任务失败: {err}"))?
         .map_err(|err| err.to_string())
 }
 
 fn lifecycle_result(
-    app_id: &str,
+    connector_id: &str,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
 ) -> ConnectorStartResult {
     ConnectorStartResult {
-        app_id: app_id.to_string(),
+        connector_id: connector_id.to_string(),
         lifecycle: ConnectorLifecycleResult {
-            app_id: app_id.to_string(),
+            connector_id: connector_id.to_string(),
             configured: true,
             exit_code,
             stdout,

@@ -43,8 +43,9 @@ use bridge_agent::{
     terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
     AgentRuntimeManager, ConnectorIcon, ConnectorInstallProvenance, ConnectorInstallRecord,
     ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncReport,
-    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
-    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    ConnectorTrustLevel, ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent,
+    RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceHealthCheck,
+    ServiceStartCommand,
 };
 use reqwest::Client;
 use semver::Version;
@@ -323,7 +324,8 @@ impl LocalAppInstallTaskPhase {
 struct LocalAppInstallTask {
     task_id: String,
     operation: LocalAppInstallTaskOperation,
-    app_id: Option<String>,
+    connector_id: Option<String>,
+    market_app_id: Option<String>,
     name: String,
     version: Option<String>,
     phase: LocalAppInstallTaskPhase,
@@ -345,7 +347,8 @@ impl LocalAppInstallTaskManager {
     fn create(
         &self,
         operation: LocalAppInstallTaskOperation,
-        app_id: Option<String>,
+        connector_id: Option<String>,
+        market_app_id: Option<String>,
         name: String,
         version: Option<String>,
     ) -> Result<LocalAppInstallTask, String> {
@@ -353,10 +356,11 @@ impl LocalAppInstallTaskManager {
             .tasks
             .write()
             .map_err(|_| "本地应用安装任务状态锁已损坏".to_string())?;
-        if let Some(existing) = tasks
-            .values()
-            .find(|task| task.phase.is_active() && app_id.is_some() && task.app_id == app_id)
-        {
+        if let Some(existing) = tasks.values().find(|task| {
+            task.phase.is_active()
+                && ((market_app_id.is_some() && task.market_app_id == market_app_id)
+                    || (connector_id.is_some() && task.connector_id == connector_id))
+        }) {
             return Err(format!(
                 "应用 {} 已在{}中",
                 existing.name,
@@ -367,7 +371,8 @@ impl LocalAppInstallTaskManager {
         let task = LocalAppInstallTask {
             task_id: uuid::Uuid::new_v4().to_string(),
             operation,
-            app_id,
+            connector_id,
+            market_app_id,
             name,
             version,
             phase: LocalAppInstallTaskPhase::Queued,
@@ -471,9 +476,9 @@ impl LocalAppInstallProgressReporter {
         });
     }
 
-    fn identity(&self, app_id: &str, name: &str, version: &str) {
+    fn identity(&self, connector_id: &str, name: &str, version: &str) {
         self.update(|task| {
-            task.app_id = Some(app_id.to_string());
+            task.connector_id = Some(connector_id.to_string());
             task.name = name.to_string();
             task.version = Some(version.to_string());
         });
@@ -497,7 +502,7 @@ fn format_byte_count(bytes: u64) -> String {
 struct LocalAppsChangedEvent {
     revision: u64,
     operation: LocalAppsChangeOperation,
-    app_id: String,
+    connector_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -522,11 +527,15 @@ impl LocalAppsChangeNotifier {
         }
     }
 
-    fn notify(&self, operation: LocalAppsChangeOperation, app_id: &str) -> LocalAppsChangedEvent {
+    fn notify(
+        &self,
+        operation: LocalAppsChangeOperation,
+        connector_id: &str,
+    ) -> LocalAppsChangedEvent {
         let event = LocalAppsChangedEvent {
             revision: self.revision.fetch_add(1, Ordering::SeqCst) + 1,
             operation,
-            app_id: app_id.to_string(),
+            connector_id: connector_id.to_string(),
         };
         let app = self
             .event_app
@@ -536,9 +545,9 @@ impl LocalAppsChangeNotifier {
         if let Some(app) = app {
             if let Err(err) = app.emit(LOCAL_APPS_CHANGED_EVENT, event.clone()) {
                 log::warn!(
-                    "failed to emit local apps changed event: operation={:?} app_id={} error={err}",
+                    "failed to emit local apps changed event: operation={:?} connector_id={} error={err}",
                     event.operation,
-                    event.app_id
+                    event.connector_id
                 );
             }
         }
@@ -921,13 +930,17 @@ struct LocalAppControlDiscovery {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct LocalAppControlInstallRequest {
     #[serde(default)]
     source: String,
     #[serde(default)]
     replace: bool,
-    app_id: Option<String>,
+    checksum: Option<String>,
+    allow_git: Option<bool>,
+    market_app_id: Option<String>,
+    #[serde(default)]
+    accept_untrusted: bool,
     #[serde(default)]
     start: bool,
 }
@@ -936,13 +949,15 @@ struct LocalAppControlInstallRequest {
 struct ConnectorInstallOptions {
     source: String,
     replace: bool,
-    app_id: Option<String>,
+    checksum: Option<String>,
+    allow_git: Option<bool>,
+    market_app_id: Option<String>,
     start: bool,
     progress: Option<LocalAppInstallProgressReporter>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct LocalAppControlManagementRequest {
     payload: Option<Value>,
 }
@@ -1221,7 +1236,7 @@ struct RegisteredServiceStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalAppRuntimeStatus {
-    app_id: String,
+    connector_id: String,
     status: RegisteredServiceState,
     detail: Option<String>,
     checked_at_ms: u64,
@@ -1246,7 +1261,7 @@ struct StartRegisteredServiceResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorAppUpdateStatus {
-    app_id: String,
+    connector_id: String,
     name: String,
     current_version: String,
     latest_version: String,
@@ -1257,13 +1272,12 @@ struct ConnectorAppUpdateStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MarketConnectorApp {
-    app_id: String,
+    id: String,
+    connector_id: String,
     application_type: String,
     name: String,
     description: String,
     source: String,
-    repo: String,
-    revision: String,
     checksum: Option<String>,
     archive_path: Option<String>,
     risk: String,
@@ -1301,7 +1315,8 @@ struct RawLocalAppMarketResponse<T> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawMarketConnectorApp {
-    app_id: String,
+    id: String,
+    connector_id: String,
     name: String,
     description: String,
     risk: String,
@@ -1316,7 +1331,6 @@ struct RawMarketConnectorVersion {
     version: String,
     source: String,
     source_type: Option<String>,
-    repo: Option<String>,
     revision: Option<String>,
     checksum: Option<String>,
     published_at: Option<String>,
@@ -1324,29 +1338,6 @@ struct RawMarketConnectorVersion {
     manifest: Value,
     #[serde(default)]
     compatibility: Option<RawMarketHostCompatibility>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RawRegisteredLocalApp {
-    app_id: String,
-    registration_status: String,
-    review_status: String,
-    name: String,
-    publisher: String,
-    platforms: Vec<String>,
-    version: RawMarketConnectorVersion,
-}
-
-#[derive(Debug)]
-struct RegisteredInstallSource {
-    app_id: String,
-    review_status: String,
-    version: String,
-    source: String,
-    repo: String,
-    revision: String,
-    checksum: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1658,15 +1649,15 @@ async fn test_capability(
 async fn test_local_app_capability(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
-    app_id: String,
+    connector_id: String,
     method: String,
     arguments: Value,
     timeout_secs: Option<u64>,
 ) -> Result<InvokeResult, String> {
-    let app_id = app_id.trim();
+    let connector_id = connector_id.trim();
     let method = method.trim();
-    if app_id.is_empty() {
-        return Err("appId 不能为空".to_string());
+    if connector_id.is_empty() {
+        return Err("connectorId 不能为空".to_string());
     }
     if method.is_empty() {
         return Err("能力名不能为空".to_string());
@@ -1682,7 +1673,7 @@ async fn test_local_app_capability(
         .invoke_local_app(
             request_id,
             None,
-            app_id,
+            connector_id,
             method,
             arguments,
             timeout_secs.filter(|value| *value > 0),
@@ -1912,18 +1903,18 @@ async fn collect_local_app_runtime_statuses(
         .map_err(|err| err.to_string())?;
     let mut statuses = Vec::with_capacity(config.local_apps.len());
     for app in config.local_apps {
-        let process_running = connector_processes.managed_running(&app.app_id).await;
-        let runtime_active = connector_processes.runtime_active(&app.app_id).await;
-        let app_id = app.app_id.clone();
+        let process_running = connector_processes.managed_running(&app.connector_id).await;
+        let runtime_active = connector_processes.runtime_active(&app.connector_id).await;
+        let connector_id = app.connector_id.clone();
         let status = if runtime_active {
             check_local_app(&client, app, process_running).await
         } else {
             inactive_local_app_status(app, process_running)
         };
-        let version = show_connector(&app_id)
+        let version = show_connector(&connector_id)
             .ok()
             .map(|record| record.manifest.version);
-        let pid = connector_processes.managed_pid(&app_id).await;
+        let pid = connector_processes.managed_pid(&connector_id).await;
         let (lifecycle, health) = match (runtime_active, status.status) {
             (false, _) => (
                 ConnectorLifecycleState::Stopped,
@@ -1947,7 +1938,7 @@ async fn collect_local_app_runtime_statuses(
             ),
         };
         connector_lifecycles.observe(
-            &app_id,
+            &connector_id,
             lifecycle,
             health,
             version,
@@ -2001,7 +1992,7 @@ fn local_app_runtime_statuses_changed(
 ) -> bool {
     previous.len() != current.len()
         || previous.iter().zip(current).any(|(left, right)| {
-            left.app_id != right.app_id
+            left.connector_id != right.connector_id
                 || left.status != right.status
                 || left.detail != right.detail
                 || left.health_check_configured != right.health_check_configured
@@ -2254,28 +2245,28 @@ fn start_local_app_ui_server(
                 post(local_app_control_install_handler),
             )
             .route(
-                "/api/v1/local-apps/{app_id}",
+                "/api/v1/local-apps/{connector_id}",
                 get(local_app_control_show_handler).delete(local_app_control_uninstall_handler),
             )
             .route(
-                "/api/v1/local-apps/{app_id}/start",
+                "/api/v1/local-apps/{connector_id}/start",
                 post(local_app_control_start_handler),
             )
             .route(
-                "/api/v1/local-apps/{app_id}/stop",
+                "/api/v1/local-apps/{connector_id}/stop",
                 post(local_app_control_stop_handler),
             )
             .route(
-                "/api/v1/local-apps/{app_id}/sync",
+                "/api/v1/local-apps/{connector_id}/sync",
                 post(local_app_control_sync_handler),
             )
             .route(
-                "/api/v1/local-apps/{app_id}/management/{operation}",
+                "/api/v1/local-apps/{connector_id}/management/{operation}",
                 post(local_app_control_management_handler),
             )
-            .route("/{token}/{app_id}/", get(local_app_ui_entry_handler))
+            .route("/{token}/{connector_id}/", get(local_app_ui_entry_handler))
             .route(
-                "/{token}/{app_id}/{*asset_path}",
+                "/{token}/{connector_id}/{*asset_path}",
                 get(local_app_ui_asset_handler),
             )
             .with_state(state);
@@ -2418,29 +2409,26 @@ async fn local_app_control_list_handler(
 
 async fn local_app_control_show_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath(app_id): AxumPath<String>,
+    AxumPath(connector_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
+        let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
         let process_running = state
             .connector_processes
-            .managed_running(&record.manifest.app_id)
+            .managed_running(&record.manifest.id)
             .await;
-        let status = connector_local_app_status(
-            &state.config_path,
-            &record.manifest.app_id,
-            process_running,
-        )
-        .await?;
+        let status =
+            connector_local_app_status(&state.config_path, &record.manifest.id, process_running)
+                .await?;
         Ok::<_, String>(serde_json::json!({
             "app": record,
             "status": status,
             "lifecycle": state.connector_lifecycles.list().into_iter()
-                .find(|snapshot| snapshot.app_id == app_id.trim()),
+                .find(|snapshot| snapshot.connector_id == connector_id.trim()),
             "runtime": state.runtime.snapshot().await
         }))
     }
@@ -2456,6 +2444,16 @@ async fn local_app_control_install_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
+    let market_install = request
+        .market_app_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !market_install && !request.accept_untrusted {
+        return local_app_control_error(
+            StatusCode::FORBIDDEN,
+            "本地目录、Git 或直接下载来源未经平台验证；检查来源后传 acceptUntrusted=true",
+        );
+    }
     let result = async {
         let document = install_connector_app_with_context(
             &state.config_path,
@@ -2466,15 +2464,18 @@ async fn local_app_control_install_handler(
             ConnectorInstallOptions {
                 source: request.source,
                 replace: request.replace,
-                app_id: request.app_id,
+                checksum: request.checksum,
+                allow_git: request.allow_git,
+                market_app_id: request.market_app_id,
                 start: request.start,
                 progress: None,
             },
         )
         .await?;
-        state
-            .local_apps
-            .notify(LocalAppsChangeOperation::Install, &document.install.app_id);
+        state.local_apps.notify(
+            LocalAppsChangeOperation::Install,
+            &document.install.connector_id,
+        );
         Ok::<_, String>(document)
     }
     .await;
@@ -2483,7 +2484,7 @@ async fn local_app_control_install_handler(
 
 async fn local_app_control_start_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath(app_id): AxumPath<String>,
+    AxumPath(connector_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
@@ -2493,7 +2494,7 @@ async fn local_app_control_start_handler(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
-        app_id.trim(),
+        connector_id.trim(),
         "启动应用",
     )
     .await;
@@ -2503,7 +2504,7 @@ async fn local_app_control_start_handler(
 
 async fn local_app_control_stop_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath(app_id): AxumPath<String>,
+    AxumPath(connector_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
@@ -2513,7 +2514,7 @@ async fn local_app_control_stop_handler(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
-        app_id.trim(),
+        connector_id.trim(),
         "停止应用",
     )
     .await;
@@ -2523,14 +2524,14 @@ async fn local_app_control_stop_handler(
 
 async fn local_app_control_sync_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath(app_id): AxumPath<String>,
+    AxumPath(connector_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
+        let record = show_connector(connector_id.trim()).map_err(|err| err.to_string())?;
         let source = record
             .source_reference
             .clone()
@@ -2544,15 +2545,18 @@ async fn local_app_control_sync_handler(
             ConnectorInstallOptions {
                 source,
                 replace: true,
-                app_id: Some(record.manifest.app_id),
+                checksum: record.source_checksum,
+                allow_git: Some(true),
+                market_app_id: record.market_app_id,
                 start: true,
                 progress: None,
             },
         )
         .await?;
-        state
-            .local_apps
-            .notify(LocalAppsChangeOperation::Sync, &document.install.app_id);
+        state.local_apps.notify(
+            LocalAppsChangeOperation::Sync,
+            &document.install.connector_id,
+        );
         Ok::<_, String>(document)
     }
     .await;
@@ -2561,7 +2565,7 @@ async fn local_app_control_sync_handler(
 
 async fn local_app_control_management_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath((app_id, operation)): AxumPath<(String, String)>,
+    AxumPath((connector_id, operation)): AxumPath<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<LocalAppControlManagementRequest>,
 ) -> AxumResponse {
@@ -2571,7 +2575,7 @@ async fn local_app_control_management_handler(
     match invoke_connector_management_with_context(
         &state.connector_lifecycles,
         &state.connector_processes,
-        app_id,
+        connector_id,
         operation,
         request.payload,
     )
@@ -2595,7 +2599,7 @@ async fn local_app_control_management_handler(
 
 async fn local_app_control_uninstall_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath(app_id): AxumPath<String>,
+    AxumPath(connector_id): AxumPath<String>,
     AxumQuery(query): AxumQuery<LocalAppControlUninstallQuery>,
     headers: HeaderMap,
 ) -> AxumResponse {
@@ -2603,21 +2607,21 @@ async fn local_app_control_uninstall_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let app_id = app_id.trim().to_string();
+        let connector_id = connector_id.trim().to_string();
         let document = uninstall_connector_app_with_context(
             &state.config_path,
             &state.runtime,
             &state.connector_lifecycles,
             &state.connector_processes,
             &state.registered_services,
-            app_id.clone(),
+            connector_id.clone(),
             query.force,
         )
         .await
         .map_err(|error| error.message().to_string())?;
         state
             .local_apps
-            .notify(LocalAppsChangeOperation::Uninstall, &app_id);
+            .notify(LocalAppsChangeOperation::Uninstall, &connector_id);
         Ok::<_, String>(document)
     }
     .await;
@@ -2626,24 +2630,24 @@ async fn local_app_control_uninstall_handler(
 
 async fn local_app_ui_entry_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath((token, app_id)): AxumPath<(String, String)>,
+    AxumPath((token, connector_id)): AxumPath<(String, String)>,
     headers: HeaderMap,
 ) -> AxumResponse {
-    serve_local_app_ui_asset(&state, &token, &app_id, None, &headers).await
+    serve_local_app_ui_asset(&state, &token, &connector_id, None, &headers).await
 }
 
 async fn local_app_ui_asset_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
-    AxumPath((token, app_id, asset_path)): AxumPath<(String, String, String)>,
+    AxumPath((token, connector_id, asset_path)): AxumPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> AxumResponse {
-    serve_local_app_ui_asset(&state, &token, &app_id, Some(&asset_path), &headers).await
+    serve_local_app_ui_asset(&state, &token, &connector_id, Some(&asset_path), &headers).await
 }
 
 async fn serve_local_app_ui_asset(
     state: &LocalAppUiHttpState,
     token: &str,
-    app_id: &str,
+    connector_id: &str,
     asset_path: Option<&str>,
     headers: &HeaderMap,
 ) -> AxumResponse {
@@ -2652,15 +2656,15 @@ async fn serve_local_app_ui_asset(
         Some(LOCAL_APP_UI_BRIDGE_ASSET) => "bridge",
         Some(_) => "asset",
     };
-    if token != state.ui_token || !local_app_ui_request_host_matches(headers, token, app_id) {
+    if token != state.ui_token || !local_app_ui_request_host_matches(headers, token, connector_id) {
         state.diagnostics.warn(format!(
-            "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=rejected reason=invalid_endpoint"
+            "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=invalid_endpoint"
         ));
         return local_app_ui_error(StatusCode::NOT_FOUND, "not found");
     }
     if asset_path == Some(LOCAL_APP_UI_BRIDGE_ASSET) {
         state.diagnostics.info(format!(
-            "local app UI request: app_id={app_id} asset_kind=bridge outcome=served status=200"
+            "local app UI request: connector_id={connector_id} asset_kind=bridge outcome=served status=200"
         ));
         return local_app_ui_response(
             StatusCode::OK,
@@ -2669,18 +2673,18 @@ async fn serve_local_app_ui_asset(
         );
     }
 
-    let record = match show_connector(app_id) {
+    let record = match show_connector(connector_id) {
         Ok(record) => record,
         Err(_) => {
             state.diagnostics.warn(format!(
-                "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=rejected reason=application_not_found"
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=application_not_found"
             ));
             return local_app_ui_error(StatusCode::NOT_FOUND, "application not found");
         }
     };
     let Some(ui) = record.manifest.ui.as_ref() else {
         state.diagnostics.warn(format!(
-            "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=rejected reason=ui_not_declared"
+            "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=ui_not_declared"
         ));
         return local_app_ui_error(StatusCode::NOT_FOUND, "application UI not found");
     };
@@ -2689,7 +2693,7 @@ async fn serve_local_app_ui_asset(
         Ok(path) => path,
         Err(_) => {
             state.diagnostics.warn(format!(
-                "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=rejected reason=asset_not_found"
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=asset_not_found"
             ));
             return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found");
         }
@@ -2698,7 +2702,7 @@ async fn serve_local_app_ui_asset(
         Ok(body) => body,
         Err(_) => {
             state.diagnostics.warn(format!(
-                "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=rejected reason=asset_read_failed"
+                "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=rejected reason=asset_read_failed"
             ));
             return local_app_ui_error(StatusCode::NOT_FOUND, "asset not found");
         }
@@ -2708,28 +2712,28 @@ async fn serve_local_app_ui_asset(
             Ok(body) => body,
             Err(message) => {
                 state.diagnostics.warn(format!(
-                    "local app UI request: app_id={app_id} asset_kind=entry outcome=rejected reason=bridge_injection_failed"
+                    "local app UI request: connector_id={connector_id} asset_kind=entry outcome=rejected reason=bridge_injection_failed"
                 ));
                 return local_app_ui_error(StatusCode::UNPROCESSABLE_ENTITY, &message);
             }
         };
     }
     state.diagnostics.info(format!(
-        "local app UI request: app_id={app_id} asset_kind={asset_kind} outcome=served status=200"
+        "local app UI request: connector_id={connector_id} asset_kind={asset_kind} outcome=served status=200"
     ));
     local_app_ui_response(StatusCode::OK, local_app_ui_content_type(&resolved), body)
 }
 
-fn local_app_ui_host(token: &str, app_id: &str) -> String {
+fn local_app_ui_host(token: &str, connector_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hasher.update([0]);
-    hasher.update(app_id.as_bytes());
+    hasher.update(connector_id.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     format!("app-{}.localhost", &digest[..20])
 }
 
-fn local_app_ui_request_host_matches(headers: &HeaderMap, token: &str, app_id: &str) -> bool {
+fn local_app_ui_request_host_matches(headers: &HeaderMap, token: &str, connector_id: &str) -> bool {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -2737,7 +2741,7 @@ fn local_app_ui_request_host_matches(headers: &HeaderMap, token: &str, app_id: &
         return false;
     };
     let host_without_port = host.split_once(':').map_or(host, |(host, _)| host);
-    host_without_port.eq_ignore_ascii_case(&local_app_ui_host(token, app_id))
+    host_without_port.eq_ignore_ascii_case(&local_app_ui_host(token, connector_id))
 }
 
 fn inject_local_app_ui_bridge(body: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -2828,10 +2832,10 @@ fn connector_app_ui_url(
         .ok_or_else(|| "本地应用界面服务当前不可用，请在诊断页查看启动状态".to_string())?;
     Ok(format!(
         "http://{}:{}/{}/{}/",
-        local_app_ui_host(&endpoint.token, &record.manifest.app_id),
+        local_app_ui_host(&endpoint.token, &record.manifest.id),
         endpoint.port,
         endpoint.token,
-        record.manifest.app_id
+        record.manifest.id
     ))
 }
 
@@ -2897,75 +2901,6 @@ async fn fetch_market_connector_apps(
             .map_err(|err| format!("解析 local-app-market 响应失败: {err}"))?
     };
     Ok(raw_apps.into_iter().map(MarketConnectorApp::from).collect())
-}
-
-async fn fetch_registered_install_source(
-    config_path: &Path,
-    app_id: &str,
-    version: &str,
-) -> Result<RegisteredInstallSource, String> {
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let base_url = config.platform.base_url.trim_end_matches('/');
-    let platform = normalized_platform();
-    let arch = std::env::consts::ARCH;
-    let mut url = reqwest::Url::parse(&format!(
-        "{base_url}/api/local-app-registry/apps/{app_id}/versions/{version}"
-    ))
-    .map_err(|err| format!("本地应用注册中心地址无效: {err}"))?;
-    url.query_pairs_mut()
-        .append_pair("platform", platform)
-        .append_pair("arch", arch)
-        .append_pair("hostVersion", env!("CARGO_PKG_VERSION"))
-        .append_pair("hostCapabilities", &LOCAL_APP_HOST_CAPABILITIES.join(","));
-    let response = Client::new()
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("查询本地应用注册版本失败: {err}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "应用 {app_id}@{version} 未注册、已撤销或不支持当前平台: HTTP {status} {body}"
-        ));
-    }
-    let registered: RawRegisteredLocalApp = response
-        .json()
-        .await
-        .map_err(|err| format!("解析本地应用注册版本失败: {err}"))?;
-    if registered.app_id != app_id
-        || registered.version.version != version
-        || registered.registration_status != "ACTIVE"
-    {
-        return Err("注册中心返回的应用身份或状态与请求不一致".to_string());
-    }
-    let _ = (
-        &registered.name,
-        &registered.publisher,
-        &registered.platforms,
-    );
-    let checksum = registered
-        .version
-        .checksum
-        .as_deref()
-        .ok_or_else(|| "注册版本缺少安装 checksum".to_string())?;
-    let digest = checksum.strip_prefix("sha256:").unwrap_or(checksum);
-    if digest.len() != 64
-        || !digest
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err("注册版本 checksum 格式无效".to_string());
-    }
-    Ok(RegisteredInstallSource {
-        app_id: registered.app_id,
-        review_status: registered.review_status,
-        version: registered.version.version,
-        source: registered.version.source,
-        repo: registered.version.repo.unwrap_or_default(),
-        revision: registered.version.revision.unwrap_or_default(),
-        checksum: digest.to_ascii_lowercase(),
-    })
 }
 
 #[tauri::command]
@@ -3178,32 +3113,36 @@ async fn invoke_connector_management_request(
 #[tauri::command]
 async fn check_connector_app_update(
     state: tauri::State<'_, DesktopState>,
-    app_id: String,
+    id: String,
+    market_app_id: String,
 ) -> Result<ConnectorAppUpdateStatus, String> {
-    let app_id = app_id.trim();
-    if app_id.is_empty() {
+    let connector_id = id.trim();
+    if connector_id.is_empty() {
         return Err("应用 ID 不能为空".to_string());
     }
-    let installed = show_connector(app_id).map_err(|err| err.to_string())?;
-    if installed.review_status != "PUBLISHED" {
-        return Err("该应用版本未在公开市场发布，请使用原注册来源同步".to_string());
+    let installed = show_connector(connector_id).map_err(|err| err.to_string())?;
+    if installed.trust_level != ConnectorTrustLevel::PlatformTrusted {
+        return Err("用户信任的应用不能静默切换到市场更新源，请从市场重新安装".to_string());
+    }
+    if installed.market_app_id.as_deref() != Some(market_app_id.trim()) {
+        return Err("已安装应用的市场身份与更新来源不匹配".to_string());
     }
     let market_app = fetch_market_connector_apps(&state.config_path)
         .await?
         .into_iter()
-        .find(|app| app.app_id == app_id)
+        .find(|app| app.id == market_app_id.trim())
         .ok_or_else(|| "市场中找不到该应用".to_string())?;
     validate_market_host_compatibility(&market_app)?;
-    validate_market_app_identity(&market_app, app_id)?;
+    validate_market_connector_identity(&market_app, connector_id)?;
     let checksum = required_market_checksum(&market_app)?;
     let resolved_source =
         resolve_connector_source(&market_app.source, false, Some(&checksum), None).await?;
     let latest_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
-    if latest_manifest.app_id != installed.manifest.app_id {
+    if latest_manifest.id != installed.manifest.id {
         return Err(format!(
             "更新来源应用 ID 不匹配：当前 `{}`，来源 `{}`",
-            installed.manifest.app_id, latest_manifest.app_id
+            installed.manifest.id, latest_manifest.id
         ));
     }
     if latest_manifest.version != market_app.version {
@@ -3214,7 +3153,7 @@ async fn check_connector_app_update(
     }
 
     Ok(ConnectorAppUpdateStatus {
-        app_id: installed.manifest.app_id,
+        connector_id: installed.manifest.id,
         name: latest_manifest.name,
         current_version: installed.manifest.version.clone(),
         latest_version: latest_manifest.version.clone(),
@@ -3236,11 +3175,17 @@ fn start_connector_app_install(
         operation,
         source,
         replace,
-        app_id,
+        checksum,
+        allow_git,
+        market_app_id,
+        connector_id,
         name,
         version,
     } = request;
-    let app_id = app_id
+    let market_app_id = market_app_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let connector_id = connector_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let display_name = name
@@ -3252,7 +3197,8 @@ fn start_connector_app_install(
         .filter(|value| !value.is_empty());
     let task = state.local_app_install_tasks.create(
         operation,
-        app_id.clone(),
+        connector_id,
+        market_app_id.clone(),
         display_name,
         display_version,
     )?;
@@ -3279,7 +3225,9 @@ fn start_connector_app_install(
             ConnectorInstallOptions {
                 source,
                 replace,
-                app_id,
+                checksum,
+                allow_git,
+                market_app_id,
                 start: true,
                 progress: Some(reporter.clone()),
             },
@@ -3288,7 +3236,7 @@ fn start_connector_app_install(
         match result {
             Ok(document) => {
                 reporter.update(|task| {
-                    task.app_id = Some(document.install.app_id.clone());
+                    task.connector_id = Some(document.install.connector_id.clone());
                     task.name = document.install.name.clone();
                     task.version = Some(document.install.version.clone());
                     task.phase = LocalAppInstallTaskPhase::Succeeded;
@@ -3304,7 +3252,7 @@ fn start_connector_app_install(
                         LocalAppInstallTaskOperation::Upgrade => LocalAppsChangeOperation::Upgrade,
                         LocalAppInstallTaskOperation::Sync => LocalAppsChangeOperation::Sync,
                     },
-                    &document.install.app_id,
+                    &document.install.connector_id,
                 );
             }
             Err(error) => {
@@ -3323,12 +3271,15 @@ fn start_connector_app_install(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct StartConnectorAppInstallRequest {
     operation: LocalAppInstallTaskOperation,
     source: String,
     replace: bool,
-    app_id: Option<String>,
+    checksum: Option<String>,
+    allow_git: Option<bool>,
+    market_app_id: Option<String>,
+    connector_id: Option<String>,
     name: Option<String>,
     version: Option<String>,
 }
@@ -3358,36 +3309,47 @@ async fn install_connector_app_with_context(
     }
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
     let requested_source = options.source.trim();
-    if requested_source.is_empty() && options.app_id.as_deref().is_none_or(str::is_empty) {
+    if requested_source.is_empty() && options.market_app_id.as_deref().is_none_or(str::is_empty) {
         return Err("安装来源不能为空".to_string());
     }
-    let expected_app_id = options
-        .app_id
+
+    let market_app = match options
+        .market_app_id
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let discovery_source =
-        resolve_connector_source(requested_source, true, None, progress.as_ref()).await?;
-    let discovered_manifest =
-        load_connector_manifest(discovery_source.path()).map_err(|err| err.to_string())?;
-    if expected_app_id.is_some_and(|app_id| app_id != discovered_manifest.app_id) {
-        return Err(format!(
-            "请求 appId 与安装包清单不匹配：请求 `{}`，安装包 `{}`",
-            expected_app_id.unwrap_or_default(),
-            discovered_manifest.app_id
-        ));
-    }
-    let registered = fetch_registered_install_source(
-        config_path,
-        &discovered_manifest.app_id,
-        &discovered_manifest.version,
-    )
-    .await?;
-    validate_direct_install_source(requested_source, &registered)?;
+        .filter(|value| !value.is_empty())
+    {
+        Some(id) => Some(
+            fetch_market_connector_apps(config_path)
+                .await?
+                .into_iter()
+                .find(|app| app.id == id)
+                .ok_or_else(|| "市场中找不到该应用".to_string())?,
+        ),
+        None => None,
+    };
+    let (resolved_source_text, resolved_checksum, resolved_allow_git) =
+        if let Some(market_app) = market_app.as_ref() {
+            validate_market_host_compatibility(market_app)?;
+            if market_app.application_type != "connector" {
+                return Err("该市场条目不是 Connector 应用".to_string());
+            }
+            (
+                market_app.source.clone(),
+                Some(required_market_checksum(market_app)?),
+                false,
+            )
+        } else {
+            (
+                requested_source.to_string(),
+                options.checksum.filter(|value| !value.trim().is_empty()),
+                options.allow_git.unwrap_or(true),
+            )
+        };
     let resolved_source = resolve_connector_source(
-        &registered.source,
-        false,
-        Some(&registered.checksum),
+        &resolved_source_text,
+        resolved_allow_git,
+        resolved_checksum.as_deref(),
         progress.as_ref(),
     )
     .await?;
@@ -3402,21 +3364,19 @@ async fn install_connector_app_with_context(
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
     if let Some(progress) = progress.as_ref() {
         progress.identity(
-            &candidate_manifest.app_id,
+            &candidate_manifest.id,
             &candidate_manifest.name,
             &candidate_manifest.version,
         );
     }
-    if candidate_manifest.app_id != registered.app_id
-        || candidate_manifest.version != registered.version
-    {
-        return Err(format!(
-            "注册版本与安装包清单不匹配：注册 `{}@{}`，安装包 `{}@{}`",
-            registered.app_id,
-            registered.version,
-            candidate_manifest.app_id,
-            candidate_manifest.version
-        ));
+    if let Some(market_app) = market_app.as_ref() {
+        validate_market_connector_identity(market_app, &candidate_manifest.id)?;
+        if candidate_manifest.version != market_app.version {
+            return Err(format!(
+                "市场版本与安装包清单不匹配：市场 `{}`，安装包 `{}`",
+                market_app.version, candidate_manifest.version
+            ));
+        }
     }
     let bundled_cli = bundled_baijimu_cli_path();
     managed_tool_dependency::ensure_ready(
@@ -3429,11 +3389,11 @@ async fn install_connector_app_with_context(
     let existing = list_connectors()
         .map_err(|err| err.to_string())?
         .into_iter()
-        .find(|connector| connector.app_id == candidate_manifest.app_id);
+        .find(|connector| connector.id == candidate_manifest.id);
     let restart_after_replace = if options.replace {
         match existing.as_ref() {
             Some(connector) => {
-                connector_local_app_is_healthy(config_path, &connector.app_id, connector_processes)
+                connector_local_app_is_healthy(config_path, &connector.id, connector_processes)
                     .await?
             }
             None => false,
@@ -3442,12 +3402,15 @@ async fn install_connector_app_with_context(
         false
     };
 
-    let provenance = ConnectorInstallProvenance::registered(
-        &registered.source,
-        &registered.review_status,
-        &registered.checksum,
-    )
-    .map_err(|err| err.to_string())?;
+    let provenance = match market_app.as_ref() {
+        Some(market_app) => ConnectorInstallProvenance::platform_trusted(
+            &resolved_source_text,
+            &market_app.id,
+            resolved_checksum.as_deref().unwrap_or_default(),
+        )
+        .map_err(|err| err.to_string())?,
+        None => ConnectorInstallProvenance::user_trusted(Some(&resolved_source_text)),
+    };
     let operation_kind = if existing.is_some() && options.replace {
         ConnectorOperationKind::Upgrade
     } else {
@@ -3455,7 +3418,7 @@ async fn install_connector_app_with_context(
     };
     let operation = connector_lifecycles
         .begin(
-            &candidate_manifest.app_id,
+            &candidate_manifest.id,
             operation_kind,
             Some(candidate_manifest.version.clone()),
             if operation_kind == ConnectorOperationKind::Upgrade {
@@ -3474,7 +3437,7 @@ async fn install_connector_app_with_context(
             );
         }
         connector_lifecycles.advance(
-            &candidate_manifest.app_id,
+            &candidate_manifest.id,
             &operation.id,
             operation_kind.lifecycle(),
             "正在安装并注册应用",
@@ -3483,7 +3446,7 @@ async fn install_connector_app_with_context(
         if options.replace {
             if let Some(connector) = existing.as_ref() {
                 connector_processes
-                    .stop_if_managed(&connector.app_id, config_path)
+                    .stop_if_managed(&connector.id, config_path)
                     .await?;
             }
         }
@@ -3499,7 +3462,7 @@ async fn install_connector_app_with_context(
                     if let Err(restart_err) = start_connector_and_wait(
                         connector_processes,
                         config_path,
-                        &candidate_manifest.app_id,
+                        &candidate_manifest.id,
                         "恢复旧版应用",
                     )
                     .await
@@ -3523,7 +3486,7 @@ async fn install_connector_app_with_context(
                 );
             }
             connector_lifecycles.advance(
-                &candidate_manifest.app_id,
+                &candidate_manifest.id,
                 &operation.id,
                 ConnectorLifecycleState::Starting,
                 "应用已安装，正在启动并检查运行状态",
@@ -3532,7 +3495,7 @@ async fn install_connector_app_with_context(
             let started = start_connector_and_wait(
                 connector_processes,
                 config_path,
-                &install.app_id,
+                &install.connector_id,
                 "启动新版应用",
             )
             .await
@@ -3550,7 +3513,7 @@ async fn install_connector_app_with_context(
             );
         }
         connector_lifecycles.advance(
-            &candidate_manifest.app_id,
+            &candidate_manifest.id,
             &operation.id,
             if should_start {
                 ConnectorLifecycleState::Starting
@@ -3588,7 +3551,7 @@ async fn install_connector_app_with_context(
                     operation,
                     Some(document.install.version.clone()),
                     connector_processes
-                        .managed_pid(&candidate_manifest.app_id)
+                        .managed_pid(&candidate_manifest.id)
                         .await,
                     "应用已启动并通过就绪检查",
                 )?;
@@ -3604,20 +3567,20 @@ async fn install_connector_app_with_context(
         Err(error) => {
             let recovered = connector_local_app_is_healthy(
                 config_path,
-                &candidate_manifest.app_id,
+                &candidate_manifest.id,
                 connector_processes,
             )
             .await
             .unwrap_or(false);
             if recovered {
-                let observed_version = show_connector(&candidate_manifest.app_id)
+                let observed_version = show_connector(&candidate_manifest.id)
                     .ok()
                     .map(|record| record.manifest.version);
                 connector_lifecycles.complete_ready(
                     operation,
                     observed_version,
                     connector_processes
-                        .managed_pid(&candidate_manifest.app_id)
+                        .managed_pid(&candidate_manifest.id)
                         .await,
                     "升级失败，已恢复原运行版本",
                 )?;
@@ -3644,29 +3607,33 @@ fn ensure_connector_lifecycle_command_succeeded(
         } else {
             format!("退出码 {:?}", failures.exit_code)
         };
-        Err(format!("{action}失败：{}: {detail}", failures.app_id))
+        Err(format!("{action}失败：{}: {detail}", failures.connector_id))
     }
 }
 
 async fn connector_local_app_is_healthy(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     connector_processes: &ConnectorProcessManager,
 ) -> Result<bool, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    if !config.local_apps.iter().any(|app| app.app_id == app_id) {
+    if !config
+        .local_apps
+        .iter()
+        .any(|app| app.connector_id == connector_id)
+    {
         // The install record is the source of truth and local_apps is derived state. Rebuild a
         // missing entry before deciding whether a running process must survive replacement.
-        sync_installed_connector(config_path, app_id).map_err(|err| err.to_string())?;
+        sync_installed_connector(config_path, connector_id).map_err(|err| err.to_string())?;
     }
-    let process_running = connector_processes.managed_running(app_id).await;
-    let status = connector_local_app_status(config_path, app_id, process_running).await?;
+    let process_running = connector_processes.managed_running(connector_id).await;
+    let status = connector_local_app_status(config_path, connector_id, process_running).await?;
     Ok(status.status == RegisteredServiceState::Healthy)
 }
 
 async fn connector_local_app_status(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     process_running: Option<bool>,
 ) -> Result<LocalAppRuntimeStatus, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
@@ -3677,19 +3644,19 @@ async fn connector_local_app_status(
     let app = config
         .local_apps
         .into_iter()
-        .find(|app| app.app_id == app_id)
-        .ok_or_else(|| format!("本地应用 `{app_id}` 不在当前配置中"))?;
+        .find(|app| app.connector_id == connector_id)
+        .ok_or_else(|| format!("本地应用 `{connector_id}` 不在当前配置中"))?;
     Ok(check_local_app(&client, app, process_running).await)
 }
 
 async fn wait_for_connector_health(
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     expected_healthy: bool,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let status = connector_local_app_status(config_path, app_id, None).await?;
+        let status = connector_local_app_status(config_path, connector_id, None).await?;
         let matches = if expected_healthy {
             !status.health_check_configured || status.status == RegisteredServiceState::Healthy
         } else {
@@ -3701,7 +3668,7 @@ async fn wait_for_connector_health(
         if Instant::now() >= deadline {
             let details = format!(
                 "{}={:?} ({})",
-                status.app_id,
+                status.connector_id,
                 status.status,
                 status.detail.as_deref().unwrap_or("无详情")
             );
@@ -3715,10 +3682,10 @@ async fn wait_for_connector_health(
 async fn start_connector_and_wait(
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     action: &str,
 ) -> Result<ConnectorStartResult, String> {
-    let record = show_connector(app_id).map_err(|err| err.to_string())?;
+    let record = show_connector(connector_id).map_err(|err| err.to_string())?;
     let bundled_cli = bundled_baijimu_cli_path();
     let dependency_env = managed_tool_dependency::ensure_ready(
         &record.manifest,
@@ -3728,32 +3695,36 @@ async fn start_connector_and_wait(
     .await
     .map_err(|err| format!("{action}前的应用依赖检查失败: {err:#}"))?;
     let result = connector_processes
-        .start(app_id, config_path, dependency_env)
+        .start(connector_id, config_path, dependency_env)
         .await?;
     let verification = ensure_connector_lifecycle_command_succeeded(action, &result);
     if let Err(error) = verification {
         return Err(cleanup_failed_connector_start(
             connector_processes,
             config_path,
-            &result.app_id,
+            &result.connector_id,
             error,
         )
         .await);
     }
-    if connector_processes.managed_running(&result.app_id).await == Some(false) {
+    if connector_processes
+        .managed_running(&result.connector_id)
+        .await
+        == Some(false)
+    {
         return Err(cleanup_failed_connector_start(
             connector_processes,
             config_path,
-            &result.app_id,
+            &result.connector_id,
             format!("{action}失败：宿主管理进程已提前退出"),
         )
         .await);
     }
-    if let Err(error) = wait_for_connector_health(config_path, &result.app_id, true).await {
+    if let Err(error) = wait_for_connector_health(config_path, &result.connector_id, true).await {
         return Err(cleanup_failed_connector_start(
             connector_processes,
             config_path,
-            &result.app_id,
+            &result.connector_id,
             error,
         )
         .await);
@@ -3765,27 +3736,27 @@ async fn start_connector_with_lifecycle(
     connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     action: &str,
 ) -> Result<ConnectorStartResult, String> {
-    let version = show_connector(app_id)
+    let version = show_connector(connector_id)
         .map_err(|error| error.to_string())?
         .manifest
         .version;
     let operation = connector_lifecycles
         .begin(
-            app_id,
+            connector_id,
             ConnectorOperationKind::Start,
             Some(version.clone()),
             action,
         )
         .await?;
-    match start_connector_and_wait(connector_processes, config_path, app_id, action).await {
+    match start_connector_and_wait(connector_processes, config_path, connector_id, action).await {
         Ok(result) => {
             connector_lifecycles.complete_ready(
                 operation,
                 Some(version),
-                connector_processes.managed_pid(app_id).await,
+                connector_processes.managed_pid(connector_id).await,
                 "应用已启动并通过就绪检查",
             )?;
             Ok(result)
@@ -3800,10 +3771,10 @@ async fn start_connector_with_lifecycle(
 async fn cleanup_failed_connector_start(
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     error: String,
 ) -> String {
-    match connector_processes.stop(app_id, config_path).await {
+    match connector_processes.stop(connector_id, config_path).await {
         Ok(_) => format!("{error}；已回收未通过启动验证的应用进程"),
         Err(cleanup_error) => {
             format!("{error}；回收未通过启动验证的应用进程也失败: {cleanup_error}")
@@ -3814,12 +3785,12 @@ async fn cleanup_failed_connector_start(
 async fn stop_connector_and_wait(
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     action: &str,
 ) -> Result<ConnectorStartResult, String> {
-    let result = connector_processes.stop(app_id, config_path).await?;
+    let result = connector_processes.stop(connector_id, config_path).await?;
     ensure_connector_lifecycle_command_succeeded(action, &result)?;
-    wait_for_connector_health(config_path, &result.app_id, false).await?;
+    wait_for_connector_health(config_path, &result.connector_id, false).await?;
     Ok(result)
 }
 
@@ -3827,21 +3798,21 @@ async fn stop_connector_with_lifecycle(
     connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     config_path: &Path,
-    app_id: &str,
+    connector_id: &str,
     action: &str,
 ) -> Result<ConnectorStartResult, String> {
-    let version = show_connector(app_id)
+    let version = show_connector(connector_id)
         .ok()
         .map(|record| record.manifest.version);
     let operation = connector_lifecycles
         .begin(
-            app_id,
+            connector_id,
             ConnectorOperationKind::Stop,
             version.clone(),
             action,
         )
         .await?;
-    match stop_connector_and_wait(connector_processes, config_path, app_id, action).await {
+    match stop_connector_and_wait(connector_processes, config_path, connector_id, action).await {
         Ok(result) => {
             connector_lifecycles.complete_stopped(operation, version, "应用已停止")?;
             Ok(result)
@@ -3856,13 +3827,13 @@ async fn stop_connector_with_lifecycle(
 #[tauri::command]
 async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
-    app_id: String,
+    id: String,
 ) -> Result<ConnectorStartResult, String> {
     let result = start_connector_with_lifecycle(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
-        app_id.trim(),
+        id.trim(),
         "启动应用",
     )
     .await;
@@ -3873,13 +3844,13 @@ async fn start_connector_app(
 #[tauri::command]
 async fn stop_connector_app(
     state: tauri::State<'_, DesktopState>,
-    app_id: String,
+    id: String,
 ) -> Result<ConnectorStartResult, String> {
     let result = stop_connector_with_lifecycle(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
-        app_id.trim(),
+        id.trim(),
         "停止应用",
     )
     .await;
@@ -3890,23 +3861,23 @@ async fn stop_connector_app(
 #[tauri::command]
 async fn uninstall_connector_app(
     state: tauri::State<'_, DesktopState>,
-    app_id: String,
+    id: String,
     force: Option<bool>,
 ) -> Result<ConfigDocument, ConnectorUninstallCommandError> {
-    let app_id = app_id.trim().to_string();
+    let connector_id = id.trim().to_string();
     let document = uninstall_connector_app_with_context(
         &state.config_path,
         &state.runtime,
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.registered_services,
-        app_id.clone(),
+        connector_id.clone(),
         force.unwrap_or(false),
     )
     .await?;
     state
         .local_apps
-        .notify(LocalAppsChangeOperation::Uninstall, &app_id);
+        .notify(LocalAppsChangeOperation::Uninstall, &connector_id);
     Ok(document)
 }
 
@@ -3916,13 +3887,13 @@ async fn uninstall_connector_app_with_context(
     connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     registered_services: &RegisteredServiceMonitor,
-    app_id: String,
+    id: String,
     force: bool,
 ) -> Result<ConfigDocument, ConnectorUninstallCommandError> {
-    let app_id = app_id.trim().to_string();
+    let connector_id = id.trim().to_string();
     let operation = connector_lifecycles
         .begin(
-            &app_id,
+            &connector_id,
             ConnectorOperationKind::Uninstall,
             None,
             "正在停止并卸载应用",
@@ -3930,8 +3901,8 @@ async fn uninstall_connector_app_with_context(
         .await
         .map_err(|message| ConnectorUninstallCommandError::Failed { message })?;
     let result = async {
-        let managed_stop = connector_processes
-        .stop_if_managed(&app_id, config_path)
+    let managed_stop = connector_processes
+        .stop_if_managed(id.trim(), config_path)
         .await;
     if let Err(error) = managed_stop {
         if !force {
@@ -3939,11 +3910,11 @@ async fn uninstall_connector_app_with_context(
         }
         log::warn!(
             "continuing explicit forced uninstall for connector `{}` after host-managed stop failed: {}",
-            app_id,
+            id.trim(),
             error
         );
     }
-    uninstall_connector_with_options(&app_id, config_path, ConnectorUninstallOptions { force })
+    uninstall_connector_with_options(id.trim(), config_path, ConnectorUninstallOptions { force })
         .map_err(|error| {
         let stop_failed = is_connector_package_stop_error(&error);
         let message = format!("{error:#}");
@@ -5103,11 +5074,11 @@ async fn check_local_app(
     app: LocalAppConfig,
     process_running: Option<bool>,
 ) -> LocalAppRuntimeStatus {
-    let app_id = app.app_id.clone();
+    let connector_id = app.connector_id.clone();
     let mut status = check_registered_service(
         client,
         ServiceConfig {
-            name: app_id.clone(),
+            name: connector_id.clone(),
             description: app.description,
             enabled: app.enabled,
             health_check: app.health_check,
@@ -5119,7 +5090,7 @@ async fn check_local_app(
     .await;
     apply_managed_process_status(&mut status, process_running);
     LocalAppRuntimeStatus {
-        app_id,
+        connector_id,
         status: status.status,
         detail: status.detail,
         checked_at_ms: status.checked_at_ms,
@@ -5136,7 +5107,7 @@ fn inactive_local_app_status(
     process_running: Option<bool>,
 ) -> LocalAppRuntimeStatus {
     LocalAppRuntimeStatus {
-        app_id: app.app_id,
+        connector_id: app.connector_id,
         status: RegisteredServiceState::Unhealthy,
         detail: Some("应用尚未由 Bridge Agent 启动".to_string()),
         checked_at_ms: now_ms(),
@@ -5410,13 +5381,12 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
         let event_names = events.iter().map(|event| event.name.clone()).collect();
         let permissions = market_manifest_permissions(&value.latest_version.manifest);
         Self {
-            app_id: value.app_id,
+            id: value.id,
+            connector_id: value.connector_id,
             application_type,
             name: value.name,
             description: value.description,
             source,
-            repo: value.latest_version.repo.clone().unwrap_or_default(),
-            revision: value.latest_version.revision.clone().unwrap_or_default(),
             checksum,
             archive_path,
             risk: value.risk,
@@ -5697,65 +5667,23 @@ fn validate_market_host_compatibility(market_app: &MarketConnectorApp) -> Result
         .unwrap_or_else(|| "当前百积木客户端不支持该应用版本，请先升级客户端".to_string()))
 }
 
-fn validate_market_app_identity(
+fn validate_market_connector_identity(
     market_app: &MarketConnectorApp,
-    app_id: &str,
+    connector_id: &str,
 ) -> Result<(), String> {
     if market_app.application_type != "connector" {
         return Err("该市场条目不是 Connector 应用".to_string());
     }
-    if market_app.app_id.trim() != app_id.trim() {
+    if market_app.connector_id.trim() != connector_id.trim() {
         return Err(format!(
             "市场应用 ID 与安装包不匹配：市场 `{}`，安装包 `{}`",
-            market_app.app_id, app_id
+            market_app.connector_id, connector_id
         ));
     }
     if !market_app.source.trim().starts_with("https://") {
         return Err("市场 Connector 安装源必须使用 HTTPS".to_string());
     }
     Ok(())
-}
-
-fn validate_direct_install_source(
-    requested_source: &str,
-    registered: &RegisteredInstallSource,
-) -> Result<(), String> {
-    let (requested_base, requested_revision) = split_source_revision(requested_source);
-    let requested = canonical_registry_source(&requested_base)?;
-    let registered_source = canonical_registry_source(&registered.source)?;
-    let registered_repo = canonical_registry_source(&registered.repo)?;
-    if requested != registered_source && requested != registered_repo {
-        return Err(format!(
-            "GitHub 安装来源未登记到应用 {}@{}",
-            registered.app_id, registered.version
-        ));
-    }
-    if let Some(requested_revision) = requested_revision {
-        if requested_revision != registered.revision {
-            return Err(format!(
-                "安装来源 revision `{requested_revision}` 与注册 revision `{}` 不一致",
-                registered.revision
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn canonical_registry_source(value: &str) -> Result<String, String> {
-    let mut url =
-        reqwest::Url::parse(value.trim()).map_err(|err| format!("注册安装来源 URL 无效: {err}"))?;
-    if url.scheme() != "https" || url.host_str().is_none() {
-        return Err("注册安装来源必须使用 HTTPS".to_string());
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    let normalized_path = url
-        .path()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .to_string();
-    url.set_path(&normalized_path);
-    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 fn required_market_checksum(market_app: &MarketConnectorApp) -> Result<String, String> {
@@ -6714,30 +6642,30 @@ fn auto_start_agent(
             }
         }
 
-        let automatic_app_ids = config
+        let automatic_connector_ids = config
             .local_apps
             .iter()
             .filter(|app| bridge_agent::local_app_starts_automatically(app))
-            .map(|app| app.app_id.clone())
+            .map(|app| app.connector_id.clone())
             .collect::<Vec<_>>();
-        for app_id in automatic_app_ids {
+        for connector_id in automatic_connector_ids {
             diagnostics.info(format!(
-                "automatic connector start requested: app_id={app_id}"
+                "automatic connector start requested: connector_id={connector_id}"
             ));
             match start_connector_with_lifecycle(
                 &connector_lifecycles,
                 &connector_processes,
                 &config_path,
-                &app_id,
+                &connector_id,
                 "自动启动应用",
             )
             .await
             {
                 Ok(_) => diagnostics.info(format!(
-                    "automatic connector start completed: app_id={app_id}"
+                    "automatic connector start completed: connector_id={connector_id}"
                 )),
                 Err(err) => diagnostics.warn(format!(
-                    "automatic connector start failed: app_id={app_id} error={err}"
+                    "automatic connector start failed: connector_id={connector_id} error={err}"
                 )),
             }
         }
@@ -7334,7 +7262,10 @@ mod tests {
             serde_json::to_value(ConnectorManagementCommandError::from(lifecycle_error))
                 .expect("management command error should serialize");
         assert_eq!(management_error["code"], "connector_not_ready");
-        assert_eq!(management_error["lifecycle"]["appId"], "connector.test");
+        assert_eq!(
+            management_error["lifecycle"]["connectorId"],
+            "connector.test"
+        );
 
         assert!(std::mem::size_of::<CommandError>() <= 64);
         assert!(std::mem::size_of::<ConnectorManagementCommandError>() <= 64);
@@ -7347,13 +7278,12 @@ mod tests {
 
     fn market_connector(checksum: Option<&str>) -> MarketConnectorApp {
         MarketConnectorApp {
-            app_id: "com.baijimu.connector.test".to_string(),
+            id: "market-app-1".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
             application_type: "connector".to_string(),
             name: "Test Connector".to_string(),
             description: String::new(),
             source: "https://downloads.example.test/connector.zip".to_string(),
-            repo: "https://github.com/example/connector".to_string(),
-            revision: "0123456789abcdef".to_string(),
             checksum: checksum.map(str::to_string),
             archive_path: None,
             risk: String::new(),
@@ -7388,6 +7318,7 @@ mod tests {
             .create(
                 LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
+                Some("codex".to_string()),
                 "Codex".to_string(),
                 Some("1.2.1".to_string()),
             )
@@ -7399,6 +7330,7 @@ mod tests {
             .create(
                 LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
+                Some("codex".to_string()),
                 "Codex".to_string(),
                 Some("1.2.1".to_string()),
             )
@@ -7432,6 +7364,7 @@ mod tests {
             .create(
                 LocalAppInstallTaskOperation::Upgrade,
                 Some("com.baijimu.connector.codex".to_string()),
+                Some("codex".to_string()),
                 "Codex".to_string(),
                 Some("1.2.1".to_string()),
             )
@@ -7509,15 +7442,17 @@ mod tests {
             required_market_checksum(&valid).unwrap(),
             format!("sha256:{}", "a".repeat(64))
         );
-        assert!(validate_market_app_identity(&valid, "com.baijimu.connector.test").is_ok());
+        assert!(validate_market_connector_identity(&valid, "com.baijimu.connector.test").is_ok());
 
         assert!(required_market_checksum(&market_connector(None)).is_err());
         assert!(required_market_checksum(&market_connector(Some("invalid"))).is_err());
-        assert!(validate_market_app_identity(&valid, "com.example.other").is_err());
+        assert!(validate_market_connector_identity(&valid, "com.example.other").is_err());
 
         let mut insecure = valid;
         insecure.source = "http://downloads.example.test/connector.zip".to_string();
-        assert!(validate_market_app_identity(&insecure, "com.baijimu.connector.test").is_err());
+        assert!(
+            validate_market_connector_identity(&insecure, "com.baijimu.connector.test").is_err()
+        );
     }
 
     #[test]
@@ -7657,7 +7592,7 @@ mod tests {
         process_running: Option<bool>,
     ) -> LocalAppRuntimeStatus {
         LocalAppRuntimeStatus {
-            app_id: "com.baijimu.connector.test".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
             status,
             detail: None,
             checked_at_ms: 100,
@@ -7672,7 +7607,7 @@ mod tests {
     #[test]
     fn inactive_connector_status_is_derived_without_a_health_probe() {
         let app = LocalAppConfig {
-            app_id: "com.baijimu.connector.inactive".to_string(),
+            connector_id: "com.baijimu.connector.inactive".to_string(),
             name: "Inactive Connector".to_string(),
             version: "1.0.0".to_string(),
             description: String::new(),
@@ -7693,7 +7628,7 @@ mod tests {
 
         let status = inactive_local_app_status(app, None);
 
-        assert_eq!(status.app_id, "com.baijimu.connector.inactive");
+        assert_eq!(status.connector_id, "com.baijimu.connector.inactive");
         assert_eq!(status.status, RegisteredServiceState::Unhealthy);
         assert_eq!(
             status.detail.as_deref(),
@@ -7806,7 +7741,7 @@ mod tests {
 
         assert_eq!(installed.revision, 1);
         assert_eq!(installed.operation, LocalAppsChangeOperation::Install);
-        assert_eq!(installed.app_id, "com.baijimu.connector.test");
+        assert_eq!(installed.connector_id, "com.baijimu.connector.test");
         assert_eq!(upgraded.revision, 2);
         assert_eq!(upgraded.operation, LocalAppsChangeOperation::Upgrade);
         assert_eq!(synced.revision, 3);
@@ -8038,9 +7973,9 @@ mod tests {
     #[test]
     fn connector_upgrade_requires_every_lifecycle_command_to_succeed() {
         let success = ConnectorStartResult {
-            app_id: "com.baijimu.connector.test".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
             lifecycle: ConnectorLifecycleResult {
-                app_id: "com.baijimu.connector.test".to_string(),
+                connector_id: "com.baijimu.connector.test".to_string(),
                 configured: true,
                 exit_code: Some(0),
                 stdout: "started".to_string(),
@@ -8050,9 +7985,9 @@ mod tests {
         assert!(ensure_connector_lifecycle_command_succeeded("启动新版应用", &success).is_ok());
 
         let failure = ConnectorStartResult {
-            app_id: "com.baijimu.connector.test".to_string(),
+            connector_id: "com.baijimu.connector.test".to_string(),
             lifecycle: ConnectorLifecycleResult {
-                app_id: "com.baijimu.connector.test".to_string(),
+                connector_id: "com.baijimu.connector.test".to_string(),
                 configured: false,
                 exit_code: None,
                 stdout: String::new(),
@@ -8302,7 +8237,7 @@ mod tests {
         let (prepared, report) = prepare_config_for_auto_start_with(&config_path, |path| {
             let mut synchronized = load_agent_config(path)?;
             synchronized.local_apps.push(LocalAppConfig {
-                app_id: "com.baijimu.connector.persisted".to_string(),
+                connector_id: "com.baijimu.connector.persisted".to_string(),
                 name: "Persisted Connector".to_string(),
                 version: "1.0.0".to_string(),
                 description: "Installed before the host upgrade".to_string(),
@@ -8332,7 +8267,7 @@ mod tests {
         assert!(report.failures.is_empty());
         assert_eq!(prepared.local_apps.len(), 1);
         assert_eq!(
-            prepared.local_apps[0].app_id,
+            prepared.local_apps[0].connector_id,
             "com.baijimu.connector.persisted"
         );
     }

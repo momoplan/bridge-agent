@@ -2,16 +2,14 @@ import { describe, expect, it } from "vitest";
 import { parseBaijimuDeepLink } from "./deep-link";
 
 describe("Baijimu desktop deep links", () => {
-  it("accepts a registered local app install route with or without a share id", () => {
-    expect(parseBaijimuDeepLink("baijimu://apps/install?appId=app-01")).toEqual({
-      kind: "local_app_install",
-      appId: "app-01",
+  it("accepts the Codex install route with or without a share id", () => {
+    expect(parseBaijimuDeepLink("baijimu://codex/install")).toEqual({
+      kind: "codex_install",
       shareId: null
     });
-    expect(parseBaijimuDeepLink("baijimu://apps/install?appId=app-01&shareId=share_01-test"))
+    expect(parseBaijimuDeepLink("baijimu://codex/install?shareId=share_01-test"))
       .toEqual({
-        kind: "local_app_install",
-        appId: "app-01",
+        kind: "codex_install",
         shareId: "share_01-test"
       });
   });
@@ -21,10 +19,7 @@ describe("Baijimu desktop deep links", () => {
   });
 
   it.each([
-    "https://apps/install?appId=app-01",
-    "baijimu://apps/install",
-    "baijimu://apps/install?appId=one&appId=two",
-    "baijimu://apps/install?appId=contains%2Fslash",
+    "https://codex/install",
     "baijimu://other/install",
     "baijimu://codex/open",
     "baijimu://codex/install#fragment",

@@ -4,31 +4,33 @@
 
 ## 术语
 
-- 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。除随客户端发布的内置能力外，可安装对象都必须先在平台登记并取得唯一 `appId`。
+- 本地应用：用户在 `bridge-agent` 桌面端看到和管理的对象。它可以是官方托管工具、内置应用、市场 Connector，也可以是用户手动注册的自定义应用。
 - 官方托管工具：由百积木维护、在应用页独立显示并按版本安装、升级和回滚的本机工具。它不必注册远程服务，例如 Baijimu CLI。
 - Connector：可安装的本地应用包。它通过 `connector.json` 声明身份、版本、运行方式、方法和设备事件。
 - 市场应用：由平台 `local-app-market` 返回的 Connector 分发记录。市场只描述可安装版本，真正安装后仍以 Connector 包为准。
+- 自定义应用：用户或本机开发工具通过开发者配置、本机服务注册 API、CLI 手动加入的服务。它没有市场更新源，默认不展示成市场应用。
 - 服务：内置能力和 legacy 自定义能力的协议对象，例如 `computer`、`shell`。
 - 方法：本地应用下的可调用动作，例如 `wechat.searchMessages`。
 - 设备事件：由某台设备上的某个 Connector 安装实例产生的事件，例如
-  `wecom + messageReceived`。唯一安装实例身份是 `deviceId + appId`。
+  `com.baijimu.connector.wechat + messageReceived`。
 
 ## 分类
 
-本地应用分为三类：
+本地应用分为四类：
 
 | 类型 | 来源 | 是否可市场更新 | 典型例子 |
 | --- | --- | --- | --- |
 | 官方托管工具 | 客户端基线版本 + `local-app-market` 独立版本 | 是 | Baijimu CLI |
 | 内置应用 | 随 `bridge-agent` 客户端发布 | 否，跟随客户端版本 | Desktop Control |
-| 已注册 Connector | `local-app-market` 精确版本登记返回的 Git / 包版本 | 是 | Codex Connector、WeCom Connector、Browser Connector |
+| 市场 Connector | `local-app-market` 返回的 Git / 包版本 | 是 | Codex Connector、WeChat Connector |
+| 自定义应用 | 本机配置、注册 API、CLI | 否 | 本地报表工具、开发中的 HTTP 服务 |
 
 UI 可以统一展示为“本地应用”，但实现和治理必须区分：
 
-- Connector 必须使用服务端分配的 `local_app.id` 作为唯一 `appId`，并能从注册表精确解析版本、来源和 SHA-256。
+- 市场 Connector 必须有稳定 `connectorId`，并能从市场记录找到更新源。
 - 官方托管工具必须有稳定应用 ID、SemVer 版本、按平台/架构区分的发布包、SHA-256 和平台签名。
 - 官方托管工具由本地应用管理器维护版本目录和稳定命令入口；客户端内置副本只负责首次安装和离线修复，不能覆盖或降级已经托管的更高版本。
-- 未登记的本地目录、压缩包或 Git 仓库一律拒绝安装。登记版本可以不经公开审核而通过精确 `appId + version` 直接安装；审核只决定是否出现在公共市场列表。
+- 自定义应用不能伪装成市场应用；除非被市场收录并按本规范提供 Connector 包。
 - 内置应用由 `bridge-agent` 客户端维护，不允许普通卸载，也不通过 Connector 安装目录管理。
 
 ## 应用图标
@@ -59,7 +61,7 @@ Connector 可以在 `connector.json` 顶层声明应用图标：
 
 ## 市场应用的本机管理界面
 
-一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或应用私有配置文件的应用，Connector 可以同时声明受本机 token 保护的管理接口和随包发布的内嵌界面；`bridge-agent` 按稳定 `appId` 在同一个应用详情中加载该界面，但不能实现应用专用设置页，也不能为这部分功能再创建第二张内置应用卡片。
+一个市场 Connector 在用户界面中只能对应一个本地应用。对于涉及本机密钥、系统授权或应用私有配置文件的应用，Connector 可以同时声明受本机 token 保护的管理接口和随包发布的内嵌界面；`bridge-agent` 按稳定 `connectorId` 在同一个应用详情中加载该界面，但不能实现应用专用设置页，也不能为这部分功能再创建第二张内置应用卡片。
 
 宿主管理面板遵循以下边界：
 
@@ -74,15 +76,14 @@ Connector 可以在 `connector.json` 顶层声明应用图标：
 - 应用运行状态和账户配置状态必须分开。Connector 健康检查失败才表示应用运行故障；凭证未配置或无效只表示账户需要处理。
 - 卸载 Connector 后，宿主管理面板随应用入口消失；本机凭证是否清理必须由用户单独确认，不能随卸载静默删除。
 
-Codex 按状态所有权拆成三个本地应用：`codex` 负责桌面应用安装、桌面工作区凭证和用户显式切换；`codex-connector` 独立提供 session、thread、turn 和 event 能力；`codex-completion` 独立提供 OpenAI 兼容补全接口。三个值都是存量市场表主键，不是客户端另造的命名空间。平台项目不参与安装和凭证归属。Bridge Agent 只后台安装和启动应用、加载清单声明的 `ui/` 并代理管理操作；LLM credential 不经过 Bridge Agent。
+Codex 按状态所有权拆成三个本地应用：`com.baijimu.connector.codex` 继承线上 Desktop Manager 身份、原数据目录和端口，只负责官方桌面应用安装、桌面工作区凭证和用户显式切换；`com.baijimu.connector.codex-connector` 独立安装 Codex CLI，并按 Relay 鉴权得到的工作区上下文提供 session、thread、turn 和 event 能力；`com.baijimu.connector.codex-completion` 继续独立提供 OpenAI 兼容补全接口。平台项目不参与安装和凭证归属。Bridge Agent 只后台安装和启动应用、加载清单声明的 `ui/` 并代理管理操作；LLM credential 不经过 Bridge Agent。
 
 管理接口必须满足：
 
 - `management.type` 当前只能为 `http`，且 `baseUrl` 必须是 loopback HTTP 地址。
-- `management.auth.type` 必须为 `connector_token`；token 由 Bridge Agent 按 `appId` 生成到应用私有数据目录，通过 `BAIJIMU_LOCAL_APP_TOKEN_FILE` 注入应用。Unix 文件权限必须为 `0600`。应用不得自行替换或返回 token。
+- `management.auth.type` 必须为 `connector_token`；token 由应用首次启动时写入宿主为该 Connector 分配的私有数据目录，文件权限在 Unix 上必须为 `0600`。
 - `operations` 只能声明 `GET` 或 `POST`，路径必须位于 `/management/` 下；宿主不得接受前端传入任意 URL、方法或路径。
-- 宿主启动应用时通过 `BAIJIMU_LOCAL_APP_DATA_DIR` 传入独立数据目录。应用包升级不得覆盖该目录，卸载是否清理业务配置必须由用户确认。
-- Bridge Agent 使用同一私有 token 为该应用的健康检查和全部 HTTP 能力调用添加 `Authorization: Bearer ...`。应用必须拒绝无 token 请求；只绑定 loopback 不能代替鉴权。
+- 宿主启动应用时通过 `BAIJIMU_CONNECTOR_DATA_DIR` 传入独立数据目录。应用包升级不得覆盖该目录，卸载是否清理业务配置必须由用户确认。
 
 需要在应用内部提供本机初始化能力的 Connector 可以声明 `setup`：
 
@@ -112,7 +113,7 @@ Codex 按状态所有权拆成三个本地应用：`codex` 负责桌面应用安
 - 市场必须返回兼容判断；不兼容版本仍可展示，但不得下发安装源，客户端必须提示先升级。
 - 客户端必须在 UI 和安装命令两层校验，不能依赖前端禁用按钮作为唯一保护。
 
-- `setup` 仅允许用于 `schemaVersion: "3.0.0"`，并要求同时声明 `management`。
+- `setup` 仅允许用于 `schemaVersion: "2.0"`，并要求同时声明 `management`。
 - 新发布且声明 `setup` 的 Connector 必须同时声明 `hostRequirements.minimumVersion >= 0.2.21` 和 `connector.setup.v1`；`0.2.21` 是首个会上报宿主版本/能力并展示升级提示的客户端版本。
 - `operation` 必须引用一个 `POST` management operation；应用内界面通过宿主受控调用桥传入当前授权工作区，操作应立即返回并在应用内部启动幂等后台任务。
 - `statusOperation` 必须引用一个 `GET` management operation，返回 `status`：`pending`、`running`、`succeeded` 或 `failed`。失败时可返回脱敏 `error`。
@@ -150,7 +151,7 @@ Connector 需要调用 Baijimu CLI 等官方托管工具时，必须在清单中
   },
   "managedToolDependencies": [
     {
-      "id": "baijimu-cli",
+      "id": "com.baijimu.cli",
       "minimumVersion": "0.1.45",
       "requiredFor": ["install", "start"],
       "executablePathEnv": "EXAMPLE_BAIJIMU_BINARY"
@@ -159,8 +160,8 @@ Connector 需要调用 Baijimu CLI 等官方托管工具时，必须在清单中
 }
 ```
 
-- `managedToolDependencies` 仅允许用于 `schemaVersion: "3.0.0"`，并要求宿主能力 `connector.managed-tool-dependencies.v1`。
-- `id` 引用已登记官方托管工具的 `appId`；`minimumVersion` 是 Connector 实际调用契约所需的最低 SemVer，不能写成随发布变化的“当前最新版”。
+- `managedToolDependencies` 仅允许用于 `schemaVersion: "2.0"`，并要求宿主能力 `connector.managed-tool-dependencies.v1`。
+- `id` 是官方托管工具的稳定身份；`minimumVersion` 是 Connector 实际调用契约所需的最低 SemVer，不能写成随发布变化的“当前最新版”。
 - `requiredFor` 可包含 `install` 和 `start`。宿主必须在进入对应阶段前串行完成工具安装或修复、版本校验和真实可执行性检查；失败时必须停止该阶段，不能继续安装或启动 Connector。
 - `executablePathEnv` 是宿主在每次启动 Connector 时注入的变量。值必须是宿主动态解析并验证过的稳定 launcher 绝对路径；不得持久化到 Connector 配置，也不得允许 `runtime.env` 覆盖。
 - `install` 门禁发生在包下载、签名和清单校验之后、停止或替换现有应用之前；因此依赖失败不会破坏已安装版本。`start` 门禁发生在创建 Connector 进程之前，覆盖首次安装后的自动启动、手动启动、升级重启和客户端恢复启动。
@@ -193,7 +194,7 @@ connector-root/
 
 - `connector.json` 必须位于包根目录。
 - 包内路径必须使用相对路径，不依赖安装前的源码绝对路径。
-- 安装后，百积木会把包复制到本机 `local-apps` 目录；运行命令应以安装后的包路径为准。
+- 安装后，百积木会把包复制到本机 connectors 目录；运行命令应以安装后的包路径为准。
 - 不要把用户 token、cookie、数据库副本或机器私有配置提交进 Connector 包。
 
 ## 官方托管工具
@@ -228,14 +229,13 @@ connector-root/
 
 ## connector.json
 
-`connector.json` 是 Connector 的主清单。当前且唯一接受的 schema 版本为严格 SemVer
-`3.0.0`。旧版 `id`、`connectorId`、`services` 和 `serviceRegistrationFiles` 不再解析；升级到
-Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新安装新清单。
+`connector.json` 是 Connector 的主清单。当前 schema 版本为 `2.0`；`1.0`、`1.1`
+和 `1.2` 的 service-registration 模型只做兼容。
 
 必填字段：
 
 - `schemaVersion`
-- `appId`
+- `id`
 - `name`
 - `version`
 - `runtime`
@@ -245,6 +245,7 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
 推荐字段：
 
 - `description`
+- `releaseNotes`
 - `publisher`
 - `source`
 - `runtime`
@@ -263,11 +264,15 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
 
 ```json
 {
-  "schemaVersion": "3.0.0",
-  "appId": "wecom",
+  "schemaVersion": "2.0",
+  "id": "com.baijimu.connector.wechat",
   "name": "WeChat Connector",
   "version": "0.2.3",
   "description": "Expose local WeChat search and message events to 百积木.",
+  "releaseNotes": [
+    "新增群聊消息搜索能力。",
+    "修复断线重连后重复上报事件的问题。"
+  ],
   "publisher": {
     "name": "Baijimu",
     "homepage": "https://baijimu.com"
@@ -387,8 +392,8 @@ Bridge Agent 使用当前已安装 package 的不可变清单快照和市场目�
 - 从当前 `schemaVersion` 无法解析到目标版本的完整 migration 链时，升级页必须明确报告契约缺失，
   不能显示“数据库无变化”。
 
-未声明某类契约表示“发布方未声明，无法判断”，不表示“无变化”。版本业务摘要属于市场发布记录，
-不属于 schema `3.0.0` 的 `connector.json`，也不能替代上述结构化契约。
+未声明某类契约表示“发布方未声明，无法判断”，不表示“无变化”。`releaseNotes` 只提供业务摘要，
+不能替代上述结构化契约。
 
 `upgradeReview` 必须对三类契约逐项声明 `declared` 或 `not_applicable`：
 
@@ -445,7 +450,7 @@ Connector 可以随应用包发布构建后的 Web 前端。Bridge Agent 只支�
 
 ```json
 {
-  "schemaVersion": "3.0.0",
+  "schemaVersion": "1.1",
   "ui": {
     "type": "embedded",
     "entry": "ui/index.html",
@@ -496,13 +501,12 @@ await window.baijimuLocalApp.invoke("saveSettings", {
 
 `invoke` 只能调用同一 Connector 在 `management.operations` 中声明的操作。应用页面不能直接获得 Tauri IPC、文件系统、relay 或任意本机 HTTP 权限。Bridge Agent 对页面消息来源、操作名、请求大小和响应大小进行校验，再使用 Connector 私有 token 调用应用后端。
 
-应用后端负责校验并原子写入 `BAIJIMU_LOCAL_APP_DATA_DIR` 下的配置。安装目录视为只读；升级必须保留数据目录，卸载时是否清理数据必须由用户单独确认。
+应用后端负责校验并原子写入 `BAIJIMU_CONNECTOR_DATA_DIR` 下的配置。安装目录视为只读；升级必须保留数据目录，卸载时是否清理数据必须由用户单独确认。
 
 命名要求：
 
-- `appId` 必须等于平台注册表 `local_app.id`。创建应用时调用方不得传入身份；服务端在同一事务中生成数据库主键并返回。
-- 存量应用保留已有主键（例如 `codex`、`wecom`），新应用通常取得 UUID。两者都只是同一数据库主键类型，不存在第二套 Connector 身份或命名空间。
-- `appId` 一旦登记不得因为仓库迁移、展示名称变化或实现重写而改变。
+- `id` 必须全局稳定，建议使用反域名格式，例如 `com.baijimu.connector.wechat`。
+- `id` 一旦发布，不得因为仓库迁移、展示名称变化或实现重写而改变。
 - `permissions[].id` 必须使用 ASCII 字母、数字、点、短横线或下划线；既有权限 ID
   `macos.fullDiskAccess` 属于稳定协议标识，宿主必须保持兼容。
 - `name` 是展示名，可以变化。
@@ -510,7 +514,7 @@ await window.baijimuLocalApp.invoke("saveSettings", {
 
 ## 本地应用能力声明
 
-Schema `3.0.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` 和 `events`，
+Schema `2.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` 和 `events`，
 一个 Connector 安装实例就是一个本地应用，不再为了远程调用或事件订阅创建 service。
 以下字段直接放在 `connector.json`：
 
@@ -558,27 +562,19 @@ Schema `3.0.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` �
 - `runtime.command + stopArgs[]` 应尽量幂等；应用未运行时也应安全退出。
 - `input_schema` 应尽量收紧，不要长期使用完全开放的 `additionalProperties: true` 作为正式能力接口。
 
-同一设备上一个 `appId` 只允许一个实例。Bridge Agent 以 Connector 独立事件凭证
-校验本机事件来源，Relay 和平台以 `deviceId + appId` 唯一识别本地应用，不再维护
+同一设备上一个 `connectorId` 只允许一个实例。Bridge Agent 以 Connector 独立事件凭证
+校验本机事件来源，Relay 和平台以 `deviceId + connectorId` 唯一识别本地应用，不再维护
 额外的安装实例身份。
 
 ## 市场元数据
 
-平台注册事务生成 `local_app.id`，并把它作为 API、清单、Bridge、设备授权和事件链路唯一的
-`appId`。调用方创建应用时不提交 ID；服务端返回后，开发者把该值写入版本化应用目录和
-`connector.json`。存量短 ID 原样保留，新建应用使用数据库生成的 UUID。
-
-市场服务 `local-app-market` 提供两类读取：
+市场服务 `local-app-market` 返回的是可安装版本列表。百积木当前请求：
 
 ```text
 GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
-GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 ```
 
-第一类只返回已审核且公开上架的版本；第二类精确解析 `ACTIVE` 的已登记版本，供 GitHub
-直接安装、测试和未审核分发。撤销应用或版本注册后，精确解析也必须立即拒绝。
-
-公开列表可以返回 lowcode 包装结构：
+可以返回 lowcode 包装结构：
 
 ```json
 {
@@ -592,7 +588,8 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 
 ```json
 {
-  "appId": "wecom",
+  "id": "wechat",
+  "connectorId": "com.baijimu.connector.wechat",
   "name": "微信",
   "description": "安装微信本地采集 connector，把微信相关本地能力接入工作区。",
   "publisher": "Baijimu",
@@ -602,33 +599,20 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
   "platforms": ["macos"],
   "latestVersion": {
     "version": "0.2.3",
-    "sourceType": "https",
-    "source": "https://download.example.com/local-apps/wecom-0.2.3.zip",
+    "sourceType": "git",
+    "source": "https://github.com/momoplan/wechat-bridge-collector.git",
     "repo": "momoplan/wechat-bridge-collector",
     "revision": "v0.2.3",
-    "checksum": "<64 lowercase hexadecimal SHA-256>",
+    "checksum": null,
     "capabilities": [
       "wechat.messages.read",
       "wechat.messages.search",
       "wechat.events.messageReceived"
     ],
     "manifest": {
-      "schemaVersion": "3.0.0",
-      "appId": "wecom",
-      "name": "微信",
-      "version": "0.2.3",
-      "runtime": {
-        "type": "process",
-        "command": "wecom-connector",
-        "args": ["start"],
-        "stopArgs": ["stop"],
-        "processOwnership": "host"
-      },
-      "hostRequirements": {
-        "minimumVersion": "0.6.0",
-        "capabilities": ["connector.process.host-managed.v1"]
-      },
-      "transport": {"type": "http", "baseUrl": "http://127.0.0.1:18082"},
+      "schemaVersion": "2.0",
+      "applicationType": "connector",
+      "releaseNotes": ["新增消息同步状态。"],
       "upgradeReview": {"configuration": "declared", "interfaces": "declared", "database": "declared"},
       "configSchema": {"type": "object", "properties": {}},
       "methods": [{"name": "searchMessages", "description": "Search messages.", "path": "/invoke/searchMessages", "httpMethod": "POST", "input_schema": {"type": "object"}}],
@@ -642,14 +626,11 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 
 要求：
 
-- `appId` 就是市场表主键，不再存在另一套市场 ID、Connector ID 或安装实例 ID。
-- `appId` 必须等于 Connector 包内 `connector.json.appId`。
+- `id` 是市场条目 ID，面向市场展示和路由。
+- `connectorId` 必须等于 Connector 包内 `connector.json.id`。
 - `latestVersion.version` 必须等于 Connector 包内 `connector.json.version`。
 - `latestVersion.revision` 推荐指向不可变 tag，例如 `v0.2.3`。
-- GitHub 直接安装只负责发现和打包指定 revision；Bridge 随后仍须通过精确注册接口核对
-  `appId + version + repo + revision + checksum`，并从登记来源重新下载。未登记内容不得执行。
-- 正式制品必须使用 HTTPS、精确 revision 和 SHA-256；按平台/架构分发时由
-  `manifest.artifacts[]` 声明唯一匹配制品。
+- `latestVersion.source` 是安装源。若带 `revision`，百积木会按 `source#revision` 克隆。
 - `latestVersion.manifest` 必须是该不可变 package 版本的完整清单快照，不能只保留启动命令摘要；
   配置、接口和数据库升级审查都以此为目标版本源事实。
 - `platforms` 必须准确表达支持平台；不要把只支持 macOS 的 Connector 标成 Windows/Linux 可用。
@@ -659,33 +640,35 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 
 安装流程：
 
-1. 用户从公开市场选择应用，或提供已登记版本的 `appId + version` / Git revision。
-2. Bridge 调用注册表精确解析版本，确认应用和版本均为 `ACTIVE`。
-3. Bridge 从登记的 HTTPS 制品源重新下载并验证 SHA-256；macOS/Windows 继续验证平台签名。
-4. Bridge 读取 `connector.json`，严格校验 schema `3.0.0`、`appId`、版本、来源和宿主能力。
-5. Bridge 安装到本机 `local-apps/{appId}/{version}`，私有数据始终位于 `app-data/{appId}`。
-6. Bridge 把本地应用定义写入 `agent-config.json.localApps[]`，生成私有 token，准备运行环境。
-7. Bridge 刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
+1. 百积木从市场读取条目。
+2. 用户选择市场应用。
+3. 百积木下载 `latestVersion.source`，如果有 `revision` 则 checkout 对应分支或 tag。
+4. 百积木读取 `connector.json` 并校验。
+5. 百积木安装 Connector 包到本机 connectors 目录。
+6. 百积木把本地应用定义写入 `agent-config.json.localApps[]`。
+7. 百积木刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
 
 更新规则：
 
-- 用市场 `appId` 找到本机已安装 Connector。
+- 用市场 `connectorId` 找到本机已安装 Connector。
 - 比较本机 `connector.json.version` 与市场 `latestVersion.version`。
-- 更新时重新安装同一个 `appId`，并替换该 Connector 的本地应用定义。
-- 更新不得悄悄迁移到另一个 `appId`。
+- 更新时重新安装同一个 `connectorId`，并替换该 Connector 的本地应用定义。
+- 更新不得悄悄迁移到另一个 `connectorId`。
 - 如果服务名、方法名、事件名发生破坏性变更，必须升级主版本，并在市场风险说明中写清楚。
 - 升级前必须展示配置、接口、数据库和权限的结构化差异；缺少声明时必须展示“无法判断”。
 
-来源同步规则：
+自定义同步规则：
 
-- `sourceReference` 只记录已登记的来源信息；它不能成为绕过注册表的信任依据。
-- Git 同步重新发现指定 revision 后，必须再次精确解析注册表并核对 repo、revision 和 checksum。
-- 重新同步只允许安装同一 `appId` 的已登记版本，并更新 `lastSyncedAtEpochMs`，保留首次 `installedAtEpochMs`。
+- 从本地目录或用户自己输入的 Git URL 安装的 Connector 不按市场版本判断升级。
+- 百积木记录原始安装来源 `sourceReference`、解析后的本地路径 `sourcePath`、首次安装时间和最近同步时间。
+- 用户点击“拉取最新”时，百积木使用 `sourceReference` 重新解析来源；没有 `sourceReference` 的历史安装记录回退使用 `sourcePath`。
+- 重新同步会重新安装同一个 Connector 包，并替换该 Connector 管理的服务。
+- 自定义应用同步完成后更新 `lastSyncedAtEpochMs`，但保留首次 `installedAtEpochMs`。
 
 卸载规则：
 
 - 卸载 Connector 时，删除安装记录和该 Connector 的本地应用定义。
-- 应用私有数据是否删除必须由用户单独确认；默认保留登录态和授权配置。
+- 不得删除用户手动创建的自定义服务。
 - 不得删除其他 Connector 的服务。
 
 ## 权限和安全
@@ -716,12 +699,12 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 
 正确流程：
 
-1. Connector 在 schema `3.0.0` 清单顶层声明 `events[]`。
+1. Connector 在 schema `2.0` 清单顶层声明 `events[]`。
 2. Bridge Agent 启动 Connector 时注入
-   `BAIJIMU_LOCAL_APP_EVENT_ENDPOINT` 和
-   `BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE`。
+   `BAIJIMU_CONNECTOR_EVENT_ENDPOINT` 和
+   `BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE`。
 3. Connector 读取独立事件凭证，调用
-   `POST /v1/local-app-events`，传入 `appId`、`event`、`payload`，可选
+   `POST /v1/local-app-events`，传入 `connectorId`、`event`、`payload`，可选
    `eventId` 和 `occurredAt`。
 4. Bridge Agent 校验凭证、安装实例和事件声明，通过 WebSocket 同步转发
    `local_app_event_emitted`；它不保存事件。
@@ -739,11 +722,11 @@ Bridge Agent 启动时会删除旧版本遗留的专用 `event-outbox` 目录；
 调用示例：
 
 ```bash
-curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
-  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE")" \
+curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
+  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE")" \
   -H "Content-Type: application/json" \
   -d '{
-    "appId": "wecom",
+    "connectorId": "com.baijimu.connector.wechat",
     "event": "messageReceived",
     "eventId": "evt-01J...",
     "payload": {"conversationId": "c-1"}
@@ -756,9 +739,9 @@ curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
 
 稳定接口：
 
-- `connector.json.appId`（即 `local_app.id`）
+- `connector.json.id`
 - `connector.json.version`
-- `deviceId + appId` 安装实例语义
+- Connector ID 和安装实例语义
 - 方法名
 - 事件名
 - 方法输入 schema
@@ -781,29 +764,38 @@ curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
 
 破坏性变更必须提升主版本。
 
-## 本地开发和 GitHub 直接安装
+## 本地开发和自定义应用
 
-本地开发不再等同于“未登记安装”。开发者先在平台创建应用取得服务端 `appId`，再为每个测试版本
-登记精确 repo、revision、HTTPS 制品和 SHA-256。版本可以保持未审核状态，因此不出现在公共市场；
-Bridge 仍可通过精确注册接口安装和同步。
+开发中的 Connector 可以从本地目录或 Git 仓库安装：
 
-GitHub URL 是输入方式，不是信任来源：Bridge 可以浅克隆 revision 读取元数据，但在执行任何包内代码前
-必须用清单中的 `appId + version` 查询注册表，校验 repo/revision/checksum，并从登记源重新下载。
-本地目录、任意压缩包和没有注册记录的 Git revision 都必须拒绝。这样保留开发效率，同时保证所有
-可执行本地应用都有可撤销的服务端身份和版本记录。
+```text
+/Users/me/connectors/my-app
+https://gitee.com/org/my-connector.git#v0.1.0
+```
+
+自定义应用适合：
+
+- 临时开发。
+- 用户自己机器上的私有工具。
+- AI 生成的本地脚本服务。
+- 尚未进入市场审核的 Connector。
+
+自定义应用不应被百积木标成“市场应用”。只有当它拥有稳定 `connectorId`、版本、风险说明、可安装源和市场条目后，才是市场 Connector。
+
+自定义应用详情页应提供“拉取最新”或“重新同步”动作，不显示“升级到最新版本”。如果安装源是 Git URL，动作会重新 clone 指定仓库和 revision；如果安装源是本地目录，动作会重新读取该目录当前内容。没有市场条目的 Connector 不展示“检查更新”。
 
 ## 发布前验收清单
 
 Connector 发布到市场前至少确认：
 
 - `connector.json` 可以被百积木解析。
-- `connector.json.appId` 与市场表主键 `local_app.id` 一致。
+- `connector.json.id` 与市场 `connectorId` 一致。
 - `connector.json.version` 与市场 `latestVersion.version` 一致。
-- 市场版本摘要逐条说明该版本对用户可感知的新增、修复和破坏性变化；它不写入严格 schema `3.0.0` 清单。
+- `connector.json.releaseNotes` 逐条说明该版本对用户可感知的新增、修复和破坏性变化；升级版本不得只写“优化体验”等无具体内容的占位说明。
 - `configSchema`、`methods/events` 和 `database` 与真实 package 行为一致；数据库版本变化时存在从所有受支持旧版本到目标版本的完整 migration 链。
-- Git tag 或 revision 存在、可被浅克隆，且与注册表中的 repo、revision、制品 SHA-256 完全一致。
+- Git tag 或 revision 存在，且可被 `git clone --depth 1 --branch <revision>` 拉取。
 - 安装后本地应用定义能写入 `agent-config.json.localApps[]`，不会写入 runtime service。
-- `runtime.command + args[]` 在 `processOwnership: host` 下是持续运行的前台进程，并可由幂等 `stopArgs[]` 优雅停止。
+- `startCommand` 可执行，且不会永久阻塞。
 - `healthCheck` 通过。
 - 方法能通过百积木调用。
 - 事件能通过百积木本机事件入口上报。
@@ -815,13 +807,13 @@ Connector 发布到市场前至少确认：
 当前百积木实现中：
 
 - Connector 清单文件名固定为 `connector.json`。
-- 清单只接受 `schemaVersion: 3.0.0` 和 `appId`；旧身份字段及 service-registration 模型全部拒绝。
-- 安装只接受注册表精确解析成功的版本。Git URL 可以用于发现 revision，但不能绕过登记和 checksum 校验。
+- 安装源支持本地目录和 Git URL。
+- Git URL 可以通过 `source#revision` 指定分支或 tag。
 - 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
-- 客户端比较新旧 `configSchema`、methods/events 完整契约、database migration 和权限声明，并按兼容、需确认、破坏性三档展示。
-- 安装包写入 `local-apps`，安装记录包含 `sourceReference`、`sourcePath`、注册状态、审核状态、来源 checksum、包 checksum、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
-- Connector 顶层至少声明一个方法或事件；`transport` 目前支持 loopback HTTP。
-- Bridge Agent 为每个 appId 在 `app-data/{appId}` 生成私有 token，并为健康检查和 HTTP 方法自动注入 Bearer 鉴权。
+- 市场版本优先从清单 `releaseNotes` 读取版本说明，并兼容旧清单中的 `changes` 或 `changelog` 字符串/字符串数组；客户端比较新旧 `configSchema`、methods/events 完整契约、database migration 和权限声明，并按兼容、需确认、破坏性三档展示。
+- 安装后记录写入本机 connectors 目录下的 `install.json`，包括 `sourceReference`、`sourcePath`、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
+- Connector 至少要声明一个服务；服务至少要声明一个方法或事件。
+- 服务注册 transport 目前支持 `http`。
 - 桌面端在配置目录写入权限为 `0600` 的 `local-app-control.json`，内容包含进程 ID、随机令牌和 loopback HTTP 地址；控制服务正常停止时删除，重启时覆盖并轮换令牌。
 - `baijimu local-app install` 和 `baijimu local-app device ...` 必须通过该本机控制面调用桌面端实现，不得自行写 Connector 目录或复制安装算法。
 - 本机控制面支持市场查询、已安装应用查询、安装、启动、停止、来源同步、卸载以及清单声明的 management operation；所有请求必须携带发现文件中的 Bearer token。

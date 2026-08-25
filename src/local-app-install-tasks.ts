@@ -14,7 +14,8 @@ export type LocalAppInstallTaskOperation = "install" | "upgrade" | "sync";
 export interface LocalAppInstallTask {
   taskId: string;
   operation: LocalAppInstallTaskOperation;
-  appId?: string | null;
+  connectorId?: string | null;
+  marketAppId?: string | null;
   name: string;
   version?: string | null;
   phase: LocalAppInstallTaskPhase;
@@ -74,7 +75,7 @@ export function latestLocalAppInstallTasks(
 ): LocalAppInstallTask[] {
   return Array.from(
     tasks.reduce((latest, task) => {
-      const key = task.appId || task.taskId;
+      const key = task.connectorId || task.marketAppId || task.taskId;
       const current = latest.get(key);
       if (!current || current.updatedAtEpochMs < task.updatedAtEpochMs) {
         latest.set(key, task);
@@ -105,11 +106,11 @@ export function reconcileLocalAppInstallSelection(
 
   const taskId = currentSelection.slice(taskPrefix.length);
   const task = tasks.find((candidate) => candidate.taskId === taskId);
-  if (task?.phase !== "succeeded" || !task.appId) {
+  if (task?.phase !== "succeeded" || !task.connectorId) {
     return null;
   }
 
-  const installedAppId = `connector:${task.appId}`;
+  const installedAppId = `connector:${task.connectorId}`;
   return available.has(installedAppId) ? installedAppId : null;
 }
 
@@ -117,5 +118,5 @@ export function shouldShowLocalAppInstallTask(
   task: LocalAppInstallTask,
   installedConnectorIds: Iterable<string>
 ): boolean {
-  return !task.appId || !new Set(installedConnectorIds).has(task.appId);
+  return !task.connectorId || !new Set(installedConnectorIds).has(task.connectorId);
 }

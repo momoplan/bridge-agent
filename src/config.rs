@@ -131,9 +131,9 @@ pub struct ServiceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalAppConfig {
-    pub app_id: String,
+    pub connector_id: String,
     pub name: String,
     pub version: String,
     #[serde(default)]
@@ -277,7 +277,7 @@ pub struct BrowserAuthManifestPreview {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserAuthLocalAppDefinition {
-    pub app_id: String,
+    pub connector_id: String,
     pub name: String,
     pub version: String,
     pub description: String,
@@ -488,24 +488,24 @@ impl AgentConfig {
             }
         }
 
-        let mut app_ids = BTreeSet::new();
+        let mut connector_ids = BTreeSet::new();
         for app in &self.local_apps {
-            if app.app_id.trim().is_empty() {
-                bail!("local app appId cannot be empty");
+            if app.connector_id.trim().is_empty() {
+                bail!("local app connectorId cannot be empty");
             }
-            if !app_ids.insert(app.app_id.as_str()) {
-                bail!("duplicate local app appId `{}`", app.app_id);
+            if !connector_ids.insert(app.connector_id.as_str()) {
+                bail!("duplicate local app connectorId `{}`", app.connector_id);
             }
             if app.name.trim().is_empty() || app.version.trim().is_empty() {
                 bail!(
                     "local app name and version cannot be empty for `{}`",
-                    app.app_id
+                    app.connector_id
                 );
             }
             if app.methods.is_empty() && app.events.is_empty() {
                 bail!(
                     "local app `{}` must declare at least one method or event",
-                    app.app_id
+                    app.connector_id
                 );
             }
             validate_local_app_capabilities(app)?;
@@ -542,7 +542,7 @@ impl AgentConfig {
             .iter()
             .filter(|app| app.enabled)
             .map(|app| LocalAppDefinition {
-                app_id: app.app_id.clone(),
+                connector_id: app.connector_id.clone(),
                 name: app.name.clone(),
                 version: app.version.clone(),
                 description: app.description.clone(),
@@ -607,7 +607,7 @@ impl AgentConfig {
                 .iter()
                 .filter(|app| app.enabled)
                 .map(|app| BrowserAuthLocalAppDefinition {
-                    app_id: app.app_id.clone(),
+                    connector_id: app.connector_id.clone(),
                     name: app.name.clone(),
                     version: app.version.clone(),
                     description: app.description.clone(),
@@ -641,20 +641,23 @@ fn validate_local_app_capabilities(app: &LocalAppConfig) -> Result<()> {
     let mut event_names = BTreeSet::new();
     for method in &app.methods {
         if method.name.trim().is_empty() {
-            bail!("method name cannot be empty in local app `{}`", app.app_id);
+            bail!(
+                "method name cannot be empty in local app `{}`",
+                app.connector_id
+            );
         }
         if !method_names.insert(method.name.as_str()) {
             bail!(
                 "duplicate method `{}` in local app `{}`",
                 method.name,
-                app.app_id
+                app.connector_id
             );
         }
         if let MethodBinding::Http(binding) = &method.binding {
             if binding.url.trim().is_empty() || binding.http_method.trim().is_empty() {
                 bail!(
                     "http binding cannot be empty for local app {}.{}",
-                    app.app_id,
+                    app.connector_id,
                     method.name
                 );
             }
@@ -662,20 +665,23 @@ fn validate_local_app_capabilities(app: &LocalAppConfig) -> Result<()> {
     }
     for event in &app.events {
         if event.name.trim().is_empty() {
-            bail!("event name cannot be empty in local app `{}`", app.app_id);
+            bail!(
+                "event name cannot be empty in local app `{}`",
+                app.connector_id
+            );
         }
         if !event_names.insert(event.name.as_str()) {
             bail!(
                 "duplicate event `{}` in local app `{}`",
                 event.name,
-                app.app_id
+                app.connector_id
             );
         }
         if method_names.contains(event.name.as_str()) {
             bail!(
                 "event `{}` conflicts with method of the same name in local app `{}`",
                 event.name,
-                app.app_id
+                app.connector_id
             );
         }
     }
@@ -992,10 +998,12 @@ pub fn windows_shared_config_path() -> Option<PathBuf> {
 pub fn load_config(path: &Path) -> Result<AgentConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
+    let has_legacy_local_app_installation_id =
+        config_has_legacy_local_app_installation_id(&content);
     let has_legacy_codex_binary_path = config_has_legacy_codex_binary_path(&content);
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
-    let mut changed = has_legacy_codex_binary_path;
+    let mut changed = has_legacy_local_app_installation_id || has_legacy_codex_binary_path;
     changed |= config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
     config.validate()?;
@@ -1041,6 +1049,21 @@ fn remove_legacy_codex_binary_overrides(config: &mut AgentConfig) -> bool {
         changed |= remove(&mut app.stop_command);
     }
     changed
+}
+
+fn config_has_legacy_local_app_installation_id(content: &str) -> bool {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .is_some_and(|config| {
+            config
+                .get("local_apps")
+                .and_then(Value::as_array)
+                .is_some_and(|local_apps| {
+                    local_apps.iter().any(|app| {
+                        app.get("installationId").is_some() || app.get("installation_id").is_some()
+                    })
+                })
+        })
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
@@ -2103,12 +2126,12 @@ mod tests {
     }
 
     #[test]
-    fn load_config_rejects_legacy_local_app_installation_identity() {
+    fn load_config_removes_legacy_local_app_installation_identity() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = serde_json::to_value(AgentConfig::example()).unwrap();
         config["local_apps"] = json!([{
-            "appId": "com.baijimu.connector.test",
+            "connectorId": "com.baijimu.connector.test",
             "installationId": "legacy-installation",
             "name": "Test",
             "version": "1.0.0",
@@ -2119,8 +2142,16 @@ mod tests {
         }]);
         fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-        let error = load_config(&path).unwrap_err();
-        assert!(error.to_string().contains("failed to parse config"));
+        let loaded = load_config(&path).unwrap();
+
+        assert_eq!(loaded.local_apps.len(), 1);
+        assert_eq!(
+            loaded.local_apps[0].connector_id,
+            "com.baijimu.connector.test"
+        );
+        assert!(!fs::read_to_string(&path)
+            .unwrap()
+            .contains("installationId"));
     }
 
     #[test]
@@ -2135,7 +2166,7 @@ mod tests {
             "env": {"CODEX_CONNECTOR_CODEX_BINARY": "/legacy/codex"}
         });
         config["local_apps"] = json!([{
-            "appId": "com.baijimu.connector.test",
+            "connectorId": "com.baijimu.connector.test",
             "name": "Test",
             "version": "1.0.0",
             "events": [{
