@@ -4269,7 +4269,11 @@ mod tests {
                 "shell",
                 "exec",
                 json!({"command": ["sh", "-lc", "sleep 1; echo bridge-agent-late"]}),
-                Some(5),
+                // This test verifies the async hand-off after the 100 ms test-only
+                // synchronous wait. Keep the process timeout well outside CI
+                // scheduler and Git-for-Windows shell startup variance; explicit
+                // process-timeout behavior is covered by the dedicated test above.
+                Some(30),
             )
             .await;
 
@@ -4281,6 +4285,7 @@ mod tests {
         assert_eq!(data["recommendedService"].as_str(), Some("shell"));
         assert_eq!(data["recommendedMethod"].as_str(), Some("queryExecution"));
         assert_eq!(data["exitCode"], Value::Null);
+        assert_eq!(data["timeoutSecs"].as_u64(), Some(30));
 
         let deadline = Instant::now() + Duration::from_secs(15);
         let (status, stdout) = loop {
