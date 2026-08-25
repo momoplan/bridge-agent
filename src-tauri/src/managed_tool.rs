@@ -24,7 +24,7 @@ use winreg::types::FromRegValue;
 #[cfg(windows)]
 use winreg::{RegKey, RegValue};
 
-pub const TOOL_ID: &str = "com.baijimu.cli";
+pub const TOOL_ID: &str = "baijimu-cli";
 const TOOL_NAME: &str = "Baijimu CLI";
 const TOOL_DESCRIPTION: &str =
     "百积木官方命令行工具，用于在本机管理工作区、项目、智能体和平台能力。";

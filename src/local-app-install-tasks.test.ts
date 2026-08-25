@@ -15,8 +15,7 @@ function task(
   return {
     taskId,
     operation: "install",
-    connectorId: "com.baijimu.connector.codex",
-    marketAppId: "codex",
+    appId: "com.baijimu.connector.codex",
     name: "Codex",
     phase,
     message: phase,
@@ -52,8 +51,8 @@ describe("local app install task selection", () => {
   });
 
   it("keeps unrelated custom-source tasks independent before identity resolution", () => {
-    const first = { ...task("first", "resolving", 10), connectorId: null, marketAppId: null };
-    const second = { ...task("second", "resolving", 20), connectorId: null, marketAppId: null };
+    const first = { ...task("first", "resolving", 10), appId: null };
+    const second = { ...task("second", "resolving", 20), appId: null };
 
     expect(latestLocalAppInstallTasks([first, second])).toEqual([first, second]);
   });

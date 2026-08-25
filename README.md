@@ -57,7 +57,7 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
   - 不直接执行本地命令
 - 外部 agent / app
   - 通过 `relay` 调用某个设备上的系统 `service.method`，或某个
-    `connectorId + method`
+    `appId + method`
 
 调用链路：
 
@@ -91,7 +91,7 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
 - 通过 WebSocket 主动连接 relay
 - 上报 `agent_id + services[] + local_apps[]`
 - 系统服务按 `service + method + arguments` 调用；本地应用按
-  `connectorId + method + arguments` 调用
+  `appId + method + arguments` 调用
 - 大截图支持先申请上传槽位、再直传对象存储/文件服务、最后只返回文件引用
 - 本地配置里支持三种方法绑定
   - `computer_use`
@@ -154,7 +154,11 @@ Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、�
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
-Connector 安装采用分级信任：只有从应用市场选择、由后端重新读取市场记录，并通过 HTTPS、SHA-256、Connector ID 和版本一致性校验的发布包才标记为“平台信任”。本地目录、Git 仓库以及其他直接来源始终标记为“用户信任、平台未验证”，即使它们使用了与市场应用相同的 Connector ID，也不会自动获得市场身份或市场升级入口。桌面端要求安装前确认风险，后续重新同步也会再次确认；CLI 安装需显式传入 `--accept-untrusted`。安装记录会保存来源、信任等级以及安装内容摘要。
+Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；HTTPS Git 直装可以安装尚未公开审核的登记版本，但宿主会先读取清单，再向平台核验 appId、版本、来源、revision 和 SHA-256，随后从登记来源重新下载并校验。未登记、已撤销、本地目录和来源不一致的包全部拒绝安装。安装记录只保存服务器 appId、登记证据、审核状态和内容摘要。
+
+Bridge Agent 还会按 appId 在应用私有数据目录生成权限为 `0600` 的调用 token，通过
+`BAIJIMU_LOCAL_APP_TOKEN_FILE` 注入应用，并为健康检查及全部本地 HTTP 能力自动添加 Bearer
+鉴权。Connector 必须拒绝无 token 请求；loopback 监听本身不是能力调用的授权机制。
 
 桌面端安装采用后台任务：应用市场只负责发起任务，可随时关闭；下载、校验、安装和启动进度显示在本地应用面板。Connector 声明的 `setup` 属于应用自身初始化能力，不再阻塞宿主安装；例如 Codex 的下载配置、凭证、路由验证和重试都在 Codex 应用界面中执行并展示。
 
@@ -164,17 +168,17 @@ Connector 安装采用分级信任：只有从应用市场选择、由后端重�
 baijimu local-app device status
 baijimu local-app device market
 baijimu local-app install codex --market
-baijimu local-app install /path/to/connector --accept-untrusted
+baijimu local-app install https://github.com/example/registered-local-app.git#v1.0.0
 baijimu local-app device list
-baijimu local-app device get com.baijimu.connector.codex
-baijimu local-app device start com.baijimu.connector.codex
-baijimu local-app device stop com.baijimu.connector.codex
-baijimu local-app device sync com.baijimu.connector.codex
-baijimu local-app device invoke com.baijimu.connector.codex credentialState
-baijimu local-app device uninstall com.baijimu.connector.codex --yes
+baijimu local-app device get codex
+baijimu local-app device start codex
+baijimu local-app device stop codex
+baijimu local-app device sync codex
+baijimu local-app device invoke codex credentialState
+baijimu local-app device uninstall codex --yes
 ```
 
-CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可用 `BAIJIMU_LOCAL_APP_CONTROL_FILE` 或 `--control-file` 指定发现文件。非市场安装必须显式传 `--accept-untrusted`，卸载必须显式传 `--yes`。
+CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可用 `BAIJIMU_LOCAL_APP_CONTROL_FILE` 或 `--control-file` 指定发现文件。Git 直装仍必须是平台注册版本；卸载必须显式传 `--yes`。
 
 ## 对外暴露的模型
 
@@ -188,7 +192,7 @@ runtime `businessId`。
 - 服务：内置能力和兼容自定义能力的内部对象，例如 `computer`、`shell`。
 - 方法：服务下面的具体动作，例如 `screenshot`、`click`、`exec`、`queryExecution`。
 - 对外能力：内置服务使用 `service.method`；本地应用使用
-  `connectorId + method/event`。
+  `appId + method/event`。
 
 所以桌面端默认以“应用”为主概念；“服务”只在开发者配置、CLI、本机注册 API 和协议说明里出现。
 
@@ -219,8 +223,8 @@ runtime `businessId`。
 
 - `computer_use` / `shell` / `http` 都不在 agent-relay 协议里暴露
 - relay 同时看到 `services[]` 和 `local_apps[]`；本地应用定义包含稳定
-  `connectorId + methods[] + events[]`。同一设备上一个 `connectorId` 只允许一个实例，
-  平台用 `deviceId + connectorId` 唯一识别本地应用
+  `appId + methods[] + events[]`。同一设备上一个 `appId` 只允许一个实例，
+  平台用 `deviceId + appId` 唯一识别本地应用
 - `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
 - Connector 发送事件时不直接连 relay；它使用安装时生成的独立事件凭证请求
   Bridge Agent 本机入口。Bridge Agent 不保存事件，请求会同步等待 Relay/Event Center
@@ -293,21 +297,22 @@ Relay 在 WebSocket 握手阶段返回 `401` 或 `403` 时，客户端会把当�
 
 ## Connector 设备事件
 
-Schema `2.0` Connector 在 `connector.json` 顶层声明 `events[]`。Bridge Agent 启动
+Schema `3.0.0` Connector 在 `connector.json` 顶层声明 `events[]`。Bridge Agent 启动
 Connector 时会注入：
 
-- `BAIJIMU_CONNECTOR_EVENT_ENDPOINT`：默认
+- `BAIJIMU_LOCAL_APP_ID`：服务器分配并写入清单的唯一 appId
+- `BAIJIMU_LOCAL_APP_EVENT_ENDPOINT`：默认
   `http://127.0.0.1:18081/v1/local-app-events`
-- `BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE`：该安装实例独享、权限为 `0600` 的事件凭证文件
+- `BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE`：该安装实例独享、权限为 `0600` 的事件凭证文件
 
 Connector 使用 Bearer token 发布：
 
 ```bash
-curl -X POST "$BAIJIMU_CONNECTOR_EVENT_ENDPOINT" \
-  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_CONNECTOR_EVENT_TOKEN_FILE")" \
+curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
+  -H "Authorization: Bearer $(tr -d '\\r\\n' < "$BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE")" \
   -H 'Content-Type: application/json' \
   -d '{
-    "connectorId": "com.baijimu.connector.wechat",
+    "appId": "registered-app-id",
     "event": "messageReceived",
     "eventId": "evt-01J...",
     "payload": {"conversationId": "c-1"}
@@ -537,8 +542,8 @@ cargo run -- run
 声明 `assets.upload` 权限并要求宿主能力 `connector.asset-upload.v1` 的 Connector，
 会获得 Connector 专属的本机上传端点与凭证文件：
 
-- `BAIJIMU_CONNECTOR_ASSET_UPLOAD_ENDPOINT`
-- `BAIJIMU_CONNECTOR_ASSET_UPLOAD_TOKEN_FILE`
+- `BAIJIMU_LOCAL_APP_ASSET_UPLOAD_ENDPOINT`
+- `BAIJIMU_LOCAL_APP_ASSET_UPLOAD_TOKEN_FILE`
 
 Connector 向 `POST /v1/local-app-assets` 提交其专属数据目录内的图片路径。Bridge Agent
 校验 Connector 安装状态、启用状态、权限、独立凭证、文件真实路径、图片魔数和 5 MB

@@ -32,11 +32,9 @@ import {
   deviceAuthorizationLocksCapabilities
 } from "./device-authorization-state";
 import {
-  CODEX_CONNECTOR_ID,
-  CODEX_MARKET_APP_ID,
   parseBaijimuDeepLink,
   type BaijimuDeepLinkIntent,
-  type CodexInstallDeepLinkIntent
+  type LocalAppInstallDeepLinkIntent
 } from "./deep-link";
 import {
   formatLocalAppInstallTaskPhase,
@@ -270,7 +268,7 @@ interface AgentConfig {
 }
 
 interface LocalAppConfig {
-  connectorId: string;
+  appId: string;
   name: string;
   version: string;
   description: string;
@@ -489,7 +487,7 @@ interface RegisteredServiceStatus {
 }
 
 interface LocalAppRuntimeStatus {
-  connectorId: string;
+  appId: string;
   status: RegisteredServiceState;
   detail: string | null;
   checkedAtMs: number;
@@ -510,14 +508,13 @@ interface StartRegisteredServiceResult {
 }
 
 interface ConnectorSummary {
-  id: string;
+  appId: string;
   name: string;
   version: string;
   packagePath: string;
   sourcePath: string;
   sourceReference?: string | null;
-  trustLevel: "platform_trusted" | "user_trusted";
-  marketAppId?: string | null;
+  reviewStatus: string;
   sourceChecksum?: string | null;
   packageChecksum?: string | null;
   iconDataUrl?: string | null;
@@ -538,7 +535,7 @@ interface ConnectorSummary {
 interface LocalAppsChangedEvent {
   revision: number;
   operation: "install" | "upgrade" | "sync" | "uninstall";
-  connectorId: string;
+  appId: string;
 }
 
 interface ConnectorPermission {
@@ -556,7 +553,7 @@ interface ConnectorUi {
 }
 
 interface ConnectorLifecycleResult {
-  connectorId: string;
+  appId: string;
   configured: boolean;
   exitCode: number | null;
   stdout: string;
@@ -564,12 +561,12 @@ interface ConnectorLifecycleResult {
 }
 
 interface ConnectorStartResult {
-  connectorId: string;
+  appId: string;
   lifecycle: ConnectorLifecycleResult;
 }
 
 interface ConnectorAppUpdateStatus {
-  connectorId: string;
+  appId: string;
   name: string;
   currentVersion: string;
   latestVersion: string;
@@ -644,7 +641,7 @@ interface ConnectorOperationSnapshot {
 
 interface ConnectorLifecycleSnapshot {
   schemaVersion: number;
-  connectorId: string;
+  appId: string;
   lifecycle: LocalAppLifecycleState;
   operation: ConnectorOperationSnapshot | null;
   health: ConnectorHealthState;
@@ -686,17 +683,13 @@ interface StartConnectorAppInstallRequest {
   operation: LocalAppInstallTaskOperation;
   source: string;
   replace: boolean;
-  checksum: string | null;
-  allowGit: boolean;
-  marketAppId: string | null;
-  connectorId: string | null;
+  appId: string | null;
   name: string | null;
   version: string | null;
 }
 
 interface MarketConnector {
-  id: string;
-  connectorId: string;
+  appId: string;
   applicationType: string;
   name: string;
   description: string;
@@ -1201,7 +1194,7 @@ function App() {
       if (!active) return;
       setConnectorLifecycles((current) => ({
         ...current,
-        [event.payload.connectorId]: event.payload
+        [event.payload.appId]: event.payload
       }));
     }).then((dispose) => {
       if (active) unlisten = dispose;
@@ -1428,10 +1421,10 @@ function App() {
 
   useEffect(() => {
     setSelectedMarketAppId((current) => {
-      if (current && visibleMarketConnectors.some((app) => app.id === current)) {
+      if (current && visibleMarketConnectors.some((app) => app.appId === current)) {
         return current;
       }
-      return visibleMarketConnectors[0]?.id ?? "";
+      return visibleMarketConnectors[0]?.appId ?? "";
     });
   }, [visibleMarketConnectors]);
 
@@ -1563,19 +1556,19 @@ function App() {
     }
     const apps: LocalAppItem[] = connectorApps.map((connector) => {
       const localAppIndex = config.local_apps.findIndex(
-        (localApp) => localApp.connectorId === connector.id
+        (localApp) => localApp.appId === connector.appId
       );
       const capabilityCount =
         connector.methodNames.length + connector.eventNames.length;
       const latestInstallTask = latestInstallTasks
         .filter(
           (task) =>
-            task.connectorId === connector.id
+            task.appId === connector.appId
         )
         .sort((left, right) => right.updatedAtEpochMs - left.updatedAtEpochMs)[0];
       const installTask = latestInstallTask?.phase === "succeeded" ? undefined : latestInstallTask;
       return {
-        id: `connector:${connector.id}`,
+        id: `connector:${connector.appId}`,
         name: connector.name,
         description: `版本 ${connector.version} · ${capabilityCount} 项能力`,
         kind: "connector",
@@ -1590,7 +1583,7 @@ function App() {
       if (
         !shouldShowLocalAppInstallTask(
           installTask,
-          connectorApps.map((connector) => connector.id)
+          connectorApps.map((connector) => connector.appId)
         )
       ) {
         return;
@@ -1928,7 +1921,7 @@ function App() {
       setRegisteredServiceStatuses(serviceStatuses);
       setLocalAppRuntimeStatuses(appStatuses);
       setConnectorLifecycles(
-        Object.fromEntries(lifecycleSnapshots.map((snapshot) => [snapshot.connectorId, snapshot]))
+        Object.fromEntries(lifecycleSnapshots.map((snapshot) => [snapshot.appId, snapshot]))
       );
       return appStatuses;
     } catch (err) {
@@ -1937,19 +1930,17 @@ function App() {
     }
   }
 
-  async function openCodexDeepLinkIntent(intent: CodexInstallDeepLinkIntent) {
+  async function openLocalAppDeepLinkIntent(intent: LocalAppInstallDeepLinkIntent) {
     setActivePage("apps");
     setMessage("");
     setError("");
 
     const installedApps = await refreshConnectorApps();
-    const installedCodex = installedApps.find(
-      (app) => app.id === CODEX_CONNECTOR_ID || app.marketAppId === CODEX_MARKET_APP_ID
-    );
-    if (installedCodex) {
+    const installedApp = installedApps.find((app) => app.appId === intent.appId);
+    if (installedApp) {
       setInstallPanelOpen(false);
-      setSelectedLocalAppId(`connector:${installedCodex.id}`);
-      setMessage(intent.shareId ? "已从分享入口打开 Codex" : "Codex 已安装");
+      setSelectedLocalAppId(`connector:${installedApp.appId}`);
+      setMessage(intent.shareId ? `已从分享入口打开 ${installedApp.name}` : `${installedApp.name} 已安装`);
       return;
     }
 
@@ -1961,42 +1952,40 @@ function App() {
         [...tasks].sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs)
       );
     } catch (err) {
-      clientWarn("读取 Codex 安装进度失败", err);
+      clientWarn("读取本地应用安装进度失败", err);
     }
     const activeTask = [...tasks]
       .sort((left, right) => right.updatedAtEpochMs - left.updatedAtEpochMs)
       .find(
         (task) =>
-          (task.connectorId === CODEX_CONNECTOR_ID || task.marketAppId === CODEX_MARKET_APP_ID) &&
+          task.appId === intent.appId &&
           task.phase !== "succeeded" &&
           task.phase !== "failed"
       );
     if (activeTask) {
       setInstallPanelOpen(false);
       setSelectedLocalAppId(`install-task:${activeTask.taskId}`);
-      setMessage("Codex 正在安装，已打开安装进度");
+      setMessage("应用正在安装，已打开安装进度");
       return;
     }
 
     setSelectedLocalAppId(null);
     setInstallSourceMode("market");
-    setMarketAppQuery("Codex");
+    setMarketAppQuery("");
     setCustomInstallConfirmed(false);
     setInstallPanelOpen(true);
     const marketApps = await refreshMarketConnectorApps();
-    const codexMarketApp = marketApps.find(
-      (app) => app.id === CODEX_MARKET_APP_ID || app.connectorId === CODEX_CONNECTOR_ID
-    );
-    if (codexMarketApp) {
-      setSelectedMarketAppId(codexMarketApp.id);
-      setMessage(intent.shareId ? "已从分享入口打开 Codex 安装" : "已打开 Codex 安装");
+    const marketApp = marketApps.find((app) => app.appId === intent.appId);
+    if (marketApp) {
+      setSelectedMarketAppId(marketApp.appId);
+      setMessage(intent.shareId ? `已从分享入口打开 ${marketApp.name} 安装` : `已打开 ${marketApp.name} 安装`);
     } else {
-      setError("应用市场暂未提供 Codex，请刷新后重试");
+      setError(`应用 ${intent.appId} 未公开上架或已撤销`);
     }
   }
 
   function openBaijimuDeepLinkIntent(intent: BaijimuDeepLinkIntent) {
-    if (intent.kind === "codex_install") {
+    if (intent.kind === "local_app_install") {
       if (authorizationStateRef.current !== "authorized") {
         setActivePage("apps");
         setInstallPanelOpen(false);
@@ -2005,7 +1994,7 @@ function App() {
         clientWarn("设备未授权，忽略本地应用安装链接");
         return;
       }
-      void openCodexDeepLinkIntent(intent);
+      void openLocalAppDeepLinkIntent(intent);
       return;
     }
 
@@ -2168,7 +2157,7 @@ function App() {
   }
 
   async function installLocalApp() {
-    const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => app.appId === selectedMarketAppId);
     if (installSourceMode === "market" && selectedMarket?.compatible === false) {
       setError(
         selectedMarket.compatibilityMessage ||
@@ -2182,12 +2171,12 @@ function App() {
       setError(
         installSourceMode === "market"
           ? "请选择要安装的应用"
-          : "请输入本地目录、Git 仓库或远程压缩包地址"
+          : "请输入已在平台注册版本的 HTTPS Git 仓库地址"
       );
       return;
     }
     if (installSourceMode === "custom" && !customInstallConfirmed) {
-      setError("请先确认自定义来源风险");
+      setError("请先确认注册来源权限");
       return;
     }
     try {
@@ -2199,10 +2188,7 @@ function App() {
         operation: "install",
         source,
         replace: true,
-        checksum: installSourceMode === "market" ? selectedMarket?.checksum ?? null : null,
-        allowGit: installSourceMode === "custom",
-        marketAppId: installSourceMode === "market" ? selectedMarket?.id ?? null : null,
-        connectorId: installSourceMode === "market" ? selectedMarket?.connectorId ?? null : null,
+        appId: installSourceMode === "market" ? selectedMarket?.appId ?? null : null,
         name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
         version: installSourceMode === "market" ? selectedMarket?.version ?? null : null
       });
@@ -2219,18 +2205,10 @@ function App() {
   }
 
   function marketConnectorForLocalApp(app: LocalAppItem): MarketConnector | undefined {
-    if (
-      app.kind !== "connector" ||
-      !app.connector ||
-      app.connector.trustLevel !== "platform_trusted" ||
-      !app.connector.marketAppId
-    ) {
+    if (app.kind !== "connector" || !app.connector || app.connector.reviewStatus !== "PUBLISHED") {
       return undefined;
     }
-    return marketConnectors.find(
-      (marketApp) =>
-        marketApp.id === app.connector?.marketAppId && marketApp.connectorId === app.connector?.id
-    );
+    return marketConnectors.find((marketApp) => marketApp.appId === app.connector?.appId);
   }
 
   function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
@@ -2239,7 +2217,7 @@ function App() {
     }
     return marketConnectors.find(
       (marketApp) =>
-        marketApp.applicationType === "managed_tool" && marketApp.connectorId === app.managedTool?.id
+        marketApp.applicationType === "managed_tool" && marketApp.appId === app.managedTool?.id
     );
   }
 
@@ -2347,11 +2325,11 @@ function App() {
   }
 
   function connectorSourceKind(app: LocalAppItem, marketApp?: MarketConnector): string {
-    if (app.connector?.trustLevel === "platform_trusted" && marketApp) {
-      return "市场应用（平台信任）";
+    if (app.connector?.reviewStatus === "PUBLISHED" && marketApp) {
+      return "公开市场（已审核）";
     }
     const source = connectorSyncSource(app);
-    return isGitSourceText(source) ? "Git 仓库（用户信任）" : "本地目录（用户信任）";
+    return isGitSourceText(source) ? "已注册 Git 仓库（未公开审核）" : "已注册安装源（未公开审核）";
   }
 
   function isGitSourceText(source: string): boolean {
@@ -2384,12 +2362,11 @@ function App() {
       setError("");
       setRuntimeConflict(null);
       const status = await invoke<ConnectorAppUpdateStatus>("check_connector_app_update", {
-        id: app.connector.id,
-        marketAppId: marketApp.id
+        appId: app.connector.appId
       });
       setConnectorUpdateStatuses((current) => ({
         ...current,
-        [app.connector!.id]: status
+        [app.connector!.appId]: status
       }));
       if (showLatestMessage) {
         setMessage(
@@ -2429,15 +2406,12 @@ function App() {
         operation: "upgrade",
         source: marketApp.source,
         replace: true,
-        checksum: marketApp.checksum ?? null,
-        allowGit: false,
-        marketAppId: marketApp.id,
-        connectorId: app.connector.id,
+        appId: app.connector.appId,
         name: marketApp.name,
         version: marketApp.version
       });
       setPendingUpgradeAppId(null);
-      setSelectedLocalAppId(`connector:${app.connector.id}`);
+      setSelectedLocalAppId(`connector:${app.connector.appId}`);
       setMessage(`应用 ${task.name} 已开始后台升级，可关闭详情并在应用卡片查看进度`);
     } catch (err) {
       handleCommandError(err);
@@ -2451,8 +2425,8 @@ function App() {
       setError(`应用 ${app.name} 不是可同步安装应用`);
       return;
     }
-    if (app.connector.trustLevel !== "user_trusted") {
-      setError(`应用 ${app.name} 是平台信任的市场安装，请通过市场检查更新`);
+    if (app.connector.reviewStatus === "PUBLISHED") {
+      setError(`应用 ${app.name} 已公开上架，请通过市场检查更新`);
       return;
     }
     const source = connectorSyncSource(app);
@@ -2462,7 +2436,7 @@ function App() {
     }
     if (
       !window.confirm(
-        `“${app.name}”来自平台未验证的自定义来源。继续会重新读取该来源并覆盖当前安装内容，是否继续？`
+        `“${app.name}”来自已注册但未公开审核的来源。继续会向平台注册中心重新校验版本并覆盖当前安装内容，是否继续？`
       )
     ) {
       return;
@@ -2476,19 +2450,16 @@ function App() {
         operation: "sync",
         source,
         replace: true,
-        checksum: null,
-        allowGit: true,
-        marketAppId: null,
-        connectorId: app.connector.id,
+        appId: app.connector.appId,
         name: app.name,
         version: app.connector.version
       });
       setConnectorUpdateStatuses((current) => {
         const next = { ...current };
-        delete next[app.connector!.id];
+        delete next[app.connector!.appId];
         return next;
       });
-      setSelectedLocalAppId(`connector:${app.connector.id}`);
+      setSelectedLocalAppId(`connector:${app.connector.appId}`);
       setMessage(`应用 ${task.name} 已开始后台同步，可关闭详情并在应用卡片查看进度`);
     } catch (err) {
       handleCommandError(err);
@@ -2508,7 +2479,7 @@ function App() {
       setRuntimeConflict(null);
       if (app.kind === "connector" && app.connector) {
         const result = await invoke<ConnectorStartResult>("start_connector_app", {
-          id: app.connector.id
+          appId: app.connector.appId
         });
         const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
         const statuses = await refreshRegisteredServiceStatuses();
@@ -2519,7 +2490,7 @@ function App() {
           );
         } else {
           const runtimeStatus = statuses?.find(
-            (status) => status.connectorId === app.connector!.id
+            (status) => status.appId === app.connector!.appId
           );
           if (statuses && runtimeStatus?.status !== "healthy") {
             throw new Error(`应用 ${app.name} 启动后未进入健康运行状态`);
@@ -2571,7 +2542,7 @@ function App() {
       setRuntimeConflict(null);
       if (app.kind === "connector" && app.connector) {
         const result = await invoke<ConnectorStartResult>("stop_connector_app", {
-          id: app.connector.id
+          appId: app.connector.appId
         });
         const failed = result.lifecycle.exitCode !== 0 ? [result.lifecycle] : [];
         const statuses = await refreshRegisteredServiceStatuses();
@@ -2583,7 +2554,7 @@ function App() {
           );
         } else {
           const runtimeStatus = statuses?.find(
-            (status) => status.connectorId === app.connector!.id
+            (status) => status.appId === app.connector!.appId
           );
           if (runtimeStatus?.status === "healthy") {
             throw new Error(`应用 ${app.name} 停止后仍处于健康运行状态`);
@@ -2668,14 +2639,14 @@ function App() {
     if (!config || !localApp || !method) {
       return;
     }
-    const testKey = `local-app:${localApp.connectorId}:${methodIndex}`;
+    const testKey = `local-app:${localApp.appId}:${methodIndex}`;
     const draft = capabilityTestDrafts[testKey] ?? defaultCapabilityArgumentsText(toUiMethod(method));
     try {
       setCapabilityTestBusy(testKey);
       setError("");
       const result = await invoke<CapabilityInvokeResult>("test_local_app_capability", {
         config: fromUiConfig(config),
-        connectorId: localApp.connectorId,
+        appId: localApp.appId,
         method: method.name,
         arguments: parseJson(draft)
       });
@@ -2714,7 +2685,7 @@ function App() {
       let document: ConfigDocument;
       try {
         document = await invoke<ConfigDocument>("uninstall_connector_app", {
-          id: app.connector.id,
+          appId: app.connector.appId,
           force: false
         });
       } catch (gracefulError) {
@@ -2729,7 +2700,7 @@ function App() {
           throw gracefulError;
         }
         document = await invoke<ConfigDocument>("uninstall_connector_app", {
-          id: app.connector.id,
+          appId: app.connector.appId,
           force: true
         });
       }
@@ -5140,7 +5111,7 @@ function App() {
           serviceIndex: null,
           localAppEvents: localApp.events.map(toUiEvent),
           service: {
-            name: localApp.connectorId,
+            name: localApp.appId,
             description: localApp.description || localApp.name,
             enabled: localApp.enabled,
             health_check: localApp.healthCheck ? toUiServiceHealthCheck(localApp.healthCheck) : null,
@@ -5345,7 +5316,7 @@ function App() {
           );
         })}
         {localApp ? (
-          <div className="local-app-runtime-row" key={localApp.connectorId}>
+          <div className="local-app-runtime-row" key={localApp.appId}>
             <div>
               <strong>{localApp.name}</strong>
               <p>
@@ -5364,7 +5335,7 @@ function App() {
     if (!installPanelOpen) {
       return null;
     }
-    const selectedMarket = installableMarketConnectors.find((app) => app.id === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => app.appId === selectedMarketAppId);
     const selectedMarketIncompatible = selectedMarket?.compatible === false;
     const marketPrimaryAction = selectedMarket
       ? resolveMarketHostUpgradeAction(
@@ -5399,12 +5370,12 @@ function App() {
               </span>
               <div>
                 <h3 id="install-panel-title">
-                  {installSourceMode === "market" ? "应用市场" : "自定义安装"}
+                  {installSourceMode === "market" ? "应用市场" : "注册来源安装"}
                 </h3>
                 <p>
                   {installSourceMode === "market"
                     ? "发现并安装经过平台验证的本地应用"
-                    : "从可信的本地目录、代码仓库或压缩包安装"}
+                    : "从已在平台注册版本的 HTTPS Git 仓库安装"}
                 </p>
               </div>
             </div>
@@ -5419,7 +5390,7 @@ function App() {
                   disabled={installBusy}
                 >
                   <Wrench size={15} aria-hidden="true" />
-                  自定义安装
+                  注册来源安装
                 </button>
               ) : (
                 <button
@@ -5478,10 +5449,10 @@ function App() {
                   ) : null}
                   {!marketLoadError && visibleMarketConnectors.map((app) => (
                     <button
-                      className={`market-app-card ${selectedMarketAppId === app.id ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
-                      key={app.id}
-                      onClick={() => setSelectedMarketAppId(app.id)}
-                      aria-pressed={selectedMarketAppId === app.id}
+                      className={`market-app-card ${selectedMarketAppId === app.appId ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
+                      key={app.appId}
+                      onClick={() => setSelectedMarketAppId(app.appId)}
+                      aria-pressed={selectedMarketAppId === app.appId}
                     >
                       <ApplicationIcon
                         className="market-app-icon"
@@ -5502,7 +5473,7 @@ function App() {
                     <div className="market-list-state">
                       <Search size={20} aria-hidden="true" />
                       <strong>{marketAppQuery.trim() ? "没有找到相关应用" : "市场暂时没有应用"}</strong>
-                      <span>{marketAppQuery.trim() ? "试试应用名称或能力关键词" : "你仍然可以使用自定义安装"}</span>
+                      <span>{marketAppQuery.trim() ? "试试应用名称或能力关键词" : "也可安装已注册但尚未公开上架的版本"}</span>
                     </div>
                   ) : null}
                 </div>
@@ -5572,23 +5543,23 @@ function App() {
             <div className="install-panel-body custom-install-view">
               <div className="custom-install-form">
                 <div className="custom-install-intro">
-                  <strong>安装你信任的应用包</strong>
-                  <p>支持本地目录、Git 仓库，以及 ZIP / tar.gz 远程压缩包。</p>
+                  <strong>安装已注册但未公开上架的应用</strong>
+                  <p>输入该版本登记的 HTTPS Git 仓库地址；客户端会向平台注册中心核验 appId、版本、revision 和 checksum。</p>
                 </div>
                 <Field label="应用来源" wide>
                   <input
                     value={installSource}
                     onChange={(event) => setInstallSource(event.target.value)}
-                    placeholder="/path/to/app、https://gitee.com/org/repo.git 或 https://example.com/app.zip"
+                    placeholder="https://github.com/organization/repository.git#registered-revision"
                     autoFocus
                   />
                 </Field>
                 <div className="install-risk-note">
                   <AlertTriangle size={18} aria-hidden="true" />
                   <div>
-                    <strong>平台未验证的自定义来源</strong>
+                    <strong>注册不等于公开审核</strong>
                     <span>
-                      自定义应用可以执行其声明的本机命令。请在安装前检查来源、代码与权限，后续同步也需要再次确认。
+                      平台会拒绝未注册或已撤销的应用版本，但未公开审核的版本仍可能执行其声明的本机命令，请先确认开发者和权限。
                     </span>
                   </div>
                 </div>
@@ -5598,7 +5569,7 @@ function App() {
                     checked={customInstallConfirmed}
                     onChange={(event) => setCustomInstallConfirmed(event.target.checked)}
                   />
-                  <span>我已检查并确认来源可信，同意以“用户信任”状态安装</span>
+                  <span>我已确认开发者和权限，同意安装这个已注册但未公开审核的版本</span>
                 </label>
               </div>
             </div>
@@ -5617,8 +5588,8 @@ function App() {
                 )
               ) : (
                 <>
-                  <strong>自定义来源</strong>
-                  <span>仅安装你已检查并信任的应用</span>
+                  <strong>已注册来源</strong>
+                  <span>未注册、已撤销或来源不匹配的版本会被拒绝</span>
                 </>
               )}
             </div>
@@ -5875,7 +5846,7 @@ function App() {
             title={localApps.length === 0 ? "还没有应用" : "没有匹配的应用"}
             description={
               localApps.length === 0
-                ? "从应用市场安装 connector，或从本地目录安装开发中的应用。"
+                ? "从应用市场安装本地应用，或安装已注册但尚未公开上架的 Git 版本。"
                 : "调整搜索词或应用类型筛选后重试。"
             }
           >
@@ -6266,7 +6237,7 @@ function App() {
                     {updateBusy ? "检查中" : "检查更新"}
                   </button>
                 )
-              ) : app.connector?.trustLevel === "user_trusted" ? (
+              ) : app.connector && app.connector.reviewStatus !== "PUBLISHED" ? (
                 <button
                   className="secondary"
                   onClick={() => void syncLocalApp(app)}
@@ -6321,7 +6292,7 @@ function App() {
               aria-labelledby="local-app-detail-app-tab"
             >
               <LocalAppEmbeddedUi
-                connectorId={app.connector.id}
+                appId={app.connector.appId}
                 title={embeddedUi.title?.trim() || app.name}
               />
             </div>
@@ -6365,11 +6336,7 @@ function App() {
                 {app.connector ? (
                   <InfoRow
                     label="信任状态"
-                    value={
-                      app.connector.trustLevel === "platform_trusted"
-                        ? "平台信任 · 市场来源已校验"
-                        : "用户信任 · 平台未验证"
-                    }
+                    value={app.connector.reviewStatus === "PUBLISHED" ? "已注册 · 已公开审核" : "已注册 · 未公开审核"}
                   />
                 ) : null}
                 <InfoRow label="安装来源" value={isManagedTool ? marketApp?.source ?? "等待市场版本" : syncSource || "内置"} />
@@ -6530,7 +6497,7 @@ function App() {
       if (!localApp) {
         return formatLocalAppLifecycle("failed", "安装记录与本地应用配置不一致");
       }
-      const lifecycle = connectorLifecycles[localApp.connectorId];
+      const lifecycle = connectorLifecycles[localApp.appId];
       if (lifecycle) {
         return formatLocalAppLifecycle(
           lifecycle.lifecycle,
@@ -6538,7 +6505,7 @@ function App() {
         );
       }
       const status = localAppRuntimeStatuses.find(
-        (candidate) => candidate.connectorId === localApp.connectorId
+        (candidate) => candidate.appId === localApp.appId
       );
       if (status?.status === "healthy") {
         return formatLocalAppLifecycle(
@@ -7282,14 +7249,14 @@ function mergeRecentLogs(...groups: LogEntry[][]) {
 }
 
 function reportLocalAppUiHandshake(
-  connectorId: string,
+  appId: string,
   event: string,
   detail: Record<string, string | number | boolean | null> = {},
 ) {
-  clientInfo("local_app_ui", { connectorId, event, ...detail });
+  clientInfo("local_app_ui", { appId, event, ...detail });
 }
 
-function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
+function LocalAppEmbeddedUi(props: { appId: string; title: string }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const iframeLoadedRef = useRef(false);
   const uiOriginRef = useRef("");
@@ -7304,26 +7271,26 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
     uiOriginRef.current = "";
     setLoadError("");
     setReady(false);
-    reportLocalAppUiHandshake(props.connectorId, "url_request_started");
-    void invoke<string>("connector_app_ui_url", { id: props.connectorId })
+    reportLocalAppUiHandshake(props.appId, "url_request_started");
+    void invoke<string>("connector_app_ui_url", { id: props.appId })
       .then((url) => {
         if (!active) return;
         const parsed = new URL(url);
         uiOriginRef.current = parsed.origin;
         setUiUrl(parsed.toString());
-        reportLocalAppUiHandshake(props.connectorId, "url_resolved", { origin: parsed.origin });
+        reportLocalAppUiHandshake(props.appId, "url_resolved", { origin: parsed.origin });
       })
       .catch((error) => {
         if (active) {
           const message = readError(error);
-          reportLocalAppUiHandshake(props.connectorId, "url_request_failed");
+          reportLocalAppUiHandshake(props.appId, "url_request_failed");
           setLoadError(message);
         }
       });
     return () => {
       active = false;
     };
-  }, [props.connectorId]);
+  }, [props.appId]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<unknown>) => {
@@ -7333,7 +7300,7 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
       const originMatches = Boolean(uiOrigin && event.origin === uiOrigin);
       const messageType = readLocalAppBridgeMessageType(event.data);
       if (sourceMatches || originMatches || messageType !== "unknown") {
-        reportLocalAppUiHandshake(props.connectorId, "message_received", {
+        reportLocalAppUiHandshake(props.appId, "message_received", {
           actualOrigin: event.origin,
           expectedOrigin: uiOrigin || null,
           sourcePresent: event.source !== null,
@@ -7345,13 +7312,13 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
       if (!target || !uiOrigin || !sourceMatches || !originMatches) return;
       if (!isLocalAppBridgeMessage(event.data)) return;
       if (event.data.type === "baijimu:local-app:ready") {
-        reportLocalAppUiHandshake(props.connectorId, "ready_accepted");
+        reportLocalAppUiHandshake(props.appId, "ready_accepted");
         setReady(true);
         return;
       }
       const request = event.data;
       void invoke<unknown>("invoke_connector_management", {
-        id: props.connectorId,
+        id: props.appId,
         operation: request.operation,
         payload: request.payload ?? null
       })
@@ -7382,12 +7349,12 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [props.connectorId]);
+  }, [props.appId]);
 
   useEffect(() => {
     if (!uiUrl || ready) return;
     const timer = window.setTimeout(() => {
-      reportLocalAppUiHandshake(props.connectorId, "ready_timeout", {
+      reportLocalAppUiHandshake(props.appId, "ready_timeout", {
         expectedOrigin: uiOriginRef.current || null,
         iframePresent: iframeRef.current !== null,
         iframeLoaded: iframeLoadedRef.current,
@@ -7422,13 +7389,13 @@ function LocalAppEmbeddedUi(props: { connectorId: string; title: string }) {
           setLoadError("");
           const target = iframeRef.current?.contentWindow;
           const uiOrigin = uiOriginRef.current;
-          reportLocalAppUiHandshake(props.connectorId, "iframe_loaded", {
+          reportLocalAppUiHandshake(props.appId, "iframe_loaded", {
             expectedOrigin: uiOrigin || null,
             targetPresent: target !== null && target !== undefined,
           });
           if (target && uiOrigin) {
             target.postMessage({ type: "baijimu:local-app:hello", version: 1 }, uiOrigin);
-            reportLocalAppUiHandshake(props.connectorId, "hello_sent", { targetOrigin: uiOrigin });
+            reportLocalAppUiHandshake(props.appId, "hello_sent", { targetOrigin: uiOrigin });
           }
         }}
       />
@@ -8158,7 +8125,7 @@ function compareVersions(left: string, right: string): number {
 
 function formatConnectorServiceFailures(results: ConnectorLifecycleResult[]): string {
   return results
-    .map((result) => `${result.connectorId}${result.stderr.trim() ? ` ${result.stderr.trim()}` : ""}`)
+    .map((result) => `${result.appId}${result.stderr.trim() ? ` ${result.stderr.trim()}` : ""}`)
     .join("；");
 }
 
