@@ -1,8 +1,6 @@
 {
   "fileLines": {
     "migration-artifacts/unified-app-id/src/main.rs": 1069,
-    "src-tauri/src/main.rs": 7775,
-    "src-tauri/src/managed_tool.rs": 1272,
     "src/config.rs": 2720,
     "src/connector.rs": 6242,
     "src/event_server.rs": 1338,
@@ -13,16 +11,6 @@
   "functionLines": {
     "migration-artifacts/unified-app-id/src/main.rs::migrate#1": 126,
     "src-tauri/src/local_app/adapters/health_http.rs::check_registered_service#1": 107,
-    "src-tauri/src/main.rs::auto_start_agent#1": 118,
-    "src-tauri/src/main.rs::from#3": 105,
-    "src-tauri/src/main.rs::install_app_update#1": 148,
-    "src-tauri/src/main.rs::install_connector_app_with_context#1": 265,
-    "src-tauri/src/main.rs::invoke_connector_management_request#1": 121,
-    "src-tauri/src/main.rs::main#1": 367,
-    "src-tauri/src/main.rs::poll_browser_auth#1": 103,
-    "src-tauri/src/main.rs::start_desktop_business_after_update_gate#1": 194,
-    "src-tauri/src/main.rs::start_local_app_ui_server#1": 150,
-    "src-tauri/src/main.rs::write_shared_cli_auth_at#1": 127,
     "src/config.rs::validate#1": 152,
     "src/connector.rs::install_connector_from_path_with_provenance#1": 145,
     "src/connector.rs::resolve_installed_start_commands#1": 118,

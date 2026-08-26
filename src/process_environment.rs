@@ -400,19 +400,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn current_account_shell_exposes_a_command_path() {
-        use super::current_user_command_path;
+    fn current_account_resolves_an_executable_shell() {
+        use super::unix_account_shell;
 
-        let path = current_user_command_path().expect("current user command PATH");
-        assert!(env::split_paths(&path).next().is_some());
-        if let Some(expected) = env::var_os("BRIDGE_AGENT_TEST_EXPECT_USER_PATH_ENTRY") {
-            let expected = PathBuf::from(expected);
-            assert!(
-                env::split_paths(&path).any(|entry| entry == expected),
-                "expected {} in resolved user PATH: {path}",
-                expected.display()
-            );
-        }
+        let shell = unix_account_shell().expect("current user login shell");
+        assert!(shell.is_absolute());
+        assert!(shell.is_file());
     }
 
     #[cfg(unix)]
