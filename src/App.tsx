@@ -60,6 +60,7 @@ import {
   type UpdateMethodContract
 } from "./local-app-updates";
 import {
+  configurationStartupFailureDetail,
   configurationStartupIsAllowed,
   resolveStartupUpdateGate,
   type StartupUpdateGateState
@@ -1015,6 +1016,9 @@ function App() {
     useState<StartupUpdateGateState>("checking");
   const startupConfigGateReady = configurationStartupIsAllowed(
     startupUpdateGate,
+    startupHealth?.components
+  );
+  const startupConfigMigrationFailure = configurationStartupFailureDetail(
     startupHealth?.components
   );
 
@@ -7115,6 +7119,36 @@ function App() {
             <h1 id="startup-update-required-title">需要先升级客户端</h1>
             <p>配置迁移、配置读取和业务组件均未启动。请先安装官方签名更新。</p>
             {renderRecoveryUpdateCard()}
+          </section>
+        ) : startupConfigMigrationFailure ? (
+          <section className="loading-panel" aria-labelledby="startup-migration-failed-title">
+            <p className="eyebrow">百积木</p>
+            <h1 id="startup-migration-failed-title">配置迁移未完成</h1>
+            <p>业务配置尚未读取，Agent、Connector 和本地服务均未启动。</p>
+            <div className="alert error">{startupConfigMigrationFailure}</div>
+            {renderRecoveryUpdateCard()}
+            <div className="loading-actions">
+              <button
+                className="primary"
+                onClick={() => void restartInNormalMode()}
+                disabled={startupRecoveryBusy}
+              >
+                {startupRecoveryBusy ? "正在重启" : "重启并重试迁移"}
+              </button>
+              <button className="secondary" onClick={() => void openStartupLog()}>
+                打开启动日志
+              </button>
+              <button
+                className="secondary danger"
+                onClick={() => void recoverInvalidConfig()}
+                disabled={busy}
+              >
+                {busy ? "恢复中" : "归档并恢复默认配置"}
+              </button>
+            </div>
+            <p className="loading-hint">
+              恢复默认配置只应在迁移无法修复时使用；操作前会先归档当前配置文件。
+            </p>
           </section>
         ) : error ? (
           <ConfigLoadFailurePanel
