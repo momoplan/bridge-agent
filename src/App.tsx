@@ -59,6 +59,11 @@ import {
   type UpdateEventContract,
   type UpdateMethodContract
 } from "./local-app-updates";
+import {
+  configurationStartupIsAllowed,
+  resolveStartupUpdateGate,
+  type StartupUpdateGateState
+} from "./startup-update-gate";
 
 type RuntimeStatus =
   | "stopped"
@@ -1006,6 +1011,12 @@ function App() {
   const [installBusy, setInstallBusy] = useState(false);
   const [pythonStatus, setPythonStatus] = useState<PythonRuntimeStatus | null>(null);
   const [pythonCheckBusy, setPythonCheckBusy] = useState(false);
+  const [startupUpdateGate, setStartupUpdateGate] =
+    useState<StartupUpdateGateState>("checking");
+  const startupConfigGateReady = configurationStartupIsAllowed(
+    startupUpdateGate,
+    startupHealth?.components
+  );
 
   useEffect(() => {
     connectorAppsRef.current = connectorApps;
@@ -1016,6 +1027,9 @@ function App() {
   }, [localAppInstallTasks]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let initialized = false;
     let unlisten: (() => void) | null = null;
@@ -1068,9 +1082,12 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let unlisten: (() => void) | null = null;
     void listen<RuntimeSnapshot>("runtime-snapshot-changed", (event) => {
@@ -1088,9 +1105,12 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     void invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks")
       .then((tasks) => {
@@ -1102,9 +1122,12 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let unlisten: (() => void) | null = null;
     void listen<LocalAppsChangedEvent>("local-apps-changed", (event) => {
@@ -1124,7 +1147,7 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
     let active = true;
@@ -1157,6 +1180,9 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let unlisten: (() => void) | null = null;
     void listen<RegisteredServiceStatus[]>("registered-services-changed", (event) => {
@@ -1174,9 +1200,12 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let unlisten: (() => void) | null = null;
     void listen<LocalAppRuntimeStatus[]>("local-app-runtime-changed", (event) => {
@@ -1190,9 +1219,12 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     let active = true;
     let unlisten: (() => void) | null = null;
     void listen<ConnectorLifecycleSnapshot>("connector-lifecycle-changed", (event) => {
@@ -1209,27 +1241,42 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
-    void refreshAll();
-  }, []);
+    if (startupConfigGateReady) {
+      void refreshAll();
+    }
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     const previousPage = previousActivePageRef.current;
     previousActivePageRef.current = activePage;
     if (activePage === "apps" && previousPage !== "apps") {
       void refreshLocalAppUpdateData();
     }
-  }, [activePage]);
+  }, [activePage, startupConfigGateReady]);
 
   useEffect(() => {
-    void checkAppUpdate();
+    let active = true;
+    void checkAppUpdate().then((status) => {
+      if (active) {
+        setStartupUpdateGate(resolveStartupUpdateGate(status));
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    void refreshDesktopPermissions();
-  }, []);
+    if (startupConfigGateReady) {
+      void refreshDesktopPermissions();
+    }
+  }, [startupConfigGateReady]);
 
   useEffect(() => {
     const handleKeyboardShortcut = (event: KeyboardEvent) => {
@@ -1309,6 +1356,9 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!startupConfigGateReady) {
+      return;
+    }
     const handleWindowFocus = () => {
       void refreshDesktopPermissions();
       if (activePage === "apps") {
@@ -1330,7 +1380,7 @@ function App() {
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [activePage]);
+  }, [activePage, startupConfigGateReady]);
 
   useEffect(() => {
     if (
@@ -2737,6 +2787,12 @@ function App() {
       }
       return null;
     }
+  }
+
+  async function checkStartupAppUpdate(showLatestMessage = false): Promise<AppUpdateStatus | null> {
+    const status = await checkAppUpdate(showLatestMessage);
+    setStartupUpdateGate(resolveStartupUpdateGate(status));
+    return status;
   }
 
   async function loadAppVersion() {
@@ -6976,7 +7032,7 @@ function App() {
             void openAppUpdateReleasePage(appUpdate);
           }
         }}
-        onCheck={() => void checkAppUpdate(true)}
+        onCheck={() => void checkStartupAppUpdate(true)}
       />
     );
   }
@@ -7043,7 +7099,7 @@ function App() {
   }
 
   if (!config) {
-    if (startupHealth?.safeMode) {
+    if (startupHealth?.safeMode && startupConfigGateReady) {
       return (
         <main className="app-shell app-loading startup-recovery-shell">
           {renderStartupRecoveryPanel()}
@@ -7053,7 +7109,14 @@ function App() {
     }
     return (
       <main className="app-shell app-loading">
-        {error ? (
+        {startupUpdateGate === "update_required" ? (
+          <section className="loading-panel" aria-labelledby="startup-update-required-title">
+            <p className="eyebrow">百积木</p>
+            <h1 id="startup-update-required-title">需要先升级客户端</h1>
+            <p>配置迁移、配置读取和业务组件均未启动。请先安装官方签名更新。</p>
+            {renderRecoveryUpdateCard()}
+          </section>
+        ) : error ? (
           <ConfigLoadFailurePanel
             error={error}
             recoveryUpdateCard={renderRecoveryUpdateCard()}
@@ -7064,8 +7127,13 @@ function App() {
         ) : (
           <section className="loading-panel">
             <p className="eyebrow">百积木</p>
-            <h1>正在加载</h1>
-            <p>读取配置和运行状态。</p>
+            <h1>{startupUpdateGate === "checking" ? "正在检查更新" : "正在准备启动"}</h1>
+            <p>
+              {startupUpdateGate === "checking"
+                ? "完成更新判定前，不会读取配置或启动业务组件。"
+                : "等待桌面壳完成更新门禁和配置迁移。"}
+            </p>
+            {renderRecoveryUpdateCard()}
           </section>
         )}
       </main>
