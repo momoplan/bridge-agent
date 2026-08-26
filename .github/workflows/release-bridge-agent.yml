@@ -197,19 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
-          npm test
-          npm run build
-          cargo fmt --all -- --check
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-          cargo fmt --manifest-path tools/windows-uninstaller/Cargo.toml -- --check
-          cargo fmt --manifest-path migration-artifacts/unified-app-id/Cargo.toml -- --check
-          cargo test --workspace
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo test --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --locked --manifest-path migration-artifacts/unified-app-id/Cargo.toml --all-targets -- -D warnings
-          cargo check --release --manifest-path src-tauri/Cargo.toml
+          npm run quality
 
   windows-quality-gate:
     name: Windows release quality gate

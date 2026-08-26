@@ -1,0 +1,45 @@
+{
+  "fileLines": {
+    "migration-artifacts/unified-app-id/src/main.rs": 1069,
+    "src-tauri/src/main.rs": 8808,
+    "src-tauri/src/managed_tool.rs": 1272,
+    "src/config.rs": 2720,
+    "src/connector.rs": 6242,
+    "src/event_server.rs": 1338,
+    "src/runtime.rs": 2570,
+    "src/services.rs": 4968,
+    "tools/windows-uninstaller/src/main.rs": 682
+  },
+  "functionLines": {
+    "migration-artifacts/unified-app-id/src/main.rs::migrate#1": 126,
+    "src-tauri/src/main.rs::auto_start_agent#1": 116,
+    "src-tauri/src/main.rs::check_registered_service#1": 107,
+    "src-tauri/src/main.rs::from#3": 105,
+    "src-tauri/src/main.rs::install_app_update#1": 148,
+    "src-tauri/src/main.rs::install_connector_app_with_context#1": 263,
+    "src-tauri/src/main.rs::invoke_connector_management_request#1": 121,
+    "src-tauri/src/main.rs::main#1": 371,
+    "src-tauri/src/main.rs::poll_browser_auth#1": 103,
+    "src-tauri/src/main.rs::start_desktop_business_after_update_gate#1": 194,
+    "src-tauri/src/main.rs::start_local_app_ui_server#1": 150,
+    "src-tauri/src/main.rs::write_shared_cli_auth_at#1": 127,
+    "src/config.rs::validate#1": 152,
+    "src/connector.rs::install_connector_from_path_with_provenance#1": 145,
+    "src/connector.rs::resolve_installed_start_commands#1": 118,
+    "src/connector.rs::validate_manifest#1": 169,
+    "src/event_server.rs::upload_local_app_asset#1": 171,
+    "src/runtime.rs::handle_connection#1": 266,
+    "src/runtime.rs::relay_stays_online_while_event_server_rebinds#1": 105,
+    "src/runtime.rs::run#2": 124,
+    "src/runtime.rs::start#1": 188,
+    "src/services.rs::capture_windows_monitor_png#1": 109,
+    "src/services.rs::upload_screenshot#1": 103,
+    "src/services.rs::wait_for_shell_command#1": 119
+  },
+  "cognitiveComplexity": {
+    "src/runtime.rs::handle_connection#1": 48,
+    "src/runtime.rs::run#2": 31,
+    "src/services.rs::ensure_registered_service_ready#1": 38,
+    "src/services.rs::wait_for_shell_command#1": 28
+  }
+}
