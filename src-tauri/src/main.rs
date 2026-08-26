@@ -96,8 +96,8 @@ const CONNECTOR_DOWNLOAD_USER_AGENT: &str = concat!(
     " Wget/1.21.4"
 );
 const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
-const UNIFIED_APP_ID_MIGRATION_BOUNDARY: &str = "0.6.0";
 const UNIFIED_APP_ID_MIGRATION_BINARY: &str = "bridge-agent-unified-app-id-migration";
+const UNIFIED_APP_ID_MIGRATION_LEDGER: &str = "unified-app-id-migration-ledger.json";
 const RUNTIME_SNAPSHOT_EVENT: &str = "runtime-snapshot-changed";
 const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
 const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
@@ -1477,9 +1477,9 @@ unsafe extern "C" {
 
 #[tauri::command]
 async fn load_config(state: tauri::State<'_, DesktopState>) -> Result<ConfigDocument, String> {
-    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
+    ensure_config_exists(&state.config_path).map_err(|err| format!("{err:#}"))?;
+    let config = load_agent_config(&state.config_path).map_err(|err| format!("{err:#}"))?;
+    let manifest_preview = manifest_preview_json(&config).map_err(|err| format!("{err:#}"))?;
     let runtime = state.runtime.snapshot().await;
     Ok(ConfigDocument {
         config_path: state.config_path.display().to_string(),
@@ -4634,11 +4634,7 @@ async fn install_app_update(
             downloaded_path: None,
         });
     };
-    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|err| format!("当前版本号无效: {err}"))?;
     let update_version = update.version.to_string();
-    let target_version =
-        Version::parse(&update_version).map_err(|err| format!("目标版本号无效: {err}"))?;
     let asset_name = update
         .download_url
         .path_segments()
@@ -4692,22 +4688,6 @@ async fn install_app_update(
         )
         .await
         .map_err(|err| format!("下载或校验官方更新失败: {err}"))?;
-
-    if update_crosses_unified_app_id_boundary(&current_version, &target_version)? {
-        emit_app_update_progress(
-            &app,
-            AppUpdateProgress {
-                phase: "migrating_local_apps".to_string(),
-                message: "更新包签名校验通过，正在迁移本地应用登录态和授权配置".to_string(),
-                version: Some(update_version.clone()),
-                asset_name: asset_name.clone(),
-                downloaded_bytes: None,
-                total_bytes: None,
-                downloaded_path: None,
-            },
-        );
-        run_unified_app_id_migration(&state.config_path).await?;
-    }
 
     emit_app_update_progress(
         &app,
@@ -4771,48 +4751,55 @@ async fn install_app_update(
     })
 }
 
-fn update_crosses_unified_app_id_boundary(
-    current_version: &Version,
-    target_version: &Version,
-) -> Result<bool, String> {
-    let boundary = Version::parse(UNIFIED_APP_ID_MIGRATION_BOUNDARY)
-        .map_err(|err| format!("统一 appId 迁移边界版本无效: {err}"))?;
-    Ok(current_version < &boundary && target_version >= &boundary)
+fn legacy_config_requires_unified_app_id_migration(config_path: &Path) -> anyhow::Result<bool> {
+    let config_dir = resolve_config_base_dir(config_path);
+    if config_dir.join(UNIFIED_APP_ID_MIGRATION_LEDGER).is_file() {
+        return Ok(true);
+    }
+    if !config_path.is_file() {
+        return Ok(false);
+    }
+    let content = fs::read(config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+    let document: Value = serde_json::from_slice(&content)
+        .with_context(|| format!("failed to parse config {}", config_path.display()))?;
+    Ok(document
+        .get("local_apps")
+        .and_then(Value::as_array)
+        .is_some_and(|apps| apps.iter().any(|app| app.get("connectorId").is_some())))
 }
 
-async fn run_unified_app_id_migration(config_path: &Path) -> Result<(), String> {
-    let binary = bundled_unified_app_id_migration_path().ok_or_else(|| {
+fn migrate_legacy_config_before_startup(config_path: &Path) -> anyhow::Result<bool> {
+    if !legacy_config_requires_unified_app_id_migration(config_path)? {
+        return Ok(false);
+    }
+    let binary = bundled_unified_app_id_migration_path().with_context(|| {
         format!(
-            "缺少统一 appId 迁移制品 {}，已拒绝安装更新",
+            "missing unified app ID migration artifact {}",
             unified_app_id_migration_binary_name()
         )
     })?;
     let config_dir = resolve_config_base_dir(config_path);
-    let output = timeout(
-        Duration::from_secs(180),
-        AsyncCommand::new(&binary)
-            .arg("--config-dir")
-            .arg(&config_dir)
-            .arg("--config")
-            .arg(config_path)
-            .arg("--leave-host-running")
-            .output(),
-    )
-    .await
-    .map_err(|_| "统一 appId 迁移超过 180 秒，已拒绝安装更新".to_string())?
-    .map_err(|err| format!("无法启动统一 appId 迁移制品 {}: {err}", binary.display()))?;
+    let output = Command::new(&binary)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("--config")
+        .arg(config_path)
+        .arg("--host-already-stopped")
+        .output()
+        .with_context(|| format!("failed to start migration artifact {}", binary.display()))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(true);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let detail = stderr.trim();
     if detail.is_empty() {
-        return Err(format!(
-            "统一 appId 迁移失败，退出状态为 {}；已拒绝安装更新",
+        anyhow::bail!(
+            "unified app ID migration failed with exit status {}",
             output.status
-        ));
+        );
     }
-    Err(format!("统一 appId 迁移失败，已拒绝安装更新: {detail}"))
+    anyhow::bail!("unified app ID migration failed: {detail}")
 }
 
 fn bundled_unified_app_id_migration_path() -> Option<PathBuf> {
@@ -7057,18 +7044,63 @@ fn main() {
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
             setup_connector_lifecycles.attach_event_app(app.handle().clone());
+            let startup_migration_ready = match migrate_legacy_config_before_startup(&config_path) {
+                Ok(true) => {
+                    setup_diagnostics.info(format!(
+                        "legacy app ID configuration migration completed before startup: config={}",
+                        config_path.display()
+                    ));
+                    setup_health.set_component(
+                        "config_migration",
+                        "配置迁移",
+                        "ready",
+                        Some("旧版本本地应用配置已完成迁移".to_string()),
+                    );
+                    true
+                }
+                Ok(false) => {
+                    setup_health.set_component(
+                        "config_migration",
+                        "配置迁移",
+                        "ready",
+                        None,
+                    );
+                    true
+                }
+                Err(err) => {
+                    setup_diagnostics.error(format!(
+                        "failed to migrate legacy app ID configuration before startup: {err:#}"
+                    ));
+                    setup_health.set_component(
+                        "config_migration",
+                        "配置迁移",
+                        "degraded",
+                        Some(format!("旧版本配置迁移失败: {err:#}")),
+                    );
+                    false
+                }
+            };
             forward_runtime_events(
                 app.handle().clone(),
                 runtime.clone(),
                 Arc::clone(&runtime_log_streaming),
             );
-            start_registered_service_monitor(
-                app.handle().clone(),
-                config_path.clone(),
-                setup_connector_lifecycles.clone(),
-                setup_connector_processes.clone(),
-                registered_service_request_rx,
-            );
+            if startup_migration_ready {
+                start_registered_service_monitor(
+                    app.handle().clone(),
+                    config_path.clone(),
+                    setup_connector_lifecycles.clone(),
+                    setup_connector_processes.clone(),
+                    registered_service_request_rx,
+                );
+            } else {
+                setup_health.set_component(
+                    "registered_service_monitor",
+                    "服务状态监控",
+                    "skipped",
+                    Some("配置迁移失败，未启动服务状态监控".to_string()),
+                );
+            }
             #[cfg(debug_assertions)]
             if std::env::var_os("BRIDGE_AGENT_OPEN_DEVTOOLS").is_some() {
                 if let Some(window) = app.get_webview_window("main") {
@@ -7102,7 +7134,12 @@ fn main() {
             if launch_mode == DesktopLaunchMode::BackgroundAutostart {
                 prepare_background_startup(app.handle(), &setup_diagnostics);
             }
-            if setup_health.safe_mode() {
+            if setup_health.safe_mode() || !startup_migration_ready {
+                let skip_reason = if startup_migration_ready {
+                    "安全模式下未自动启动"
+                } else {
+                    "配置迁移失败，未自动启动"
+                };
                 for (id, label) in [
                     ("local_app_ui_server", "本地应用界面服务"),
                     ("managed_cli", "Baijimu CLI"),
@@ -7112,7 +7149,7 @@ fn main() {
                         id,
                         label,
                         "skipped",
-                        Some("安全模式下未自动启动".to_string()),
+                        Some(skip_reason.to_string()),
                     );
                 }
             } else {
@@ -7919,23 +7956,6 @@ mod tests {
     }
 
     #[test]
-    fn unified_app_id_migration_runs_only_when_an_update_crosses_the_boundary() {
-        let requires = |current: &str, target: &str| {
-            update_crosses_unified_app_id_boundary(
-                &Version::parse(current).unwrap(),
-                &Version::parse(target).unwrap(),
-            )
-            .unwrap()
-        };
-
-        assert!(requires("0.5.6", "0.6.0"));
-        assert!(requires("0.5.6", "0.7.0"));
-        assert!(!requires("0.5.5", "0.5.6"));
-        assert!(!requires("0.6.0", "0.6.1"));
-        assert!(!requires("0.6.1", "0.6.0"));
-    }
-
-    #[test]
     fn updater_asset_selection_requires_a_signature() {
         if matches!(std::env::consts::OS, "windows" | "linux") && std::env::consts::ARCH != "x86_64"
         {
@@ -8349,6 +8369,60 @@ mod tests {
         request_interactive_restart(&config_path).unwrap();
         assert!(consume_interactive_restart_request(&config_path).unwrap());
         assert!(!consume_interactive_restart_request(&config_path).unwrap());
+    }
+
+    #[test]
+    fn startup_detects_legacy_connector_identity_before_strict_config_loading() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "local_apps": [{
+                    "connectorId": "com.baijimu.connector.codex",
+                    "name": "Codex",
+                    "version": "1.5.5"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(legacy_config_requires_unified_app_id_migration(&config_path).unwrap());
+    }
+
+    #[test]
+    fn startup_skips_migration_for_current_app_identity_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "local_apps": [{
+                    "appId": "codex",
+                    "name": "Codex",
+                    "version": "1.5.5"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!legacy_config_requires_unified_app_id_migration(&config_path).unwrap());
+    }
+
+    #[test]
+    fn startup_resumes_an_interrupted_unified_app_id_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("agent-config.json");
+        fs::write(&config_path, br#"{"local_apps":[]}"#).unwrap();
+        fs::write(
+            directory.path().join(UNIFIED_APP_ID_MIGRATION_LEDGER),
+            b"{}",
+        )
+        .unwrap();
+
+        assert!(legacy_config_requires_unified_app_id_migration(&config_path).unwrap());
     }
 
     #[test]
