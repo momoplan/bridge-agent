@@ -29,7 +29,7 @@ use bridge_agent::connector::{
 };
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
-use bridge_agent::services::ServiceRegistry;
+use bridge_agent::services::{local_app_runtime_service, ServiceRegistry};
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_icon_data_url,
     connector_management_token_path, default_config_path, ensure_browser_auth_agent_id,
@@ -5140,16 +5140,30 @@ async fn check_local_app(
     process_running: Option<bool>,
 ) -> LocalAppRuntimeStatus {
     let app_id = app.app_id.clone();
+    let health_check_configured = app.health_check.is_some();
+    let start_command_configured = app.start_command.is_some();
+    let stop_command_configured = app.stop_command.is_some();
+    let service = match local_app_runtime_service(&app) {
+        Ok(service) => service,
+        Err(err) => {
+            return LocalAppRuntimeStatus {
+                app_id,
+                status: RegisteredServiceState::Unknown,
+                detail: Some(format!("加载应用本机凭证失败: {err:#}")),
+                checked_at_ms: now_ms(),
+                health_check_configured,
+                start_command_configured,
+                stop_command_configured,
+                process_managed: process_running.is_some(),
+                process_running,
+            };
+        }
+    };
     let mut status = check_registered_service(
         client,
         ServiceConfig {
-            name: app_id.clone(),
-            description: app.description,
-            enabled: app.enabled,
-            health_check: app.health_check,
-            start_command: app.start_command,
-            stop_command: app.stop_command,
             methods: Vec::new(),
+            ..service
         },
     )
     .await;
@@ -7962,6 +7976,119 @@ mod tests {
         assert!(status.health_check_configured);
         assert!(!status.process_managed);
         assert_eq!(status.process_running, None);
+    }
+
+    #[tokio::test]
+    async fn local_app_health_probe_uses_the_app_scoped_bearer_token() {
+        async fn authorized_health(
+            AxumState(expected_token): AxumState<String>,
+            headers: HeaderMap,
+        ) -> StatusCode {
+            let expected = format!("Bearer {expected_token}");
+            if headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                == Some(expected.as_str())
+            {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token = "bjm_app_desktop_health_private_runtime_token";
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/health", get(authorized_health))
+                    .with_state(token.to_string()),
+            )
+            .await
+            .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("management-token");
+        fs::write(&token_path, token).unwrap();
+        let app = LocalAppConfig {
+            app_id: "com.baijimu.connector.authenticated-health".to_string(),
+            name: "Authenticated health Connector".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: format!("http://{address}/health"),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: Some(ServiceStartCommand::ShellCommand {
+                command: vec!["unused-local-app-start".to_string()],
+                cwd: None,
+                env: BTreeMap::from([(
+                    "BAIJIMU_LOCAL_APP_TOKEN_FILE".to_string(),
+                    token_path.display().to_string(),
+                )]),
+                timeout_secs: Some(1),
+            }),
+            stop_command: None,
+            methods: Vec::new(),
+            events: Vec::new(),
+        };
+
+        let client = Client::builder().build().unwrap();
+        let status = check_local_app(&client, app, Some(true)).await;
+
+        assert_eq!(status.status, RegisteredServiceState::Healthy);
+        assert_eq!(status.detail.as_deref(), Some("health HTTP 200"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_app_health_probe_reports_an_invalid_private_token_without_sending_a_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("management-token");
+        fs::write(&token_path, "short-secret").unwrap();
+        let app = LocalAppConfig {
+            app_id: "com.baijimu.connector.invalid-token".to_string(),
+            name: "Invalid token Connector".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            enabled: true,
+            health_check: Some(ServiceHealthCheck::Http {
+                url: "http://127.0.0.1:9/health".to_string(),
+                http_method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                timeout_secs: Some(1),
+                expect_status: Some(200),
+                body_contains: None,
+            }),
+            start_command: Some(ServiceStartCommand::ShellCommand {
+                command: vec!["unused-local-app-start".to_string()],
+                cwd: None,
+                env: BTreeMap::from([(
+                    "BAIJIMU_LOCAL_APP_TOKEN_FILE".to_string(),
+                    token_path.display().to_string(),
+                )]),
+                timeout_secs: Some(1),
+            }),
+            stop_command: None,
+            methods: Vec::new(),
+            events: Vec::new(),
+        };
+
+        let client = Client::builder().build().unwrap();
+        let status = check_local_app(&client, app, Some(true)).await;
+
+        assert_eq!(status.status, RegisteredServiceState::Unknown);
+        let detail = status.detail.unwrap();
+        assert!(detail.contains("应用本机凭证"));
+        assert!(detail.contains("invalid"));
+        assert!(!detail.contains("short-secret"));
     }
 
     #[test]
