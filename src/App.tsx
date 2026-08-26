@@ -681,11 +681,11 @@ interface LocalAppItem {
 
 interface StartConnectorAppInstallRequest {
   operation: LocalAppInstallTaskOperation;
-  source: string;
   replace: boolean;
-  appId: string | null;
+  appId: string;
   name: string | null;
-  version: string | null;
+  version: string;
+  acceptUnreviewed: boolean;
 }
 
 interface MarketConnector {
@@ -996,7 +996,8 @@ function App() {
   const [marketAppQuery, setMarketAppQuery] = useState("");
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketLoadError, setMarketLoadError] = useState("");
-  const [installSource, setInstallSource] = useState("");
+  const [registeredInstallAppId, setRegisteredInstallAppId] = useState("");
+  const [registeredInstallVersion, setRegisteredInstallVersion] = useState("");
   const [customInstallConfirmed, setCustomInstallConfirmed] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
   const [pythonStatus, setPythonStatus] = useState<PythonRuntimeStatus | null>(null);
@@ -2165,13 +2166,15 @@ function App() {
       );
       return;
     }
-    const source =
-      installSourceMode === "market" ? selectedMarket?.source ?? "" : installSource.trim();
-    if (!source) {
+    const appId =
+      installSourceMode === "market" ? selectedMarket?.appId ?? "" : registeredInstallAppId;
+    const version =
+      installSourceMode === "market" ? selectedMarket?.version ?? "" : registeredInstallVersion;
+    if (!appId || !version) {
       setError(
         installSourceMode === "market"
           ? "请选择要安装的应用"
-          : "请输入已在平台注册版本的 HTTPS Git 仓库地址"
+          : "请输入已在平台注册的 appId 和精确版本"
       );
       return;
     }
@@ -2186,11 +2189,11 @@ function App() {
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
         operation: "install",
-        source,
         replace: true,
-        appId: installSourceMode === "market" ? selectedMarket?.appId ?? null : null,
+        appId,
         name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
-        version: installSourceMode === "market" ? selectedMarket?.version ?? null : null
+        version,
+        acceptUnreviewed: installSourceMode === "custom" && customInstallConfirmed
       });
       setSelectedLocalAppId(`install-task:${task.taskId}`);
       setActivePage("apps");
@@ -2328,19 +2331,7 @@ function App() {
     if (app.connector?.reviewStatus === "PUBLISHED" && marketApp) {
       return "公开市场（已审核）";
     }
-    const source = connectorSyncSource(app);
-    return isGitSourceText(source) ? "已注册 Git 仓库（未公开审核）" : "已注册安装源（未公开审核）";
-  }
-
-  function isGitSourceText(source: string): boolean {
-    const value = source.trim();
-    return (
-      value.startsWith("https://") ||
-      value.startsWith("http://") ||
-      value.startsWith("git@") ||
-      value.endsWith(".git") ||
-      value.includes(".git#")
-    );
+    return "平台注册版本（未公开审核）";
   }
 
   async function checkLocalAppUpdate(app: LocalAppItem, showLatestMessage = true) {
@@ -2404,11 +2395,11 @@ function App() {
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
         operation: "upgrade",
-        source: marketApp.source,
         replace: true,
         appId: app.connector.appId,
         name: marketApp.name,
-        version: marketApp.version
+        version: marketApp.version,
+        acceptUnreviewed: false
       });
       setPendingUpgradeAppId(null);
       setSelectedLocalAppId(`connector:${app.connector.appId}`);
@@ -2429,11 +2420,6 @@ function App() {
       setError(`应用 ${app.name} 已公开上架，请通过市场检查更新`);
       return;
     }
-    const source = connectorSyncSource(app);
-    if (!source) {
-      setError(`应用 ${app.name} 没有记录安装来源，无法重新同步`);
-      return;
-    }
     if (
       !window.confirm(
         `“${app.name}”来自已注册但未公开审核的来源。继续会向平台注册中心重新校验版本并覆盖当前安装内容，是否继续？`
@@ -2448,11 +2434,11 @@ function App() {
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
         operation: "sync",
-        source,
         replace: true,
         appId: app.connector.appId,
         name: app.name,
-        version: app.connector.version
+        version: app.connector.version,
+        acceptUnreviewed: true
       });
       setConnectorUpdateStatuses((current) => {
         const next = { ...current };
@@ -5370,12 +5356,12 @@ function App() {
               </span>
               <div>
                 <h3 id="install-panel-title">
-                  {installSourceMode === "market" ? "应用市场" : "注册来源安装"}
+                  {installSourceMode === "market" ? "应用市场" : "注册版本安装"}
                 </h3>
                 <p>
                   {installSourceMode === "market"
                     ? "发现并安装经过平台验证的本地应用"
-                    : "从已在平台注册版本的 HTTPS Git 仓库安装"}
+                    : "按平台注册的 appId 和精确版本安装"}
                 </p>
               </div>
             </div>
@@ -5390,7 +5376,7 @@ function App() {
                   disabled={installBusy}
                 >
                   <Wrench size={15} aria-hidden="true" />
-                  注册来源安装
+                  注册版本安装
                 </button>
               ) : (
                 <button
@@ -5544,14 +5530,21 @@ function App() {
               <div className="custom-install-form">
                 <div className="custom-install-intro">
                   <strong>安装已注册但未公开上架的应用</strong>
-                  <p>输入该版本登记的 HTTPS Git 仓库地址；客户端会向平台注册中心核验 appId、版本、revision 和 checksum。</p>
+                  <p>输入 appId 和精确版本；客户端会从平台注册中心解析安装内容，并在下载前核验登记状态。</p>
                 </div>
-                <Field label="应用来源" wide>
+                <Field label="appId" wide>
                   <input
-                    value={installSource}
-                    onChange={(event) => setInstallSource(event.target.value)}
-                    placeholder="https://github.com/organization/repository.git#registered-revision"
+                    value={registeredInstallAppId}
+                    onChange={(event) => setRegisteredInstallAppId(event.target.value)}
+                    placeholder="已在平台注册的 appId"
                     autoFocus
+                  />
+                </Field>
+                <Field label="版本" wide>
+                  <input
+                    value={registeredInstallVersion}
+                    onChange={(event) => setRegisteredInstallVersion(event.target.value)}
+                    placeholder="例如 3.0.1"
                   />
                 </Field>
                 <div className="install-risk-note">
@@ -5588,8 +5581,8 @@ function App() {
                 )
               ) : (
                 <>
-                  <strong>已注册来源</strong>
-                  <span>未注册、已撤销或来源不匹配的版本会被拒绝</span>
+                  <strong>已注册版本</strong>
+                  <span>未注册、已撤销或身份不匹配的版本会被拒绝</span>
                 </>
               )}
             </div>
@@ -5610,7 +5603,8 @@ function App() {
                 installBusy ||
                 (installSourceMode === "market" && !selectedMarket) ||
                 (installSourceMode === "market" && marketPrimaryAction?.disabled === true) ||
-                (installSourceMode === "custom" && (!installSource.trim() || !customInstallConfirmed))
+                (installSourceMode === "custom" &&
+                  (!registeredInstallAppId || !registeredInstallVersion || !customInstallConfirmed))
               }
             >
               {installBusy
@@ -6241,7 +6235,7 @@ function App() {
                 <button
                   className="secondary"
                   onClick={() => void syncLocalApp(app)}
-                  disabled={connectorBusy != null || connectorUpdateBusy != null || !syncSource}
+                  disabled={connectorBusy != null || connectorUpdateBusy != null}
                 >
                   {updateBusy ? "同步中" : "拉取最新"}
                 </button>

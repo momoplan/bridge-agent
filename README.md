@@ -154,7 +154,7 @@ Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、�
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
-Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；HTTPS Git 直装可以安装尚未公开审核的登记版本，但宿主会先读取清单，再向平台核验 appId、版本、来源、revision 和 SHA-256，随后从登记来源重新下载并校验。未登记、已撤销、本地目录和来源不一致的包全部拒绝安装。安装记录只保存服务器 appId、登记证据、审核状态和内容摘要。
+Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；尚未公开审核的登记版本也只通过精确 `appId + version` 安装，并要求用户显式确认。Git 地址、revision 和制品位置由平台注册表解析，不能作为用户安装输入。未登记、已撤销、本地目录和身份不一致的包全部拒绝安装。安装记录只保存服务器 appId、登记证据、审核状态和内容摘要。
 
 Bridge Agent 还会按 appId 在应用私有数据目录生成权限为 `0600` 的调用 token，通过
 `BAIJIMU_LOCAL_APP_TOKEN_FILE` 注入应用，并为健康检查及全部本地 HTTP 能力自动添加 Bearer
@@ -167,8 +167,8 @@ Bridge Agent 还会按 appId 在应用私有数据目录生成权限为 `0600` �
 ```bash
 baijimu local-app device status
 baijimu local-app device market
-baijimu local-app install codex --market
-baijimu local-app install https://github.com/example/registered-local-app.git#v1.0.0
+baijimu local-app install codex --version 1.2.3
+baijimu local-app install 36d35399-a0cd-11f1-8622-00163e3536cb --version 3.0.1 --accept-unreviewed
 baijimu local-app device list
 baijimu local-app device get codex
 baijimu local-app device start codex
@@ -178,7 +178,7 @@ baijimu local-app device invoke codex credentialState
 baijimu local-app device uninstall codex --yes
 ```
 
-CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可用 `BAIJIMU_LOCAL_APP_CONTROL_FILE` 或 `--control-file` 指定发现文件。Git 直装仍必须是平台注册版本；卸载必须显式传 `--yes`。
+CLI 默认自动发现并在需要时启动百积木桌面端；特殊部署可用 `BAIJIMU_LOCAL_APP_CONTROL_FILE` 或 `--control-file` 指定发现文件。未公开审核的版本必须显式传 `--accept-unreviewed`；卸载必须显式传 `--yes`。
 
 ## 对外暴露的模型
 
