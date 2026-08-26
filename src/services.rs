@@ -424,7 +424,7 @@ impl ServiceRegistry {
             if !app.enabled {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_service(app)?;
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
@@ -469,7 +469,7 @@ impl ServiceRegistry {
             if !app.enabled || app.health_check.is_some() {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_service(app)?;
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
@@ -522,7 +522,7 @@ impl ServiceRegistry {
             if !app.enabled {
                 continue;
             }
-            let service = local_app_runtime_config(app)?;
+            let service = local_app_runtime_service(app)?;
             // Connector lifecycle belongs to the desktop process supervisor. The
             // registry only observes readiness and must never execute a host-owned
             // foreground command as if it were a one-shot service start command.
@@ -657,7 +657,12 @@ impl ServiceRegistry {
     }
 }
 
-fn local_app_runtime_config(app: &LocalAppConfig) -> Result<ServiceConfig> {
+/// Materializes the in-memory service used for every local app HTTP request.
+///
+/// The returned configuration contains the app's private bearer credential and must never be
+/// persisted or logged. Keeping this conversion in one place ensures capability invocation,
+/// health monitoring, and lifecycle verification all use the same app-scoped authorization.
+pub fn local_app_runtime_service(app: &LocalAppConfig) -> Result<ServiceConfig> {
     let mut service = ServiceConfig {
         name: app.app_id.clone(),
         description: app.description.clone(),
