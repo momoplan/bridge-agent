@@ -2560,10 +2560,8 @@ async fn local_app_control_sync_handler(
     }
     let result = async {
         let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
-        let identity = RegisteredAppVersionIdentity::parse(
-            record.manifest.app_id,
-            record.manifest.version,
-        )?;
+        let identity =
+            RegisteredAppVersionIdentity::parse(record.manifest.app_id, record.manifest.version)?;
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
@@ -7338,14 +7336,14 @@ mod tests {
         assert_eq!(identity.version.to_string(), "3.0.1-beta.2+macos");
 
         for invalid in ["3", "3.0", "v3.0.1", "3.00.1", " 3.0.1"] {
-            assert!(RegisteredAppVersionIdentity::parse(
-                "app-1".to_string(),
-                invalid.to_string()
-            )
-            .is_err());
+            assert!(
+                RegisteredAppVersionIdentity::parse("app-1".to_string(), invalid.to_string())
+                    .is_err()
+            );
         }
-        assert!(RegisteredAppVersionIdentity::parse(" app-1".to_string(), "3.0.1".to_string())
-            .is_err());
+        assert!(
+            RegisteredAppVersionIdentity::parse(" app-1".to_string(), "3.0.1".to_string()).is_err()
+        );
     }
 
     #[test]
@@ -7365,11 +7363,8 @@ mod tests {
     #[test]
     fn unreviewed_registered_version_requires_explicit_acceptance() {
         let registered = RegisteredInstallSource {
-            identity: RegisteredAppVersionIdentity::parse(
-                "app-1".to_string(),
-                "3.0.1".to_string(),
-            )
-            .unwrap(),
+            identity: RegisteredAppVersionIdentity::parse("app-1".to_string(), "3.0.1".to_string())
+                .unwrap(),
             review_status: "DRAFT".to_string(),
             name: "测试应用".to_string(),
             publisher: "测试发布者".to_string(),
@@ -7395,13 +7390,15 @@ mod tests {
         assert_eq!(request.app_id, "app-1");
         assert_eq!(request.version, "3.0.1");
 
-        assert!(serde_json::from_value::<LocalAppControlInstallRequest>(serde_json::json!({
-            "source": "https://example.invalid/app.git#v3.0.1",
-            "replace": true,
-            "start": true,
-            "acceptUnreviewed": true
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<LocalAppControlInstallRequest>(serde_json::json!({
+                "source": "https://example.invalid/app.git#v3.0.1",
+                "replace": true,
+                "start": true,
+                "acceptUnreviewed": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]
