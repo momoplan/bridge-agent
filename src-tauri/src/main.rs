@@ -1,18 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod codex_skill;
-mod connector_lifecycle;
-mod connector_process;
+mod local_app;
 mod macos_installation;
 mod managed_tool;
 mod managed_tool_dependency;
 mod window_layout;
 
-use connector_lifecycle::{
-    ConnectorHealthState, ConnectorLifecycleManager, ConnectorLifecycleSnapshot,
-    ConnectorLifecycleState, ConnectorManagementNotReady, ConnectorOperationKind,
+#[cfg(test)]
+use local_app::{
+    apply_managed_process_status, check_local_app, ensure_lifecycle_command_succeeded,
+    format_byte_count, format_health_http_error, inactive_local_app_status,
+    local_app_runtime_statuses_changed, registered_service_statuses_changed,
+    RegisteredServiceState, HEALTH_ERROR_MESSAGE_MAX_CHARS,
 };
-use connector_process::ConnectorProcessManager;
+use local_app::{
+    attach_lifecycle_events, collect_local_app_runtime_statuses, connector_local_app_is_healthy,
+    connector_local_app_status, start_connector_and_wait, start_connector_with_lifecycle,
+    start_runtime_monitor_with_tauri, stop_connector_with_lifecycle, ConnectorHealthState,
+    ConnectorLifecycleManager, ConnectorLifecycleSnapshot, ConnectorLifecycleState,
+    ConnectorManagementNotReady, ConnectorOperationKind, ConnectorProcessManager,
+    LocalAppInstallProgressReporter, LocalAppInstallTask, LocalAppInstallTaskManager,
+    LocalAppInstallTaskOperation, LocalAppInstallTaskPhase, LocalAppRuntimeStatus,
+    LocalAppsChangeNotifier, LocalAppsChangeOperation, RegisteredServiceMonitor,
+    RegisteredServiceMonitorReceiver, RegisteredServiceStatus,
+};
 
 use anyhow::Context as _;
 use axum::{
@@ -29,7 +41,7 @@ use bridge_agent::connector::{
 };
 use bridge_agent::logging::LogMetadata;
 use bridge_agent::protocol::InvokeResult;
-use bridge_agent::services::{local_app_runtime_service, ServiceRegistry};
+use bridge_agent::services::ServiceRegistry;
 use bridge_agent::{
     browser_auth_manifest_json, clear_relay_credentials, connector_icon_data_url,
     connector_management_token_path, default_config_path, ensure_browser_auth_agent_id,
@@ -39,19 +51,23 @@ use bridge_agent::{
     load_connector_manifest, manifest_preview_json,
     process_environment::enrich_user_command_environment, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
-    show_connector, sync_installed_connector, sync_installed_connectors_report,
-    terminate_runtime_lock_owner, uninstall_connector_with_options, AgentConfig,
-    AgentRuntimeManager, ConnectorIcon, ConnectorInstallProvenance, ConnectorInstallRecord,
-    ConnectorInstallResult, ConnectorStartResult, ConnectorSummary, ConnectorSyncReport,
-    ConnectorUninstallOptions, LocalAppConfig, RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot,
-    RuntimeStatus, ServiceConfig, ServiceHealthCheck, ServiceStartCommand,
+    show_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
+    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager, ConnectorIcon,
+    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
+    ConnectorStartResult, ConnectorSummary, ConnectorSyncReport, ConnectorUninstallOptions,
+    RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig,
+    ServiceStartCommand,
 };
+#[cfg(test)]
+use bridge_agent::{LocalAppConfig, ServiceHealthCheck};
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Read, Write};
@@ -59,7 +75,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, Mutex, RwLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -103,9 +119,6 @@ const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
 const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
 const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
 const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
-const REGISTERED_SERVICES_EVENT: &str = "registered-services-changed";
-const LOCAL_APP_RUNTIME_EVENT: &str = "local-app-runtime-changed";
-const LOCAL_APPS_CHANGED_EVENT: &str = "local-apps-changed";
 const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
 const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str = "connector.process.host-managed.v1";
 const HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1: &str =
@@ -117,15 +130,12 @@ const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
     HOST_CAPABILITY_CONNECTOR_MANAGED_TOOL_DEPENDENCIES_V1,
     HOST_CAPABILITY_CONNECTOR_PRESENTATION_ICON_V1,
 ];
-const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(12);
 const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
 const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 const LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const HEALTH_ERROR_RESPONSE_MAX_BYTES: usize = 8 * 1024;
-const HEALTH_ERROR_MESSAGE_MAX_CHARS: usize = 512;
 const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 const TRAY_ID: &str = "bridge-agent";
 const TRAY_MENU_SHOW: &str = "show";
@@ -228,355 +238,6 @@ struct DesktopState {
     runtime_log_streaming_requested: Arc<AtomicBool>,
     runtime_log_streaming: Arc<AtomicBool>,
     main_window_visible: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum LocalAppInstallTaskPhase {
-    Queued,
-    Resolving,
-    Downloading,
-    Verifying,
-    Installing,
-    Starting,
-    Finalizing,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum LocalAppInstallTaskOperation {
-    Install,
-    Upgrade,
-    Sync,
-}
-
-impl LocalAppInstallTaskOperation {
-    fn active_label(self) -> &'static str {
-        match self {
-            Self::Install => "安装",
-            Self::Upgrade => "升级",
-            Self::Sync => "同步",
-        }
-    }
-
-    fn queued_message(self) -> &'static str {
-        match self {
-            Self::Install => "等待开始安装",
-            Self::Upgrade => "等待开始升级",
-            Self::Sync => "等待开始同步",
-        }
-    }
-
-    fn succeeded_message(self) -> &'static str {
-        match self {
-            Self::Install => "应用已安装，可进入应用完成初始化",
-            Self::Upgrade => "应用已升级，可继续使用",
-            Self::Sync => "应用已同步到最新来源，可继续使用",
-        }
-    }
-
-    fn failed_message(self) -> &'static str {
-        match self {
-            Self::Install => "应用安装失败",
-            Self::Upgrade => "应用升级失败",
-            Self::Sync => "应用同步失败",
-        }
-    }
-
-    fn phase_message(self, phase: LocalAppInstallTaskPhase) -> Option<&'static str> {
-        match (self, phase) {
-            (Self::Install, LocalAppInstallTaskPhase::Resolving) => Some("正在解析安装来源"),
-            (Self::Install, LocalAppInstallTaskPhase::Verifying) => {
-                Some("正在校验应用清单与平台身份")
-            }
-            (Self::Install, LocalAppInstallTaskPhase::Installing) => Some("正在安装并注册应用"),
-            (Self::Install, LocalAppInstallTaskPhase::Starting) => {
-                Some("应用已安装，正在启动并检查运行状态")
-            }
-            (Self::Upgrade, LocalAppInstallTaskPhase::Resolving) => Some("正在解析升级来源"),
-            (Self::Upgrade, LocalAppInstallTaskPhase::Verifying) => {
-                Some("正在校验升级包与平台身份")
-            }
-            (Self::Upgrade, LocalAppInstallTaskPhase::Installing) => {
-                Some("正在安装新版本并更新应用注册")
-            }
-            (Self::Upgrade, LocalAppInstallTaskPhase::Starting) => {
-                Some("新版本已安装，正在启动并检查运行状态")
-            }
-            (Self::Sync, LocalAppInstallTaskPhase::Resolving) => Some("正在解析同步来源"),
-            (Self::Sync, LocalAppInstallTaskPhase::Verifying) => Some("正在校验来源包与应用身份"),
-            (Self::Sync, LocalAppInstallTaskPhase::Installing) => Some("正在同步并更新应用注册"),
-            (Self::Sync, LocalAppInstallTaskPhase::Starting) => {
-                Some("应用已同步，正在启动并检查运行状态")
-            }
-            (_, LocalAppInstallTaskPhase::Finalizing) => Some("正在刷新本地应用能力"),
-            _ => None,
-        }
-    }
-}
-
-impl LocalAppInstallTaskPhase {
-    fn is_active(self) -> bool {
-        !matches!(self, Self::Succeeded | Self::Failed)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalAppInstallTask {
-    task_id: String,
-    operation: LocalAppInstallTaskOperation,
-    app_id: Option<String>,
-    name: String,
-    version: Option<String>,
-    phase: LocalAppInstallTaskPhase,
-    progress_percent: Option<u8>,
-    downloaded_bytes: Option<u64>,
-    total_bytes: Option<u64>,
-    message: String,
-    error: Option<String>,
-    created_at_epoch_ms: u64,
-    updated_at_epoch_ms: u64,
-}
-
-#[derive(Clone, Default)]
-struct LocalAppInstallTaskManager {
-    tasks: Arc<RwLock<BTreeMap<String, LocalAppInstallTask>>>,
-}
-
-impl LocalAppInstallTaskManager {
-    fn create(
-        &self,
-        operation: LocalAppInstallTaskOperation,
-        app_id: Option<String>,
-        name: String,
-        version: Option<String>,
-    ) -> Result<LocalAppInstallTask, String> {
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|_| "本地应用安装任务状态锁已损坏".to_string())?;
-        if let Some(existing) = tasks
-            .values()
-            .find(|task| task.phase.is_active() && app_id.is_some() && task.app_id == app_id)
-        {
-            return Err(format!(
-                "应用 {} 已在{}中",
-                existing.name,
-                existing.operation.active_label()
-            ));
-        }
-        let timestamp = now_ms();
-        let task = LocalAppInstallTask {
-            task_id: uuid::Uuid::new_v4().to_string(),
-            operation,
-            app_id,
-            name,
-            version,
-            phase: LocalAppInstallTaskPhase::Queued,
-            progress_percent: Some(0),
-            downloaded_bytes: None,
-            total_bytes: None,
-            message: operation.queued_message().to_string(),
-            error: None,
-            created_at_epoch_ms: timestamp,
-            updated_at_epoch_ms: timestamp,
-        };
-        tasks.insert(task.task_id.clone(), task.clone());
-        Ok(task)
-    }
-
-    fn update(
-        &self,
-        task_id: &str,
-        update: impl FnOnce(&mut LocalAppInstallTask),
-    ) -> Option<LocalAppInstallTask> {
-        let mut tasks = self.tasks.write().ok()?;
-        let task = tasks.get_mut(task_id)?;
-        update(task);
-        task.updated_at_epoch_ms = now_ms();
-        let snapshot = task.clone();
-        Some(snapshot)
-    }
-
-    fn list(&self) -> Vec<LocalAppInstallTask> {
-        self.tasks
-            .read()
-            .map(|tasks| tasks.values().cloned().collect())
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Clone)]
-struct LocalAppInstallProgressReporter {
-    manager: LocalAppInstallTaskManager,
-    task_id: String,
-    on_event: Option<tauri::ipc::Channel<LocalAppInstallTask>>,
-}
-
-impl LocalAppInstallProgressReporter {
-    fn send(&self, task: LocalAppInstallTask) {
-        let Some(on_event) = self.on_event.as_ref() else {
-            return;
-        };
-        if let Err(err) = on_event.send(task) {
-            log::warn!(
-                "failed to send local app task progress: task_id={} error={err}",
-                self.task_id
-            );
-        }
-    }
-
-    fn update(&self, update: impl FnOnce(&mut LocalAppInstallTask)) {
-        if let Some(task) = self.manager.update(&self.task_id, update) {
-            self.send(task);
-        }
-    }
-
-    fn report(
-        &self,
-        phase: LocalAppInstallTaskPhase,
-        progress_percent: Option<u8>,
-        message: impl Into<String>,
-    ) {
-        let fallback_message = message.into();
-        self.update(|task| {
-            task.phase = phase;
-            task.progress_percent = progress_percent;
-            task.message = task
-                .operation
-                .phase_message(phase)
-                .unwrap_or(fallback_message.as_str())
-                .to_string();
-            task.error = None;
-            task.downloaded_bytes = None;
-            task.total_bytes = None;
-        });
-    }
-
-    fn download(&self, downloaded_bytes: u64, total_bytes: Option<u64>) {
-        self.update(|task| {
-            task.phase = LocalAppInstallTaskPhase::Downloading;
-            task.downloaded_bytes = Some(downloaded_bytes);
-            task.total_bytes = total_bytes;
-            task.progress_percent = total_bytes.filter(|total| *total > 0).map(|total| {
-                let download_percent = downloaded_bytes.saturating_mul(100) / total;
-                (10 + download_percent.saturating_mul(45) / 100).min(55) as u8
-            });
-            task.message = match total_bytes {
-                Some(total) => format!(
-                    "正在下载应用包（{} / {}）",
-                    format_byte_count(downloaded_bytes),
-                    format_byte_count(total)
-                ),
-                None => format!("正在下载应用包（{}）", format_byte_count(downloaded_bytes)),
-            };
-        });
-    }
-
-    fn identity(&self, app_id: &str, name: &str, version: &str) {
-        self.update(|task| {
-            task.app_id = Some(app_id.to_string());
-            task.name = name.to_string();
-            task.version = Some(version.to_string());
-        });
-    }
-}
-
-fn format_byte_count(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    const KIB: u64 = 1024;
-    if bytes >= MIB {
-        format!("{:.1} MB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct LocalAppsChangedEvent {
-    revision: u64,
-    operation: LocalAppsChangeOperation,
-    app_id: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum LocalAppsChangeOperation {
-    Install,
-    Upgrade,
-    Sync,
-    Uninstall,
-}
-
-#[derive(Clone, Default)]
-struct LocalAppsChangeNotifier {
-    revision: Arc<AtomicU64>,
-    event_app: Arc<Mutex<Option<tauri::AppHandle>>>,
-}
-
-impl LocalAppsChangeNotifier {
-    fn attach_event_app(&self, app: tauri::AppHandle) {
-        if let Ok(mut current) = self.event_app.lock() {
-            *current = Some(app);
-        }
-    }
-
-    fn notify(&self, operation: LocalAppsChangeOperation, app_id: &str) -> LocalAppsChangedEvent {
-        let event = LocalAppsChangedEvent {
-            revision: self.revision.fetch_add(1, Ordering::SeqCst) + 1,
-            operation,
-            app_id: app_id.to_string(),
-        };
-        let app = self
-            .event_app
-            .lock()
-            .ok()
-            .and_then(|current| current.clone());
-        if let Some(app) = app {
-            if let Err(err) = app.emit(LOCAL_APPS_CHANGED_EVENT, event.clone()) {
-                log::warn!(
-                    "failed to emit local apps changed event: operation={:?} app_id={} error={err}",
-                    event.operation,
-                    event.app_id
-                );
-            }
-        }
-        event
-    }
-}
-
-#[derive(Clone)]
-struct RegisteredServiceMonitor {
-    request_tx: tokio::sync::mpsc::UnboundedSender<RegisteredServiceMonitorRequest>,
-}
-
-impl RegisteredServiceMonitor {
-    fn request_refresh(&self) {
-        let _ = self
-            .request_tx
-            .send(RegisteredServiceMonitorRequest::Refresh);
-    }
-
-    async fn statuses(&self) -> Result<Vec<RegisteredServiceStatus>, String> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.request_tx
-            .send(RegisteredServiceMonitorRequest::RefreshAndRespond(reply_tx))
-            .map_err(|_| "本地应用健康监控已停止".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "本地应用健康监控未返回结果".to_string())?
-    }
-}
-
-enum RegisteredServiceMonitorRequest {
-    Refresh,
-    RefreshAndRespond(tokio::sync::oneshot::Sender<Result<Vec<RegisteredServiceStatus>, String>>),
 }
 
 #[derive(Debug, Clone)]
@@ -1218,41 +879,6 @@ struct DesktopPermissionStatus {
     screen_recording_granted: bool,
     accessibility_supported: bool,
     screen_recording_supported: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum RegisteredServiceState {
-    NotConfigured,
-    Healthy,
-    Unhealthy,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisteredServiceStatus {
-    service: String,
-    status: RegisteredServiceState,
-    detail: Option<String>,
-    checked_at_ms: u64,
-    health_check_configured: bool,
-    start_command_configured: bool,
-    stop_command_configured: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalAppRuntimeStatus {
-    app_id: String,
-    status: RegisteredServiceState,
-    detail: Option<String>,
-    checked_at_ms: u64,
-    health_check_configured: bool,
-    start_command_configured: bool,
-    stop_command_configured: bool,
-    process_managed: bool,
-    process_running: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1944,204 +1570,6 @@ fn connector_lifecycle_snapshots(
     state.connector_lifecycles.list()
 }
 
-async fn collect_local_app_runtime_statuses(
-    config_path: &Path,
-    connector_lifecycles: &ConnectorLifecycleManager,
-    connector_processes: &ConnectorProcessManager,
-) -> Result<Vec<LocalAppRuntimeStatus>, String> {
-    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|err| err.to_string())?;
-    let mut statuses = Vec::with_capacity(config.local_apps.len());
-    for app in config.local_apps {
-        let process_running = connector_processes.managed_running(&app.app_id).await;
-        let runtime_active = connector_processes.runtime_active(&app.app_id).await;
-        let app_id = app.app_id.clone();
-        let status = if runtime_active {
-            check_local_app(&client, app, process_running).await
-        } else {
-            inactive_local_app_status(app, process_running)
-        };
-        let version = show_connector(&app_id)
-            .ok()
-            .map(|record| record.manifest.version);
-        let pid = connector_processes.managed_pid(&app_id).await;
-        let (lifecycle, health) = match (runtime_active, status.status) {
-            (false, _) => (
-                ConnectorLifecycleState::Stopped,
-                ConnectorHealthState::Unhealthy,
-            ),
-            (true, RegisteredServiceState::Healthy) => (
-                ConnectorLifecycleState::Ready,
-                ConnectorHealthState::Healthy,
-            ),
-            (true, RegisteredServiceState::Unhealthy) => (
-                ConnectorLifecycleState::Degraded,
-                ConnectorHealthState::Unhealthy,
-            ),
-            (true, RegisteredServiceState::NotConfigured) => (
-                ConnectorLifecycleState::Ready,
-                ConnectorHealthState::NotConfigured,
-            ),
-            (true, RegisteredServiceState::Unknown) => (
-                ConnectorLifecycleState::Recovering,
-                ConnectorHealthState::Unknown,
-            ),
-        };
-        connector_lifecycles.observe(
-            &app_id,
-            lifecycle,
-            health,
-            version,
-            pid,
-            status.detail.clone(),
-        )?;
-        statuses.push(status);
-    }
-    Ok(statuses)
-}
-
-async fn collect_registered_service_statuses(
-    config_path: &Path,
-) -> Result<Vec<RegisteredServiceStatus>, String> {
-    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|err| err.to_string())?;
-    let mut statuses = Vec::new();
-
-    for service in config.services {
-        if service.health_check.is_none() && service.start_command.is_none() {
-            continue;
-        }
-        statuses.push(check_registered_service(&client, service).await);
-    }
-
-    Ok(statuses)
-}
-
-fn registered_service_statuses_changed(
-    previous: &[RegisteredServiceStatus],
-    current: &[RegisteredServiceStatus],
-) -> bool {
-    previous.len() != current.len()
-        || previous.iter().zip(current).any(|(left, right)| {
-            left.service != right.service
-                || left.status != right.status
-                || left.detail != right.detail
-                || left.health_check_configured != right.health_check_configured
-                || left.start_command_configured != right.start_command_configured
-                || left.stop_command_configured != right.stop_command_configured
-        })
-}
-
-fn local_app_runtime_statuses_changed(
-    previous: &[LocalAppRuntimeStatus],
-    current: &[LocalAppRuntimeStatus],
-) -> bool {
-    previous.len() != current.len()
-        || previous.iter().zip(current).any(|(left, right)| {
-            left.app_id != right.app_id
-                || left.status != right.status
-                || left.detail != right.detail
-                || left.health_check_configured != right.health_check_configured
-                || left.start_command_configured != right.start_command_configured
-                || left.stop_command_configured != right.stop_command_configured
-                || left.process_managed != right.process_managed
-                || left.process_running != right.process_running
-        })
-}
-
-fn start_registered_service_monitor(
-    app: tauri::AppHandle,
-    config_path: PathBuf,
-    connector_lifecycles: ConnectorLifecycleManager,
-    connector_processes: ConnectorProcessManager,
-    mut request_rx: tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
-) {
-    tauri::async_runtime::spawn(async move {
-        let mut previous: Option<Vec<RegisteredServiceStatus>> = None;
-        let mut previous_local_apps: Option<Vec<LocalAppRuntimeStatus>> = None;
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + REGISTERED_SERVICES_MONITOR_INTERVAL,
-            REGISTERED_SERVICES_MONITOR_INTERVAL,
-        );
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            let mut responders = Vec::new();
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = connector_processes.changed() => {}
-                request = request_rx.recv() => {
-                    match request {
-                        Some(RegisteredServiceMonitorRequest::Refresh) => {}
-                        Some(RegisteredServiceMonitorRequest::RefreshAndRespond(reply)) => {
-                            responders.push(reply);
-                        }
-                        None => break,
-                    }
-                }
-            }
-
-            while let Ok(request) = request_rx.try_recv() {
-                if let RegisteredServiceMonitorRequest::RefreshAndRespond(reply) = request {
-                    responders.push(reply);
-                }
-            }
-
-            let result = collect_registered_service_statuses(&config_path).await;
-            match result.as_ref() {
-                Ok(current) => {
-                    let changed = previous
-                        .as_deref()
-                        .is_none_or(|last| registered_service_statuses_changed(last, current));
-                    if changed {
-                        log::debug!("registered service status changed");
-                    }
-                    if responders.is_empty() {
-                        let _ = app.emit(REGISTERED_SERVICES_EVENT, current.clone());
-                    }
-                    previous = Some(current.clone());
-                }
-                Err(err) => {
-                    log::warn!("failed to refresh registered service statuses: {err}");
-                }
-            }
-            for responder in responders {
-                let _ = responder.send(result.clone());
-            }
-
-            match collect_local_app_runtime_statuses(
-                &config_path,
-                &connector_lifecycles,
-                &connector_processes,
-            )
-            .await
-            {
-                Ok(current) => {
-                    let changed = previous_local_apps
-                        .as_deref()
-                        .is_none_or(|last| local_app_runtime_statuses_changed(last, &current));
-                    if changed {
-                        log::debug!("local app runtime status changed");
-                        let _ = app.emit(LOCAL_APP_RUNTIME_EVENT, current.clone());
-                    }
-                    previous_local_apps = Some(current);
-                }
-                Err(err) => {
-                    log::warn!("failed to refresh local app runtime statuses: {err}");
-                }
-            }
-        }
-    });
-}
-
 #[tauri::command]
 async fn start_registered_service(
     state: tauri::State<'_, DesktopState>,
@@ -2535,12 +1963,14 @@ async fn local_app_control_start_handler(
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
+    let bundled_cli = bundled_baijimu_cli_path();
     let result = start_connector_with_lifecycle(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         app_id.trim(),
         "启动应用",
+        bundled_cli.as_deref(),
     )
     .await;
     state.registered_services.request_refresh();
@@ -3545,6 +2975,7 @@ async fn install_connector_app_with_context(
                         config_path,
                         &candidate_manifest.app_id,
                         "恢复旧版应用",
+                        bundled_cli.as_deref(),
                     )
                     .await
                     {
@@ -3578,6 +3009,7 @@ async fn install_connector_app_with_context(
                 config_path,
                 &install.app_id,
                 "启动新版应用",
+                bundled_cli.as_deref(),
             )
             .await
             .map_err(|err| format!("新版应用已安装，但启动失败: {err}"))?;
@@ -3673,241 +3105,19 @@ async fn install_connector_app_with_context(
     }
 }
 
-fn ensure_connector_lifecycle_command_succeeded(
-    action: &str,
-    result: &ConnectorStartResult,
-) -> Result<(), String> {
-    let failures = &result.lifecycle;
-    if failures.configured && failures.exit_code == Some(0) {
-        Ok(())
-    } else {
-        let detail = if !failures.configured {
-            "命令未配置".to_string()
-        } else if !failures.stderr.trim().is_empty() {
-            failures.stderr.trim().to_string()
-        } else {
-            format!("退出码 {:?}", failures.exit_code)
-        };
-        Err(format!("{action}失败：{}: {detail}", failures.app_id))
-    }
-}
-
-async fn connector_local_app_is_healthy(
-    config_path: &Path,
-    app_id: &str,
-    connector_processes: &ConnectorProcessManager,
-) -> Result<bool, String> {
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    if !config.local_apps.iter().any(|app| app.app_id == app_id) {
-        // The install record is the source of truth and local_apps is derived state. Rebuild a
-        // missing entry before deciding whether a running process must survive replacement.
-        sync_installed_connector(config_path, app_id).map_err(|err| err.to_string())?;
-    }
-    let process_running = connector_processes.managed_running(app_id).await;
-    let status = connector_local_app_status(config_path, app_id, process_running).await?;
-    Ok(status.status == RegisteredServiceState::Healthy)
-}
-
-async fn connector_local_app_status(
-    config_path: &Path,
-    app_id: &str,
-    process_running: Option<bool>,
-) -> Result<LocalAppRuntimeStatus, String> {
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|err| err.to_string())?;
-    let app = config
-        .local_apps
-        .into_iter()
-        .find(|app| app.app_id == app_id)
-        .ok_or_else(|| format!("本地应用 `{app_id}` 不在当前配置中"))?;
-    Ok(check_local_app(&client, app, process_running).await)
-}
-
-async fn wait_for_connector_health(
-    config_path: &Path,
-    app_id: &str,
-    expected_healthy: bool,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = connector_local_app_status(config_path, app_id, None).await?;
-        let matches = if expected_healthy {
-            !status.health_check_configured || status.status == RegisteredServiceState::Healthy
-        } else {
-            !status.health_check_configured || status.status != RegisteredServiceState::Healthy
-        };
-        if matches {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let details = format!(
-                "{}={:?} ({})",
-                status.app_id,
-                status.status,
-                status.detail.as_deref().unwrap_or("无详情")
-            );
-            let expected = if expected_healthy { "健康" } else { "停止" };
-            return Err(format!("等待应用进入{expected}状态超时：{details}"));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-async fn start_connector_and_wait(
-    connector_processes: &ConnectorProcessManager,
-    config_path: &Path,
-    app_id: &str,
-    action: &str,
-) -> Result<ConnectorStartResult, String> {
-    let record = show_connector(app_id).map_err(|err| err.to_string())?;
-    let bundled_cli = bundled_baijimu_cli_path();
-    let dependency_env = managed_tool_dependency::ensure_ready(
-        &record.manifest,
-        bridge_agent::ConnectorManagedToolDependencyPhase::Start,
-        bundled_cli.as_deref(),
-    )
-    .await
-    .map_err(|err| format!("{action}前的应用依赖检查失败: {err:#}"))?;
-    let result = connector_processes
-        .start(app_id, config_path, dependency_env)
-        .await?;
-    let verification = ensure_connector_lifecycle_command_succeeded(action, &result);
-    if let Err(error) = verification {
-        return Err(cleanup_failed_connector_start(
-            connector_processes,
-            config_path,
-            &result.app_id,
-            error,
-        )
-        .await);
-    }
-    if connector_processes.managed_running(&result.app_id).await == Some(false) {
-        return Err(cleanup_failed_connector_start(
-            connector_processes,
-            config_path,
-            &result.app_id,
-            format!("{action}失败：宿主管理进程已提前退出"),
-        )
-        .await);
-    }
-    if let Err(error) = wait_for_connector_health(config_path, &result.app_id, true).await {
-        return Err(cleanup_failed_connector_start(
-            connector_processes,
-            config_path,
-            &result.app_id,
-            error,
-        )
-        .await);
-    }
-    Ok(result)
-}
-
-async fn start_connector_with_lifecycle(
-    connector_lifecycles: &ConnectorLifecycleManager,
-    connector_processes: &ConnectorProcessManager,
-    config_path: &Path,
-    app_id: &str,
-    action: &str,
-) -> Result<ConnectorStartResult, String> {
-    let version = show_connector(app_id)
-        .map_err(|error| error.to_string())?
-        .manifest
-        .version;
-    let operation = connector_lifecycles
-        .begin(
-            app_id,
-            ConnectorOperationKind::Start,
-            Some(version.clone()),
-            action,
-        )
-        .await?;
-    match start_connector_and_wait(connector_processes, config_path, app_id, action).await {
-        Ok(result) => {
-            connector_lifecycles.complete_ready(
-                operation,
-                Some(version),
-                connector_processes.managed_pid(app_id).await,
-                "应用已启动并通过就绪检查",
-            )?;
-            Ok(result)
-        }
-        Err(error) => {
-            connector_lifecycles.fail(operation, &error)?;
-            Err(error)
-        }
-    }
-}
-
-async fn cleanup_failed_connector_start(
-    connector_processes: &ConnectorProcessManager,
-    config_path: &Path,
-    app_id: &str,
-    error: String,
-) -> String {
-    match connector_processes.stop(app_id, config_path).await {
-        Ok(_) => format!("{error}；已回收未通过启动验证的应用进程"),
-        Err(cleanup_error) => {
-            format!("{error}；回收未通过启动验证的应用进程也失败: {cleanup_error}")
-        }
-    }
-}
-
-async fn stop_connector_and_wait(
-    connector_processes: &ConnectorProcessManager,
-    config_path: &Path,
-    app_id: &str,
-    action: &str,
-) -> Result<ConnectorStartResult, String> {
-    let result = connector_processes.stop(app_id, config_path).await?;
-    ensure_connector_lifecycle_command_succeeded(action, &result)?;
-    wait_for_connector_health(config_path, &result.app_id, false).await?;
-    Ok(result)
-}
-
-async fn stop_connector_with_lifecycle(
-    connector_lifecycles: &ConnectorLifecycleManager,
-    connector_processes: &ConnectorProcessManager,
-    config_path: &Path,
-    app_id: &str,
-    action: &str,
-) -> Result<ConnectorStartResult, String> {
-    let version = show_connector(app_id)
-        .ok()
-        .map(|record| record.manifest.version);
-    let operation = connector_lifecycles
-        .begin(
-            app_id,
-            ConnectorOperationKind::Stop,
-            version.clone(),
-            action,
-        )
-        .await?;
-    match stop_connector_and_wait(connector_processes, config_path, app_id, action).await {
-        Ok(result) => {
-            connector_lifecycles.complete_stopped(operation, version, "应用已停止")?;
-            Ok(result)
-        }
-        Err(error) => {
-            connector_lifecycles.fail(operation, &error)?;
-            Err(error)
-        }
-    }
-}
-
 #[tauri::command]
 async fn start_connector_app(
     state: tauri::State<'_, DesktopState>,
     app_id: String,
 ) -> Result<ConnectorStartResult, String> {
+    let bundled_cli = bundled_baijimu_cli_path();
     let result = start_connector_with_lifecycle(
         &state.connector_lifecycles,
         &state.connector_processes,
         &state.config_path,
         app_id.trim(),
         "启动应用",
+        bundled_cli.as_deref(),
     )
     .await;
     state.registered_services.request_refresh();
@@ -4976,245 +4186,6 @@ fn read_desktop_permission_status() -> DesktopPermissionStatus {
             accessibility_supported: false,
             screen_recording_supported: false,
         }
-    }
-}
-
-async fn check_registered_service(
-    client: &Client,
-    service: ServiceConfig,
-) -> RegisteredServiceStatus {
-    let health_check_configured = service.health_check.is_some();
-    let start_command_configured = service.start_command.is_some();
-    let stop_command_configured = service.stop_command.is_some();
-    let Some(health_check) = service.health_check else {
-        return RegisteredServiceStatus {
-            service: service.name,
-            status: RegisteredServiceState::NotConfigured,
-            detail: Some("没有注册 healthCheck".to_string()),
-            checked_at_ms: now_ms(),
-            health_check_configured,
-            start_command_configured,
-            stop_command_configured,
-        };
-    };
-
-    match health_check {
-        ServiceHealthCheck::Http {
-            url,
-            http_method,
-            headers,
-            timeout_secs,
-            expect_status,
-            body_contains,
-        } => {
-            let method = http_method
-                .parse::<reqwest::Method>()
-                .unwrap_or(reqwest::Method::GET);
-            let mut request = client
-                .request(method, &url)
-                .timeout(Duration::from_secs(timeout_secs.unwrap_or(3).max(1)));
-            for (key, value) in headers {
-                request = request.header(key, value);
-            }
-            match request.send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    let expected_status = expect_status.unwrap_or(200);
-                    if status.as_u16() != expected_status {
-                        let detail = health_http_error_detail(response, expected_status).await;
-                        return RegisteredServiceStatus {
-                            service: service.name,
-                            status: RegisteredServiceState::Unhealthy,
-                            detail: Some(detail),
-                            checked_at_ms: now_ms(),
-                            health_check_configured,
-                            start_command_configured,
-                            stop_command_configured,
-                        };
-                    }
-                    if let Some(expected_text) = body_contains
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        match response.text().await {
-                            Ok(body) if body.contains(expected_text) => {}
-                            Ok(_) => {
-                                return RegisteredServiceStatus {
-                                    service: service.name,
-                                    status: RegisteredServiceState::Unhealthy,
-                                    detail: Some("health 响应内容不符合 bodyContains".to_string()),
-                                    checked_at_ms: now_ms(),
-                                    health_check_configured,
-                                    start_command_configured,
-                                    stop_command_configured,
-                                };
-                            }
-                            Err(err) => {
-                                return RegisteredServiceStatus {
-                                    service: service.name,
-                                    status: RegisteredServiceState::Unknown,
-                                    detail: Some(format!("读取 health 响应失败: {err}")),
-                                    checked_at_ms: now_ms(),
-                                    health_check_configured,
-                                    start_command_configured,
-                                    stop_command_configured,
-                                };
-                            }
-                        }
-                    }
-                    RegisteredServiceStatus {
-                        service: service.name,
-                        status: RegisteredServiceState::Healthy,
-                        detail: Some(format!("health HTTP {}", status.as_u16())),
-                        checked_at_ms: now_ms(),
-                        health_check_configured,
-                        start_command_configured,
-                        stop_command_configured,
-                    }
-                }
-                Err(err) => RegisteredServiceStatus {
-                    service: service.name,
-                    status: RegisteredServiceState::Unhealthy,
-                    detail: Some(format!("health 检查失败: {err}")),
-                    checked_at_ms: now_ms(),
-                    health_check_configured,
-                    start_command_configured,
-                    stop_command_configured,
-                },
-            }
-        }
-    }
-}
-
-async fn health_http_error_detail(mut response: reqwest::Response, expected_status: u16) -> String {
-    let status = response.status().as_u16();
-    let mut body = Vec::new();
-    while body.len() < HEALTH_ERROR_RESPONSE_MAX_BYTES {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) | Err(_) => break,
-        };
-        let remaining = HEALTH_ERROR_RESPONSE_MAX_BYTES - body.len();
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if chunk.len() > remaining {
-            break;
-        }
-    }
-    format_health_http_error(status, expected_status, &body)
-}
-
-fn format_health_http_error(status: u16, expected_status: u16, body: &[u8]) -> String {
-    let prefix = format!("health HTTP {status}，期望 {expected_status}");
-    let Some(message) = structured_health_error_message(body) else {
-        return prefix;
-    };
-    format!("{prefix}：{message}")
-}
-
-fn structured_health_error_message(body: &[u8]) -> Option<String> {
-    let payload = serde_json::from_slice::<Value>(body).ok()?;
-    let message = [
-        "/error/message",
-        "/status/startup/error",
-        "/status/startup/message",
-        "/message",
-    ]
-    .into_iter()
-    .find_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))?;
-    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return None;
-    }
-    Some(
-        normalized
-            .chars()
-            .take(HEALTH_ERROR_MESSAGE_MAX_CHARS)
-            .collect(),
-    )
-}
-
-async fn check_local_app(
-    client: &Client,
-    app: LocalAppConfig,
-    process_running: Option<bool>,
-) -> LocalAppRuntimeStatus {
-    let app_id = app.app_id.clone();
-    let health_check_configured = app.health_check.is_some();
-    let start_command_configured = app.start_command.is_some();
-    let stop_command_configured = app.stop_command.is_some();
-    let service = match local_app_runtime_service(&app) {
-        Ok(service) => service,
-        Err(err) => {
-            return LocalAppRuntimeStatus {
-                app_id,
-                status: RegisteredServiceState::Unknown,
-                detail: Some(format!("加载应用本机凭证失败: {err:#}")),
-                checked_at_ms: now_ms(),
-                health_check_configured,
-                start_command_configured,
-                stop_command_configured,
-                process_managed: process_running.is_some(),
-                process_running,
-            };
-        }
-    };
-    let mut status = check_registered_service(
-        client,
-        ServiceConfig {
-            methods: Vec::new(),
-            ..service
-        },
-    )
-    .await;
-    apply_managed_process_status(&mut status, process_running);
-    LocalAppRuntimeStatus {
-        app_id,
-        status: status.status,
-        detail: status.detail,
-        checked_at_ms: status.checked_at_ms,
-        health_check_configured: status.health_check_configured,
-        start_command_configured: status.start_command_configured,
-        stop_command_configured: status.stop_command_configured,
-        process_managed: process_running.is_some(),
-        process_running,
-    }
-}
-
-fn inactive_local_app_status(
-    app: LocalAppConfig,
-    process_running: Option<bool>,
-) -> LocalAppRuntimeStatus {
-    LocalAppRuntimeStatus {
-        app_id: app.app_id,
-        status: RegisteredServiceState::Unhealthy,
-        detail: Some("应用尚未由 Bridge Agent 启动".to_string()),
-        checked_at_ms: now_ms(),
-        health_check_configured: app.health_check.is_some(),
-        start_command_configured: app.start_command.is_some(),
-        stop_command_configured: app.stop_command.is_some(),
-        process_managed: process_running.is_some(),
-        process_running,
-    }
-}
-
-fn apply_managed_process_status(
-    status: &mut RegisteredServiceStatus,
-    process_running: Option<bool>,
-) {
-    if status.health_check_configured {
-        return;
-    }
-    match process_running {
-        Some(true) => {
-            status.status = RegisteredServiceState::Healthy;
-            status.detail = Some("宿主管理进程正在运行".to_string());
-        }
-        Some(false) => {
-            status.status = RegisteredServiceState::Unhealthy;
-            status.detail = Some("宿主管理进程未运行".to_string());
-        }
-        None => {}
     }
 }
 
@@ -6732,12 +5703,14 @@ fn auto_start_agent(
             diagnostics.info(format!(
                 "automatic connector start requested: app_id={app_id}"
             ));
+            let bundled_cli = bundled_baijimu_cli_path();
             match start_connector_with_lifecycle(
                 &connector_lifecycles,
                 &connector_processes,
                 &config_path,
                 &app_id,
                 "自动启动应用",
+                bundled_cli.as_deref(),
             )
             .await
             {
@@ -6773,8 +5746,7 @@ struct DesktopBusinessStartup {
     local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     local_apps: LocalAppsChangeNotifier,
     registered_services: RegisteredServiceMonitor,
-    registered_service_request_rx:
-        tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
+    registered_service_request_rx: RegisteredServiceMonitorReceiver,
 }
 
 fn mark_business_startup_skipped(startup_health: &StartupHealthManager, reason: &str) {
@@ -6925,7 +5897,7 @@ fn start_desktop_business_after_update_gate(startup: DesktopBusinessStartup) {
         };
 
         if startup_migration_ready {
-            start_registered_service_monitor(
+            start_runtime_monitor_with_tauri(
                 app.clone(),
                 config_path.clone(),
                 connector_lifecycles.clone(),
@@ -7181,11 +6153,7 @@ fn main() {
     let runtime = AgentRuntimeManager::new();
     let connector_lifecycles = ConnectorLifecycleManager::default();
     let connector_processes = ConnectorProcessManager::default();
-    let (registered_service_request_tx, registered_service_request_rx) =
-        tokio::sync::mpsc::unbounded_channel();
-    let registered_services = RegisteredServiceMonitor {
-        request_tx: registered_service_request_tx,
-    };
+    let (registered_services, registered_service_request_rx) = RegisteredServiceMonitor::new();
     let local_apps = LocalAppsChangeNotifier::default();
     let local_app_install_tasks = LocalAppInstallTaskManager::default();
     let runtime_log_streaming_requested = Arc::new(AtomicBool::new(false));
@@ -7299,7 +6267,7 @@ fn main() {
             }
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
-            setup_connector_lifecycles.attach_event_app(app.handle().clone());
+            attach_lifecycle_events(&setup_connector_lifecycles, app.handle().clone());
             forward_runtime_events(
                 app.handle().clone(),
                 runtime.clone(),
@@ -8450,7 +7418,7 @@ mod tests {
                 stderr: String::new(),
             },
         };
-        assert!(ensure_connector_lifecycle_command_succeeded("启动新版应用", &success).is_ok());
+        assert!(ensure_lifecycle_command_succeeded("启动新版应用", &success).is_ok());
 
         let failure = ConnectorStartResult {
             app_id: "com.baijimu.connector.test".to_string(),
@@ -8462,8 +7430,7 @@ mod tests {
                 stderr: "stop command is not configured".to_string(),
             },
         };
-        let error =
-            ensure_connector_lifecycle_command_succeeded("停止旧版应用", &failure).unwrap_err();
+        let error = ensure_lifecycle_command_succeeded("停止旧版应用", &failure).unwrap_err();
         assert!(error.contains("命令未配置"));
         assert!(error.contains("com.baijimu.connector.test"));
     }
