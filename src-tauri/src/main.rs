@@ -134,6 +134,7 @@ const STARTUP_LOG_FILE_NAME: &str = "bridge-agent-desktop-startup.log";
 const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-state.json";
 const INTERACTIVE_RESTART_MARKER_FILE_NAME: &str = "bridge-agent-desktop-interactive-restart";
 const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
+const LOCAL_APP_CONTROL_SCHEMA_VERSION: &str = "2.0.0";
 const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -913,31 +914,35 @@ struct LocalAppUiServerDependencies {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalAppControlDiscovery {
-    schema_version: u32,
+    schema_version: String,
     pid: u32,
     base_url: String,
     token: String,
     started_at_epoch_ms: u64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LocalAppControlInstallRequest {
-    #[serde(default)]
-    source: String,
-    #[serde(default)]
+    app_id: String,
+    version: String,
     replace: bool,
-    app_id: Option<String>,
-    #[serde(default)]
     start: bool,
+    accept_unreviewed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalAppControlSyncRequest {
+    accept_unreviewed: bool,
 }
 
 #[derive(Clone)]
 struct ConnectorInstallOptions {
-    source: String,
+    identity: RegisteredAppVersionIdentity,
     replace: bool,
-    app_id: Option<String>,
     start: bool,
+    accept_unreviewed: bool,
     progress: Option<LocalAppInstallProgressReporter>,
 }
 
@@ -1338,14 +1343,36 @@ struct RawRegisteredLocalApp {
     version: RawMarketConnectorVersion,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredAppVersionIdentity {
+    app_id: String,
+    version: Version,
+}
+
+impl RegisteredAppVersionIdentity {
+    fn parse(app_id: String, version: String) -> Result<Self, String> {
+        if app_id.is_empty() || app_id.trim() != app_id {
+            return Err("appId 不能为空或包含首尾空白".to_string());
+        }
+        let parsed_version = Version::parse(&version)
+            .map_err(|err| format!("本地应用版本必须是严格 SemVer 2.0.0：{err}"))?;
+        if parsed_version.to_string() != version {
+            return Err("本地应用版本必须使用规范 SemVer 2.0.0 表达".to_string());
+        }
+        Ok(Self {
+            app_id,
+            version: parsed_version,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct RegisteredInstallSource {
-    app_id: String,
+    identity: RegisteredAppVersionIdentity,
     review_status: String,
-    version: String,
+    name: String,
+    publisher: String,
     source: String,
-    repo: String,
-    revision: String,
     checksum: String,
 }
 
@@ -2309,7 +2336,7 @@ fn write_local_app_control_discovery(path: &Path, port: u16, token: &str) -> Res
         .ok_or_else(|| "无法确定本机应用控制文件目录".to_string())?;
     fs::create_dir_all(parent).map_err(|err| format!("创建本机应用控制目录失败: {err}"))?;
     let document = LocalAppControlDiscovery {
-        schema_version: 1,
+        schema_version: LOCAL_APP_CONTROL_SCHEMA_VERSION.to_string(),
         pid: std::process::id(),
         base_url: format!("http://127.0.0.1:{port}/api/v1"),
         token: token.to_string(),
@@ -2370,7 +2397,7 @@ async fn local_app_control_status_handler(
     let result = async {
         let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
         Ok::<_, String>(serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": LOCAL_APP_CONTROL_SCHEMA_VERSION,
             "pid": std::process::id(),
             "version": env!("CARGO_PKG_VERSION"),
             "configPath": state.config_path.display().to_string(),
@@ -2457,6 +2484,7 @@ async fn local_app_control_install_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
+        let identity = RegisteredAppVersionIdentity::parse(request.app_id, request.version)?;
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
@@ -2464,10 +2492,10 @@ async fn local_app_control_install_handler(
             &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
-                source: request.source,
+                identity,
                 replace: request.replace,
-                app_id: request.app_id,
                 start: request.start,
+                accept_unreviewed: request.accept_unreviewed,
                 progress: None,
             },
         )
@@ -2525,16 +2553,17 @@ async fn local_app_control_sync_handler(
     AxumState(state): AxumState<LocalAppUiHttpState>,
     AxumPath(app_id): AxumPath<String>,
     headers: HeaderMap,
+    Json(request): Json<LocalAppControlSyncRequest>,
 ) -> AxumResponse {
     if !local_app_control_is_authorized(&state, &headers) {
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
         let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
-        let source = record
-            .source_reference
-            .clone()
-            .unwrap_or_else(|| record.source_path.clone());
+        let identity = RegisteredAppVersionIdentity::parse(
+            record.manifest.app_id,
+            record.manifest.version,
+        )?;
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
@@ -2542,10 +2571,10 @@ async fn local_app_control_sync_handler(
             &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
-                source,
+                identity,
                 replace: true,
-                app_id: Some(record.manifest.app_id),
                 start: true,
+                accept_unreviewed: request.accept_unreviewed,
                 progress: None,
             },
         )
@@ -2899,19 +2928,35 @@ async fn fetch_market_connector_apps(
     Ok(raw_apps.into_iter().map(MarketConnectorApp::from).collect())
 }
 
+fn registered_install_url(
+    base_url: &str,
+    identity: &RegisteredAppVersionIdentity,
+) -> Result<reqwest::Url, String> {
+    let version = identity.version.to_string();
+    let mut url = reqwest::Url::parse(base_url.trim_end_matches('/'))
+        .map_err(|err| format!("本地应用注册中心地址无效: {err}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "本地应用注册中心地址不能作为路径基址".to_string())?
+        .pop_if_empty()
+        .extend([
+            "api",
+            "local-app-registry",
+            "apps",
+            identity.app_id.as_str(),
+            "versions",
+            version.as_str(),
+        ]);
+    Ok(url)
+}
+
 async fn fetch_registered_install_source(
     config_path: &Path,
-    app_id: &str,
-    version: &str,
+    identity: &RegisteredAppVersionIdentity,
 ) -> Result<RegisteredInstallSource, String> {
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let base_url = config.platform.base_url.trim_end_matches('/');
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
-    let mut url = reqwest::Url::parse(&format!(
-        "{base_url}/api/local-app-registry/apps/{app_id}/versions/{version}"
-    ))
-    .map_err(|err| format!("本地应用注册中心地址无效: {err}"))?;
+    let mut url = registered_install_url(&config.platform.base_url, identity)?;
     url.query_pairs_mut()
         .append_pair("platform", platform)
         .append_pair("arch", arch)
@@ -2926,24 +2971,22 @@ async fn fetch_registered_install_source(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(format!(
-            "应用 {app_id}@{version} 未注册、已撤销或不支持当前平台: HTTP {status} {body}"
+            "应用 {}@{} 未注册、已撤销或不支持当前平台: HTTP {status} {body}",
+            identity.app_id, identity.version
         ));
     }
     let registered: RawRegisteredLocalApp = response
         .json()
         .await
         .map_err(|err| format!("解析本地应用注册版本失败: {err}"))?;
-    if registered.app_id != app_id
-        || registered.version.version != version
-        || registered.registration_status != "ACTIVE"
-    {
+    let registered_identity = RegisteredAppVersionIdentity::parse(
+        registered.app_id.clone(),
+        registered.version.version.clone(),
+    )?;
+    if registered_identity != *identity || registered.registration_status != "ACTIVE" {
         return Err("注册中心返回的应用身份或状态与请求不一致".to_string());
     }
-    let _ = (
-        &registered.name,
-        &registered.publisher,
-        &registered.platforms,
-    );
+    let _ = &registered.platforms;
     let checksum = registered
         .version
         .checksum
@@ -2958,14 +3001,29 @@ async fn fetch_registered_install_source(
         return Err("注册版本 checksum 格式无效".to_string());
     }
     Ok(RegisteredInstallSource {
-        app_id: registered.app_id,
+        identity: registered_identity,
         review_status: registered.review_status,
-        version: registered.version.version,
+        name: registered.name,
+        publisher: registered.publisher,
         source: registered.version.source,
-        repo: registered.version.repo.unwrap_or_default(),
-        revision: registered.version.revision.unwrap_or_default(),
         checksum: digest.to_ascii_lowercase(),
     })
+}
+
+fn ensure_registered_install_is_accepted(
+    registered: &RegisteredInstallSource,
+    accept_unreviewed: bool,
+) -> Result<(), String> {
+    if registered.review_status == "PUBLISHED" || accept_unreviewed {
+        return Ok(());
+    }
+    Err(format!(
+        "应用 {}（{}@{}，发布者 {}）尚未经过市场公开审核；确认开发者和权限后显式允许安装未审核版本",
+        registered.name,
+        registered.identity.app_id,
+        registered.identity.version,
+        registered.publisher
+    ))
 }
 
 #[tauri::command]
@@ -3234,27 +3292,22 @@ fn start_connector_app_install(
 ) -> Result<LocalAppInstallTask, String> {
     let StartConnectorAppInstallRequest {
         operation,
-        source,
         replace,
         app_id,
         name,
         version,
+        accept_unreviewed,
     } = request;
-    let app_id = app_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let identity = RegisteredAppVersionIdentity::parse(app_id, version)?;
     let display_name = name
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "自定义应用".to_string());
-    let display_version = version
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+        .unwrap_or_else(|| identity.app_id.clone());
     let task = state.local_app_install_tasks.create(
         operation,
-        app_id.clone(),
+        Some(identity.app_id.clone()),
         display_name,
-        display_version,
+        Some(identity.version.to_string()),
     )?;
     let manager = state.local_app_install_tasks.clone();
     let reporter = LocalAppInstallProgressReporter {
@@ -3277,10 +3330,10 @@ fn start_connector_app_install(
             &connector_processes,
             &registered_services,
             ConnectorInstallOptions {
-                source,
+                identity,
                 replace,
-                app_id,
                 start: true,
+                accept_unreviewed,
                 progress: Some(reporter.clone()),
             },
         )
@@ -3326,11 +3379,11 @@ fn start_connector_app_install(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartConnectorAppInstallRequest {
     operation: LocalAppInstallTaskOperation,
-    source: String,
     replace: bool,
-    app_id: Option<String>,
+    app_id: String,
     name: Option<String>,
-    version: Option<String>,
+    version: String,
+    accept_unreviewed: bool,
 }
 
 #[tauri::command]
@@ -3353,37 +3406,12 @@ async fn install_connector_app_with_context(
         progress.report(
             LocalAppInstallTaskPhase::Resolving,
             Some(5),
-            "正在解析安装来源",
+            "正在解析平台注册版本",
         );
     }
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
-    let requested_source = options.source.trim();
-    if requested_source.is_empty() && options.app_id.as_deref().is_none_or(str::is_empty) {
-        return Err("安装来源不能为空".to_string());
-    }
-    let expected_app_id = options
-        .app_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let discovery_source =
-        resolve_connector_source(requested_source, true, None, progress.as_ref()).await?;
-    let discovered_manifest =
-        load_connector_manifest(discovery_source.path()).map_err(|err| err.to_string())?;
-    if expected_app_id.is_some_and(|app_id| app_id != discovered_manifest.app_id) {
-        return Err(format!(
-            "请求 appId 与安装包清单不匹配：请求 `{}`，安装包 `{}`",
-            expected_app_id.unwrap_or_default(),
-            discovered_manifest.app_id
-        ));
-    }
-    let registered = fetch_registered_install_source(
-        config_path,
-        &discovered_manifest.app_id,
-        &discovered_manifest.version,
-    )
-    .await?;
-    validate_direct_install_source(requested_source, &registered)?;
+    let registered = fetch_registered_install_source(config_path, &options.identity).await?;
+    ensure_registered_install_is_accepted(&registered, options.accept_unreviewed)?;
     let resolved_source = resolve_connector_source(
         &registered.source,
         false,
@@ -3407,13 +3435,13 @@ async fn install_connector_app_with_context(
             &candidate_manifest.version,
         );
     }
-    if candidate_manifest.app_id != registered.app_id
-        || candidate_manifest.version != registered.version
+    if candidate_manifest.app_id != registered.identity.app_id
+        || candidate_manifest.version != registered.identity.version.to_string()
     {
         return Err(format!(
             "注册版本与安装包清单不匹配：注册 `{}@{}`，安装包 `{}@{}`",
-            registered.app_id,
-            registered.version,
+            registered.identity.app_id,
+            registered.identity.version,
             candidate_manifest.app_id,
             candidate_manifest.version
         ));
@@ -5716,48 +5744,6 @@ fn validate_market_app_identity(
     Ok(())
 }
 
-fn validate_direct_install_source(
-    requested_source: &str,
-    registered: &RegisteredInstallSource,
-) -> Result<(), String> {
-    let (requested_base, requested_revision) = split_source_revision(requested_source);
-    let requested = canonical_registry_source(&requested_base)?;
-    let registered_source = canonical_registry_source(&registered.source)?;
-    let registered_repo = canonical_registry_source(&registered.repo)?;
-    if requested != registered_source && requested != registered_repo {
-        return Err(format!(
-            "GitHub 安装来源未登记到应用 {}@{}",
-            registered.app_id, registered.version
-        ));
-    }
-    if let Some(requested_revision) = requested_revision {
-        if requested_revision != registered.revision {
-            return Err(format!(
-                "安装来源 revision `{requested_revision}` 与注册 revision `{}` 不一致",
-                registered.revision
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn canonical_registry_source(value: &str) -> Result<String, String> {
-    let mut url =
-        reqwest::Url::parse(value.trim()).map_err(|err| format!("注册安装来源 URL 无效: {err}"))?;
-    if url.scheme() != "https" || url.host_str().is_none() {
-        return Err("注册安装来源必须使用 HTTPS".to_string());
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    let normalized_path = url
-        .path()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .to_string();
-    url.set_path(&normalized_path);
-    Ok(url.to_string().trim_end_matches('/').to_string())
-}
-
 fn required_market_checksum(market_app: &MarketConnectorApp) -> Result<String, String> {
     let checksum = market_app
         .checksum
@@ -7305,6 +7291,83 @@ mod tests {
     use bridge_agent::ConnectorLifecycleResult;
 
     #[test]
+    fn registered_app_version_identity_requires_exact_semver() {
+        let identity = RegisteredAppVersionIdentity::parse(
+            "app-1".to_string(),
+            "3.0.1-beta.2+macos".to_string(),
+        )
+        .unwrap();
+        assert_eq!(identity.app_id, "app-1");
+        assert_eq!(identity.version.to_string(), "3.0.1-beta.2+macos");
+
+        for invalid in ["3", "3.0", "v3.0.1", "3.00.1", " 3.0.1"] {
+            assert!(RegisteredAppVersionIdentity::parse(
+                "app-1".to_string(),
+                invalid.to_string()
+            )
+            .is_err());
+        }
+        assert!(RegisteredAppVersionIdentity::parse(" app-1".to_string(), "3.0.1".to_string())
+            .is_err());
+    }
+
+    #[test]
+    fn registered_install_url_preserves_base_path_and_encodes_identity() {
+        let identity = RegisteredAppVersionIdentity::parse(
+            "app/with/slash".to_string(),
+            "3.0.1+macos".to_string(),
+        )
+        .unwrap();
+        let url = registered_install_url("https://api.example.com/lowcode3/", &identity).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.com/lowcode3/api/local-app-registry/apps/app%2Fwith%2Fslash/versions/3.0.1+macos"
+        );
+    }
+
+    #[test]
+    fn unreviewed_registered_version_requires_explicit_acceptance() {
+        let registered = RegisteredInstallSource {
+            identity: RegisteredAppVersionIdentity::parse(
+                "app-1".to_string(),
+                "3.0.1".to_string(),
+            )
+            .unwrap(),
+            review_status: "DRAFT".to_string(),
+            name: "测试应用".to_string(),
+            publisher: "测试发布者".to_string(),
+            source: "https://example.invalid/app.zip".to_string(),
+            checksum: "0".repeat(64),
+        };
+        let error = ensure_registered_install_is_accepted(&registered, false).unwrap_err();
+        assert!(error.contains("尚未经过市场公开审核"));
+        assert!(error.contains("app-1@3.0.1"));
+        assert!(ensure_registered_install_is_accepted(&registered, true).is_ok());
+    }
+
+    #[test]
+    fn local_app_install_contract_accepts_identity_and_rejects_source_url() {
+        let request: LocalAppControlInstallRequest = serde_json::from_value(serde_json::json!({
+            "appId": "app-1",
+            "version": "3.0.1",
+            "replace": true,
+            "start": true,
+            "acceptUnreviewed": true
+        }))
+        .unwrap();
+        assert_eq!(request.app_id, "app-1");
+        assert_eq!(request.version, "3.0.1");
+
+        assert!(serde_json::from_value::<LocalAppControlInstallRequest>(serde_json::json!({
+            "source": "https://example.invalid/app.git#v3.0.1",
+            "replace": true,
+            "start": true,
+            "acceptUnreviewed": true
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn boxed_command_error_payloads_preserve_the_ipc_contract() {
         let conflict = RuntimeLockConflict {
             pid: 42,
@@ -8151,7 +8214,7 @@ mod tests {
         write_local_app_control_discovery(&path, 39100, token).unwrap();
 
         let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(document["schemaVersion"], 1);
+        assert_eq!(document["schemaVersion"], LOCAL_APP_CONTROL_SCHEMA_VERSION);
         assert_eq!(document["baseUrl"], "http://127.0.0.1:39100/api/v1");
         assert_eq!(document["token"], token);
         #[cfg(unix)]

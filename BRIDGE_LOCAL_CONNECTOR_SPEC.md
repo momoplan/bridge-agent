@@ -575,8 +575,8 @@ GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
 GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 ```
 
-第一类只返回已审核且公开上架的版本；第二类精确解析 `ACTIVE` 的已登记版本，供 GitHub
-直接安装、测试和未审核分发。撤销应用或版本注册后，精确解析也必须立即拒绝。
+第一类只返回已审核且公开上架的版本；第二类按 `appId + version` 精确解析 `ACTIVE` 的已登记版本，
+供测试和未审核分发。撤销应用或版本注册后，精确解析也必须立即拒绝。
 
 公开列表可以返回 lowcode 包装结构：
 
@@ -646,8 +646,8 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 - `appId` 必须等于 Connector 包内 `connector.json.appId`。
 - `latestVersion.version` 必须等于 Connector 包内 `connector.json.version`。
 - `latestVersion.revision` 推荐指向不可变 tag，例如 `v0.2.3`。
-- GitHub 直接安装只负责发现和打包指定 revision；Bridge 随后仍须通过精确注册接口核对
-  `appId + version + repo + revision + checksum`，并从登记来源重新下载。未登记内容不得执行。
+- 用户安装输入只能是精确 `appId + version`。Bridge 通过注册接口取得 repo、revision、source 和 checksum，
+  再从登记来源下载；GitHub URL 不得成为用户安装身份或绕过注册表。未登记内容不得执行。
 - 正式制品必须使用 HTTPS、精确 revision 和 SHA-256；按平台/架构分发时由
   `manifest.artifacts[]` 声明唯一匹配制品。
 - `latestVersion.manifest` 必须是该不可变 package 版本的完整清单快照，不能只保留启动命令摘要；
@@ -659,7 +659,7 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 
 安装流程：
 
-1. 用户从公开市场选择应用，或提供已登记版本的 `appId + version` / Git revision。
+1. 用户从公开市场选择应用，或提供已登记版本的精确 `appId + version`。
 2. Bridge 调用注册表精确解析版本，确认应用和版本均为 `ACTIVE`。
 3. Bridge 从登记的 HTTPS 制品源重新下载并验证 SHA-256；macOS/Windows 继续验证平台签名。
 4. Bridge 读取 `connector.json`，严格校验 schema `3.0.0`、`appId`、版本、来源和宿主能力。
@@ -679,7 +679,7 @@ GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
 来源同步规则：
 
 - `sourceReference` 只记录已登记的来源信息；它不能成为绕过注册表的信任依据。
-- Git 同步重新发现指定 revision 后，必须再次精确解析注册表并核对 repo、revision 和 checksum。
+- 重新同步按已安装清单中的精确 `appId + version` 再次解析注册表；来源信息只由注册表返回。
 - 重新同步只允许安装同一 `appId` 的已登记版本，并更新 `lastSyncedAtEpochMs`，保留首次 `installedAtEpochMs`。
 
 卸载规则：
@@ -781,16 +781,16 @@ curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
 
 破坏性变更必须提升主版本。
 
-## 本地开发和 GitHub 直接安装
+## 本地开发和登记版本安装
 
 本地开发不再等同于“未登记安装”。开发者先在平台创建应用取得服务端 `appId`，再为每个测试版本
 登记精确 repo、revision、HTTPS 制品和 SHA-256。版本可以保持未审核状态，因此不出现在公共市场；
 Bridge 仍可通过精确注册接口安装和同步。
 
-GitHub URL 是输入方式，不是信任来源：Bridge 可以浅克隆 revision 读取元数据，但在执行任何包内代码前
-必须用清单中的 `appId + version` 查询注册表，校验 repo/revision/checksum，并从登记源重新下载。
-本地目录、任意压缩包和没有注册记录的 Git revision 都必须拒绝。这样保留开发效率，同时保证所有
-可执行本地应用都有可撤销的服务端身份和版本记录。
+安装输入只接受 `appId + version`。Bridge 在执行任何包内代码前查询注册表，取得并校验登记状态、
+审核状态和宿主兼容性，再从登记源下载。未公开审核的版本必须由用户显式确认；本地目录、任意压缩包、
+Git URL 和没有注册记录的 revision 都必须拒绝。这样所有可执行本地应用都有可撤销的服务端身份和版本记录，
+同时避免让用户复制平台已经拥有的分发地址。
 
 ## 发布前验收清单
 
@@ -816,14 +816,15 @@ Connector 发布到市场前至少确认：
 
 - Connector 清单文件名固定为 `connector.json`。
 - 清单只接受 `schemaVersion: 3.0.0` 和 `appId`；旧身份字段及 service-registration 模型全部拒绝。
-- 安装只接受注册表精确解析成功的版本。Git URL 可以用于发现 revision，但不能绕过登记和 checksum 校验。
+- 安装只接受注册表按精确 `appId + version` 解析成功的版本；Git URL 不属于安装输入。
 - 市场列表既支持 lowcode 包装结构，也支持直接返回数组。
 - 客户端比较新旧 `configSchema`、methods/events 完整契约、database migration 和权限声明，并按兼容、需确认、破坏性三档展示。
 - 安装包写入 `local-apps`，安装记录包含 `sourceReference`、`sourcePath`、注册状态、审核状态、来源 checksum、包 checksum、`installedAtEpochMs` 和 `lastSyncedAtEpochMs`。
 - Connector 顶层至少声明一个方法或事件；`transport` 目前支持 loopback HTTP。
 - Bridge Agent 为每个 appId 在 `app-data/{appId}` 生成私有 token，并为健康检查和 HTTP 方法自动注入 Bearer 鉴权。
-- 桌面端在配置目录写入权限为 `0600` 的 `local-app-control.json`，内容包含进程 ID、随机令牌和 loopback HTTP 地址；控制服务正常停止时删除，重启时覆盖并轮换令牌。
+- 桌面端在配置目录写入权限为 `0600` 的 `local-app-control.json`，其 `schemaVersion` 为严格 SemVer `2.0.0`，内容包含进程 ID、随机令牌和 loopback HTTP 地址；控制服务正常停止时删除，重启时覆盖并轮换令牌。
 - `baijimu local-app install` 和 `baijimu local-app device ...` 必须通过该本机控制面调用桌面端实现，不得自行写 Connector 目录或复制安装算法。
+- 安装请求只携带 `appId`、精确 `version`、`replace`、`start` 和 `acceptUnreviewed`；不得携带 source、repo 或 revision。未审核版本在解析注册表后、下载制品前检查 `acceptUnreviewed`。
 - 本机控制面支持市场查询、已安装应用查询、安装、启动、停止、来源同步、卸载以及清单声明的 management operation；所有请求必须携带发现文件中的 Bearer token。
 - 本机控制面只允许绑定 loopback；CLI 读取发现文件后必须再次校验 URL，禁止向远端主机发送本机控制 token。
 
