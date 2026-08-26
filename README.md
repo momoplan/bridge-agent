@@ -232,6 +232,19 @@ runtime `businessId`。
 
 ## 项目结构
 
+Rust 架构和发布质量使用同一个入口：
+
+```bash
+npm ci
+npm run quality
+```
+
+该命令会构建前端，随后执行 rustfmt、文件/函数长度与认知复杂度债务棘轮、全部 Rust 测试、Clippy 和
+桌面端 release check。Pull Request 和 `release-bridge-agent` 打包流水线都调用这个入口。阈值配置位于
+`config/rust-architecture.json`，存量债务位于 `config/rust-architecture-baseline.json`；baseline 只允许
+随拆分降低或删除，禁止新增或提高。通用规范见
+[Rust 服务设计约束](https://docs.baijimu.com/development/backend-development/rust-service-design)。
+
 - `src/lib.rs`
 - `src/config.rs`
 - `src/event_server.rs`

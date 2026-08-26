@@ -1,0 +1,9 @@
+{
+  "fileLines": {
+    "ordinary": { "warning": 600, "maximum": 1000 },
+    "entrypoint": { "warning": 300, "maximum": 500 }
+  },
+  "functionLines": { "warning": 60, "maximum": 100 },
+  "cognitiveComplexity": { "warning": 15, "maximum": 25 },
+  "excludedPathSegments": ["target", "node_modules", "src-tauri/gen"]
+}
