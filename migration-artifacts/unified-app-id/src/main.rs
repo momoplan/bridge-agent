@@ -4,13 +4,15 @@ use directories::{BaseDirs, ProjectDirs};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, Signal, System};
 
-const ARTIFACT_VERSION: &str = "1.0.0";
+const ARTIFACT_VERSION: &str = "1.0.1";
+const PREVIOUS_ARTIFACT_VERSION: &str = "1.0.0";
 const LEDGER_FILE: &str = "unified-app-id-migration-ledger.json";
 const LOCK_FILE: &str = "unified-app-id-migration.lock";
 const LEGACY_MANAGED_CLI_APP_ID: &str = "com.baijimu.cli";
@@ -181,7 +183,10 @@ fn migrate(
         write_json_atomically(&ledger_path, &ledger)?;
         ledger
     };
-    if ledger.artifact_version != ARTIFACT_VERSION {
+    if !matches!(
+        ledger.artifact_version.as_str(),
+        ARTIFACT_VERSION | PREVIOUS_ARTIFACT_VERSION
+    ) {
         bail!(
             "migration ledger version {} cannot be handled by artifact {}",
             ledger.artifact_version,
@@ -189,11 +194,13 @@ fn migrate(
         );
     }
 
+    let has_legacy_state = legacy_state_exists(config_dir, config_path)?;
     let needs_stop = ledger
         .entries
         .iter()
-        .any(|entry| entry.phase == MigrationPhase::Prepared);
-    if needs_stop || (!ledger.legacy_apps_stopped && !ledger.entries.is_empty()) {
+        .any(|entry| entry.phase == MigrationPhase::Prepared)
+        || (!ledger.legacy_apps_stopped && has_legacy_state);
+    if needs_stop {
         if host_already_stopped {
             verify_legacy_host_and_apps_stopped(config_dir, &ledger)?;
             for entry in &mut ledger.entries {
@@ -240,13 +247,15 @@ fn migrate(
             write_json_atomically(&ledger_path, &ledger)?;
         }
     }
+    archive_unregistered_legacy_state(config_dir, config_path, &ledger)?;
     migrate_managed_cli_app_id_at(managed_apps)?;
-    if ledger
-        .entries
-        .iter()
-        .any(|entry| entry.phase == MigrationPhase::PackagesArchived)
+    if legacy_config_has_local_apps(config_path)?
+        || ledger
+            .entries
+            .iter()
+            .any(|entry| entry.phase == MigrationPhase::PackagesArchived)
     {
-        rewrite_config_without_installations(config_path, &ledger)?;
+        rewrite_config_without_installations(config_path)?;
         for entry in &mut ledger.entries {
             if entry.phase == MigrationPhase::PackagesArchived {
                 entry.phase = MigrationPhase::ConfigWritten;
@@ -273,7 +282,7 @@ fn migrate(
     Ok(())
 }
 
-fn verify_legacy_host_and_apps_stopped(config_dir: &Path, ledger: &MigrationLedger) -> Result<()> {
+fn verify_legacy_host_and_apps_stopped(config_dir: &Path, _ledger: &MigrationLedger) -> Result<()> {
     let mut system = System::new_all();
     system.refresh_all();
     let discovery_path = config_dir.join("local-app-control.json");
@@ -293,30 +302,23 @@ fn verify_legacy_host_and_apps_stopped(config_dir: &Path, ledger: &MigrationLedg
         }
     }
 
-    for entry in &ledger.entries {
-        if entry.phase != MigrationPhase::Prepared {
-            continue;
-        }
-        let package_path = config_dir.join("connectors").join(&entry.legacy_identity);
-        for (pid, process) in system.processes() {
-            let uses_package = process
-                .exe()
-                .is_some_and(|path| path.starts_with(&package_path))
-                || process
-                    .cwd()
-                    .is_some_and(|path| path.starts_with(&package_path))
-                || process
-                    .cmd()
-                    .iter()
-                    .any(|argument| Path::new(argument).starts_with(&package_path));
-            if uses_package {
-                bail!(
-                    "legacy application {} still has process {} using {}; close it before offline migration",
-                    entry.legacy_identity,
-                    pid,
-                    package_path.display()
-                );
-            }
+    let packages_root = config_dir.join("connectors");
+    for (pid, process) in system.processes() {
+        let uses_legacy_package = process
+            .exe()
+            .is_some_and(|path| path.starts_with(&packages_root))
+            || process
+                .cwd()
+                .is_some_and(|path| path.starts_with(&packages_root))
+            || process
+                .cmd()
+                .iter()
+                .any(|argument| Path::new(argument).starts_with(&packages_root));
+        if uses_legacy_package {
+            bail!(
+                "legacy application process {pid} is still using {}; close it before offline migration",
+                packages_root.display()
+            );
         }
     }
     Ok(())
@@ -332,17 +334,26 @@ fn default_managed_apps_dir() -> Result<PathBuf> {
 }
 
 fn migrate_managed_cli_app_id_at(managed_apps: &Path) -> Result<()> {
-    move_once(
-        &managed_apps.join(LEGACY_MANAGED_CLI_APP_ID),
-        &managed_apps.join(MANAGED_CLI_APP_ID),
-        "managed Baijimu CLI application",
-    )
+    let source = managed_apps.join(LEGACY_MANAGED_CLI_APP_ID);
+    let target = managed_apps.join(MANAGED_CLI_APP_ID);
+    if source.exists() && target.exists() {
+        return move_once(
+            &source,
+            &managed_apps
+                .join("migration-backups")
+                .join("unified-app-id")
+                .join(ARTIFACT_VERSION)
+                .join(LEGACY_MANAGED_CLI_APP_ID),
+            "superseded managed Baijimu CLI application",
+        );
+    }
+    move_once(&source, &target, "managed Baijimu CLI application")
 }
 
 fn preflight(config_dir: &Path, config_path: &Path) -> Result<MigrationLedger> {
-    let config = read_json::<LegacyAgentConfig>(config_path)?;
+    let _: LegacyAgentConfig = read_json(config_path)?;
     let connectors_dir = config_dir.join("connectors");
-    let mut entries = Vec::new();
+    let mut candidates = Vec::new();
     if connectors_dir.exists() {
         for item in fs::read_dir(&connectors_dir)
             .with_context(|| format!("failed to read {}", connectors_dir.display()))?
@@ -351,39 +362,35 @@ fn preflight(config_dir: &Path, config_path: &Path) -> Result<MigrationLedger> {
             if !item.file_type()?.is_dir() {
                 continue;
             }
+            let directory_identity = item.file_name().to_string_lossy().into_owned();
+            validate_path_segment(&directory_identity, "legacy application identity")?;
             let record_path = item.path().join("install.json");
             if !record_path.is_file() {
                 continue;
             }
-            let record = read_json::<LegacyInstallRecord>(&record_path)?;
+            let Ok(record) = read_json::<LegacyInstallRecord>(&record_path) else {
+                continue;
+            };
             if !matches!(
                 record.manifest.schema_version.as_str(),
                 "1.0" | "1.1" | "1.2" | "2.0"
             ) {
-                bail!(
-                    "legacy installation {} uses unsupported manifest schema {}",
-                    record.manifest.id,
-                    record.manifest.schema_version
-                );
+                continue;
             }
-            let app_id = record
+            if record.manifest.id != directory_identity {
+                continue;
+            }
+            let Some(app_id) = record
                 .market_app_id
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .with_context(|| {
-                    format!(
-                        "legacy installation {} is not associated with a registered market app; register and reinstall it before upgrading",
-                        record.manifest.id
-                    )
-                })?;
-            if entries
-                .iter()
-                .any(|entry: &MigrationEntry| entry.app_id == app_id)
-            {
-                bail!("multiple legacy installations resolve to appId {app_id}");
-            }
-            entries.push(MigrationEntry {
+            else {
+                continue;
+            };
+            validate_path_segment(&record.manifest.id, "legacy application identity")?;
+            validate_path_segment(app_id, "registered application ID")?;
+            candidates.push(MigrationEntry {
                 legacy_identity: record.manifest.id,
                 app_id: app_id.to_string(),
                 version: record.manifest.version,
@@ -391,18 +398,15 @@ fn preflight(config_dir: &Path, config_path: &Path) -> Result<MigrationLedger> {
             });
         }
     }
-    entries.sort_by(|left, right| left.app_id.cmp(&right.app_id));
-    for app in &config.local_apps {
-        if !entries
-            .iter()
-            .any(|entry| entry.legacy_identity == app.connector_id)
-        {
-            bail!(
-                "configured legacy application {} has no registered installation record",
-                app.connector_id
-            );
-        }
+    let mut app_id_counts = BTreeMap::<String, usize>::new();
+    for candidate in &candidates {
+        *app_id_counts.entry(candidate.app_id.clone()).or_default() += 1;
     }
+    let mut entries = candidates
+        .into_iter()
+        .filter(|candidate| app_id_counts.get(&candidate.app_id) == Some(&1))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.app_id.cmp(&right.app_id));
     Ok(MigrationLedger {
         artifact_version: ARTIFACT_VERSION.to_string(),
         legacy_apps_stopped: false,
@@ -463,6 +467,19 @@ fn move_app_data(config_dir: &Path, entry: &MigrationEntry) -> Result<()> {
         .join("connector-data")
         .join(&entry.legacy_identity);
     let target = config_dir.join("app-data").join(&entry.app_id);
+    if source.exists() && target.exists() {
+        return move_once(
+            &source,
+            &config_dir
+                .join("migration-backups")
+                .join("unified-app-id")
+                .join(ARTIFACT_VERSION)
+                .join("superseded")
+                .join("connector-data")
+                .join(&entry.legacy_identity),
+            "superseded legacy application data",
+        );
+    }
     move_once(&source, &target, "application data")
 }
 
@@ -475,6 +492,103 @@ fn archive_package(config_dir: &Path, entry: &MigrationEntry) -> Result<()> {
         .join("connectors")
         .join(&entry.legacy_identity);
     move_once(&source, &target, "legacy package")
+}
+
+fn legacy_config_has_local_apps(config_path: &Path) -> Result<bool> {
+    Ok(!read_json::<LegacyAgentConfig>(config_path)?
+        .local_apps
+        .is_empty())
+}
+
+fn directory_has_entries(path: &Path) -> Result<bool> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    Ok(fs::read_dir(path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+        .next()
+        .transpose()?
+        .is_some())
+}
+
+fn legacy_state_exists(config_dir: &Path, config_path: &Path) -> Result<bool> {
+    Ok(legacy_config_has_local_apps(config_path)?
+        || directory_has_entries(&config_dir.join("connectors"))?
+        || directory_has_entries(&config_dir.join("connector-data"))?)
+}
+
+fn legacy_identity_set(config_dir: &Path, config_path: &Path) -> Result<BTreeSet<String>> {
+    let mut identities = read_json::<LegacyAgentConfig>(config_path)?
+        .local_apps
+        .into_iter()
+        .map(|app| app.connector_id)
+        .collect::<BTreeSet<_>>();
+    for root in [
+        config_dir.join("connectors"),
+        config_dir.join("connector-data"),
+    ] {
+        if !root.is_dir() {
+            continue;
+        }
+        for item in
+            fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+        {
+            let item = item?;
+            if item.file_type()?.is_dir() {
+                identities.insert(item.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    for identity in &identities {
+        validate_path_segment(identity, "legacy application identity")?;
+    }
+    Ok(identities)
+}
+
+fn validate_path_segment(value: &str, label: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.trim() != value
+        || path.is_absolute()
+        || path.components().count() != 1
+        || matches!(value, "." | "..")
+    {
+        bail!("invalid {label} {value:?}");
+    }
+    Ok(())
+}
+
+fn archive_unregistered_legacy_state(
+    config_dir: &Path,
+    config_path: &Path,
+    ledger: &MigrationLedger,
+) -> Result<()> {
+    let registered = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.legacy_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    let backup_root = config_dir
+        .join("migration-backups")
+        .join("unified-app-id")
+        .join(ARTIFACT_VERSION)
+        .join("unregistered");
+    for identity in legacy_identity_set(config_dir, config_path)? {
+        if registered.contains(identity.as_str()) {
+            continue;
+        }
+        move_once(
+            &config_dir.join("connectors").join(&identity),
+            &backup_root.join("connectors").join(&identity),
+            "unregistered legacy application package",
+        )?;
+        move_once(
+            &config_dir.join("connector-data").join(&identity),
+            &backup_root.join("connector-data").join(&identity),
+            "unregistered legacy application data",
+        )?;
+    }
+    Ok(())
 }
 
 fn move_once(source: &Path, target: &Path, label: &str) -> Result<()> {
@@ -501,23 +615,8 @@ fn move_once(source: &Path, target: &Path, label: &str) -> Result<()> {
     }
 }
 
-fn rewrite_config_without_installations(
-    config_path: &Path,
-    ledger: &MigrationLedger,
-) -> Result<()> {
+fn rewrite_config_without_installations(config_path: &Path) -> Result<()> {
     let config = read_json::<LegacyAgentConfig>(config_path)?;
-    for app in &config.local_apps {
-        if !ledger
-            .entries
-            .iter()
-            .any(|entry| entry.legacy_identity == app.connector_id)
-        {
-            bail!(
-                "configuration changed after preflight; unknown legacy application {}",
-                app.connector_id
-            );
-        }
-    }
     let config_backup = config_path
         .parent()
         .context("agent configuration path has no parent directory")?
@@ -620,15 +719,15 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_unregistered_and_duplicate_target_app_ids() {
+    fn preflight_excludes_unregistered_and_ambiguous_target_app_ids() {
         let unregistered = tempdir().unwrap();
         let config_path = unregistered.path().join("agent-config.json");
         write_legacy_config(&config_path, &["com.example.unregistered"]);
         write_install_record(unregistered.path(), "com.example.unregistered", None);
         assert!(preflight(unregistered.path(), &config_path)
-            .unwrap_err()
-            .to_string()
-            .contains("not associated with a registered market app"));
+            .unwrap()
+            .entries
+            .is_empty());
 
         let duplicate = tempdir().unwrap();
         let duplicate_config = duplicate.path().join("agent-config.json");
@@ -636,9 +735,9 @@ mod tests {
         write_install_record(duplicate.path(), "legacy.one", Some("server-app-01"));
         write_install_record(duplicate.path(), "legacy.two", Some("server-app-01"));
         assert!(preflight(duplicate.path(), &duplicate_config)
-            .unwrap_err()
-            .to_string()
-            .contains("multiple legacy installations resolve to appId"));
+            .unwrap()
+            .entries
+            .is_empty());
     }
 
     #[test]
@@ -646,18 +745,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         write_legacy_config(&config_path, &["com.example.legacy"]);
-        let ledger = MigrationLedger {
-            artifact_version: ARTIFACT_VERSION.to_string(),
-            legacy_apps_stopped: true,
-            entries: vec![MigrationEntry {
-                legacy_identity: "com.example.legacy".to_string(),
-                app_id: "server-app-01".to_string(),
-                version: "0.1.0".to_string(),
-                phase: MigrationPhase::PackagesArchived,
-            }],
-        };
 
-        rewrite_config_without_installations(&config_path, &ledger).unwrap();
+        rewrite_config_without_installations(&config_path).unwrap();
         let rewritten: Value = read_json(&config_path).unwrap();
 
         assert_eq!(rewritten["local_apps"], json!([]));
@@ -667,7 +756,9 @@ mod tests {
         assert_eq!(rewritten["services"][0]["name"], "shell");
         let backup = dir
             .path()
-            .join("migration-backups/unified-app-id/1.0.0/agent-config.json");
+            .join("migration-backups/unified-app-id")
+            .join(ARTIFACT_VERSION)
+            .join("agent-config.json");
         let original: Value = read_json(&backup).unwrap();
         assert_eq!(
             original["local_apps"][0]["connectorId"],
@@ -676,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn data_and_packages_move_once_and_conflicts_are_rejected() {
+    fn data_and_packages_move_once_and_superseded_data_is_archived() {
         let dir = tempdir().unwrap();
         let entry = MigrationEntry {
             legacy_identity: "com.example.legacy".to_string(),
@@ -709,13 +800,28 @@ mod tests {
         );
         assert!(dir
             .path()
-            .join("migration-backups/unified-app-id/1.0.0/connectors")
+            .join("migration-backups/unified-app-id")
+            .join(ARTIFACT_VERSION)
+            .join("connectors")
             .join(&entry.legacy_identity)
             .join("install.json")
             .is_file());
 
         fs::create_dir_all(&source_data).unwrap();
-        assert!(move_app_data(dir.path(), &entry).is_err());
+        fs::write(source_data.join("legacy-session.json"), b"older-state").unwrap();
+        move_app_data(dir.path(), &entry).unwrap();
+        assert_eq!(
+            fs::read(
+                dir.path()
+                    .join("migration-backups/unified-app-id")
+                    .join(ARTIFACT_VERSION)
+                    .join("superseded/connector-data")
+                    .join(&entry.legacy_identity)
+                    .join("legacy-session.json")
+            )
+            .unwrap(),
+            b"older-state"
+        );
     }
 
     #[test]
@@ -761,14 +867,128 @@ mod tests {
         assert!(!dir.path().join("connectors/com.example.legacy").exists());
         assert!(dir
             .path()
-            .join(
-                "migration-backups/unified-app-id/1.0.0/connectors/com.example.legacy/install.json"
-            )
+            .join("migration-backups/unified-app-id")
+            .join(ARTIFACT_VERSION)
+            .join("connectors/com.example.legacy/install.json")
             .is_file());
         assert_eq!(
             fs::read(dir.path().join("app-data/registered-app-01/session.json")).unwrap(),
             b"signed-in-state"
         );
+    }
+
+    #[test]
+    fn offline_migration_archives_unregistered_derived_state_and_clears_config() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        write_legacy_config(&config_path, &["com.baijimu.connector.codex"]);
+        let package = dir.path().join("connectors/com.baijimu.connector.codex");
+        let data = dir
+            .path()
+            .join("connector-data/com.baijimu.connector.codex");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        fs::write(package.join("connector.json"), b"legacy-package").unwrap();
+        fs::write(data.join("session.json"), b"signed-in-state").unwrap();
+
+        migrate(
+            dir.path(),
+            &config_path,
+            false,
+            true,
+            &dir.path().join("managed-apps"),
+        )
+        .unwrap();
+
+        let migrated: Value = read_json(&config_path).unwrap();
+        assert_eq!(migrated["local_apps"], json!([]));
+        let backup_root = dir
+            .path()
+            .join("migration-backups/unified-app-id")
+            .join(ARTIFACT_VERSION);
+        assert!(backup_root.join("agent-config.json").is_file());
+        assert_eq!(
+            fs::read(
+                backup_root
+                    .join("unregistered/connectors/com.baijimu.connector.codex/connector.json")
+            )
+            .unwrap(),
+            b"legacy-package"
+        );
+        assert_eq!(
+            fs::read(
+                backup_root
+                    .join("unregistered/connector-data/com.baijimu.connector.codex/session.json")
+            )
+            .unwrap(),
+            b"signed-in-state"
+        );
+        assert!(!dir.path().join(LEDGER_FILE).exists());
+        assert!(!dir.path().join(LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn offline_migration_clears_stale_config_without_local_installation_files() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        write_legacy_config(&config_path, &["com.baijimu.connector.codex"]);
+
+        migrate(
+            dir.path(),
+            &config_path,
+            false,
+            true,
+            &dir.path().join("managed-apps"),
+        )
+        .unwrap();
+
+        let migrated: Value = read_json(&config_path).unwrap();
+        assert_eq!(migrated["local_apps"], json!([]));
+        let original: Value = read_json(
+            &dir.path()
+                .join("migration-backups/unified-app-id")
+                .join(ARTIFACT_VERSION)
+                .join("agent-config.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            original["local_apps"][0]["connectorId"],
+            "com.baijimu.connector.codex"
+        );
+    }
+
+    #[test]
+    fn current_artifact_resumes_previous_version_ledger() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        write_legacy_config(&config_path, &["com.example.legacy"]);
+        write_json_atomically(
+            &dir.path().join(LEDGER_FILE),
+            &MigrationLedger {
+                artifact_version: PREVIOUS_ARTIFACT_VERSION.to_string(),
+                legacy_apps_stopped: true,
+                entries: vec![MigrationEntry {
+                    legacy_identity: "com.example.legacy".to_string(),
+                    app_id: "registered-app-01".to_string(),
+                    version: "1.0.0".to_string(),
+                    phase: MigrationPhase::PackagesArchived,
+                }],
+            },
+        )
+        .unwrap();
+
+        migrate(
+            dir.path(),
+            &config_path,
+            false,
+            true,
+            &dir.path().join("managed-apps"),
+        )
+        .unwrap();
+
+        let migrated: Value = read_json(&config_path).unwrap();
+        assert_eq!(migrated["local_apps"], json!([]));
+        assert!(!dir.path().join(LEDGER_FILE).exists());
     }
 
     #[test]
@@ -815,6 +1035,35 @@ mod tests {
         assert_eq!(
             fs::read(dir.path().join(MANAGED_CLI_APP_ID).join("state.json")).unwrap(),
             b"managed-state"
+        );
+    }
+
+    #[test]
+    fn managed_cli_conflict_preserves_current_target_and_archives_legacy_source() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_MANAGED_CLI_APP_ID);
+        let current = dir.path().join(MANAGED_CLI_APP_ID);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::write(legacy.join("state.json"), b"legacy-state").unwrap();
+        fs::write(current.join("state.json"), b"current-state").unwrap();
+
+        migrate_managed_cli_app_id_at(dir.path()).unwrap();
+
+        assert_eq!(
+            fs::read(current.join("state.json")).unwrap(),
+            b"current-state"
+        );
+        assert_eq!(
+            fs::read(
+                dir.path()
+                    .join("migration-backups/unified-app-id")
+                    .join(ARTIFACT_VERSION)
+                    .join(LEGACY_MANAGED_CLI_APP_ID)
+                    .join("state.json")
+            )
+            .unwrap(),
+            b"legacy-state"
         );
     }
 }

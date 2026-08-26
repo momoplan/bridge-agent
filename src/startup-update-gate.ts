@@ -7,6 +7,7 @@ interface StartupUpdateDecisionInput {
 interface StartupComponentHealthInput {
   id: string;
   status: string;
+  detail?: string | null;
 }
 
 export function resolveStartupUpdateGate(
@@ -23,5 +24,15 @@ export function configurationStartupIsAllowed(
     return false;
   }
   const migration = components?.find((component) => component.id === "config_migration");
-  return migration?.status === "ready" || migration?.status === "degraded";
+  return migration?.status === "ready";
+}
+
+export function configurationStartupFailureDetail(
+  components: StartupComponentHealthInput[] | null | undefined
+): string | null {
+  const migration = components?.find((component) => component.id === "config_migration");
+  if (migration?.status !== "degraded") {
+    return null;
+  }
+  return migration.detail?.trim() || "配置迁移失败，尚未读取业务配置。";
 }

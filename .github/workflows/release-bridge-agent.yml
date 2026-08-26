@@ -1344,7 +1344,7 @@ jobs:
             }
             $migrationRoot = Join-Path `
               (Split-Path -Parent $configPath) `
-              "migration-backups\unified-app-id\1.0.0"
+              "migration-backups\unified-app-id\1.0.1"
             if (-not (Test-Path -LiteralPath (Join-Path $migrationRoot "agent-config.json"))) {
               throw "Legacy configuration backup was not created during direct MSI upgrade"
             }
