@@ -118,6 +118,8 @@ const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
     HOST_CAPABILITY_CONNECTOR_PRESENTATION_ICON_V1,
 ];
 const REGISTERED_SERVICES_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
+const STARTUP_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(12);
+const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
 const LOCAL_APP_UI_MAX_MANAGEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -177,6 +179,7 @@ impl DesktopLaunchMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainWindowOpenReason {
     InteractiveStartup,
+    RequiredUpdate,
     SecondaryLaunch,
     TrayMenu,
     TrayIcon,
@@ -188,6 +191,7 @@ impl MainWindowOpenReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::InteractiveStartup => "interactive_startup",
+            Self::RequiredUpdate => "required_update",
             Self::SecondaryLaunch => "secondary_launch",
             Self::TrayMenu => "tray_menu",
             Self::TrayIcon => "tray_icon",
@@ -1169,6 +1173,20 @@ struct AppUpdateStatus {
     current_target: String,
     auto_download_available: bool,
     asset_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupUpdateDecision {
+    Continue,
+    RequireUpdate,
+}
+
+fn startup_update_decision(status: &AppUpdateStatus) -> StartupUpdateDecision {
+    if status.force_update_required {
+        StartupUpdateDecision::RequireUpdate
+    } else {
+        StartupUpdateDecision::Continue
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -4870,7 +4888,12 @@ fn release_force_update_required(
 
 async fn fetch_latest_release() -> Result<UpdateReleaseResponse, String> {
     let update_api_url = configured_update_api_url()?;
-    let response = Client::new()
+    let client = Client::builder()
+        .connect_timeout(UPDATE_CONNECT_TIMEOUT)
+        .timeout(STARTUP_UPDATE_CHECK_TIMEOUT)
+        .build()
+        .map_err(|err| format!("初始化更新检查客户端失败: {err}"))?;
+    let response = client
         .get(update_api_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -6724,6 +6747,227 @@ fn config_is_authorized(config: &AgentConfig) -> bool {
     config.platform.workspace_id.is_some() && !config.relay.token.trim().is_empty()
 }
 
+struct DesktopBusinessStartup {
+    app: tauri::AppHandle,
+    launch_mode: DesktopLaunchMode,
+    runtime: AgentRuntimeManager,
+    connector_lifecycles: ConnectorLifecycleManager,
+    connector_processes: ConnectorProcessManager,
+    config_path: PathBuf,
+    startup_health: StartupHealthManager,
+    diagnostics: StartupDiagnostics,
+    local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+    local_apps: LocalAppsChangeNotifier,
+    registered_services: RegisteredServiceMonitor,
+    registered_service_request_rx:
+        tokio::sync::mpsc::UnboundedReceiver<RegisteredServiceMonitorRequest>,
+}
+
+fn mark_business_startup_skipped(startup_health: &StartupHealthManager, reason: &str) {
+    for (id, label) in [
+        ("local_app_ui_server", "本地应用界面服务"),
+        ("managed_cli", "Baijimu CLI"),
+        ("agent_runtime", "Agent 运行时"),
+    ] {
+        startup_health.set_component(id, label, "skipped", Some(reason.to_string()));
+    }
+}
+
+fn start_desktop_business_after_update_gate(startup: DesktopBusinessStartup) {
+    tauri::async_runtime::spawn(async move {
+        let DesktopBusinessStartup {
+            app,
+            launch_mode,
+            runtime,
+            connector_lifecycles,
+            connector_processes,
+            config_path,
+            startup_health,
+            diagnostics,
+            local_app_ui,
+            local_apps,
+            registered_services,
+            registered_service_request_rx,
+        } = startup;
+
+        startup_health.set_component(
+            "updater",
+            "官方更新器",
+            "starting",
+            Some("正在启动任何配置或业务组件之前检查官方更新".to_string()),
+        );
+        diagnostics.info("startup update gate check started before configuration migration");
+        let update_status = timeout(STARTUP_UPDATE_CHECK_TIMEOUT, check_app_update()).await;
+        match update_status {
+            Ok(Ok(status)) => match startup_update_decision(&status) {
+                StartupUpdateDecision::RequireUpdate => {
+                    let target = status
+                        .latest_version
+                        .as_deref()
+                        .or(status.minimum_supported_version.as_deref())
+                        .unwrap_or("最新版本");
+                    let detail = format!(
+                        "当前版本 {} 已停止支持，必须先升级到 {target}",
+                        status.current_version
+                    );
+                    diagnostics.warn(format!(
+                        "startup update gate blocked configuration and business startup: {detail}"
+                    ));
+                    startup_health.set_component("updater", "官方更新器", "degraded", Some(detail));
+                    startup_health.set_component(
+                        "config_migration",
+                        "配置迁移",
+                        "skipped",
+                        Some("必须先完成客户端升级".to_string()),
+                    );
+                    startup_health.set_component(
+                        "registered_service_monitor",
+                        "服务状态监控",
+                        "skipped",
+                        Some("必须先完成客户端升级".to_string()),
+                    );
+                    mark_business_startup_skipped(&startup_health, "必须先完成客户端升级");
+                    if launch_mode == DesktopLaunchMode::BackgroundAutostart {
+                        show_main_window(
+                            &app,
+                            Some(&diagnostics),
+                            MainWindowOpenReason::RequiredUpdate,
+                        );
+                    }
+                    return;
+                }
+                StartupUpdateDecision::Continue => {
+                    let detail = if status.update_available {
+                        status
+                            .latest_version
+                            .as_deref()
+                            .map(|version| format!("发现可选更新 {version}，启动后可随时安装"))
+                    } else {
+                        None
+                    };
+                    diagnostics
+                        .info("startup update gate completed; configuration startup allowed");
+                    startup_health.set_component("updater", "官方更新器", "ready", detail);
+                }
+            },
+            Ok(Err(err)) => {
+                diagnostics.warn(format!(
+                    "startup update gate check failed; continuing in offline-capable mode: {err}"
+                ));
+                startup_health.set_component(
+                    "updater",
+                    "官方更新器",
+                    "degraded",
+                    Some(format!("更新检查失败，已按离线模式继续启动: {err}")),
+                );
+            }
+            Err(_) => {
+                diagnostics.warn(
+                    "startup update gate check timed out; continuing in offline-capable mode",
+                );
+                startup_health.set_component(
+                    "updater",
+                    "官方更新器",
+                    "degraded",
+                    Some("更新检查超时，已按离线模式继续启动".to_string()),
+                );
+            }
+        }
+
+        diagnostics.info(format!(
+            "configuration migration started after startup update gate: config={}",
+            config_path.display()
+        ));
+        let startup_migration_ready = match migrate_legacy_config_before_startup(&config_path) {
+            Ok(true) => {
+                diagnostics.info(format!(
+                    "legacy app ID configuration migration completed before startup: config={}",
+                    config_path.display()
+                ));
+                startup_health.set_component(
+                    "config_migration",
+                    "配置迁移",
+                    "ready",
+                    Some("旧版本本地应用配置已完成迁移".to_string()),
+                );
+                true
+            }
+            Ok(false) => {
+                startup_health.set_component("config_migration", "配置迁移", "ready", None);
+                true
+            }
+            Err(err) => {
+                diagnostics.error(format!(
+                    "failed to migrate legacy app ID configuration before startup: {err:#}"
+                ));
+                startup_health.set_component(
+                    "config_migration",
+                    "配置迁移",
+                    "degraded",
+                    Some(format!("旧版本配置迁移失败: {err:#}")),
+                );
+                false
+            }
+        };
+
+        if startup_migration_ready {
+            start_registered_service_monitor(
+                app.clone(),
+                config_path.clone(),
+                connector_lifecycles.clone(),
+                connector_processes.clone(),
+                registered_service_request_rx,
+            );
+            startup_health.set_component(
+                "registered_service_monitor",
+                "服务状态监控",
+                "ready",
+                None,
+            );
+        } else {
+            startup_health.set_component(
+                "registered_service_monitor",
+                "服务状态监控",
+                "skipped",
+                Some("配置迁移失败，未启动服务状态监控".to_string()),
+            );
+        }
+
+        if startup_health.safe_mode() || !startup_migration_ready {
+            let skip_reason = if startup_migration_ready {
+                "安全模式下未自动启动"
+            } else {
+                "配置迁移失败，未自动启动"
+            };
+            mark_business_startup_skipped(&startup_health, skip_reason);
+            return;
+        }
+
+        start_local_app_ui_server(
+            local_app_ui,
+            startup_health.clone(),
+            LocalAppUiServerDependencies {
+                diagnostics: diagnostics.clone(),
+                config_path: config_path.clone(),
+                runtime: runtime.clone(),
+                connector_lifecycles: connector_lifecycles.clone(),
+                connector_processes: connector_processes.clone(),
+                registered_services: registered_services.clone(),
+                local_apps,
+            },
+        );
+        bootstrap_bundled_baijimu_cli(startup_health.clone(), diagnostics.clone());
+        auto_start_agent(
+            runtime,
+            connector_lifecycles,
+            connector_processes,
+            config_path,
+            startup_health,
+            diagnostics,
+        );
+    });
+}
+
 fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
     if unified_app_id_managed_cli_root().is_dir() && !legacy_managed_cli_root().exists() {
         let skill_path = codex_skill::install_bundled()?;
@@ -7042,70 +7286,17 @@ fn main() {
             setup_health.attach_event_app(app.handle().clone());
             setup_local_apps.attach_event_app(app.handle().clone());
             setup_connector_lifecycles.attach_event_app(app.handle().clone());
-            let startup_migration_ready = match migrate_legacy_config_before_startup(&config_path) {
-                Ok(true) => {
-                    setup_diagnostics.info(format!(
-                        "legacy app ID configuration migration completed before startup: config={}",
-                        config_path.display()
-                    ));
-                    setup_health.set_component(
-                        "config_migration",
-                        "配置迁移",
-                        "ready",
-                        Some("旧版本本地应用配置已完成迁移".to_string()),
-                    );
-                    true
-                }
-                Ok(false) => {
-                    setup_health.set_component(
-                        "config_migration",
-                        "配置迁移",
-                        "ready",
-                        None,
-                    );
-                    true
-                }
-                Err(err) => {
-                    setup_diagnostics.error(format!(
-                        "failed to migrate legacy app ID configuration before startup: {err:#}"
-                    ));
-                    setup_health.set_component(
-                        "config_migration",
-                        "配置迁移",
-                        "degraded",
-                        Some(format!("旧版本配置迁移失败: {err:#}")),
-                    );
-                    false
-                }
-            };
             forward_runtime_events(
                 app.handle().clone(),
                 runtime.clone(),
                 Arc::clone(&runtime_log_streaming),
             );
-            if startup_migration_ready {
-                start_registered_service_monitor(
-                    app.handle().clone(),
-                    config_path.clone(),
-                    setup_connector_lifecycles.clone(),
-                    setup_connector_processes.clone(),
-                    registered_service_request_rx,
-                );
-            } else {
-                setup_health.set_component(
-                    "registered_service_monitor",
-                    "服务状态监控",
-                    "skipped",
-                    Some("配置迁移失败，未启动服务状态监控".to_string()),
-                );
-            }
             #[cfg(debug_assertions)]
             if std::env::var_os("BRIDGE_AGENT_OPEN_DEVTOOLS").is_some() {
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
                 }
             }
-            setup_health.set_component("updater", "官方更新器", "ready", None);
             configure_desktop_autostart(app, &setup_health, &setup_diagnostics);
             if let Err(err) = setup_main_window_icon(app) {
                 setup_diagnostics.error(format!(
@@ -7132,48 +7323,20 @@ fn main() {
             if launch_mode == DesktopLaunchMode::BackgroundAutostart {
                 prepare_background_startup(app.handle(), &setup_diagnostics);
             }
-            if setup_health.safe_mode() || !startup_migration_ready {
-                let skip_reason = if startup_migration_ready {
-                    "安全模式下未自动启动"
-                } else {
-                    "配置迁移失败，未自动启动"
-                };
-                for (id, label) in [
-                    ("local_app_ui_server", "本地应用界面服务"),
-                    ("managed_cli", "Baijimu CLI"),
-                    ("agent_runtime", "Agent 运行时"),
-                ] {
-                    setup_health.set_component(
-                        id,
-                        label,
-                        "skipped",
-                        Some(skip_reason.to_string()),
-                    );
-                }
-            } else {
-                start_local_app_ui_server(
-                    Arc::clone(&setup_local_app_ui),
-                    setup_health.clone(),
-                    LocalAppUiServerDependencies {
-                        diagnostics: setup_diagnostics.clone(),
-                        config_path: config_path.clone(),
-                        runtime: runtime.clone(),
-                        connector_lifecycles: setup_connector_lifecycles.clone(),
-                        connector_processes: setup_connector_processes.clone(),
-                        registered_services: registered_services.clone(),
-                        local_apps: setup_local_apps.clone(),
-                    },
-                );
-                bootstrap_bundled_baijimu_cli(setup_health.clone(), setup_diagnostics.clone());
-                auto_start_agent(
-                    runtime.clone(),
-                    setup_connector_lifecycles.clone(),
-                    setup_connector_processes.clone(),
-                    config_path.clone(),
-                    setup_health.clone(),
-                    setup_diagnostics.clone(),
-                );
-            }
+            start_desktop_business_after_update_gate(DesktopBusinessStartup {
+                app: app.handle().clone(),
+                launch_mode,
+                runtime: runtime.clone(),
+                connector_lifecycles: setup_connector_lifecycles.clone(),
+                connector_processes: setup_connector_processes.clone(),
+                config_path: config_path.clone(),
+                startup_health: setup_health.clone(),
+                diagnostics: setup_diagnostics.clone(),
+                local_app_ui: Arc::clone(&setup_local_app_ui),
+                local_apps: setup_local_apps.clone(),
+                registered_services: registered_services.clone(),
+                registered_service_request_rx,
+            });
             setup_diagnostics.info("tauri setup completed");
             Ok(())
         })
@@ -7950,6 +8113,39 @@ mod tests {
             &release,
             &Version::parse("0.1.72").unwrap()
         ));
+    }
+
+    fn app_update_status(force_update_required: bool) -> AppUpdateStatus {
+        AppUpdateStatus {
+            current_version: "0.6.5".to_string(),
+            latest_version: Some("0.6.6".to_string()),
+            update_available: true,
+            force_update_required,
+            minimum_supported_version: Some("0.6.6".to_string()),
+            force_update_message: None,
+            release_url: None,
+            release_name: None,
+            published_at: None,
+            current_target: "windows-x86_64".to_string(),
+            auto_download_available: true,
+            asset_name: Some("Baijimu_0.6.6_x64_zh-CN.msi".to_string()),
+        }
+    }
+
+    #[test]
+    fn startup_update_gate_blocks_business_components_for_a_required_update() {
+        assert_eq!(
+            startup_update_decision(&app_update_status(true)),
+            StartupUpdateDecision::RequireUpdate
+        );
+    }
+
+    #[test]
+    fn startup_update_gate_allows_optional_updates_without_breaking_offline_startup() {
+        assert_eq!(
+            startup_update_decision(&app_update_status(false)),
+            StartupUpdateDecision::Continue
+        );
     }
 
     #[test]
