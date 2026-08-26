@@ -12,6 +12,7 @@ const windowsTauriConfig = JSON.parse(
 const tauriConfig = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
 const packageLock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+const bundledCliAppId = readFileSync("tools/baijimu-cli/APP_ID", "utf8").trim();
 const cargoManifests = [
   "Cargo.toml",
   "src-tauri/Cargo.toml",
@@ -63,6 +64,16 @@ describe("release workflow repository script availability", () => {
     for (const manifest of cargoManifests) {
       expect(cargoPackageVersion(manifest)).toBe(expected);
     }
+  });
+
+  test("bundled CLI market gate resolves the versioned app identity", () => {
+    const body = jobBody("prepare-domestic-release", "quality-gate");
+
+    expect(bundledCliAppId).toBe("baijimu-cli");
+    expect(body).toContain("tools/baijimu-cli/APP_ID");
+    expect(body).toContain("select(.appId == $app_id)");
+    expect(body).toContain("select(.latestVersion.manifest.appId == $app_id)");
+    expect(body).not.toContain(".latestVersion.repo ==");
   });
 
   test("verify-update-service checks out the dispatched workflow commit", () => {

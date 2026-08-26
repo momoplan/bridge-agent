@@ -99,12 +99,17 @@ jobs:
           fi
 
           cli_version="$(tr -d '[:space:]' < tools/baijimu-cli/VERSION)"
+          cli_app_id="$(tr -d '[:space:]' < tools/baijimu-cli/APP_ID)"
           case "$cli_version" in
             *[!0-9.]*|'')
               echo "Invalid bundled Baijimu CLI version: $cli_version" >&2
               exit 1
               ;;
           esac
+          if [ -z "$cli_app_id" ]; then
+            echo "Missing bundled Baijimu CLI app ID" >&2
+            exit 1
+          fi
 
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             for target in \
@@ -114,10 +119,11 @@ jobs:
               market_cli_version="$(
                 curl -fsSL --retry 3 --retry-delay 2 \
                   "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
-                  | jq -er '
+                  | jq -er --arg app_id "$cli_app_id" '
                     .[]
+                    | select(.appId == $app_id)
                     | select(.latestVersion.manifest.applicationType == "managed_tool")
-                    | select(.latestVersion.repo == "momoplan/baijimu-cli-rs")
+                    | select(.latestVersion.manifest.appId == $app_id)
                     | select(.latestVersion.revision == ("v" + .latestVersion.version))
                     | select(all(.latestVersion.manifest.artifacts[];
                         .source | startswith("https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/")))
