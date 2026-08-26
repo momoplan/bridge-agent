@@ -1172,8 +1172,45 @@ jobs:
             $config.platform.workspace_id = 999999
             $config.relay.url = "ws://127.0.0.1:9/ws/agent"
             $config.relay.token = "windows-upgrade-smoke-token"
+            $legacyConnectorId = "com.example.legacy-upgrade"
+            $registeredAppId = "registered-upgrade-app"
+            $config.local_apps = @(
+              [ordered]@{
+                connectorId = $legacyConnectorId
+                name = "Legacy upgrade fixture"
+                version = "1.0.0"
+                description = "Verifies offline app ID migration during MSI upgrade"
+                enabled = $false
+                methods = @()
+                events = @(
+                  [ordered]@{
+                    name = "upgrade.test"
+                    description = "Upgrade migration fixture"
+                    enabled = $true
+                    payload_schema = [ordered]@{ type = "object" }
+                  }
+                )
+              }
+            )
             $config | ConvertTo-Json -Depth 100 |
               Set-Content -LiteralPath $configPath -Encoding utf8
+
+            $legacyInstallDir = Join-Path (Split-Path -Parent $configPath) "connectors\$legacyConnectorId"
+            $legacyDataDir = Join-Path (Split-Path -Parent $configPath) "connector-data\$legacyConnectorId"
+            New-Item -ItemType Directory -Path $legacyInstallDir, $legacyDataDir -Force | Out-Null
+            [ordered]@{
+              manifest = [ordered]@{
+                schemaVersion = "2.0"
+                id = $legacyConnectorId
+                version = "1.0.0"
+              }
+              marketAppId = $registeredAppId
+            } | ConvertTo-Json -Depth 20 |
+              Set-Content -LiteralPath (Join-Path $legacyInstallDir "install.json") -Encoding utf8
+            Set-Content `
+              -LiteralPath (Join-Path $legacyDataDir "session.json") `
+              -Value "preserved-upgrade-session" `
+              -Encoding utf8
 
             Start-Service -Name "BridgeAgent" -ErrorAction Stop
 
@@ -1293,6 +1330,26 @@ jobs:
             }
             if ($desktopListener.OwningProcess -ne $desktopProcess.Id) {
               throw "Port 18081 is not owned by the desktop process"
+            }
+
+            $migratedConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            if (@($migratedConfig.local_apps).Count -ne 0) {
+              throw "Legacy connectorId configuration remained after direct MSI upgrade"
+            }
+            $migrationRoot = Join-Path `
+              (Split-Path -Parent $configPath) `
+              "migration-backups\unified-app-id\1.0.0"
+            if (-not (Test-Path -LiteralPath (Join-Path $migrationRoot "agent-config.json"))) {
+              throw "Legacy configuration backup was not created during direct MSI upgrade"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $migrationRoot "connectors\$legacyConnectorId\install.json"))) {
+              throw "Legacy connector package was not archived during direct MSI upgrade"
+            }
+            $migratedSession = Join-Path `
+              (Split-Path -Parent $configPath) `
+              "app-data\$registeredAppId\session.json"
+            if (-not (Test-Path -LiteralPath $migratedSession)) {
+              throw "Legacy connector data was not moved to the registered app ID"
             }
 
             $desktopCount = @(Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue).Count

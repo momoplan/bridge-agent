@@ -25,6 +25,8 @@ struct Args {
     config: Option<PathBuf>,
     #[arg(long)]
     leave_host_running: bool,
+    #[arg(long, conflicts_with = "leave_host_running")]
+    host_already_stopped: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +142,7 @@ fn main() -> Result<()> {
         &config_dir,
         &config_path,
         args.leave_host_running,
+        args.host_already_stopped,
         &managed_apps,
     )
 }
@@ -154,6 +157,7 @@ fn migrate(
     config_dir: &Path,
     config_path: &Path,
     leave_host_running: bool,
+    host_already_stopped: bool,
     managed_apps: &Path,
 ) -> Result<()> {
     fs::create_dir_all(config_dir)
@@ -190,24 +194,34 @@ fn migrate(
         .iter()
         .any(|entry| entry.phase == MigrationPhase::Prepared);
     if needs_stop || (!ledger.legacy_apps_stopped && !ledger.entries.is_empty()) {
-        let discovery =
-            read_json::<LocalControlDiscovery>(&config_dir.join("local-app-control.json"))?;
-        if discovery.schema_version != 1 {
-            bail!(
-                "unsupported local control schema {}",
-                discovery.schema_version
-            );
-        }
-        for index in 0..ledger.entries.len() {
-            if ledger.entries[index].phase != MigrationPhase::Prepared {
-                continue;
+        if host_already_stopped {
+            verify_legacy_host_and_apps_stopped(config_dir, &ledger)?;
+            for entry in &mut ledger.entries {
+                if entry.phase == MigrationPhase::Prepared {
+                    entry.phase = MigrationPhase::AppsStopped;
+                }
             }
-            stop_legacy_app(&discovery, &ledger.entries[index].legacy_identity)?;
-            ledger.entries[index].phase = MigrationPhase::AppsStopped;
             write_json_atomically(&ledger_path, &ledger)?;
-        }
-        if !leave_host_running {
-            stop_legacy_bridge(&discovery)?;
+        } else {
+            let discovery =
+                read_json::<LocalControlDiscovery>(&config_dir.join("local-app-control.json"))?;
+            if discovery.schema_version != 1 {
+                bail!(
+                    "unsupported local control schema {}",
+                    discovery.schema_version
+                );
+            }
+            for index in 0..ledger.entries.len() {
+                if ledger.entries[index].phase != MigrationPhase::Prepared {
+                    continue;
+                }
+                stop_legacy_app(&discovery, &ledger.entries[index].legacy_identity)?;
+                ledger.entries[index].phase = MigrationPhase::AppsStopped;
+                write_json_atomically(&ledger_path, &ledger)?;
+            }
+            if !leave_host_running {
+                stop_legacy_bridge(&discovery)?;
+            }
         }
         ledger.legacy_apps_stopped = true;
         write_json_atomically(&ledger_path, &ledger)?;
@@ -256,6 +270,55 @@ fn migrate(
     FileExt::unlock(&lock)?;
     fs::remove_file(&lock_path)
         .with_context(|| format!("failed to remove migration lock {}", lock_path.display()))?;
+    Ok(())
+}
+
+fn verify_legacy_host_and_apps_stopped(config_dir: &Path, ledger: &MigrationLedger) -> Result<()> {
+    let mut system = System::new_all();
+    system.refresh_all();
+    let discovery_path = config_dir.join("local-app-control.json");
+    if discovery_path.is_file() {
+        let discovery = read_json::<LocalControlDiscovery>(&discovery_path)?;
+        if discovery.schema_version != 1 {
+            bail!(
+                "unsupported local control schema {}",
+                discovery.schema_version
+            );
+        }
+        if system.process(Pid::from_u32(discovery.pid)).is_some() {
+            bail!(
+                "legacy Bridge Agent process {} is still running; close it before offline migration",
+                discovery.pid
+            );
+        }
+    }
+
+    for entry in &ledger.entries {
+        if entry.phase != MigrationPhase::Prepared {
+            continue;
+        }
+        let package_path = config_dir.join("connectors").join(&entry.legacy_identity);
+        for (pid, process) in system.processes() {
+            let uses_package = process
+                .exe()
+                .is_some_and(|path| path.starts_with(&package_path))
+                || process
+                    .cwd()
+                    .is_some_and(|path| path.starts_with(&package_path))
+                || process
+                    .cmd()
+                    .iter()
+                    .any(|argument| Path::new(argument).starts_with(&package_path));
+            if uses_package {
+                bail!(
+                    "legacy application {} still has process {} using {}; close it before offline migration",
+                    entry.legacy_identity,
+                    pid,
+                    package_path.display()
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -665,12 +728,77 @@ mod tests {
             dir.path(),
             &config_path,
             false,
+            false,
             &dir.path().join("managed-apps"),
         )
         .unwrap();
 
         assert!(!dir.path().join(LEDGER_FILE).exists());
         assert!(!dir.path().join(LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn offline_migration_repairs_legacy_config_after_installer_upgrade() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("agent-config.json");
+        write_legacy_config(&config_path, &["com.example.legacy"]);
+        write_install_record(dir.path(), "com.example.legacy", Some("registered-app-01"));
+        let legacy_data = dir.path().join("connector-data").join("com.example.legacy");
+        fs::create_dir_all(&legacy_data).unwrap();
+        fs::write(legacy_data.join("session.json"), b"signed-in-state").unwrap();
+
+        migrate(
+            dir.path(),
+            &config_path,
+            false,
+            true,
+            &dir.path().join("managed-apps"),
+        )
+        .unwrap();
+
+        let migrated: Value = read_json(&config_path).unwrap();
+        assert_eq!(migrated["local_apps"], json!([]));
+        assert!(!dir.path().join("connectors/com.example.legacy").exists());
+        assert!(dir
+            .path()
+            .join(
+                "migration-backups/unified-app-id/1.0.0/connectors/com.example.legacy/install.json"
+            )
+            .is_file());
+        assert_eq!(
+            fs::read(dir.path().join("app-data/registered-app-01/session.json")).unwrap(),
+            b"signed-in-state"
+        );
+    }
+
+    #[test]
+    fn offline_migration_refuses_to_mutate_while_the_legacy_host_is_running() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("local-app-control.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "pid": std::process::id(),
+                "baseUrl": "http://127.0.0.1:1",
+                "token": "test-token",
+                "startedAtEpochMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ledger = MigrationLedger {
+            artifact_version: ARTIFACT_VERSION.to_string(),
+            legacy_apps_stopped: false,
+            entries: vec![MigrationEntry {
+                legacy_identity: "com.example.legacy".to_string(),
+                app_id: "registered-app-01".to_string(),
+                version: "1.0.0".to_string(),
+                phase: MigrationPhase::Prepared,
+            }],
+        };
+
+        let error = verify_legacy_host_and_apps_stopped(dir.path(), &ledger).unwrap_err();
+        assert!(error.to_string().contains("is still running"));
     }
 
     #[test]
