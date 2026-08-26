@@ -28,6 +28,10 @@ import { clientInfo, clientWarn } from "./client-logger";
 import { DeviceAuthorizationGate } from "./components/DeviceAuthorizationGate";
 import { DesktopSidebar, type DesktopPage } from "./components/DesktopShell";
 import {
+  ConfigLoadFailurePanel,
+  RecoveryUpdateCard
+} from "./components/RecoveryUpdateCard";
+import {
   deriveDeviceAuthorizationState,
   deviceAuthorizationLocksCapabilities
 } from "./device-authorization-state";
@@ -6953,11 +6957,34 @@ function App() {
   const degradedStartupComponents =
     startupHealth?.components.filter((component) => component.status === "degraded") ?? [];
 
+  function renderRecoveryUpdateCard() {
+    return (
+      <RecoveryUpdateCard
+        checkState={appUpdateCheckState}
+        checkError={appUpdateError}
+        currentVersion={appVersion?.currentVersion ?? appUpdate?.currentVersion ?? null}
+        targetVersion={appUpdate?.latestVersion ?? appUpdate?.minimumSupportedVersion ?? null}
+        updateAvailable={appUpdate?.updateAvailable === true}
+        autoDownloadAvailable={appUpdate?.autoDownloadAvailable === true}
+        releaseUrl={appUpdate?.releaseUrl ?? null}
+        updateBusy={updateBusy}
+        updateBusyLabel={formatAppUpdateProgressButton(appUpdateProgress)}
+        progress={renderAppUpdateProgress()}
+        onInstall={() => void installAppUpdate()}
+        onOpenRelease={() => {
+          if (appUpdate) {
+            void openAppUpdateReleasePage(appUpdate);
+          }
+        }}
+        onCheck={() => void checkAppUpdate(true)}
+      />
+    );
+  }
+
   function renderStartupRecoveryPanel() {
     if (!startupHealth?.safeMode) {
       return null;
     }
-    const targetVersion = appUpdate?.latestVersion ?? null;
     return (
       <section className="startup-recovery-panel" aria-labelledby="startup-recovery-title">
         <div className="startup-recovery-heading">
@@ -6993,39 +7020,7 @@ function App() {
           ))}
         </div>
 
-        <div className="startup-update-card">
-          <div>
-            <strong>客户端更新</strong>
-            <p>
-              {appUpdateCheckState === "checking"
-                ? "正在检查更新…"
-                : appUpdateError
-                  ? `检查失败：${appUpdateError}`
-                  : appUpdate?.updateAvailable
-                    ? `发现 ${targetVersion ?? "新版本"}，可在安全模式直接安装。`
-                    : `当前版本 ${appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-"}。`}
-            </p>
-          </div>
-          <div className="startup-update-actions">
-            {(appUpdate?.updateAvailable && appUpdate.autoDownloadAvailable) || appUpdateError ? (
-              <button className="primary" onClick={() => void installAppUpdate()} disabled={updateBusy}>
-                {updateBusy ? formatAppUpdateProgressButton(appUpdateProgress) : "通过官方更新器检查并安装"}
-              </button>
-            ) : appUpdate?.updateAvailable && appUpdate.releaseUrl ? (
-              <button className="primary" onClick={() => void openAppUpdateReleasePage(appUpdate)}>
-                打开下载页
-              </button>
-            ) : null}
-            <button
-              className="secondary"
-              onClick={() => void checkAppUpdate(true)}
-              disabled={updateBusy || appUpdateCheckState === "checking"}
-            >
-              {appUpdateCheckState === "checking" ? "检查中" : "重新检查"}
-            </button>
-          </div>
-          {renderAppUpdateProgress()}
-        </div>
+        {renderRecoveryUpdateCard()}
 
         <div className="startup-recovery-actions">
           <button
@@ -7058,27 +7053,21 @@ function App() {
     }
     return (
       <main className="app-shell app-loading">
-        <section className="loading-panel">
-          <p className="eyebrow">百积木</p>
-          <h1>正在加载</h1>
-          <p>读取配置和运行状态。</p>
-          {error ? (
-            <>
-              <div className="alert error">{error}</div>
-              <div className="loading-actions">
-                <button className="primary" onClick={() => void recoverInvalidConfig()} disabled={busy}>
-                  {busy ? "恢复中" : "恢复默认配置"}
-                </button>
-                <button className="secondary" onClick={() => void refreshAll()} disabled={busy}>
-                  重试加载
-                </button>
-              </div>
-              <p className="loading-hint">
-                恢复时会先把当前配置文件重命名保留，再生成新的默认配置。
-              </p>
-            </>
-          ) : null}
-        </section>
+        {error ? (
+          <ConfigLoadFailurePanel
+            error={error}
+            recoveryUpdateCard={renderRecoveryUpdateCard()}
+            recoveryBusy={busy}
+            onRetry={() => void refreshAll()}
+            onRecoverDefaults={() => void recoverInvalidConfig()}
+          />
+        ) : (
+          <section className="loading-panel">
+            <p className="eyebrow">百积木</p>
+            <h1>正在加载</h1>
+            <p>读取配置和运行状态。</p>
+          </section>
+        )}
       </main>
     );
   }
