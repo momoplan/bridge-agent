@@ -20,7 +20,7 @@ pub(crate) use application::install_tasks::{
     LocalAppInstallTask, LocalAppInstallTaskManager, LocalAppInstallTaskOperation,
     LocalAppInstallTaskPhase,
 };
-pub(crate) use application::lifecycle::ConnectorLifecycleManager;
+pub(crate) use application::lifecycle::{ConnectorLifecycleManager, ConnectorLifecycleOperation};
 pub(crate) use domain::{
     ConnectorHealthState, ConnectorLifecycleSnapshot, ConnectorLifecycleState,
     ConnectorManagementNotReady, ConnectorOperationKind,
