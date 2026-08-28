@@ -136,9 +136,9 @@ Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端�
 迁移到 `~/.agents/skill-backups/`，避免重复发现。
 
 Agent 在新任务中遇到百积木、Bundle、模块、运行时、平台应用、Connector 或 Partner
-API 需求时，会先通过本机 `baijimu capabilities --offline --json` 取得版本固定的官方
-文档入口，再查询 `https://docs.baijimu.com/`；不需要用户手工提供百积木规范。CLI
-升级、回滚或客户端重启都会修复缺失或被修改的托管 Skill。
+API 需求时，会先运行 `baijimu --help`，再针对当前目标逐级运行
+`baijimu <command> --help`，并按需查询 `https://docs.baijimu.com/`；不再下载或注入完整
+命令树。CLI 升级、回滚或客户端重启都会修复缺失或被修改的托管 Skill。
 
 稳定命令在 macOS/Linux 安装到 `~/.local/bin/baijimu`，在 Windows 安装到
 `%LOCALAPPDATA%\Baijimu\bin\baijimu.exe`。Windows 客户端会把该目录幂等置于当前用户

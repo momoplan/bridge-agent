@@ -309,4 +309,12 @@ mod tests {
     fn rejects_invalid_skill_frontmatter() {
         assert!(validate_skill(b"not a skill").is_err());
     }
+
+    #[test]
+    fn bundled_skill_uses_progressive_cli_help() {
+        let contents = std::str::from_utf8(BUNDLED_SKILL).unwrap();
+        assert!(!contents.contains("baijimu capabilities"));
+        assert!(contents.contains("baijimu --help"));
+        assert!(contents.contains("<command> --help"));
+    }
 }
