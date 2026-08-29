@@ -76,6 +76,88 @@ fn startup_update_gate_allows_optional_updates_without_breaking_offline_startup(
     );
 }
 
+#[tokio::test]
+async fn startup_update_check_retries_temporary_failures_and_recovers() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_check = Arc::clone(&attempts);
+    let status = run_update_check_with_retry(
+        move || {
+            let attempt = attempts_for_check.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt < 3 {
+                    Err(UpdateCheckFailure::temporarily_unavailable(format!(
+                        "temporary failure {attempt}"
+                    )))
+                } else {
+                    Ok(app_update_status(false))
+                }
+            }
+        },
+        Duration::from_secs(1),
+        &[Duration::ZERO, Duration::ZERO],
+        None,
+    )
+    .await
+    .expect("third update check should recover");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert!(!status.force_update_required);
+}
+
+#[tokio::test]
+async fn startup_update_check_does_not_retry_configuration_failures() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_check = Arc::clone(&attempts);
+    let failure = run_update_check_with_retry(
+        move || {
+            attempts_for_check.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(UpdateCheckFailure::configuration(
+                    "missing packaged update endpoint",
+                ))
+            }
+        },
+        Duration::from_secs(1),
+        &[Duration::ZERO, Duration::ZERO],
+        None,
+    )
+    .await
+    .expect_err("configuration failure should be terminal");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(failure.kind, UpdateCheckFailureKind::Configuration);
+}
+
+#[test]
+fn updater_health_distinguishes_temporary_unavailability_and_recovers() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("agent-config.json");
+    let health = StartupHealthManager::new(
+        &config_path,
+        StartupDiagnostics::for_config_path(&config_path),
+    );
+    let failure = UpdateCheckFailure::temporarily_unavailable("proxy route is not ready");
+
+    apply_updater_failure_health(&health, &failure, true);
+    let unavailable = health
+        .snapshot()
+        .components
+        .into_iter()
+        .find(|component| component.id == "updater")
+        .unwrap();
+    assert_eq!(unavailable.status, "unavailable");
+    assert!(unavailable.detail.unwrap().contains("后台自动重试"));
+
+    apply_updater_health_status(&health, &app_update_status(false));
+    let recovered = health
+        .snapshot()
+        .components
+        .into_iter()
+        .find(|component| component.id == "updater")
+        .unwrap();
+    assert_eq!(recovered.status, "ready");
+}
+
 #[test]
 fn updater_asset_selection_requires_a_signature() {
     if matches!(std::env::consts::OS, "windows" | "linux") && std::env::consts::ARCH != "x86_64" {

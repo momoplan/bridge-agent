@@ -29,6 +29,18 @@ pub(super) const LOCAL_APP_HOST_CAPABILITIES: &[&str] = &[
     HOST_CAPABILITY_CONNECTOR_PRESENTATION_ICON_V1,
 ];
 pub(super) const STARTUP_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(12);
+pub(super) const STARTUP_UPDATE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+pub(super) const STARTUP_UPDATE_RETRY_DELAYS: &[Duration] = &[
+    Duration::from_millis(250),
+    Duration::from_millis(750),
+    Duration::from_secs(2),
+];
+pub(super) const STARTUP_UPDATE_RECOVERY_DELAYS: &[Duration] = &[
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+];
 pub(super) const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 pub(super) const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";
