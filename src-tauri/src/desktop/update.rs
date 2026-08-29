@@ -30,6 +30,54 @@ pub(super) enum StartupUpdateDecision {
     RequireUpdate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpdateCheckFailureKind {
+    TemporarilyUnavailable,
+    Configuration,
+    InvalidResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UpdateCheckFailure {
+    pub(super) kind: UpdateCheckFailureKind,
+    pub(super) detail: String,
+}
+
+impl UpdateCheckFailure {
+    pub(super) fn temporarily_unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateCheckFailureKind::TemporarilyUnavailable,
+            detail: detail.into(),
+        }
+    }
+
+    pub(super) fn configuration(detail: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateCheckFailureKind::Configuration,
+            detail: detail.into(),
+        }
+    }
+
+    pub(super) fn invalid_response(detail: impl Into<String>) -> Self {
+        Self {
+            kind: UpdateCheckFailureKind::InvalidResponse,
+            detail: detail.into(),
+        }
+    }
+
+    pub(super) fn retryable(&self) -> bool {
+        self.kind == UpdateCheckFailureKind::TemporarilyUnavailable
+    }
+
+    pub(super) fn health_status(&self) -> &'static str {
+        if self.retryable() {
+            "unavailable"
+        } else {
+            "degraded"
+        }
+    }
+}
+
 pub(super) fn startup_update_decision(status: &AppUpdateStatus) -> StartupUpdateDecision {
     if status.force_update_required {
         StartupUpdateDecision::RequireUpdate
@@ -159,12 +207,11 @@ pub(super) fn open_app_uninstaller() -> Result<(), String> {
     Err("当前平台请使用系统的软件包管理方式卸载百积木".to_string())
 }
 
-#[tauri::command]
-pub(super) async fn check_app_update() -> Result<AppUpdateStatus, String> {
+pub(super) async fn resolve_app_update_status() -> Result<AppUpdateStatus, UpdateCheckFailure> {
     let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|err| format!("当前版本号无效: {err}"))?;
+        .map_err(|err| UpdateCheckFailure::configuration(format!("当前版本号无效: {err}")))?;
     let release = fetch_latest_release().await?;
-    let latest_version = release_version(&release)?;
+    let latest_version = release_version(&release).map_err(UpdateCheckFailure::invalid_response)?;
     let preferred_asset = select_tauri_updater_asset(&release);
     let release_url = release_page_url(&release);
     let release_name = release.release_name.clone();
@@ -191,6 +238,88 @@ pub(super) async fn check_app_update() -> Result<AppUpdateStatus, String> {
         auto_download_available,
         asset_name,
     })
+}
+
+pub(super) fn updater_ready_detail(status: &AppUpdateStatus) -> Option<String> {
+    if status.update_available {
+        status
+            .latest_version
+            .as_deref()
+            .map(|version| format!("发现可选更新 {version}，启动后可随时安装"))
+    } else {
+        None
+    }
+}
+
+pub(super) fn updater_required_detail(status: &AppUpdateStatus) -> String {
+    let target = status
+        .latest_version
+        .as_deref()
+        .or(status.minimum_supported_version.as_deref())
+        .unwrap_or("最新版本");
+    format!(
+        "当前版本 {} 已停止支持，必须先升级到 {target}",
+        status.current_version
+    )
+}
+
+pub(super) fn apply_updater_health_status(
+    startup_health: &StartupHealthManager,
+    status: &AppUpdateStatus,
+) {
+    match startup_update_decision(status) {
+        StartupUpdateDecision::RequireUpdate => startup_health.set_component(
+            "updater",
+            "官方更新器",
+            "degraded",
+            Some(updater_required_detail(status)),
+        ),
+        StartupUpdateDecision::Continue => startup_health.set_component(
+            "updater",
+            "官方更新器",
+            "ready",
+            updater_ready_detail(status),
+        ),
+    }
+}
+
+pub(super) fn apply_updater_failure_health(
+    startup_health: &StartupHealthManager,
+    failure: &UpdateCheckFailure,
+    automatic_retry_pending: bool,
+) {
+    let detail = if failure.retryable() {
+        let next_step = if automatic_retry_pending {
+            "客户端已按离线模式启动，并将在后台自动重试"
+        } else {
+            "客户端可继续离线运行，请稍后重新检查"
+        };
+        format!("更新服务暂时不可用，{next_step}: {}", failure.detail)
+    } else {
+        failure.detail.clone()
+    };
+    startup_health.set_component(
+        "updater",
+        "官方更新器",
+        failure.health_status(),
+        Some(detail),
+    );
+}
+
+#[tauri::command]
+pub(super) async fn check_app_update(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<AppUpdateStatus, String> {
+    match resolve_app_update_status().await {
+        Ok(status) => {
+            apply_updater_health_status(&state.startup_health, &status);
+            Ok(status)
+        }
+        Err(failure) => {
+            apply_updater_failure_health(&state.startup_health, &failure, false);
+            Err(failure.detail)
+        }
+    }
 }
 
 #[tauri::command]
@@ -482,13 +611,18 @@ pub(super) fn release_force_update_required(
         .unwrap_or(false)
 }
 
-pub(super) async fn fetch_latest_release() -> Result<UpdateReleaseResponse, String> {
-    let update_api_url = configured_update_api_url()?;
+pub(super) async fn fetch_latest_release() -> Result<UpdateReleaseResponse, UpdateCheckFailure> {
+    let update_api_url = configured_update_api_url().map_err(UpdateCheckFailure::configuration)?;
     let client = Client::builder()
         .connect_timeout(UPDATE_CONNECT_TIMEOUT)
         .timeout(STARTUP_UPDATE_CHECK_TIMEOUT)
         .build()
-        .map_err(|err| format!("初始化更新检查客户端失败: {err}"))?;
+        .map_err(|err| {
+            UpdateCheckFailure::configuration(format!(
+                "初始化更新检查客户端失败: {}",
+                format_error_chain(&err)
+            ))
+        })?;
     let response = client
         .get(update_api_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
@@ -500,18 +634,48 @@ pub(super) async fn fetch_latest_release() -> Result<UpdateReleaseResponse, Stri
         ])
         .send()
         .await
-        .map_err(|err| format!("检查更新失败: {err}"))?;
+        .map_err(|err| {
+            let detail = format!("检查更新失败: {}", format_error_chain(&err));
+            if err.is_builder() {
+                UpdateCheckFailure::configuration(detail)
+            } else {
+                UpdateCheckFailure::temporarily_unavailable(detail)
+            }
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let payload = response.text().await.unwrap_or_default();
-        return Err(format!("检查更新失败 ({status}): {payload}"));
+        let detail = format!("检查更新失败 ({status}): {payload}");
+        return if status.is_server_error()
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            Err(UpdateCheckFailure::temporarily_unavailable(detail))
+        } else {
+            Err(UpdateCheckFailure::invalid_response(detail))
+        };
     }
 
-    response
-        .json()
-        .await
-        .map_err(|err| format!("解析最新版本信息失败: {err}"))
+    response.json().await.map_err(|err| {
+        UpdateCheckFailure::invalid_response(format!(
+            "解析最新版本信息失败: {}",
+            format_error_chain(&err)
+        ))
+    })
+}
+
+fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if messages.last() != Some(&message) {
+            messages.push(message);
+        }
+        source = cause.source();
+    }
+    messages.join("；原因: ")
 }
 
 pub(super) fn current_update_target() -> String {

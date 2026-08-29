@@ -347,6 +347,110 @@ pub(super) fn mark_business_startup_skipped(startup_health: &StartupHealthManage
     }
 }
 
+pub(super) async fn run_update_check_with_retry<F, Fut>(
+    mut check: F,
+    attempt_timeout: Duration,
+    retry_delays: &[Duration],
+    diagnostics: Option<&StartupDiagnostics>,
+) -> Result<AppUpdateStatus, UpdateCheckFailure>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<AppUpdateStatus, UpdateCheckFailure>>,
+{
+    let total_attempts = retry_delays.len() + 1;
+    for attempt_index in 0..total_attempts {
+        let attempt = attempt_index + 1;
+        let failure = match timeout(attempt_timeout, check()).await {
+            Ok(Ok(status)) => return Ok(status),
+            Ok(Err(failure)) => failure,
+            Err(_) => UpdateCheckFailure::temporarily_unavailable(format!(
+                "第 {attempt} 次更新检查在 {} 秒后超时",
+                attempt_timeout.as_secs()
+            )),
+        };
+        let Some(delay) = retry_delays.get(attempt_index) else {
+            return Err(failure);
+        };
+        if !failure.retryable() {
+            return Err(failure);
+        }
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.warn(format!(
+                "startup update check attempt {attempt}/{total_attempts} failed; retrying in {}ms: {}",
+                delay.as_millis(),
+                failure.detail
+            ));
+        }
+        tokio::time::sleep(*delay).await;
+    }
+    unreachable!("update retry loop always returns on its final attempt")
+}
+
+fn start_update_service_recovery(
+    app: tauri::AppHandle,
+    startup_health: StartupHealthManager,
+    diagnostics: StartupDiagnostics,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_failure = None;
+        for (attempt_index, delay) in STARTUP_UPDATE_RECOVERY_DELAYS.iter().enumerate() {
+            tokio::time::sleep(*delay).await;
+            diagnostics.info(format!(
+                "background update service recovery attempt {}/{} started",
+                attempt_index + 1,
+                STARTUP_UPDATE_RECOVERY_DELAYS.len()
+            ));
+            let result = timeout(STARTUP_UPDATE_ATTEMPT_TIMEOUT, resolve_app_update_status()).await;
+            match result {
+                Ok(Ok(status)) => {
+                    diagnostics.info("background update service recovery completed");
+                    apply_updater_health_status(&startup_health, &status);
+                    if startup_update_decision(&status) == StartupUpdateDecision::RequireUpdate {
+                        diagnostics.warn(
+                            "required update discovered after offline-capable startup; showing the main window",
+                        );
+                        show_main_window(
+                            &app,
+                            Some(&diagnostics),
+                            MainWindowOpenReason::RequiredUpdate,
+                        );
+                    }
+                    return;
+                }
+                Ok(Err(failure)) => {
+                    diagnostics.warn(format!(
+                        "background update service recovery attempt {} failed: {}",
+                        attempt_index + 1,
+                        failure.detail
+                    ));
+                    if !failure.retryable() {
+                        apply_updater_failure_health(&startup_health, &failure, false);
+                        return;
+                    }
+                    last_failure = Some(failure);
+                }
+                Err(_) => {
+                    let failure = UpdateCheckFailure::temporarily_unavailable(format!(
+                        "后台更新检查在 {} 秒后超时",
+                        STARTUP_UPDATE_ATTEMPT_TIMEOUT.as_secs()
+                    ));
+                    diagnostics.warn(format!(
+                        "background update service recovery attempt {} timed out",
+                        attempt_index + 1
+                    ));
+                    last_failure = Some(failure);
+                }
+            }
+        }
+        if let Some(failure) = last_failure {
+            diagnostics.warn(
+                "background update service recovery exhausted; keeping offline-capable status",
+            );
+            apply_updater_failure_health(&startup_health, &failure, false);
+        }
+    });
+}
+
 pub(super) fn start_desktop_business_after_update_gate(startup: DesktopBusinessStartup) {
     tauri::async_runtime::spawn(run_desktop_business_after_update_gate(startup));
 }
@@ -364,19 +468,20 @@ async fn startup_update_gate_allows_business(
         Some("正在启动任何配置或业务组件之前检查官方更新".to_string()),
     );
     diagnostics.info("startup update gate check started before configuration migration");
-    let update_status = timeout(STARTUP_UPDATE_CHECK_TIMEOUT, check_app_update()).await;
+    let update_status = timeout(
+        STARTUP_UPDATE_CHECK_TIMEOUT,
+        run_update_check_with_retry(
+            resolve_app_update_status,
+            STARTUP_UPDATE_ATTEMPT_TIMEOUT,
+            STARTUP_UPDATE_RETRY_DELAYS,
+            Some(diagnostics),
+        ),
+    )
+    .await;
     match update_status {
         Ok(Ok(status)) => match startup_update_decision(&status) {
             StartupUpdateDecision::RequireUpdate => {
-                let target = status
-                    .latest_version
-                    .as_deref()
-                    .or(status.minimum_supported_version.as_deref())
-                    .unwrap_or("最新版本");
-                let detail = format!(
-                    "当前版本 {} 已停止支持，必须先升级到 {target}",
-                    status.current_version
-                );
+                let detail = updater_required_detail(&status);
                 diagnostics.warn(format!(
                     "startup update gate blocked configuration and business startup: {detail}"
                 ));
@@ -400,38 +505,33 @@ async fn startup_update_gate_allows_business(
                 return false;
             }
             StartupUpdateDecision::Continue => {
-                let detail = if status.update_available {
-                    status
-                        .latest_version
-                        .as_deref()
-                        .map(|version| format!("发现可选更新 {version}，启动后可随时安装"))
-                } else {
-                    None
-                };
                 diagnostics.info("startup update gate completed; configuration startup allowed");
-                startup_health.set_component("updater", "官方更新器", "ready", detail);
+                apply_updater_health_status(startup_health, &status);
             }
         },
-        Ok(Err(err)) => {
+        Ok(Err(failure)) => {
             diagnostics.warn(format!(
-                "startup update gate check failed; continuing in offline-capable mode: {err}"
+                "startup update gate check failed; continuing in offline-capable mode: {}",
+                failure.detail
             ));
-            startup_health.set_component(
-                "updater",
-                "官方更新器",
-                "degraded",
-                Some(format!("更新检查失败，已按离线模式继续启动: {err}")),
-            );
+            apply_updater_failure_health(startup_health, &failure, failure.retryable());
+            if failure.retryable() {
+                start_update_service_recovery(
+                    app.clone(),
+                    startup_health.clone(),
+                    diagnostics.clone(),
+                );
+            }
         }
         Err(_) => {
             diagnostics
                 .warn("startup update gate check timed out; continuing in offline-capable mode");
-            startup_health.set_component(
-                "updater",
-                "官方更新器",
-                "degraded",
-                Some("更新检查超时，已按离线模式继续启动".to_string()),
-            );
+            let failure = UpdateCheckFailure::temporarily_unavailable(format!(
+                "启动更新检查在 {} 秒后超时",
+                STARTUP_UPDATE_CHECK_TIMEOUT.as_secs()
+            ));
+            apply_updater_failure_health(startup_health, &failure, true);
+            start_update_service_recovery(app.clone(), startup_health.clone(), diagnostics.clone());
         }
     }
 

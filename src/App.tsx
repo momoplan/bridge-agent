@@ -387,7 +387,7 @@ interface AppUpdateProgress {
 interface StartupComponentHealth {
   id: string;
   label: string;
-  status: "starting" | "ready" | "degraded" | "skipped" | string;
+  status: "starting" | "ready" | "unavailable" | "degraded" | "skipped" | string;
   detail: string | null;
 }
 
@@ -8367,6 +8367,7 @@ function formatStartupComponentStatus(status: string): string {
   const labels: Record<string, string> = {
     starting: "启动中",
     ready: "正常",
+    unavailable: "暂不可用",
     degraded: "异常",
     skipped: "已跳过"
   };
