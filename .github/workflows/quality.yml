@@ -14,10 +14,17 @@ jobs:
   rust-architecture:
     name: Rust architecture and quality
     runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Configure authenticated CModel dependency access
+        shell: bash
+        run: .github/scripts/configure-gitee-cargo.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

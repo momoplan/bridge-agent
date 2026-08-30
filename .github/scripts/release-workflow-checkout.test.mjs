@@ -6,6 +6,7 @@ const workflow = readFileSync(
   ".github/workflows/release-bridge-agent.yml",
   "utf8",
 );
+const qualityWorkflow = readFileSync(".github/workflows/quality.yml", "utf8");
 const windowsTauriConfig = JSON.parse(
   readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
 );
@@ -156,6 +157,9 @@ describe("release workflow repository script availability", () => {
       expect(body).toContain("secrets.GITEE_ACCESS_TOKEN");
       expect(body).toContain("configure-gitee-cargo.sh");
     }
+    expect(qualityWorkflow).toContain("CARGO_NET_GIT_FETCH_WITH_CLI");
+    expect(qualityWorkflow).toContain("secrets.GITEE_ACCESS_TOKEN");
+    expect(qualityWorkflow).toContain("configure-gitee-cargo.sh");
     expect(giteeCargoConfigurator).toContain(
       'password=$GITEE_ACCESS_TOKEN',
     );
