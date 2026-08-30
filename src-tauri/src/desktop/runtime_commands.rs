@@ -405,8 +405,10 @@ pub(super) fn describe_upstream_http_failure(
 ) -> String {
     let trimmed = body.trim();
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(message) = value.get("value").and_then(Value::as_str) {
-            return format!("HTTP {status}: {message}");
+        if let Some(description) =
+            bridge_agent::services::describe_cmodel_http_outcome(status, &value)
+        {
+            return description;
         }
         if let Some(message) = value.get("message").and_then(Value::as_str) {
             return format!("HTTP {status}: {message}");

@@ -1722,7 +1722,76 @@ fn normalize_connector_http_outcome(
         });
     }
 
-    None
+    if body.get("errorCode").is_none() && body.get("contractVersion").is_none() {
+        return None;
+    }
+    let response =
+        match serde_json::from_value::<baijimu_cmodel_core::CModelResponse<Value>>(body.clone()) {
+            Ok(response) => response,
+            Err(error) => {
+                return Some(ServiceOutcome {
+                    success: false,
+                    data: None,
+                    error: Some(InvokeError {
+                        code: "CMODEL_PROTOCOL_ERROR".to_string(),
+                        message: format!("local connector returned invalid CModel: {error}"),
+                    }),
+                });
+            }
+        };
+    let status = match reqwest::StatusCode::from_u16(status_code) {
+        Ok(status) => status,
+        Err(error) => {
+            return Some(ServiceOutcome {
+                success: false,
+                data: None,
+                error: Some(InvokeError {
+                    code: "CMODEL_PROTOCOL_ERROR".to_string(),
+                    message: format!("local connector returned invalid HTTP status: {error}"),
+                }),
+            });
+        }
+    };
+    if let Err(error) = baijimu_cmodel_http::validate_http_status(status, &response) {
+        return Some(ServiceOutcome {
+            success: false,
+            data: None,
+            error: Some(InvokeError {
+                code: "CMODEL_PROTOCOL_ERROR".to_string(),
+                message: format!("local connector violated HTTP/CModel outcome: {error}"),
+            }),
+        });
+    }
+    let success = response.is_success();
+    let error_code = response.error_code().to_string();
+    Some(ServiceOutcome {
+        success,
+        data: response.into_data(),
+        error: if success {
+            None
+        } else {
+            Some(InvokeError {
+                code: error_code,
+                message: "local connector returned a CModel failure".to_string(),
+            })
+        },
+    })
+}
+
+pub fn describe_cmodel_http_outcome(status: reqwest::StatusCode, body: &Value) -> Option<String> {
+    if body.get("errorCode").is_none() && body.get("contractVersion").is_none() {
+        return None;
+    }
+
+    Some(
+        match serde_json::from_value::<baijimu_cmodel_core::CModelResponse<Value>>(body.clone()) {
+            Ok(response) => match baijimu_cmodel_http::validate_http_status(status, &response) {
+                Ok(()) => format!("HTTP {status}: {}", response.error_code()),
+                Err(error) => format!("HTTP {status}: CModel 协议错误: {error}"),
+            },
+            Err(error) => format!("HTTP {status}: CModel 协议错误: {error}"),
+        },
+    )
 }
 
 fn passthrough_http_outcome(
