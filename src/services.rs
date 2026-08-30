@@ -1676,7 +1676,6 @@ impl HttpMethod {
         let outcome = normalize_cmodel_http_response(
             status,
             &bytes,
-            &body,
             &format!(
                 "local HTTP binding {}.{}",
                 self.service_name, self.method_name

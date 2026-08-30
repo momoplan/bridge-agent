@@ -13,7 +13,6 @@ pub(crate) struct CModelHttpOutcome {
 pub(crate) fn normalize_cmodel_http_response(
     status: StatusCode,
     bytes: &[u8],
-    body: &Value,
     operation: &str,
 ) -> CModelHttpOutcome {
     match decode_optional_data::<Value>(status, bytes, operation) {
@@ -30,7 +29,7 @@ pub(crate) fn normalize_cmodel_http_response(
                 data: None,
                 error: Some(InvokeError {
                     code: error_code.as_str().to_string(),
-                    message: cmodel_error_message(body),
+                    message: format!("local endpoint returned CModel failure {error_code}"),
                 }),
             }
         }
@@ -43,14 +42,6 @@ pub(crate) fn normalize_cmodel_http_response(
             }),
         },
     }
-}
-
-fn cmodel_error_message(body: &Value) -> String {
-    body.get("value")
-        .or_else(|| body.get("errorMessage"))
-        .and_then(Value::as_str)
-        .unwrap_or("local endpoint returned a CModel error")
-        .to_string()
 }
 
 #[cfg(test)]
@@ -68,7 +59,7 @@ mod tests {
         let bytes = serde_json::to_vec(&body).unwrap();
 
         let outcome =
-            normalize_cmodel_http_response(StatusCode::BAD_GATEWAY, &bytes, &body, "test binding");
+            normalize_cmodel_http_response(StatusCode::BAD_GATEWAY, &bytes, "test binding");
 
         assert!(!outcome.success);
         let error = outcome.error.unwrap();
@@ -81,17 +72,18 @@ mod tests {
         let body = json!({
             "contractVersion": "1.0.0",
             "errorCode": "RESOURCE_NOT_FOUND",
-            "value": "资源不存在",
             "data": null
         });
         let bytes = serde_json::to_vec(&body).unwrap();
 
-        let outcome =
-            normalize_cmodel_http_response(StatusCode::NOT_FOUND, &bytes, &body, "test binding");
+        let outcome = normalize_cmodel_http_response(StatusCode::NOT_FOUND, &bytes, "test binding");
 
         assert!(!outcome.success);
         let error = outcome.error.unwrap();
         assert_eq!(error.code, "RESOURCE_NOT_FOUND");
-        assert_eq!(error.message, "资源不存在");
+        assert_eq!(
+            error.message,
+            "local endpoint returned CModel failure RESOURCE_NOT_FOUND"
+        );
     }
 }
