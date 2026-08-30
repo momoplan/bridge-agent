@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.6.13"
+version = "0.6.14"
 edition = "2021"
 
 [build-dependencies]
@@ -10,6 +10,8 @@ toml = "0.8"
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
+baijimu-cmodel-core = { version = "=1.1.3", git = "https://gitee.com/zxflimit_admin/baijimu-contracts.git", rev = "b90f674b171543574aa01293583bac6567bae2f5" }
+baijimu-cmodel-http = { version = "=1.1.3", git = "https://gitee.com/zxflimit_admin/baijimu-contracts.git", rev = "b90f674b171543574aa01293583bac6567bae2f5" }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "5.0"
