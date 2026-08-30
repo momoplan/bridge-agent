@@ -165,6 +165,9 @@ jobs:
     name: Release quality gate
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout release source
@@ -173,6 +176,10 @@ jobs:
           # A repair release is dispatched from the fixed main commit while keeping
           # the existing immutable release tag only as the artifact version.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Configure authenticated CModel dependency access
+        shell: bash
+        run: .github/scripts/configure-gitee-cargo.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -203,12 +210,19 @@ jobs:
     name: Windows release quality gate
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: windows-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Configure authenticated CModel dependency access
+        shell: bash
+        run: .github/scripts/configure-gitee-cargo.sh
 
       - name: Test Microsoft Defender signature update retries
         shell: pwsh
@@ -281,6 +295,8 @@ jobs:
             tauri_args: --bundles appimage,deb
             rust_targets: ""
     env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       MACOSX_DEPLOYMENT_TARGET: "10.13"
 
@@ -290,6 +306,10 @@ jobs:
         with:
           # Repair releases build the dispatched main commit, not the old tag.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Configure authenticated CModel dependency access
+        shell: bash
+        run: .github/scripts/configure-gitee-cargo.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

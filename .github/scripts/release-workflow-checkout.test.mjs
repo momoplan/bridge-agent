@@ -6,6 +6,7 @@ const workflow = readFileSync(
   ".github/workflows/release-bridge-agent.yml",
   "utf8",
 );
+const qualityWorkflow = readFileSync(".github/workflows/quality.yml", "utf8");
 const windowsTauriConfig = JSON.parse(
   readFileSync("src-tauri/tauri.windows.conf.json", "utf8"),
 );
@@ -24,6 +25,10 @@ const windowsUninstallerPreparation = readFileSync(
 );
 const linuxDependencyInstaller = readFileSync(
   ".github/scripts/install-linux-release-dependencies.sh",
+  "utf8",
+);
+const giteeCargoConfigurator = readFileSync(
+  ".github/scripts/configure-gitee-cargo.sh",
   "utf8",
 );
 
@@ -140,6 +145,25 @@ describe("release workflow repository script availability", () => {
     expect(workflow).toContain("WiX linker diagnostic exit code");
     expect(workflow).toContain("required signed sidecar");
     expect(workflow).toContain("Installed executable has an invalid Authenticode signature");
+  });
+
+  test("all Rust build jobs authenticate immutable CModel dependencies without embedding tokens", () => {
+    const qualityBody = jobBody("quality-gate", "windows-quality-gate");
+    const windowsBody = jobBody("windows-quality-gate", "release");
+    const releaseBody = jobBody("release", "mirror-domestic-release");
+
+    for (const body of [qualityBody, windowsBody, releaseBody]) {
+      expect(body).toContain("CARGO_NET_GIT_FETCH_WITH_CLI");
+      expect(body).toContain("secrets.GITEE_ACCESS_TOKEN");
+      expect(body).toContain("configure-gitee-cargo.sh");
+    }
+    expect(qualityWorkflow).toContain("CARGO_NET_GIT_FETCH_WITH_CLI");
+    expect(qualityWorkflow).toContain("secrets.GITEE_ACCESS_TOKEN");
+    expect(qualityWorkflow).toContain("configure-gitee-cargo.sh");
+    expect(giteeCargoConfigurator).toContain(
+      'password=$GITEE_ACCESS_TOKEN',
+    );
+    expect(giteeCargoConfigurator).not.toMatch(/gitee\.com\/[^'" ]+@/);
   });
 
   test("external publisher token cannot mutate internal upgrade policy", () => {

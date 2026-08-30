@@ -1,3 +1,4 @@
+use crate::cmodel_response::normalize_cmodel_http_response;
 use crate::config::{
     AgentConfig, ComputerUseBinding, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
     ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
@@ -1667,34 +1668,29 @@ impl HttpMethod {
         }
 
         if let Some(outcome) =
-            normalize_local_http_outcome(status.is_success(), status.as_u16(), &body)
+            normalize_connector_http_outcome(status.is_success(), status.as_u16(), &body)
         {
             return Ok(outcome);
         }
 
-        let error = if status.is_success() {
-            None
-        } else {
-            Some(local_http_error(
-                status.as_u16(),
-                &self.service_name,
-                &self.method_name,
-            ))
-        };
-
+        let outcome = normalize_cmodel_http_response(
+            status,
+            &bytes,
+            &body,
+            &format!(
+                "local HTTP binding {}.{}",
+                self.service_name, self.method_name
+            ),
+        );
         Ok(ServiceOutcome {
-            success: status.is_success(),
-            data: Some(json!({
-                "status": status.as_u16(),
-                "headers": headers,
-                "body": body,
-            })),
-            error,
+            success: outcome.success,
+            data: outcome.data,
+            error: outcome.error,
         })
     }
 }
 
-fn normalize_local_http_outcome(
+fn normalize_connector_http_outcome(
     http_success: bool,
     status_code: u16,
     body: &Value,
@@ -1726,25 +1722,7 @@ fn normalize_local_http_outcome(
         });
     }
 
-    let error_code = body.get("errorCode").and_then(Value::as_str)?;
-    let success = http_success && error_code == "0";
-    Some(ServiceOutcome {
-        success,
-        data: body.get("data").cloned(),
-        error: if success {
-            None
-        } else {
-            Some(InvokeError {
-                code: error_code.to_string(),
-                message: body
-                    .get("value")
-                    .or_else(|| body.get("errorMessage"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("local connector returned an error")
-                    .to_string(),
-            })
-        },
-    })
+    None
 }
 
 fn passthrough_http_outcome(
@@ -1792,16 +1770,6 @@ fn extract_invoke_error(body: &Value) -> Option<InvokeError> {
             .unwrap_or("local connector returned an error")
             .to_string(),
     })
-}
-
-fn local_http_error(status_code: u16, service_name: &str, method_name: &str) -> InvokeError {
-    InvokeError {
-        code: "HTTP_REQUEST_FAILED".to_string(),
-        message: format!(
-            "local endpoint returned status {} for {}.{}",
-            status_code, service_name, method_name
-        ),
-    }
 }
 
 impl ComputerMethod {

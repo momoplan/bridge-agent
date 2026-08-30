@@ -1,3 +1,7 @@
+[registries.baijimu]
+index = "sparse+https://registry.baijimu.com/kellnr/api/v1/crates/"
+credential-provider = ["cargo:token"]
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 

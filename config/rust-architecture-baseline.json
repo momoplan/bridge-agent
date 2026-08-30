@@ -5,7 +5,7 @@
     "src/connector.rs": 6242,
     "src/event_server.rs": 1338,
     "src/runtime.rs": 2570,
-    "src/services.rs": 4968,
+    "src/services.rs": 4936,
     "tools/windows-uninstaller/src/main.rs": 682
   },
   "functionLines": {
