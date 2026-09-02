@@ -1673,15 +1673,11 @@ impl HttpMethod {
             return Ok(outcome);
         }
 
-        let outcome = normalize_cmodel_http_response(
-            status,
-            &bytes,
-            &body,
-            &format!(
-                "local HTTP binding {}.{}",
-                self.service_name, self.method_name
-            ),
+        let operation = format!(
+            "local HTTP binding {}.{}",
+            self.service_name, self.method_name
         );
+        let outcome = normalize_cmodel_http_response(status, &bytes, &operation);
         Ok(ServiceOutcome {
             success: outcome.success,
             data: outcome.data,
@@ -3742,6 +3738,10 @@ pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> 
     }
     Ok(canonical)
 }
+
+#[cfg(test)]
+#[path = "services_cmodel_tests.rs"]
+mod cmodel_tests;
 
 #[cfg(test)]
 mod tests {

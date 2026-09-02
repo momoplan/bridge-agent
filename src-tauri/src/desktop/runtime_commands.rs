@@ -404,10 +404,14 @@ pub(super) fn describe_upstream_http_failure(
     body: &str,
 ) -> String {
     let trimmed = body.trim();
+    if let Some(description) = bridge_agent::describe_cmodel_http_outcome(
+        status,
+        trimmed.as_bytes(),
+        "platform authorization",
+    ) {
+        return description;
+    }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(message) = value.get("value").and_then(Value::as_str) {
-            return format!("HTTP {status}: {message}");
-        }
         if let Some(message) = value.get("message").and_then(Value::as_str) {
             return format!("HTTP {status}: {message}");
         }
@@ -542,4 +546,63 @@ pub(super) fn forward_runtime_events(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_official_cmodel_failure_details() {
+        let body = r#"{
+            "contractVersion": "1.0.0",
+            "errorCode": "WORKSPACE_AUTHORIZATION_REQUIRED",
+            "value": "不能展示的遗留字段",
+            "data": {
+                "message": "当前工作区尚未授权此设备",
+                "retryable": false
+            }
+        }"#;
+
+        let description = describe_upstream_http_failure(
+            reqwest::StatusCode::FORBIDDEN,
+            "application/json",
+            body,
+        );
+
+        assert_eq!(
+            description,
+            "HTTP 403 Forbidden: WORKSPACE_AUTHORIZATION_REQUIRED: 当前工作区尚未授权此设备"
+        );
+        assert!(!description.contains("遗留字段"));
+    }
+
+    #[test]
+    fn reports_invalid_cmodel_candidate_as_protocol_error() {
+        let body = r#"{
+            "contractVersion": "1.0.0",
+            "errorCode": "WORKSPACE_AUTHORIZATION_REQUIRED",
+            "data": {"message": "缺少 retryable"}
+        }"#;
+
+        let description = describe_upstream_http_failure(
+            reqwest::StatusCode::FORBIDDEN,
+            "application/json",
+            body,
+        );
+
+        assert!(description.contains("CModel 协议错误"));
+        assert!(description.contains("retryable"));
+    }
+
+    #[test]
+    fn keeps_non_cmodel_json_message_fallback() {
+        let description = describe_upstream_http_failure(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "application/json",
+            r#"{"message":"upstream unavailable"}"#,
+        );
+
+        assert_eq!(description, "HTTP 502 Bad Gateway: upstream unavailable");
+    }
 }

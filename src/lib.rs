@@ -16,6 +16,7 @@ mod windows_tcp;
 
 use anyhow::{anyhow, Result};
 
+pub use cmodel_response::describe_cmodel_http_outcome;
 pub use config::{
     browser_auth_manifest_json, clear_relay_credentials, default_config_path,
     ensure_browser_auth_agent_id, ensure_config_exists, load_config, manifest_preview_json,
