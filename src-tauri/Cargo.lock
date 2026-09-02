@@ -376,18 +376,19 @@ dependencies = [
 
 [[package]]
 name = "baijimu-cmodel-core"
-version = "1.1.3"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=b90f674b171543574aa01293583bac6567bae2f5#b90f674b171543574aa01293583bac6567bae2f5"
+version = "1.1.7"
+source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=5ae4e03e9533af32b0bb3a974c9a808628623d73#5ae4e03e9533af32b0bb3a974c9a808628623d73"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "baijimu-cmodel-http"
-version = "1.1.3"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=b90f674b171543574aa01293583bac6567bae2f5#b90f674b171543574aa01293583bac6567bae2f5"
+version = "1.1.7"
+source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=5ae4e03e9533af32b0bb3a974c9a808628623d73#5ae4e03e9533af32b0bb3a974c9a808628623d73"
 dependencies = [
  "baijimu-cmodel-core",
  "bytes",
