@@ -131,6 +131,9 @@ describe("release workflow repository script availability", () => {
     expect(desktopCheckIndex).toBeGreaterThan(prepareUninstallerIndex);
     expect(body).toContain("cargo test --locked --workspace");
     expect(body).toContain(
+      "rustup toolchain install stable --component clippy,rustfmt",
+    );
+    expect(body).toContain(
       "managed_tool::tests::windows_registry_path_registration_round_trips",
     );
     expect(body).toContain("cargo test --locked --manifest-path src-tauri/Cargo.toml");
@@ -145,6 +148,16 @@ describe("release workflow repository script availability", () => {
     expect(workflow).toContain("WiX linker diagnostic exit code");
     expect(workflow).toContain("required signed sidecar");
     expect(workflow).toContain("Installed executable has an invalid Authenticode signature");
+  });
+
+  test("pull requests run the same Windows Rust quality contract before release", () => {
+    expect(qualityWorkflow).toContain("runs-on: windows-latest");
+    expect(qualityWorkflow).toContain(
+      "npm run prepare:windows-uninstaller:quality",
+    );
+    expect(qualityWorkflow).toContain(
+      "./.github/scripts/release-steps/03-check-windows-rust-targets.ps1",
+    );
   });
 
   test("all Rust build jobs authenticate immutable CModel dependencies without embedding tokens", () => {

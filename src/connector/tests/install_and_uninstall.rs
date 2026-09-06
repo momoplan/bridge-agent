@@ -237,6 +237,7 @@
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn unix_process_inspection_matches_only_the_connector_package_tree() {
         let package_path = Path::new("/tmp/Bridge Agent/connectors/example/package");
