@@ -128,7 +128,7 @@ jobs:
         shell: pwsh
         run: |
           rustup set profile minimal
-          rustup toolchain install stable --component clippy --no-self-update
+          rustup toolchain install stable --component clippy,rustfmt --no-self-update
           rustup default stable
 
       - name: Build frontend for Tauri context
