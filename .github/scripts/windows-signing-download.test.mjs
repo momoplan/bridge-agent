@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { readExpandedReleaseWorkflow } from "./release-workflow-source.mjs";
 
 const workflowPaths = [
   ".github/workflows/release-bridge-agent.yml",
@@ -14,7 +15,7 @@ const windowsTauriConfigPath = "src-tauri/tauri.windows.conf.json";
 describe("Windows signing tool download", () => {
   for (const workflowPath of workflowPaths) {
     it(`${workflowPath} uses the pinned archive with an accepted user agent and retries`, () => {
-      const workflow = readFileSync(workflowPath, "utf8");
+      const workflow = readExpandedReleaseWorkflow(workflowPath);
 
       expect(workflow).toContain(
         "https://ssl.com/wp-content/uploads/2024/10/CodeSignTool-v1.3.1-windows.zip",
@@ -55,9 +56,8 @@ describe("Windows signing tool download", () => {
   });
 
   it("preserves Windows signing diagnostics when the Tauri bundle step fails", () => {
-    const workflow = readFileSync(
+    const workflow = readExpandedReleaseWorkflow(
       ".github/workflows/release-bridge-agent.yml",
-      "utf8",
     );
 
     expect(workflow).toContain("WINDOWS_SIGNING_LOG_PATH");
@@ -68,9 +68,8 @@ describe("Windows signing tool download", () => {
   });
 
   it("pins an Authenticode metadata parser for the Chinese program name", () => {
-    const workflow = readFileSync(
+    const workflow = readExpandedReleaseWorkflow(
       ".github/workflows/release-bridge-agent.yml",
-      "utf8",
     );
 
     expect(workflow).toContain(

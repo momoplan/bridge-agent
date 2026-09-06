@@ -10,6 +10,33 @@ const printBaseline = process.argv.includes("--print-baseline");
 
 runSelfTests();
 
+const warnings = [];
+const trackedSources = trackedSourceFiles();
+const sourceLineCounts = trackedSources
+  .map((sourcePath) => ({
+    sourcePath,
+    lines: countLines(readFileSync(resolve(repositoryRoot, sourcePath), "utf8")),
+  }));
+for (const { sourcePath, lines } of sourceLineCounts) {
+  if (lines > config.sourceFileLines.warning) {
+    warnings.push(`${sourcePath}: ${lines} 行（源码文件提醒阈值 ${config.sourceFileLines.warning}）`);
+  }
+}
+const oversizedSources = sourceLineCounts.filter(
+  ({ lines }) => lines > config.sourceFileLines.maximum,
+);
+if (oversizedSources.length > 0) {
+  process.stderr.write("源文件架构门禁失败：\n");
+  process.stderr.write(
+    `${oversizedSources
+      .map(({ sourcePath, lines }) =>
+        `- ${sourcePath}: ${lines} 行（硬上限 ${config.sourceFileLines.maximum}）`,
+      )
+      .join("\n")}\n`,
+  );
+  process.exit(1);
+}
+
 const sources = trackedRustSources();
 const sourceFunctions = new Map();
 const observed = {
@@ -17,7 +44,6 @@ const observed = {
   functionLines: {},
   cognitiveComplexity: {},
 };
-const warnings = [];
 
 for (const sourcePath of sources) {
   const source = readFileSync(resolve(repositoryRoot, sourcePath), "utf8");
@@ -92,7 +118,8 @@ if (errors.length > 0) {
 }
 
 process.stdout.write(
-  `Rust 架构门禁通过：${sources.length} 个源文件，${warnings.length} 项提醒，未新增或扩大硬上限债务。\n`,
+  `源码架构门禁通过：${trackedSources.length} 个源码文件均不超过 ${config.sourceFileLines.maximum} 行；` +
+    `${sources.length} 个 Rust 源文件，${warnings.length} 项提醒，未新增或扩大硬上限债务。\n`,
 );
 
 function readJson(path) {
@@ -101,6 +128,38 @@ function readJson(path) {
 
 function trackedRustSources() {
   const result = run("git", ["ls-files", "-co", "--exclude-standard", "--", "*.rs"]);
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(
+      (path) =>
+        !config.excludedPathSegments.some(
+          (segment) => path === segment || path.startsWith(`${segment}/`) || path.includes(`/${segment}/`),
+        ),
+    )
+    .sort();
+}
+
+function trackedSourceFiles() {
+  const result = run("git", [
+    "ls-files",
+    "-co",
+    "--exclude-standard",
+    "--",
+    "*.rs",
+    "*.ts",
+    "*.tsx",
+    "*.js",
+    "*.mjs",
+    "*.css",
+    "*.html",
+    "*.sh",
+    "*.ps1",
+    "*.py",
+    "*.yml",
+    "*.yaml",
+  ]);
   return result.stdout
     .split("\n")
     .map((line) => line.trim())

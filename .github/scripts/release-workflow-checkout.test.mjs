@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 
 import { describe, expect, test } from "vitest";
+import { readExpandedReleaseWorkflow } from "./release-workflow-source.mjs";
 
-const workflow = readFileSync(
+const workflow = readExpandedReleaseWorkflow(
   ".github/workflows/release-bridge-agent.yml",
-  "utf8",
 );
 const qualityWorkflow = readFileSync(".github/workflows/quality.yml", "utf8");
 const windowsTauriConfig = JSON.parse(

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { readExpandedReleaseWorkflow } from "./release-workflow-source.mjs";
 
 const signer = ".github/scripts/sign-macos-with-retry.sh";
 const releaseWorkflows = [
@@ -81,7 +82,7 @@ esac
 describe("macOS signing timestamp recovery", () => {
   it("routes every macOS release workflow through the shared signer", () => {
     for (const workflowPath of releaseWorkflows) {
-      const workflow = readFileSync(workflowPath, "utf8");
+      const workflow = readExpandedReleaseWorkflow(workflowPath);
       expect(workflow).toContain("bash .github/scripts/sign-macos-with-retry.sh");
       expect(workflow).not.toMatch(/codesign[^\n]*--timestamp/);
     }
