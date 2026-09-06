@@ -51,15 +51,11 @@ pub(crate) async fn check_registered_service(
     let start_command_configured = service.start_command.is_some();
     let stop_command_configured = service.stop_command.is_some();
     let Some(health_check) = service.health_check else {
-        return RegisteredServiceStatus {
-            service: service.name,
-            status: RegisteredServiceState::NotConfigured,
-            detail: Some("没有注册 healthCheck".to_string()),
-            checked_at_ms: now_ms(),
-            health_check_configured,
+        return missing_health_check_status(
+            service.name,
             start_command_configured,
             stop_command_configured,
-        };
+        );
     };
 
     match health_check {
@@ -71,15 +67,7 @@ pub(crate) async fn check_registered_service(
             expect_status,
             body_contains,
         } => {
-            let method = http_method
-                .parse::<reqwest::Method>()
-                .unwrap_or(reqwest::Method::GET);
-            let mut request = client
-                .request(method, &url)
-                .timeout(Duration::from_secs(timeout_secs.unwrap_or(3).max(1)));
-            for (key, value) in headers {
-                request = request.header(key, value);
-            }
+            let request = build_health_request(client, &url, &http_method, &headers, timeout_secs);
             match request.send().await {
                 Ok(response) => {
                     let status = response.status();
@@ -149,6 +137,40 @@ pub(crate) async fn check_registered_service(
             }
         }
     }
+}
+
+fn missing_health_check_status(
+    service: String,
+    start_command_configured: bool,
+    stop_command_configured: bool,
+) -> RegisteredServiceStatus {
+    RegisteredServiceStatus {
+        service,
+        status: RegisteredServiceState::NotConfigured,
+        detail: Some("没有注册 healthCheck".to_string()),
+        checked_at_ms: now_ms(),
+        health_check_configured: false,
+        start_command_configured,
+        stop_command_configured,
+    }
+}
+
+fn build_health_request(
+    client: &Client,
+    url: &str,
+    http_method: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    timeout_secs: Option<u64>,
+) -> reqwest::RequestBuilder {
+    let method = http_method
+        .parse::<reqwest::Method>()
+        .unwrap_or(reqwest::Method::GET);
+    headers.iter().fold(
+        client
+            .request(method, url)
+            .timeout(Duration::from_secs(timeout_secs.unwrap_or(3).max(1))),
+        |request, (key, value)| request.header(key, value),
+    )
 }
 
 async fn health_http_error_detail(mut response: reqwest::Response, expected_status: u16) -> String {

@@ -1,9 +1,10 @@
 {
   "fileLines": {
-    "ordinary": { "warning": 600, "maximum": 1000 },
+    "ordinary": { "warning": 400, "maximum": 600 },
     "entrypoint": { "warning": 300, "maximum": 500 }
   },
   "functionLines": { "warning": 60, "maximum": 100 },
   "cognitiveComplexity": { "warning": 15, "maximum": 25 },
-  "excludedPathSegments": ["target", "node_modules", "src-tauri/gen"]
+  "sourceFileLines": { "warning": 400, "maximum": 600 },
+  "excludedPathSegments": ["target", "node_modules", "src-tauri/gen", "dist", "pnpm-lock.yaml"]
 }

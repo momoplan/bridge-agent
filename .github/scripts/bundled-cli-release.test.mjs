@@ -13,6 +13,7 @@ import { basename, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { readExpandedReleaseWorkflow } from "./release-workflow-source.mjs";
 
 const scriptPath = "tools/baijimu-cli/prepare-bundled-cli.sh";
 const pinnedCliVersion = readFileSync(
@@ -187,7 +188,7 @@ describe("bundled Baijimu CLI release provenance", () => {
   );
 
   it("uses the immutable CLI release and scans final Windows artifacts", () => {
-    const workflow = readFileSync(workflowPath, "utf8");
+    const workflow = readExpandedReleaseWorkflow(workflowPath);
     const attributes = readFileSync(".gitattributes", "utf8");
     const defenderScript = readFileSync(defenderScriptPath, "utf8");
     const defenderUpdateScript = readFileSync(
