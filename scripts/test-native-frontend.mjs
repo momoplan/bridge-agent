@@ -11,7 +11,8 @@ const environment = { ...process.env,
   CARGO_TARGET_DIR: target,
 };
 delete environment.BRIDGE_AGENT_UPDATE_API_URL;
-const build = spawnSync("cargo", ["build", "--locked", "--manifest-path", join(root, "src-tauri/Cargo.toml")], {
+// Keep the declared registries and platform compiler flags even with an isolated working directory.
+const build = spawnSync("cargo", ["build", "--locked", "--config", join(root, ".cargo/config.toml"), "--manifest-path", join(root, "src-tauri/Cargo.toml")], {
   cwd: temporary, env: environment, stdio: "inherit", timeout: 20 * 60 * 1000
 });
 if (build.status !== 0) throw build.error ?? new Error(`native smoke build failed: ${build.status}`);
