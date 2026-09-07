@@ -60,6 +60,16 @@ function cargoPackageVersion(path) {
 }
 
 describe("release workflow repository script availability", () => {
+  test("white-screen repair compares against the signed MSI payload, not the unsigned build intermediate", () => {
+    const smoke = readFileSync(".github/scripts/release-steps/16-smoke-test-windows-white-screen-repair.ps1", "utf8");
+    expect(smoke).toContain('Get-AuthenticodeSignature -LiteralPath $installed');
+    expect(smoke).toContain('$expected = (Get-FileHash $installed).Hash');
+    expect(smoke).not.toContain('Get-FileHash "src-tauri/target/release/bridge-agent-desktop.exe"');
+    expect(smoke.indexOf('"install-current-msi-baseline"')).toBeLessThan(smoke.indexOf('$expected ='));
+    expect(smoke.indexOf('$expected =')).toBeLessThan(smoke.indexOf('"install-affected-version"'));
+    expect(smoke.indexOf('"install-affected-version"')).toBeLessThan(smoke.indexOf('"repair-with-new-version"'));
+  });
+
   test("frontend and native recovery are mandatory on both desktop platforms before release", () => {
     const gate = jobBody("frontend-recovery-gate", "prepare-domestic-release");
     const release = jobBody("release", "mirror-domestic-release");
