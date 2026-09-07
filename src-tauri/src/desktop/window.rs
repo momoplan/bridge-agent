@@ -147,7 +147,9 @@ pub(super) fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> 
     diagnostics.info("setting up tray icon");
     let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "打开百积木", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let recovery = MenuItem::with_id(app, "recovery", "检查更新与修复", true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "startup-logs", "打开启动日志", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &recovery, &logs, &quit])?;
     let icon = app.default_window_icon().cloned();
     let menu_diagnostics = diagnostics.clone();
     let tray_diagnostics = diagnostics.clone();
@@ -161,6 +163,12 @@ pub(super) fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> 
                 show_main_window(app, Some(&menu_diagnostics), MainWindowOpenReason::TrayMenu)
             }
             TRAY_MENU_QUIT => quit_app(app),
+            "recovery" => open_native_recovery(app.clone()),
+            "startup-logs" => {
+                if let Err(error) = open_startup_log(app.state::<DesktopState>()) {
+                    menu_diagnostics.error(error);
+                }
+            }
             _ => {}
         })
         .on_tray_icon_event(move |tray, event| {

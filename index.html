@@ -7,8 +7,31 @@
       content="width=device-width, initial-scale=1.0"
     />
     <title>百积木</title>
+    <style>
+      #desktop-recovery[hidden], #root[hidden] { display: none !important; }
+      #desktop-recovery { position: fixed; inset: 0; z-index: 2147483647; overflow: auto; padding: 48px 24px; background: #f6f7f9; color: #1e2a44; font: 16px/1.6 system-ui, sans-serif; }
+      #desktop-recovery section { max-width: 640px; margin: 8vh auto; padding: 28px; background: white; border: 1px solid #dce1e8; border-radius: 16px; }
+      #desktop-recovery button { margin: 6px; padding: 10px 16px; border: 1px solid #bbc7d2; border-radius: 8px; background: white; color: #1e2a44; font: inherit; cursor: pointer; }
+      #recovery-detail, #recovery-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
   </head>
   <body>
+    <main id="desktop-recovery" aria-label="客户端更新与恢复">
+      <section>
+        <h1 id="recovery-title">正在启动百积木</h1>
+        <p id="recovery-detail">正在加载界面。若长时间没有响应，可检查官方更新或重试。</p>
+        <p>更新与恢复保留现有配置及本机应用数据。</p>
+        <div>
+          <button id="recovery-retry">重试界面</button>
+          <button id="recovery-check">检查更新</button>
+          <button id="recovery-install">安装官方更新</button>
+          <button id="recovery-log">打开启动日志</button>
+          <button id="recovery-native">打开系统修复窗口</button>
+        </div>
+        <p id="recovery-status" role="status" aria-live="polite"></p>
+        <p>若按钮无响应，请从系统托盘选择“检查更新与修复”。</p>
+      </section>
+    </main>
     <div id="root"></div>
     <script type="module" src="/src/bootstrap-diagnostics.ts"></script>
     <script type="module" src="/src/main.tsx"></script>

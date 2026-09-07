@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { useMemo } from "react";
 import { createLocalAppSelectors } from "./app/local-app-selectors";
+import { createLocalAppUpdateSelectors } from "./app/local-app-update-selectors";
 import { createLocalAppLifecycleActions } from "./app/local-app-lifecycle-actions";
 import { createLocalAppCatalogActions } from "./app/local-app-catalog-actions";
 import { useInterfaceEffects } from "./app/use-interface-effects";
@@ -31,12 +32,6 @@ import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
 
 import { toUiConfig, isComputerService, isShellService, reindexRecordAfterDelete } from "./app/config-conversion";
 import { serviceSignature, calculateAppUpdateProgressPercent, readError, readRuntimeConflict } from "./app/formatters";
-
-
-
-
-
-
 
 
 
@@ -266,6 +261,7 @@ export function useAppController() {
     selectedLocalAppId == null ? null : localApps.find((app) => app.id === selectedLocalAppId) ?? null;
   const pendingUpgradeApp =
     pendingUpgradeAppId == null ? null : localApps.find((app) => app.id === pendingUpgradeAppId) ?? null;
+  const { localAppUpdateStatus } = createLocalAppUpdateSelectors(marketConnectors);
   const availableLocalAppUpdates = localApps
     .map((app) => ({ app, status: localAppUpdateStatus(app) }))
     .filter(
@@ -535,7 +531,6 @@ export function useAppController() {
   const localAppSelectors = createLocalAppSelectors(appState);
   const { hasLocalAppStartCommand, hasLocalAppStopCommand, setLocalAppLifecycleOverride, clearLocalAppLifecycleOverride } = localAppSelectors;
   const localAppLifecycleActions = createLocalAppLifecycleActions(appState, { applyConfigDocument, applyRuntimeSnapshot, buildCapabilityTestKey, clearLocalAppLifecycleOverride, formatApplyMessage, handleCommandError, hasLocalAppStartCommand, hasLocalAppStopCommand, refreshConnectorApps, refreshLocalAppUpdateData, refreshRegisteredServiceStatuses, refreshRuntime, setLocalAppLifecycleOverride, startLocalAppInstallTask, startRegisteredService, stopRegisteredService });
-  const { localAppUpdateStatus } = localAppLifecycleActions;
 
   const desktopActions = createDesktopActions(appState, { appUpdateProgressPercent, applyConfigDocument, applyDeletedServiceDocument, applyRuntimeSnapshot, applySavedServiceDocument, formatApplyMessage, handleCommandError, refreshRegisteredServiceStatuses, refreshRuntime });
   const { loadAppVersion } = desktopActions;

@@ -252,6 +252,7 @@ fn configure_desktop_callbacks(
         runtime_log_streaming: Arc::clone(&services.runtime_log_streaming),
     };
     builder
+        .manage(RecoveryState::default())
         .manage(desktop_state)
         .on_page_load(move |webview, payload| {
             handle_page_load(
@@ -285,6 +286,10 @@ fn handle_page_load<R: tauri::Runtime>(
         webview.label(),
         payload.url()
     ));
+    #[cfg(debug_assertions)]
+    if payload.event() == tauri::webview::PageLoadEvent::Finished {
+        native_smoke::probe(webview);
+    }
 }
 
 fn setup_desktop(
@@ -304,6 +309,11 @@ fn setup_desktop(
         .begin_primary(setup.forced_safe_mode, setup.config_path_failure);
     record_crypto_provider_health(&setup.startup_health, setup.crypto_provider_failure);
     setup.startup_health.attach_event_app(app.handle().clone());
+    #[cfg(debug_assertions)]
+    if native_smoke::setup(app, &setup.config_path, &setup.startup_health)? {
+        return Ok(());
+    }
+    start_frontend_watchdog(app.handle().clone());
     setup.local_apps.attach_event_app(app.handle().clone());
     attach_lifecycle_events(&setup.connector_lifecycles, app.handle().clone());
     forward_runtime_events(
@@ -408,6 +418,9 @@ fn handle_window_event(
 
 fn register_desktop_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
+        frontend_heartbeat,
+        report_frontend_failure,
+        open_native_recovery,
         load_config,
         python_runtime_status,
         save_config,

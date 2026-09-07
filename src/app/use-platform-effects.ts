@@ -162,7 +162,7 @@ useEffect(() => {
           return;
         }
         unlisten = dispose;
-        const snapshot = await invoke<StartupHealthSnapshot>("mark_frontend_ready");
+        const snapshot = await invoke<StartupHealthSnapshot>("get_startup_health");
         if (active) {
           applyStartupHealthSnapshot(snapshot);
         }

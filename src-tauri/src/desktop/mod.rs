@@ -9,6 +9,9 @@ mod local_app_http;
 mod local_app_install;
 mod local_app_management;
 mod local_app_market;
+#[cfg(debug_assertions)]
+mod native_smoke;
+mod recovery;
 mod runtime_commands;
 mod startup;
 mod startup_health;
@@ -25,6 +28,7 @@ use local_app_http::*;
 use local_app_install::*;
 use local_app_management::*;
 use local_app_market::*;
+use recovery::*;
 use runtime_commands::*;
 use startup::*;
 use startup_health::*;
@@ -132,5 +136,7 @@ use core_foundation::string::CFString;
 
 #[cfg(test)]
 mod market_lifecycle_tests;
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod startup_update_tests;

@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { flushSync } from "react-dom";
+import { createLocalAppUpdateSelectors } from "./local-app-update-selectors";
 import { isConnectorUninstallStopError } from "../local-app-uninstall";
 import { defaultCapabilityArgumentsText, fromUiConfig, toUiMethod } from "./config-conversion";
-import { compareVersions, formatConnectorServiceFailures, parseJson, readError } from "./formatters";
+import { formatConnectorServiceFailures, parseJson, readError } from "./formatters";
 import type { createLocalAppCatalogActions } from "./local-app-catalog-actions";
 import type { createLocalAppSelectors } from "./local-app-selectors";
-import type { CapabilityInvokeResult, ConfigDocument, ConnectorAppUpdateStatus, ConnectorStartResult, LocalAppItem, LocalAppRuntimeStatus, LocalAppUpdateStatus, ManagedToolStatus, MarketConnector, RuntimeSnapshot, UiServiceConfig } from "./types";
+import type { CapabilityInvokeResult, ConfigDocument, ConnectorAppUpdateStatus, ConnectorStartResult, LocalAppItem, LocalAppRuntimeStatus, ManagedToolStatus, MarketConnector, RuntimeSnapshot, UiServiceConfig } from "./types";
 import type { AppControllerState } from "./use-app-state";
 
 type CatalogDependencies = Pick<ReturnType<typeof createLocalAppCatalogActions>, "refreshConnectorApps" | "refreshLocalAppUpdateData" | "startLocalAppInstallTask" | "startRegisteredService" | "stopRegisteredService">;
@@ -16,44 +17,7 @@ type LocalAppLifecycleDependencies = CatalogDependencies & SelectorDependencies 
 export function createLocalAppLifecycleActions(state: AppControllerState, dependencies: LocalAppLifecycleDependencies) {
   const { applyConfigDocument, applyRuntimeSnapshot, buildCapabilityTestKey, clearLocalAppLifecycleOverride, formatApplyMessage, handleCommandError, hasLocalAppStartCommand, hasLocalAppStopCommand, refreshConnectorApps, refreshLocalAppUpdateData, refreshRegisteredServiceStatuses, refreshRuntime, setLocalAppLifecycleOverride, startLocalAppInstallTask, startRegisteredService, stopRegisteredService } = dependencies;
   const { capabilityTestDrafts, config, marketConnectors, setBaijimuCli, setCapabilityTestBusy, setCapabilityTestResults, setConnectorBusy, setConnectorUninstalling, setConnectorUpdateBusy, setConnectorUpdateStatuses, setError, setManagedToolBusy, setMessage, setPendingUpgradeAppId, setRuntimeConflict, setSelectedLocalAppId } = state;
-  function marketConnectorForLocalApp(app: LocalAppItem): MarketConnector | undefined {
-    if (app.kind !== "connector" || !app.connector || app.connector.reviewStatus !== "PUBLISHED") {
-      return undefined;
-    }
-    return marketConnectors.find((marketApp) => marketApp.appId === app.connector?.appId);
-  }
-
-  function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
-    if (app.kind !== "managed_tool" || !app.managedTool) {
-      return undefined;
-    }
-    return marketConnectors.find(
-      (marketApp) =>
-        marketApp.applicationType === "managed_tool" && marketApp.appId === app.managedTool?.id
-    );
-  }
-
-  function marketAppForLocalApp(app: LocalAppItem): MarketConnector | undefined {
-    return app.kind === "managed_tool"
-      ? marketManagedToolForLocalApp(app)
-      : marketConnectorForLocalApp(app);
-  }
-
-  function localAppUpdateStatus(app: LocalAppItem): LocalAppUpdateStatus | undefined {
-    const marketApp = marketAppForLocalApp(app);
-    const currentVersion = app.managedTool?.installedVersion ?? app.connector?.version ?? null;
-    if (!marketApp || !currentVersion) {
-      return undefined;
-    }
-    return {
-      appId: app.id,
-      name: app.name,
-      currentVersion,
-      latestVersion: marketApp.version,
-      updateAvailable: compareVersions(marketApp.version, currentVersion) > 0,
-      source: marketApp.source
-    };
-  }
+  const { marketConnectorForLocalApp, marketManagedToolForLocalApp, marketAppForLocalApp, localAppUpdateStatus } = createLocalAppUpdateSelectors(marketConnectors);
 
   async function upgradeLocalAppVersion(app: LocalAppItem) {
     if (app.kind === "managed_tool") {

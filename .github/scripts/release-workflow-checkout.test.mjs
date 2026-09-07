@@ -60,6 +60,21 @@ function cargoPackageVersion(path) {
 }
 
 describe("release workflow repository script availability", () => {
+  test("frontend and native recovery are mandatory on both desktop platforms before release", () => {
+    const gate = jobBody("frontend-recovery-gate", "prepare-domestic-release");
+    const release = jobBody("release", "mirror-domestic-release");
+    const action = readFileSync(".github/actions/frontend-recovery/action.yml", "utf8");
+    expect(gate).toContain("runner: [macos-15, windows-latest]");
+    expect(qualityWorkflow).toContain("runner: [macos-15, windows-latest]");
+    expect(gate).toContain("uses: ./.github/actions/frontend-recovery");
+    expect(qualityWorkflow).toContain("uses: ./.github/actions/frontend-recovery");
+    expect(release).toContain("needs: [prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]");
+    expect(action).toContain("npm run test:browser");
+    expect(action).toContain("npm run test:native");
+    expect(release.indexOf("repair-with-new-version")).toBeGreaterThan(0);
+    expect(release.indexOf("repair-with-new-version")).toBeLessThan(release.indexOf("Upload bundles to GitHub release"));
+  });
+
   test("all Bridge Agent release package versions remain aligned", () => {
     const expected = packageJson.version;
 

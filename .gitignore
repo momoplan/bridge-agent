@@ -6,3 +6,5 @@
 /tools/windows-uninstaller/target
 .DS_Store
 .bridge-agent-development/
+/test-results
+/playwright-report

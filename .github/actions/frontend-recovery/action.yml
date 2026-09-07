@@ -1,0 +1,49 @@
+name: Frontend recovery gate
+description: Exercise the built UI and actual native WebView, including fatal frontend faults
+runs:
+  using: composite
+  steps:
+    - name: Configure authenticated dependencies
+      shell: bash
+      run: .github/scripts/configure-gitee-cargo.sh
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: npm
+    - name: Setup Rust
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup set profile minimal
+        rustup toolchain install stable --no-self-update
+        rustup default stable
+    - name: Install frontend dependencies
+      shell: bash
+      run: npm ci
+    - name: Build frontend
+      shell: bash
+      run: npm run build
+    - name: Prepare Windows resources
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $env:TAURI_ENV_PLATFORM = "windows"
+        npm run prepare:windows-uninstaller:quality
+        if ($LASTEXITCODE -ne 0) { throw "Windows smoke resources failed" }
+    - name: Install browser
+      shell: bash
+      run: npx playwright install chromium
+    - name: Exercise built frontend recovery
+      shell: bash
+      run: npm run test:browser
+    - name: Exercise actual native WebView and recovery IPC
+      shell: bash
+      run: npm run test:native
+    - name: Preserve browser failure evidence
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: frontend-recovery-${{ runner.os }}
+        path: test-results
+        if-no-files-found: ignore

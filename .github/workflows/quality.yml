@@ -11,6 +11,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  frontend-recovery:
+    name: Frontend recovery (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, windows-latest]
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/frontend-recovery
+
   rust-architecture:
     name: Rust architecture and quality
     runs-on: ubuntu-22.04
