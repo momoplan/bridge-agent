@@ -41,6 +41,10 @@ import type { BrowserAuthPollResponse, ConnectorSummary, LocalAppItem, LogEntry,
 
 
 export function AppView({ controller }: { controller: ReturnType<typeof useAppController> }) {
+  // Readiness is acknowledged only after a successful commit with loaded business config.
+  useEffect(() => {
+    if (controller.config) void invoke("mark_frontend_ready").catch(() => {});
+  }, [controller.config != null]);
   const {
     configPath,
     manifestPreview,
@@ -396,7 +400,7 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
   }
 
   function renderLocalAppCard(app: LocalAppItem) {
-    return <LocalAppCard app={app} config={config} countLocalAppCapabilities={countLocalAppCapabilities} formatLocalAppKind={formatLocalAppKind} hasLocalAppStartCommand={hasLocalAppStartCommand} localAppLifecycle={localAppLifecycle} localAppUpdateStatus={localAppUpdateStatus} marketAppForLocalApp={marketAppForLocalApp} renderLocalAppInstallProgress={renderLocalAppInstallProgress} setActiveLocalAppDetailTab={setActiveLocalAppDetailTab} setExpandedServiceIndex={setExpandedServiceIndex} setSelectedLocalAppId={setSelectedLocalAppId} />;
+    return <LocalAppCard key={app.id} app={app} config={config} countLocalAppCapabilities={countLocalAppCapabilities} formatLocalAppKind={formatLocalAppKind} hasLocalAppStartCommand={hasLocalAppStartCommand} localAppLifecycle={localAppLifecycle} localAppUpdateStatus={localAppUpdateStatus} marketAppForLocalApp={marketAppForLocalApp} renderLocalAppInstallProgress={renderLocalAppInstallProgress} setActiveLocalAppDetailTab={setActiveLocalAppDetailTab} setExpandedServiceIndex={setExpandedServiceIndex} setSelectedLocalAppId={setSelectedLocalAppId} />;
   }
 
   function renderLocalAppInstallProgress(task: LocalAppInstallTask, compact = false) {

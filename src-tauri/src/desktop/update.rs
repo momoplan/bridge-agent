@@ -327,6 +327,8 @@ pub(super) async fn install_app_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<AppUpdateInstallResult, String> {
+    let recovery = app.state::<RecoveryState>();
+    let _installation = UpdateInstallationGuard::acquire(&recovery.installing)?;
     emit_app_update_progress(
         &app,
         AppUpdateProgress {

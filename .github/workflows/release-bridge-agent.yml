@@ -24,6 +24,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  frontend-recovery-gate:
+    name: Release frontend recovery (${{ matrix.runner }})
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, windows-latest]
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+      - uses: ./.github/actions/frontend-recovery
+
   prepare-domestic-release:
     name: Prepare domestic release
     runs-on: ubuntu-22.04
@@ -145,7 +163,7 @@ jobs:
           & ./.github/scripts/release-steps/03-check-windows-rust-targets.ps1
   release:
     name: ${{ matrix.name }}
-    needs: [prepare-domestic-release, quality-gate, windows-quality-gate]
+    needs: [prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -444,7 +462,15 @@ jobs:
         shell: pwsh
         run: |
           & ./.github/scripts/release-steps/16-smoke-test-windows-guided-full-uninstall.ps1
+      - name: Smoke test Windows external white-screen repair preserves data
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          & ./.github/scripts/release-steps/16-smoke-test-windows-white-screen-repair.ps1
       - name: Upload bundles to GitHub release
+        # Public assets are uploaded only after upgrade/recovery regression tests pass.
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

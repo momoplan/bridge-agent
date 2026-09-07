@@ -1,12 +1,7 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import App from "./App";
-import "./styles.css";
-import "./design-system.css";
-import "./desktop.css";
+import { startRecoveryShell } from "./recovery-shell";
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+const recovery = startRecoveryShell(document);
+// The independent shell also catches module loading, syntax and asset failures.
+void import("./business-entry")
+  .then(({ mountBusiness }) => mountBusiness(document.getElementById("root")!, recovery.ready, recovery.fail))
+  .catch(recovery.fail);

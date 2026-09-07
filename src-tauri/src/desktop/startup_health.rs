@@ -187,6 +187,16 @@ impl StartupHealthManager {
         Ok(snapshot)
     }
 
+    pub(super) fn mark_frontend_failed(&self, detail: String) {
+        {
+            let mut health = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            health.frontend_ready = false;
+        }
+        self.diagnostics.error(format!("frontend failed: {detail}"));
+        self.set_component("desktop_shell", "桌面基础壳", "degraded", Some(detail));
+        self.write_pending_state();
+    }
+
     pub(super) fn reset_for_normal_restart(&self) -> Result<(), String> {
         write_startup_state(
             &self.state_path,
