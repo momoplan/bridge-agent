@@ -19,7 +19,8 @@ if (build.status !== 0) throw build.error ?? new Error(`native smoke build faile
 const executable = join(target, "debug", `bridge-agent-desktop${process.platform === "win32" ? ".exe" : ""}`);
 const result = spawnSync(executable, [], {
   cwd: temporary,
-  env: { ...environment, WS_BRIDGE_CONFIG: join(temporary, "agent-config.json"), BRIDGE_AGENT_FRONTEND_SMOKE: "1" },
+  env: { ...environment, WS_BRIDGE_CONFIG: join(temporary, "agent-config.json"), BRIDGE_AGENT_FRONTEND_SMOKE: "1",
+    BAIJIMU_MANAGED_TOOL_ROOT: join(temporary, "managed-tools"), BAIJIMU_MANAGED_BIN_DIR: join(temporary, "bin") },
   stdio: "inherit", timeout: 45000
 });
 if (result.status !== 0) throw result.error ?? new Error(`native frontend smoke failed: ${result.status}`);
