@@ -1,5 +1,5 @@
 // Test-only IPC fixture. Production bundles never import this module.
-export function installDesktopRuntime(options: { dnsError?: boolean; configError?: boolean; crash?: boolean; authorized?: boolean } = {}) {
+export function installDesktopRuntime(options: { dnsError?: boolean; installError?: boolean; configError?: boolean; crash?: boolean; authorized?: boolean } = {}) {
   const calls: string[] = [];
   const callbacks = new Map<number, (value: unknown) => void>();
   let nextId = 0;
@@ -38,7 +38,9 @@ export function installDesktopRuntime(options: { dnsError?: boolean; configError
           case "check_app_update":
             if (options.dnsError) throw new Error("dns error: failed to lookup address information");
             return update;
-          case "install_app_update": return { status: "installed", version: "1.0.1" };
+          case "install_app_update":
+            if (options.installError) throw new Error("signature verification failed (test)");
+            return { status: "installed", version: "1.0.1" };
           case "load_config":
             if (options.configError) throw new Error("配置读取失败（故障注入）");
             return { config, config_path: "fixture.json", manifest_preview: "{}", runtime };
