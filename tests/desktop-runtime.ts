@@ -1,5 +1,5 @@
 // Test-only IPC fixture. Production bundles never import this module.
-export function installDesktopRuntime(options: { dnsError?: boolean; installError?: boolean; configError?: boolean; crash?: boolean; authorized?: boolean } = {}) {
+export function installDesktopRuntime(options: { dnsError?: boolean; marketError?: boolean; installError?: boolean; configError?: boolean; crash?: boolean; authorized?: boolean } = {}) {
   const calls: string[] = [];
   const callbacks = new Map<number, (value: unknown) => void>();
   let nextId = 0;
@@ -46,7 +46,9 @@ export function installDesktopRuntime(options: { dnsError?: boolean; installErro
             return { config, config_path: "fixture.json", manifest_preview: "{}", runtime };
           case "list_connector_apps": return [connector];
           case "runtime_snapshot": return runtime;
-          case "list_market_connector_apps": return [];
+          case "list_market_connector_apps":
+            if (options.marketError) throw new Error("请求 localApp 市场失败: HTTP 404");
+            return [];
           case "baijimu_cli_status": return { id: "fixture-cli", name: "测试 CLI", description: "托管工具",
             state: "ready", installedVersion: "1.0.0", bundledVersion: "1.0.0", canRollback: false };
           case "list_connector_app_install_tasks":

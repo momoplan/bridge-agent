@@ -36,6 +36,24 @@ describe("complete desktop startup and independent recovery", () => {
     expect(document.getElementById("desktop-recovery")!.hidden).toBe(true);
     expect(fixture.calls.indexOf("mark_frontend_ready")).toBeGreaterThan(fixture.calls.indexOf("load_config"));
   });
+  it("shows market failure on the app page and clears it after a successful retry", async () => {
+    const fixture = await start({ marketError: true });
+    const root = document.getElementById("root")!;
+    expect(root.textContent).toContain("应用更新检查失败，无法确认最新版本");
+    expect(root.textContent).toContain("HTTP 404");
+    expect(root.textContent).toContain("测试应用");
+    expect(root.textContent).toContain("已安装版本 1.0.0");
+    fixture.options.marketError = false;
+    const retry = Array.from(root.querySelectorAll("button"))
+      .find((button) => button.textContent === "重试检查更新");
+    expect(retry).toBeDefined();
+    const checksBeforeRetry = fixture.calls.filter((call) => call === "list_market_connector_apps").length;
+    await act(async () => { retry!.click(); });
+    expect(fixture.calls.filter((call) => call === "list_market_connector_apps").length)
+      .toBeGreaterThan(checksBeforeRetry);
+    expect(root.textContent).not.toContain("应用更新检查失败，无法确认最新版本");
+    expect(root.textContent).toContain("测试应用");
+  });
   it("keeps an unregistered device usable for authorization", async () => {
     await start({ authorized: false });
     expect(document.getElementById("root")!.textContent).toContain("设备尚未授权");

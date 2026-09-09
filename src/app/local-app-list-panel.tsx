@@ -6,6 +6,8 @@ import { ApplicationIcon, Card } from "./ui-primitives";
 import type { InstallSourceMode, LocalAppDetailTab, LocalAppItem, LocalAppKind, LocalAppLifecycle, LocalAppUpdateStatus, MarketConnector, UiAgentConfig } from "./types";
 
 interface LocalAppListPanelProps {
+  marketLoadError: string;
+  marketLoading: boolean;
   availableLocalAppUpdates: Array<{ app: LocalAppItem; status: LocalAppUpdateStatus }>; busy: boolean; config: UiAgentConfig | null; formatLocalAppKind: (kind: LocalAppKind) => string; localAppKindFilter: LocalAppKind | "all"; localAppQuery: string; localApps: LocalAppItem[]; needsAuthorization: boolean; openConsole: () => Promise<void>; refreshAll: () => Promise<void>; refreshing: boolean; refreshMarketConnectorApps: () => Promise<MarketConnector[]>; renderAppAttentionPanel: () => ReactNode; renderLocalAppCard: (app: LocalAppItem) => ReactNode; setCustomInstallConfirmed: Dispatch<SetStateAction<boolean>>; setInstallPanelOpen: Dispatch<SetStateAction<boolean>>; setInstallSourceMode: Dispatch<SetStateAction<InstallSourceMode>>; setLocalAppKindFilter: Dispatch<SetStateAction<LocalAppKind | "all">>; setLocalAppQuery: Dispatch<SetStateAction<string>>; setMarketAppQuery: Dispatch<SetStateAction<string>>; setSelectedLocalAppId: Dispatch<SetStateAction<string | null>>;
 }
 interface LocalAppCardProps {
@@ -13,7 +15,7 @@ interface LocalAppCardProps {
 }
 
 export function LocalAppListPanel(props: LocalAppListPanelProps) {
-  const { availableLocalAppUpdates, busy, config, formatLocalAppKind, localAppKindFilter, localAppQuery, localApps, needsAuthorization, openConsole, refreshAll, refreshing, refreshMarketConnectorApps, renderAppAttentionPanel, renderLocalAppCard, setCustomInstallConfirmed, setInstallPanelOpen, setInstallSourceMode, setLocalAppKindFilter, setLocalAppQuery, setMarketAppQuery, setSelectedLocalAppId } = props;
+  const { marketLoadError, marketLoading, availableLocalAppUpdates, busy, config, formatLocalAppKind, localAppKindFilter, localAppQuery, localApps, needsAuthorization, openConsole, refreshAll, refreshing, refreshMarketConnectorApps, renderAppAttentionPanel, renderLocalAppCard, setCustomInstallConfirmed, setInstallPanelOpen, setInstallSourceMode, setLocalAppKindFilter, setLocalAppQuery, setMarketAppQuery, setSelectedLocalAppId } = props;
     if (!config) {
       return <div />;
     }
@@ -100,7 +102,26 @@ export function LocalAppListPanel(props: LocalAppListPanelProps) {
             </button>
           </div>
         </div>
-        {availableLocalAppUpdates.length > 0 ? (
+        {marketLoadError ? (
+          <div className="notice-banner warning" role="alert">
+            <div>
+              <strong>应用更新检查失败，无法确认最新版本</strong>
+              <span>卡片显示的是本机已安装版本，请重试检查市场更新。</span>
+              <details>
+                <summary>错误详情</summary>
+                <p>{marketLoadError}</p>
+              </details>
+            </div>
+            <button
+              className="secondary"
+              disabled={marketLoading}
+              onClick={() => void refreshMarketConnectorApps()}
+            >
+              {marketLoading ? "正在重试…" : "重试检查更新"}
+            </button>
+          </div>
+        ) : null}
+        {!marketLoadError && availableLocalAppUpdates.length > 0 ? (
           <div className="notice-banner warning" role="status">
             <div>
               <strong>{availableLocalAppUpdates.length} 个应用有可用更新</strong>
@@ -184,7 +205,7 @@ export function LocalAppCard(props: LocalAppCardProps) {
         <div className="local-app-card-meta">
           <span>{formatLocalAppKind(app.kind)}</span>
           {app.managedTool ? (
-            <span>版本 {app.managedTool.installedVersion ?? "未安装"}</span>
+            <span>已安装版本 {app.managedTool.installedVersion ?? "未安装"}</span>
           ) : app.installTask && !app.connector ? (
             <span>{formatLocalAppInstallTaskPhase(app.installTask)}</span>
           ) : (

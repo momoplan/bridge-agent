@@ -137,14 +137,15 @@ pub(super) async fn list_market_connector_apps(
 }
 
 pub(super) async fn fetch_market_connector_apps(
-    config_path: &Path,
+    _config_path: &Path,
 ) -> Result<Vec<MarketConnectorApp>, String> {
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-    let base_url = config.platform.base_url.trim_end_matches('/');
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
-    let mut url = reqwest::Url::parse(&format!("{base_url}/api/local-app-market/apps"))
-        .map_err(|err| format!("localApp 市场地址无效: {err}"))?;
+    let mut url = market_distribution_base_url()?;
+    url.path_segments_mut()
+        .map_err(|_| "市场分发地址不能作为路径基址".to_string())?
+        .pop_if_empty()
+        .push("apps");
     url.query_pairs_mut()
         .append_pair("platform", platform)
         .append_pair("arch", arch)
@@ -210,11 +211,16 @@ pub(super) fn registered_install_url(
 pub(super) async fn fetch_registered_install_source(
     config_path: &Path,
     identity: &RegisteredAppVersionIdentity,
+    accept_unreviewed: bool,
 ) -> Result<RegisteredInstallSource, String> {
-    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
-    let mut url = registered_install_url(&config.platform.base_url, identity)?;
+    let mut url = if accept_unreviewed {
+        let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+        registered_install_url(&config.platform.base_url, identity)?
+    } else {
+        public_market_version_url(market_distribution_base_url()?, identity)?
+    };
     url.query_pairs_mut()
         .append_pair("platform", platform)
         .append_pair("arch", arch)
