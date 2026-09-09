@@ -571,8 +571,8 @@ Schema `3.0.0` 在 `connector.json` 顶层直接声明 `transport`、`methods` �
 市场服务 `local-app-market` 提供两类读取：
 
 ```text
-GET {platform.base_url}/api/local-app-market/apps?platform={macos|windows|linux}
-GET {platform.base_url}/api/local-app-registry/apps/{appId}/versions/{version}
+GET {distribution.marketApiBaseUrl}/apps?platform={macos|windows|linux}
+GET {distribution.marketApiBaseUrl}/apps/{appId}/versions/{version}
 ```
 
 第一类只返回已审核且公开上架的版本；第二类按 `appId + version` 精确解析 `ACTIVE` 的已登记版本，

@@ -68,13 +68,24 @@ if [ -z "$cli_app_id" ]; then
 fi
 
 if [ "$GITHUB_EVENT_NAME" = push ]; then
+  market_api_base_url="$(node --input-type=module -e '
+    import fs from "node:fs";
+    const config = JSON.parse(fs.readFileSync("src-tauri/distribution-config.json", "utf8"));
+    const url = new URL(config.marketApiBaseUrl);
+    if (config.schemaVersion !== "1.0.0" || url.protocol !== "https:" ||
+        url.username || url.password || url.search || url.hash ||
+        config.marketApiBaseUrl.trim() !== config.marketApiBaseUrl) {
+      throw new Error("Invalid client market distribution configuration");
+    }
+    process.stdout.write(url.href.replace(/\/$/, ""));
+  ')"
   for target in \
     "macos&arch=aarch64" \
     "windows&arch=x86_64" \
     "linux&arch=x86_64"; do
     market_cli_version="$(
       curl -fsSL --retry 3 --retry-delay 2 \
-        "https://api.baijimu.com/lowcode3/api/local-app-market/apps?platform=${target}" \
+        "${market_api_base_url}/apps?platform=${target}" \
         | jq -er --arg app_id "$cli_app_id" '
           .[]
           | select(.appId == $app_id)
