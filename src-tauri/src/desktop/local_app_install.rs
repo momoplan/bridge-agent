@@ -243,7 +243,9 @@ async fn prepare_connector_install(
         );
     }
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
-    let registered = fetch_registered_install_source(config_path, &options.identity).await?;
+    let registered =
+        fetch_registered_install_source(config_path, &options.identity, options.accept_unreviewed)
+            .await?;
     ensure_registered_install_is_accepted(&registered, options.accept_unreviewed)?;
     let resolved_source = resolve_connector_source(
         &registered.source,
