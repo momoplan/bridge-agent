@@ -575,8 +575,9 @@ GET {distribution.marketApiBaseUrl}/apps?platform={macos|windows|linux}
 GET {distribution.marketApiBaseUrl}/apps/{appId}/versions/{version}
 ```
 
-第一类只返回已审核且公开上架的版本；第二类按 `appId + version` 精确解析 `ACTIVE` 的已登记版本，
-供测试和未审核分发。撤销应用或版本注册后，精确解析也必须立即拒绝。
+两类公开读取都要求应用和版本已审核、公开上架且有效。第二类按 `appId + version` 精确解析，
+下架或撤销应用、版本后立即拒绝。`distribution.marketApiBaseUrl` 来自客户端版本化分发配置。
+显式接受未审核分发的安装仍使用平台环境的注册读取合同，不由上述公开市场接口提供。
 
 公开列表可以返回 lowcode 包装结构：
 
