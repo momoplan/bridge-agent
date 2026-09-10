@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "3.0.0",
+  "appId": "test-app",
+  "name": "Setup Connector",
+  "version": "1.0.0",
+  "runtime": {
+    "type": "process",
+    "command": "setup-connector",
+    "ownerExtension": true
+  },
+  "management": {
+    "type": "http",
+    "baseUrl": "http://127.0.0.1:18110",
+    "auth": {
+      "type": "connector_token"
+    },
+    "operations": {
+      "setupRetry": {
+        "method": "POST",
+        "path": "/management/v1/setup/retry"
+      },
+      "setupState": {
+        "method": "GET",
+        "path": "/management/v1/setup/state"
+      }
+    }
+  },
+  "setup": {
+    "operation": "setupRetry",
+    "statusOperation": "setupState",
+    "timeoutSecs": 900
+  },
+  "transport": {
+    "type": "http",
+    "baseUrl": "http://127.0.0.1:18110"
+  },
+  "methods": [
+    {
+      "name": "ping",
+      "description": "Ping.",
+      "path": "/invoke/ping"
+    }
+  ]
+}

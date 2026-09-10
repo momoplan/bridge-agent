@@ -500,6 +500,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "local-app-contract",
  "pep440_rs",
  "reqwest 0.12.28",
  "rustls",
@@ -2578,6 +2579,23 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
+
+[[package]]
+name = "local-app-contract"
+version = "1.0.0"
+source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=534803e56ab8b9bf79633ead4709356c2bcd231a#534803e56ab8b9bf79633ead4709356c2bcd231a"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "image",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "lock_api"

@@ -16,6 +16,7 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "5.0"
 futures-util = "0.3"
+local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "534803e56ab8b9bf79633ead4709356c2bcd231a", version = "=1.0.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pep440_rs = "0.7.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -60,3 +61,6 @@ keyring = "4.1.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+market-cmodel-core = { package = "baijimu-cmodel-core", version = "=5.0.0", git = "https://gitee.com/zxflimit_admin/baijimu-contracts.git", rev = "213e7efbcc06984820690e87a2cd27f6d552254b" }

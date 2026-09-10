@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "3.0.0",
+  "appId": "test-app",
+  "version": "1.0.0",
+  "applicationType": "managed_tool",
+  "artifacts": [
+    {
+      "platform": "linux",
+      "arch": "x86_64",
+      "source": "https://example.test/immutable/app.zip",
+      "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archivePath": "bin/example"
+    }
+  ]
+}
