@@ -345,6 +345,7 @@ fn write_fake_cli(path: &Path, version: &str) {
     set_executable(path).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn bundled_market_source_survives_upgrade_and_rollback() {
     let _guard = ENV_LOCK.lock().unwrap();
