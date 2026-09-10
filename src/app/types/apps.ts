@@ -1,3 +1,4 @@
+import type { InstallSource } from "../market-identity";
 import type { DesktopPage } from "../../components/DesktopShell";
 import type { LocalAppInstallTask, LocalAppInstallTaskOperation } from "../../local-app-install-tasks";
 import type { UpdateContractDeclaration, UpdateDatabaseContract, UpdateEventContract, UpdateMethodContract } from "../../local-app-updates";
@@ -74,6 +75,7 @@ export interface LocalAppItem {
 }
 
 export interface StartConnectorAppInstallRequest {
+  installSource?: InstallSource | null;
   operation: LocalAppInstallTaskOperation;
   replace: boolean;
   appId: string;
@@ -83,6 +85,7 @@ export interface StartConnectorAppInstallRequest {
 }
 
 export interface MarketConnector {
+  installSource?: InstallSource | null;
   appId: string;
   applicationType: string;
   name: string;
@@ -115,6 +118,7 @@ export interface MarketConnector {
 }
 
 export interface ManagedToolStatus {
+  installSource?: InstallSource | null;
   id: string;
   name: string;
   description: string;

@@ -69,3 +69,23 @@ pub fn select_upgrade(
         source: candidate.frozen_version.source.clone(),
     }))
 }
+
+/// A universal archive can run on either CPU architecture of its declared platform.
+/// Prefer the exact target when both are present; never cross platform boundaries.
+pub fn select_artifact<'a>(
+    frozen: &'a local_app_contract::FrozenVersion,
+    platform: &str,
+    architecture: &str,
+) -> Result<Option<&'a local_app_contract::Artifact>, ContractError> {
+    frozen.validate()?;
+    Ok(frozen
+        .content
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == platform && artifact.architecture == architecture)
+        .or_else(|| {
+            frozen.content.artifacts.iter().find(|artifact| {
+                artifact.platform == platform && artifact.architecture == "universal"
+            })
+        }))
+}

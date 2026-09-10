@@ -47,6 +47,7 @@ pub fn install_connector_from_path_with_provenance(
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
     let manifest = load_connector_manifest(&source)?;
+    provenance.validate_manifest(&manifest)?;
     let registrations = load_connector_service_registrations(&source, &manifest)?;
     if registrations.is_empty() {
         bail!(
@@ -76,6 +77,8 @@ pub fn install_connector_from_path_with_provenance(
         );
     }
     let previous_record = load_install_record(&manifest.app_id).ok();
+    validate_install_replacement(previous_record.as_ref(), &provenance)?;
+
     if package_path.exists() && previous_record.is_some() {
         stop_connector_for_package_change(&manifest.app_id, &config)?;
     }
@@ -194,12 +197,13 @@ fn complete_connector_install(
 
     let now = now_ms();
     save_install_record(&ConnectorInstallRecord {
+        install_source: provenance.install_source.clone(),
         manifest: manifest.clone(),
         package_path: package_path.display().to_string(),
         source_path: source.display().to_string(),
         source_reference: provenance.source_reference.clone(),
         review_status: provenance.review_status.clone(),
-        source_checksum: Some(provenance.source_checksum.clone()),
+        source_checksum: provenance.source_checksum.clone(),
         package_checksum: Some(package_checksum),
         installed_at_epoch_ms: previous_record
             .map(|record| record.installed_at_epoch_ms)
@@ -473,4 +477,38 @@ fn sync_installed_connector_record(
     record.last_synced_at_epoch_ms = now;
     save_install_record(&record)?;
     Ok(summary_from_record(record))
+}
+
+fn validate_install_replacement(
+    previous_record: Option<&ConnectorInstallRecord>,
+    provenance: &ConnectorInstallProvenance,
+) -> Result<()> {
+    if previous_record.is_some_and(|record| record.install_source.is_some())
+        && provenance.install_source.is_none()
+    {
+        bail!("a verified installation cannot be replaced by a source without provenance");
+    }
+
+    if let Some(selected) = provenance.install_source.as_ref() {
+        if let Some(previous) = previous_record {
+            let existing = previous.install_source.as_ref()
+                .context("existing installation has no verified source identity; source migration is required before upgrade")?;
+            let application = |identity: &local_app_contract::InstallSource| match identity {
+                local_app_contract::InstallSource::Market { source, .. }
+                | local_app_contract::InstallSource::Environment { source } => source.application.clone(),
+            };
+            if application(existing) != application(selected) {
+                bail!("different source applications cannot replace the same installation");
+            }
+            match (existing, selected) {
+                (local_app_contract::InstallSource::Market { market_key: old_market, listing_id: old_listing, .. },
+                 local_app_contract::InstallSource::Market { market_key: new_market, listing_id: new_listing, .. })
+                    if old_market == new_market && old_listing == new_listing => {},
+                (local_app_contract::InstallSource::Environment { .. }, local_app_contract::InstallSource::Environment { .. }) => {},
+                _ => bail!("installation distribution authority cannot change during upgrade"),
+            }
+        }
+    }
+
+    Ok(())
 }

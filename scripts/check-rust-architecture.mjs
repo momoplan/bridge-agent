@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
@@ -132,6 +132,7 @@ function trackedRustSources() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((path) => existsSync(resolve(repositoryRoot, path)))
     .filter(
       (path) =>
         !config.excludedPathSegments.some(
@@ -164,6 +165,7 @@ function trackedSourceFiles() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((path) => existsSync(resolve(repositoryRoot, path)))
     .filter(
       (path) =>
         !config.excludedPathSegments.some(

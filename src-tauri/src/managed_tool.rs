@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,7 +11,7 @@ use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
@@ -37,6 +36,7 @@ const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedToolStatus {
+    pub install_source: Option<local_app_contract::InstallSource>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -55,6 +55,10 @@ pub struct ManagedToolStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagedToolState {
+    #[serde(default)]
+    install_source: Option<local_app_contract::InstallSource>,
+    #[serde(default)]
+    previous_install_source: Option<local_app_contract::InstallSource>,
     schema_version: u32,
     active_version: String,
     previous_version: Option<String>,
@@ -93,7 +97,7 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
             if launcher.is_file() {
                 if let Ok(version) = validate_cli(&launcher, None) {
                     if version_is_newer(&version, &state.active_version)? {
-                        import_binary(&launcher, &version, "newer-stable-launcher", None)?;
+                        import_binary(&launcher, &version, "newer-stable-launcher", None, None)?;
                         return bootstrap_bundled_inner(source);
                     }
                 }
@@ -101,7 +105,13 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
             if let Some(bundled) = source {
                 if let Ok(version) = validate_cli(bundled, None) {
                     if version_is_newer(&version, &state.active_version)? {
-                        import_binary(bundled, &version, "bundled-upgrade", None)?;
+                        import_binary(
+                            bundled,
+                            &version,
+                            "bundled-upgrade",
+                            None,
+                            bundled_market_source(bundled, &version)?,
+                        )?;
                         return inspect_inner(Some(bundled));
                     }
                 }
@@ -112,7 +122,7 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
         let launcher = launcher_path();
         if launcher.is_file() {
             if let Ok(version) = validate_cli(&launcher, None) {
-                import_binary(&launcher, &version, "recovered-stable-launcher", None)?;
+                import_binary(&launcher, &version, "recovered-stable-launcher", None, None)?;
                 return bootstrap_bundled_inner(source);
             }
         }
@@ -122,6 +132,10 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
                 let mut recovered = state;
                 recovered.active_version = previous;
                 recovered.previous_version = Some(current);
+                std::mem::swap(
+                    &mut recovered.install_source,
+                    &mut recovered.previous_install_source,
+                );
                 recovered.source = "automatic-recovery".to_string();
                 recovered.updated_at_epoch_ms = now_ms();
                 save_state(&recovered)?;
@@ -134,7 +148,7 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
     let launcher = launcher_path();
     if launcher.is_file() {
         if let Ok(version) = validate_cli(&launcher, None) {
-            import_binary(&launcher, &version, "legacy-launcher", None)?;
+            import_binary(&launcher, &version, "legacy-launcher", None, None)?;
             return bootstrap_bundled_inner(source);
         }
     }
@@ -142,7 +156,13 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
     let source = source.context("bundled baijimu CLI resource not found")?;
     let version = validate_cli(source, None)
         .with_context(|| format!("bundled baijimu CLI is invalid: {}", source.display()))?;
-    import_binary(source, &version, "bundled", None)?;
+    import_binary(
+        source,
+        &version,
+        "bundled",
+        None,
+        bundled_market_source(source, &version)?,
+    )?;
     inspect_inner(Some(source))
 }
 
@@ -165,6 +185,7 @@ fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
     let fallback_active_path = managed_root().join("versions");
     let Some(state) = load_state()? else {
         return Ok(ManagedToolStatus {
+            install_source: None,
             id: TOOL_ID.to_string(),
             name: TOOL_NAME.to_string(),
             description: TOOL_DESCRIPTION.to_string(),
@@ -190,6 +211,7 @@ fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
                 &launcher,
                 launcher_version,
                 "external-stable-launcher",
+                None,
                 None,
             )?;
             return inspect_inner(bundled_source);
@@ -225,6 +247,7 @@ fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
     }
 
     Ok(ManagedToolStatus {
+        install_source: state.install_source,
         id: TOOL_ID.to_string(),
         name: TOOL_NAME.to_string(),
         description: TOOL_DESCRIPTION.to_string(),
@@ -281,65 +304,51 @@ pub fn ensure_bundled_dependency_ready(
     Ok(status)
 }
 
-pub async fn install_update(
-    source: &str,
-    expected_version: &str,
-    expected_checksum: &str,
+pub fn install_market_package(
+    bytes: &[u8],
+    artifact: &local_app_contract::Artifact,
+    selection: local_app_contract::InstallSource,
+    listing: &local_app_contract::MarketListing,
     archive_path: Option<&str>,
 ) -> Result<ManagedToolStatus> {
-    let source = source.trim();
-    let expected_version = expected_version.trim();
-    if expected_version.is_empty() {
-        bail!("managed tool version cannot be empty");
-    }
-    let url = reqwest::Url::parse(source).context("managed tool source must be a valid URL")?;
-    if url.scheme() != "https" {
-        bail!("managed tool source must use HTTPS");
-    }
-    let checksum = normalize_sha256(expected_checksum)?;
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(10 * 60))
-        .user_agent(concat!(
-            "bridge-agent-managed-tool/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("failed to download managed tool")?
-        .error_for_status()
-        .context("managed tool download returned an error")?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)
+    bridge_agent::market_distribution::resolve_exact(&selection, listing)?;
+    if listing.frozen_version.source.application.app_id.as_str() != TOOL_ID
+        || listing.frozen_version.content.application_type
+            != local_app_contract::ApplicationType::ManagedTool
+        || bytes.len() as u64 != artifact.size_bytes
+        || bytes.len() as u64 > MAX_DOWNLOAD_BYTES
+        || !listing.frozen_version.content.artifacts.contains(artifact)
     {
-        bail!("managed tool package exceeds 128 MiB");
+        bail!("managed tool package does not match selected frozen version");
     }
-    let bytes = response
-        .bytes()
-        .await
-        .context("failed to read managed tool package")?;
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        bail!("managed tool package exceeds 128 MiB");
-    }
-    let actual_checksum = hex_sha256(bytes.as_ref());
-    if actual_checksum != checksum {
-        bail!("managed tool checksum mismatch: expected {checksum}, got {actual_checksum}");
-    }
-
-    let binary = extract_binary(bytes.as_ref(), source, archive_path)?;
-    let staging_dir = managed_root().join("staging");
-    fs::create_dir_all(&staging_dir)?;
-    let candidate = staging_dir.join(format!("{}-{}.tmp", binary_name(), now_ms()));
+    let expected_version = listing.frozen_version.source.version.to_string();
+    let binary = extract_binary(bytes, artifact.file_name.as_str(), archive_path)?;
+    fs::create_dir_all(managed_root())?;
+    let staging = tempfile::tempdir_in(managed_root()).context("cannot stage managed tool")?;
+    let candidate = staging.path().join(binary_name());
     write_executable(&candidate, &binary)?;
     verify_platform_signature(&candidate)?;
-    validate_cli(&candidate, Some(expected_version))?;
+    validate_cli(&candidate, Some(&expected_version))?;
     let _guard = lock_managed_tool()?;
-    activate_candidate(&candidate, expected_version, source, &actual_checksum)?;
-    let _ = fs::remove_file(candidate);
+    if let Some(state) = load_state()? {
+        if state.install_source.is_some()
+            && bridge_agent::market_distribution::select_upgrade(
+                state.install_source.as_ref(),
+                listing,
+            )?
+            .is_none()
+        {
+            bail!("selected tool release is not newer than the installed release");
+        }
+    }
+    // Preserve the existing package checksum used by managed-tool recovery.
+    activate_candidate(
+        &candidate,
+        &expected_version,
+        "market",
+        &hex_sha256(bytes),
+        Some(selection),
+    )?;
     inspect_inner(None)
 }
 
@@ -355,6 +364,10 @@ pub fn rollback() -> Result<ManagedToolStatus> {
     let current = state.active_version;
     state.active_version = previous;
     state.previous_version = Some(current);
+    std::mem::swap(
+        &mut state.install_source,
+        &mut state.previous_install_source,
+    );
     state.source = "rollback".to_string();
     state.updated_at_epoch_ms = now_ms();
     save_state(&state)?;
@@ -373,6 +386,7 @@ fn import_binary(
     version: &str,
     source_label: &str,
     checksum: Option<&str>,
+    install_source: Option<local_app_contract::InstallSource>,
 ) -> Result<()> {
     let bytes = fs::read(source)?;
     let checksum = checksum
@@ -383,12 +397,18 @@ fn import_binary(
     let candidate = staging_dir.join(format!("{}-{}.tmp", binary_name(), now_ms()));
     write_executable(&candidate, &bytes)?;
     validate_cli(&candidate, Some(version))?;
-    activate_candidate(&candidate, version, source_label, &checksum)?;
+    activate_candidate(&candidate, version, source_label, &checksum, install_source)?;
     let _ = fs::remove_file(candidate);
     Ok(())
 }
 
-fn activate_candidate(candidate: &Path, version: &str, source: &str, checksum: &str) -> Result<()> {
+fn activate_candidate(
+    candidate: &Path,
+    version: &str,
+    source: &str,
+    checksum: &str,
+    install_source: Option<local_app_contract::InstallSource>,
+) -> Result<()> {
     let version_dir = versions_dir().join(version);
     fs::create_dir_all(&version_dir)?;
     let version_binary = version_dir.join(binary_name());
@@ -401,6 +421,10 @@ fn activate_candidate(candidate: &Path, version: &str, source: &str, checksum: &
         .as_ref()
         .and_then(|state| (state.active_version != version).then(|| state.active_version.clone()));
     let state = ManagedToolState {
+        install_source,
+        previous_install_source: previous_state
+            .as_ref()
+            .and_then(|state| state.install_source.clone()),
         schema_version: 1,
         active_version: version.to_string(),
         previous_version: previous_version.or_else(|| {
@@ -463,3 +487,35 @@ fn replace_file(source: &Path, target: &Path) -> Result<()> {
 }
 
 include!("managed_tool/implementation.rs");
+
+fn bundled_market_source(
+    binary: &Path,
+    version: &str,
+) -> Result<Option<local_app_contract::InstallSource>> {
+    let file_name = binary
+        .file_name()
+        .context("bundled binary has no file name")?
+        .to_string_lossy();
+    let path = binary.with_file_name(format!("{file_name}.market.json"));
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let selection: local_app_contract::InstallSource = local_app_contract::decode(&bytes)?;
+    match &selection {
+        local_app_contract::InstallSource::Market {
+            listing_id,
+            version: selected,
+            source,
+            ..
+        } if !listing_id.is_nil()
+            && source.application.app_id.as_str() == TOOL_ID
+            && selected == &source.version
+            && selected.to_string() == version =>
+        {
+            Ok(Some(selection))
+        }
+        _ => bail!("bundled CLI market source does not match its immutable version"),
+    }
+}

@@ -63,6 +63,7 @@ mod tests {
     include!("connector/tests/manifest_contract.rs");
     include!("connector/tests/permissions_and_ui.rs");
     include!("connector/tests/install_and_uninstall.rs");
+    include!("connector/tests/market_provenance.rs");
     include!("connector/tests/lifecycle_process.rs");
     include!("connector/tests/runtime_commands.rs");
     include!("connector/tests/python_runtime.rs");

@@ -4,6 +4,7 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 pub(super) struct MarketConnectorApp {
     pub(super) app_id: String,
+    pub(super) install_source: Option<local_app_contract::InstallSource>,
     pub(super) application_type: String,
     pub(super) name: String,
     pub(super) description: String,
@@ -34,14 +35,6 @@ pub(super) struct MarketConnectorApp {
     pub(super) minimum_host_version: Option<String>,
     pub(super) required_host_capabilities: Vec<String>,
     pub(super) missing_host_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct RawLocalAppMarketResponse<T> {
-    pub(super) error_code: Option<String>,
-    pub(super) value: Option<String>,
-    pub(super) data: Option<T>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,54 +130,76 @@ pub(super) async fn list_market_connector_apps(
 }
 
 pub(super) async fn fetch_market_connector_apps(
-    _config_path: &Path,
+    config_path: &Path,
 ) -> Result<Vec<MarketConnectorApp>, String> {
-    let platform = normalized_platform();
-    let arch = std::env::consts::ARCH;
-    let mut url = market_distribution_base_url()?;
-    url.path_segments_mut()
-        .map_err(|_| "市场分发地址不能作为路径基址".to_string())?
-        .pop_if_empty()
-        .push("apps");
-    url.query_pairs_mut()
-        .append_pair("platform", platform)
-        .append_pair("arch", arch)
-        .append_pair("hostVersion", env!("CARGO_PKG_VERSION"))
-        .append_pair("hostCapabilities", &LOCAL_APP_HOST_CAPABILITIES.join(","));
-    let response = Client::new()
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("请求 localApp 市场失败: {err}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("请求 localApp 市场失败: HTTP {status} {body}"));
-    }
-    let payload: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|err| format!("解析 localApp 市场响应失败: {err}"))?;
-    let raw_apps: Vec<RawMarketConnectorApp> = if payload.get("data").is_some() {
-        let wrapped: RawLocalAppMarketResponse<Vec<RawMarketConnectorApp>> =
-            serde_json::from_value(payload)
-                .map_err(|err| format!("解析 lowcode localApp 市场响应失败: {err}"))?;
-        if wrapped
-            .error_code
-            .as_deref()
-            .is_some_and(|code| code != "0")
-        {
-            return Err(format!(
-                "lowcode localApp 市场返回失败: {}",
-                wrapped.value.unwrap_or_else(|| "未知错误".to_string())
-            ));
-        }
-        wrapped.data.unwrap_or_default()
-    } else {
-        serde_json::from_value(payload)
-            .map_err(|err| format!("解析 local-app-market 响应失败: {err}"))?
+    let consumer = market_consumer::market_consumer(config_path).await?;
+    consumer
+        .listings()
+        .await?
+        .into_iter()
+        .map(market_listing_presentation)
+        .collect()
+}
+
+pub(super) fn market_listing_presentation(
+    listing: local_app_contract::MarketListing,
+) -> Result<MarketConnectorApp, String> {
+    listing
+        .frozen_version
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
+        .map_err(|error| error.to_string())?;
+    let field = |name: &str| {
+        manifest
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     };
-    Ok(raw_apps.into_iter().map(MarketConnectorApp::from).collect())
+    let source = listing.frozen_version.source.clone();
+    let selection = local_app_contract::InstallSource::Market {
+        market_key: listing.market_key,
+        listing_id: listing.listing_id,
+        version: source.version.clone(),
+        source: source.clone(),
+    };
+    let mut presentation = MarketConnectorApp::from(RawMarketConnectorApp {
+        app_id: source.application.app_id.as_str().to_owned(),
+        name: field("name"),
+        description: field("description"),
+        risk: field("risk"),
+        risk_level: Some(field("riskLevel")),
+        capability: field("capability"),
+        latest_version: RawMarketConnectorVersion {
+            version: source.version.to_string(),
+            source: String::new(),
+            source_type: None,
+            repo: None,
+            revision: Some(listing.frozen_version.content.source_revision.clone()),
+            checksum: None,
+            published_at: None,
+            manifest,
+            compatibility: None,
+        },
+    });
+    // Manifest URLs are authoring metadata, never a consumer download authority.
+    presentation.source.clear();
+    presentation.checksum = None;
+    presentation.archive_path = None;
+    presentation.install_source = Some(selection);
+    if bridge_agent::market_distribution::select_artifact(
+        &listing.frozen_version,
+        normalized_platform(),
+        std::env::consts::ARCH,
+    )
+    .map_err(|error| error.to_string())?
+    .is_none()
+    {
+        presentation.compatible = false;
+        presentation.compatibility_message = Some("该版本未提供当前平台的安装包".into());
+    }
+    Ok(presentation)
 }
 
 pub(super) fn registered_install_url(
@@ -219,7 +234,7 @@ pub(super) async fn fetch_registered_install_source(
         let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
         registered_install_url(&config.platform.base_url, identity)?
     } else {
-        public_market_version_url(market_distribution_base_url()?, identity)?
+        return Err("公开市场安装必须使用完整 installSource".into());
     };
     url.query_pairs_mut()
         .append_pair("platform", platform)
@@ -423,6 +438,7 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
         let permissions = market_manifest_permissions(&value.latest_version.manifest);
         Self {
             app_id: value.app_id,
+            install_source: None,
             application_type,
             name: value.name,
             description: value.description,

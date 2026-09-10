@@ -198,7 +198,7 @@ fn managed_bootstrap_never_downgrades_and_supports_rollback() {
     let initial = bootstrap_bundled(Some(&bundled)).unwrap();
     assert_eq!(initial.installed_version.as_deref(), Some("0.1.0"));
 
-    import_binary(&newer, "0.2.0", "test-update", None).unwrap();
+    import_binary(&newer, "0.2.0", "test-update", None, None).unwrap();
     let after_restart = bootstrap_bundled(Some(&bundled)).unwrap();
     assert_eq!(after_restart.installed_version.as_deref(), Some("0.2.0"));
     assert_eq!(after_restart.previous_version.as_deref(), Some("0.1.0"));
@@ -343,4 +343,31 @@ fn write_fake_cli(path: &Path, version: &str) {
     )
     .unwrap();
     set_executable(path).unwrap();
+}
+
+#[test]
+fn bundled_market_source_survives_upgrade_and_rollback() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    std::env::set_var("BAIJIMU_MANAGED_TOOL_ROOT", temp.path().join("managed"));
+    std::env::set_var("BAIJIMU_MANAGED_BIN_DIR", temp.path().join("bin"));
+    let bundled = temp.path().join("bundled-cli");
+    let source_path = temp.path().join("bundled-cli.market.json");
+    let source = |version: &str| serde_json::json!({
+        "kind":"market", "marketKey":"test-market", "listingId":"00000000-0000-0000-0000-000000000001",
+        "version":version, "source":{"application":{"environmentKey":"source-a","appId":TOOL_ID},"version":version}
+    });
+    write_fake_cli(&bundled, "0.1.0");
+    fs::write(&source_path, serde_json::to_vec(&source("0.1.0")).unwrap()).unwrap();
+    let first = bootstrap_bundled(Some(&bundled)).unwrap();
+    assert_eq!(serde_json::to_value(first.install_source).unwrap(), source("0.1.0"));
+    write_fake_cli(&bundled, "0.2.0");
+    fs::write(&source_path, serde_json::to_vec(&source("0.2.0")).unwrap()).unwrap();
+    let second = bootstrap_bundled(Some(&bundled)).unwrap();
+    assert_eq!(serde_json::to_value(second.install_source).unwrap(), source("0.2.0"));
+    let previous = rollback().unwrap();
+    assert_eq!(previous.installed_version.as_deref(), Some("0.1.0"));
+    assert_eq!(serde_json::to_value(previous.install_source).unwrap(), source("0.1.0"));
+    std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
+    std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
 }

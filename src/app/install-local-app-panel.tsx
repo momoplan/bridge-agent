@@ -1,3 +1,4 @@
+import { marketSelectionKey } from "./market-identity";
 import type { Dispatch, SetStateAction } from "react";
 import { ArrowLeft, AlertTriangle, CheckCircle2, Package, RefreshCw, Search, ShieldCheck, Wrench, X } from "lucide-react";
 import { resolveMarketHostUpgradeAction } from "../local-app-host-upgrade";
@@ -39,7 +40,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
     if (!installPanelOpen) {
       return null;
     }
-    const selectedMarket = installableMarketConnectors.find((app) => app.appId === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => marketSelectionKey(app) === selectedMarketAppId);
     const selectedMarketIncompatible = selectedMarket?.compatible === false;
     const marketPrimaryAction = selectedMarket
       ? resolveMarketHostUpgradeAction(
@@ -153,10 +154,10 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                   ) : null}
                   {!marketLoadError && visibleMarketConnectors.map((app) => (
                     <button
-                      className={`market-app-card ${selectedMarketAppId === app.appId ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
-                      key={app.appId}
-                      onClick={() => setSelectedMarketAppId(app.appId)}
-                      aria-pressed={selectedMarketAppId === app.appId}
+                      className={`market-app-card ${selectedMarketAppId === marketSelectionKey(app) ? "active" : ""} ${app.compatible ? "" : "incompatible"}`}
+                      key={marketSelectionKey(app)}
+                      onClick={() => setSelectedMarketAppId(marketSelectionKey(app))}
+                      aria-pressed={selectedMarketAppId === marketSelectionKey(app)}
                     >
                       <ApplicationIcon
                         className="market-app-icon"
@@ -170,6 +171,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                         </span>
                         <span>{app.description}</span>
                         <small>{app.capability} · {app.version}</small>
+                        <small>来源：{app.installSource?.source.application.environmentKey} / {app.appId}</small>
                       </span>
                     </button>
                   ))}

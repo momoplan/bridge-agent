@@ -339,6 +339,8 @@ pub struct ConnectorRemoteCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorInstallRecord {
+    #[serde(default)]
+    pub install_source: Option<local_app_contract::InstallSource>,
     pub manifest: ConnectorManifest,
     pub package_path: String,
     pub source_path: String,
@@ -356,12 +358,37 @@ pub struct ConnectorInstallRecord {
 
 #[derive(Debug, Clone)]
 pub struct ConnectorInstallProvenance {
+    install_source: Option<local_app_contract::InstallSource>,
     source_reference: Option<String>,
     review_status: String,
-    source_checksum: String,
+    source_checksum: Option<String>,
 }
 
 impl ConnectorInstallProvenance {
+    pub fn frozen_market(selection: local_app_contract::InstallSource, listing: &local_app_contract::MarketListing) -> Result<Self> {
+        crate::market_distribution::resolve_exact(&selection, listing)?;
+        Ok(Self {
+            install_source: Some(selection),
+            source_reference: None,
+            review_status: "PUBLISHED".into(),
+            source_checksum: None,
+        })
+    }
+
+    pub fn validate_manifest(&self, manifest: &ConnectorManifest) -> Result<()> {
+        if let Some(selection) = &self.install_source {
+            let source = match selection {
+                local_app_contract::InstallSource::Market { source, .. }
+                | local_app_contract::InstallSource::Environment { source } => source,
+            };
+            if source.application.app_id.as_str() != manifest.app_id
+                || source.version.to_string() != manifest.version {
+                bail!("installed manifest differs from the selected frozen source version");
+            }
+        }
+        Ok(())
+    }
+
     pub fn registered(
         source_reference: &str,
         review_status: &str,
@@ -373,9 +400,10 @@ impl ConnectorInstallProvenance {
             .context("registered connector review status is required")?;
         let source_checksum = normalize_sha256_checksum(source_checksum)?;
         Ok(Self {
+            install_source: None,
             source_reference: Some(source_reference),
             review_status,
-            source_checksum,
+            source_checksum: Some(source_checksum),
         })
     }
 }
@@ -394,6 +422,7 @@ pub struct ConnectorInstallResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorSummary {
+    pub install_source: Option<local_app_contract::InstallSource>,
     pub app_id: String,
     pub name: String,
     pub version: String,

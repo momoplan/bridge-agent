@@ -281,7 +281,8 @@ pub(super) fn write_shared_cli_auth_at(
     let local_client_token = validate_shared_cli_auth_payload(authorized)?;
     let mut document = load_shared_cli_auth_document(path)?;
     configure_shared_cli_environment(&mut document, config, authorized);
-    let credentials = merged_shared_cli_credentials(&document, authorized, local_client_token);
+    let credentials =
+        merged_shared_cli_credentials(&document, config, authorized, local_client_token);
     document["schemaVersion"] = serde_json::json!(2);
     document["credentials"] = Value::Array(credentials);
     if let Some(object) = document.as_object_mut() {
@@ -330,7 +331,21 @@ fn configure_shared_cli_environment(
     config: &AgentConfig,
     authorized: &AuthorizedPayload,
 ) {
-    document["currentEnvironment"] = serde_json::json!("prod");
+    let base_url = config.platform.base_url.trim_end_matches('/');
+    let alias = document
+        .get("environments")
+        .and_then(Value::as_object)
+        .and_then(|environments| {
+            environments.iter().find(|(_, environment)| {
+                environment
+                    .get("baseUrl")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.trim_end_matches('/') == base_url)
+            })
+        })
+        .map(|(alias, _)| alias.clone())
+        .unwrap_or_else(|| format!("device-{}", authorized.device_id));
+    document["currentEnvironment"] = serde_json::json!(alias);
     document["currentWorkspaceId"] = serde_json::json!(authorized.workspace_id);
     if !document
         .get("environments")
@@ -339,13 +354,14 @@ fn configure_shared_cli_environment(
     {
         document["environments"] = serde_json::json!({});
     }
-    document["environments"]["prod"] = serde_json::json!({
+    document["environments"][&alias] = serde_json::json!({
         "baseUrl": config.platform.base_url.trim_end_matches('/'),
     });
 }
 
 fn merged_shared_cli_credentials(
     document: &Value,
+    config: &AgentConfig,
     authorized: &AuthorizedPayload,
     local_client_token: &str,
 ) -> Vec<Value> {
@@ -384,6 +400,7 @@ fn merged_shared_cli_credentials(
                 != Some(authorized.device_id.as_str())
     });
     credentials.push(serde_json::json!({
+        "baseUrl": config.platform.base_url.trim_end_matches('/'),
         "credentialId": authorized.local_client_key_id,
         "userId": authorized.local_client_user_id,
         "workspaceIds": [authorized.workspace_id],

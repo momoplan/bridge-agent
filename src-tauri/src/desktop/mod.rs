@@ -3,13 +3,13 @@ use crate::{codex_skill, local_app, macos_installation, managed_tool, managed_to
 mod app;
 mod auth;
 mod constants;
-mod distribution;
 mod local_app_archive;
 mod local_app_commands;
 mod local_app_http;
 mod local_app_install;
 mod local_app_management;
 mod local_app_market;
+mod market_consumer;
 #[cfg(debug_assertions)]
 mod native_smoke;
 mod recovery;
@@ -23,7 +23,6 @@ mod window;
 pub(crate) use app::run;
 use auth::*;
 use constants::*;
-use distribution::*;
 use local_app_archive::*;
 use local_app_commands::*;
 use local_app_http::*;

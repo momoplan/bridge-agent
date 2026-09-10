@@ -1,9 +1,9 @@
+use baijimu_cmodel_core::CModelResponse;
 use bridge_agent::market_distribution::{resolve_exact, select_upgrade, MarketDistribution};
 use local_app_contract::{
     Artifact, FrozenVersion, InstallSource, ManifestDocument, MarketListing, MarketPage, SourceApp,
     SourceVersion, VersionContent,
 };
-use market_cmodel_core::CModelResponse;
 use uuid::Uuid;
 
 fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
@@ -47,7 +47,8 @@ fn selection(item: &MarketListing) -> InstallSource {
 fn market() -> MarketDistribution {
     MarketDistribution::new(
         "public-market".to_owned().try_into().unwrap(),
-        "https://distribution.example.test/api/local-app-distribution/",
+        "https://consumer.example.test/api/local-app-market/",
+        42,
     )
     .unwrap()
 }
@@ -134,14 +135,15 @@ fn inconsistent_requested_versions_are_rejected() {
 }
 
 #[test]
-fn addresses_are_owned_by_market_and_do_not_use_manifest_download_sources() {
+fn addresses_use_consumer_service_and_do_not_use_manifest_download_sources() {
     let item = listing("environment-a", "1.0.0+build.1", 1);
     let selected = selection(&item);
     let endpoint = market()
         .artifact_url(&selected, &item, Uuid::from_u128(10))
         .unwrap();
-    assert_eq!(endpoint.host_str(), Some("distribution.example.test"));
-    assert_eq!(endpoint.path(), "/api/local-app-distribution/listings/00000000-0000-0000-0000-000000000001/versions/1.0.0+build.1/artifacts/00000000-0000-0000-0000-00000000000a");
+    assert_eq!(endpoint.host_str(), Some("consumer.example.test"));
+    assert_eq!(endpoint.query(), Some("workspaceId=42"));
+    assert_eq!(endpoint.path(), "/api/local-app-market/listings/00000000-0000-0000-0000-000000000001/versions/1.0.0+build.1/artifacts/00000000-0000-0000-0000-00000000000a");
     assert!(market()
         .artifact_url(&selected, &item, Uuid::from_u128(11))
         .is_err());
@@ -161,7 +163,7 @@ fn market_base_rejects_credential_and_ambiguous_targets() {
         "/relative",
     ] {
         assert!(
-            MarketDistribution::new("market".to_owned().try_into().unwrap(), url).is_err(),
+            MarketDistribution::new("market".to_owned().try_into().unwrap(), url, 42).is_err(),
             "{url}"
         );
     }
@@ -179,7 +181,7 @@ fn page_preserves_same_app_ids_across_different_sources() {
     market().validate_page(None, &page).unwrap();
     assert_eq!(
         market().page_url(page.next_cursor).unwrap().query(),
-        Some("after=00000000-0000-0000-0000-000000000002")
+        Some("workspaceId=42&after=00000000-0000-0000-0000-000000000002")
     );
     market()
         .validate_page(
@@ -283,7 +285,7 @@ async fn http_cmodel_roundtrip_keeps_manifest_bytes_and_owner_errors() {
     let envelope: CModelResponse<MarketListing> = local_app_contract::decode(&bytes).unwrap();
     assert_eq!(envelope.into_data().unwrap(), expected);
     let failure: CModelResponse<MarketListing> = CModelResponse::failure(
-        market_cmodel_core::ErrorCode::parse("LOCAL_APP_MARKET_NOT_FOUND").unwrap(),
+        baijimu_cmodel_core::ErrorCode::parse("LOCAL_APP_MARKET_NOT_FOUND").unwrap(),
     )
     .unwrap();
     let wire = serde_json::to_vec(&failure).unwrap();
@@ -305,4 +307,34 @@ fn connector_golden_and_managed_tool_use_the_same_source_contract() {
     let envelope: CModelResponse<MarketListing> = local_app_contract::decode(&wire).unwrap();
     let decoded = envelope.into_data().unwrap();
     assert_eq!(resolve_exact(&requested, &decoded).unwrap(), &item);
+}
+
+#[test]
+fn universal_package_is_supported_without_crossing_platforms() {
+    use bridge_agent::market_distribution::select_artifact;
+    let mut item = listing("environment-a", "1.0.0", 1);
+    let universal = &mut item.frozen_version.content.artifacts[0];
+    universal.platform = "macos".into();
+    universal.architecture = "universal".into();
+    assert_eq!(
+        select_artifact(&item.frozen_version, "macos", "aarch64")
+            .unwrap()
+            .unwrap()
+            .architecture,
+        "universal"
+    );
+    assert!(select_artifact(&item.frozen_version, "windows", "x86_64")
+        .unwrap()
+        .is_none());
+    let mut exact = item.frozen_version.content.artifacts[0].clone();
+    exact.architecture = "aarch64".into();
+    exact.artifact_id = Uuid::from_u128(11);
+    item.frozen_version.content.artifacts.push(exact);
+    assert_eq!(
+        select_artifact(&item.frozen_version, "macos", "aarch64")
+            .unwrap()
+            .unwrap()
+            .artifact_id,
+        Uuid::from_u128(11)
+    );
 }

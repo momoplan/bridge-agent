@@ -61,7 +61,7 @@ export function useAppController() {
   } = appState;
 
   const installableMarketConnectors = useMemo(
-    () => marketConnectors.filter((app) => app.applicationType !== "managed_tool"),
+    () => marketConnectors,
     [marketConnectors]
   );
 

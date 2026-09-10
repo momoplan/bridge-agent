@@ -1,28 +1,34 @@
-//! Stateless consumer preparation for the market-owned distribution contract.
-//!
-//! Not connected to desktop commands, installation records, or existing routes.
-//! Installation activation requires an explicit migration of proven source identity.
+//! Stateless market reader routed through the consumer environment local-app service.
+//! Full source identity is preserved independently of the consumer environment.
 use local_app_contract::{ContractError, InstallSource, MarketKey, MarketListing, MarketPage};
 use std::collections::HashSet;
 use url::Url;
 use uuid::Uuid;
 
 mod identity;
-pub use identity::{resolve_exact, select_upgrade};
+mod reader;
+pub use identity::{resolve_exact, select_artifact, select_upgrade};
+pub use reader::MarketReader;
 
-/// The caller supplies an authoritative configured market key and API base URL.
+/// The caller supplies the market key and consumer environment service API base URL.
 /// A source environment's identity must never be inferred from this address.
 #[derive(Debug, Clone)]
 pub struct MarketDistribution {
     market_key: MarketKey,
     base_url: Url,
+    workspace_id: u64,
 }
 
 impl MarketDistribution {
-    pub fn new(market_key: MarketKey, base_url: &str) -> Result<Self, ContractError> {
+    pub fn new(
+        market_key: MarketKey,
+        base_url: &str,
+        workspace_id: u64,
+    ) -> Result<Self, ContractError> {
         let url = Url::parse(base_url)
             .map_err(|_| ContractError::new("market.baseUrl", "invalid URL"))?;
-        if base_url.trim() != base_url
+        if workspace_id == 0
+            || base_url.trim() != base_url
             || url.scheme() != "https"
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -38,6 +44,7 @@ impl MarketDistribution {
         Ok(Self {
             market_key,
             base_url: url,
+            workspace_id,
         })
     }
 
@@ -48,6 +55,8 @@ impl MarketDistribution {
             .expect("validated HTTPS base")
             .pop_if_empty()
             .extend(segments);
+        url.query_pairs_mut()
+            .append_pair("workspaceId", &self.workspace_id.to_string());
         url
     }
 
@@ -66,7 +75,7 @@ impl MarketDistribution {
         Ok(self.path(&["listings", &listing.to_string(), "versions", &version]))
     }
 
-    /// Download addresses are constructed from the configured market authority,
+    /// Download addresses are constructed from the configured consumer service,
     /// never from manifest source URLs or the author's environment.
     pub fn artifact_url(
         &self,

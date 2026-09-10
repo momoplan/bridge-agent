@@ -293,43 +293,6 @@ pub(super) fn validate_market_host_compatibility(
         .unwrap_or_else(|| "当前百积木客户端不支持该应用版本，请先升级客户端".to_string()))
 }
 
-pub(super) fn validate_market_app_identity(
-    market_app: &MarketConnectorApp,
-    app_id: &str,
-) -> Result<(), String> {
-    if market_app.application_type != "connector" {
-        return Err("该市场条目不是 Connector 应用".to_string());
-    }
-    if market_app.app_id.trim() != app_id.trim() {
-        return Err(format!(
-            "市场应用 ID 与安装包不匹配：市场 `{}`，安装包 `{}`",
-            market_app.app_id, app_id
-        ));
-    }
-    if !market_app.source.trim().starts_with("https://") {
-        return Err("市场 Connector 安装源必须使用 HTTPS".to_string());
-    }
-    Ok(())
-}
-
-pub(super) fn required_market_checksum(market_app: &MarketConnectorApp) -> Result<String, String> {
-    let checksum = market_app
-        .checksum
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "市场本地应用发布包必须提供 SHA-256 checksum".to_string())?;
-    let digest = checksum.strip_prefix("sha256:").unwrap_or(checksum);
-    if digest.len() != 64
-        || !digest
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err("市场本地应用 SHA-256 checksum 格式无效".to_string());
-    }
-    Ok(format!("sha256:{}", digest.to_ascii_lowercase()))
-}
-
 pub(super) fn select_market_tool_artifact(manifest: &Value) -> Option<Value> {
     let platform = normalized_platform();
     let arch = std::env::consts::ARCH;
@@ -405,13 +368,4 @@ pub(super) fn is_git_connector_source(source: &str) -> bool {
 pub(super) fn is_http_connector_source(source: &str) -> bool {
     let value = source.trim();
     value.starts_with("https://") || value.starts_with("http://")
-}
-
-pub(super) fn connector_version_is_newer(latest: &str, current: &str) -> bool {
-    let latest = latest.trim().trim_start_matches('v');
-    let current = current.trim().trim_start_matches('v');
-    match (Version::parse(latest), Version::parse(current)) {
-        (Ok(latest), Ok(current)) => latest > current,
-        _ => latest != current,
-    }
 }

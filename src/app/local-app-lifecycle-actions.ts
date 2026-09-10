@@ -49,8 +49,8 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       );
       return;
     }
-    if (!marketApp.source || !marketApp.checksum) {
-      setError(`工具 ${app.name} 的市场版本缺少下载地址或 SHA-256 校验值`);
+    if (!marketApp.installSource) {
+      setError(`工具 ${app.name} 的市场版本缺少来源身份`);
       return;
     }
     try {
@@ -58,10 +58,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setMessage("");
       setError("");
       const status = await invoke<ManagedToolStatus>("install_baijimu_cli_update", {
-        version: marketApp.version,
-        source: marketApp.source,
-        checksum: marketApp.checksum,
-        archivePath: marketApp.archivePath ?? null
+        installSource: marketApp.installSource
       });
       setBaijimuCli(status);
       setPendingUpgradeAppId(null);
@@ -167,6 +164,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setError("");
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
+        installSource: marketApp.installSource,
         operation: "upgrade",
         replace: true,
         appId: app.connector.appId,
