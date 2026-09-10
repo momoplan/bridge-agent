@@ -1,3 +1,4 @@
+import { marketSelectionKey } from "./market-identity";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
@@ -199,10 +200,10 @@ useEffect(() => {
 
 useEffect(() => {
     setSelectedMarketAppId((current) => {
-      if (current && visibleMarketConnectors.some((app) => app.appId === current)) {
+      if (current && visibleMarketConnectors.some((app) => marketSelectionKey(app) === current)) {
         return current;
       }
-      return visibleMarketConnectors[0]?.appId ?? "";
+      return visibleMarketConnectors[0] ? marketSelectionKey(visibleMarketConnectors[0]) : "";
     });
   }, [visibleMarketConnectors]);
 

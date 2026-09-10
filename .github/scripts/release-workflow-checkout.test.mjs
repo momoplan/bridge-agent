@@ -101,8 +101,8 @@ describe("release workflow repository script availability", () => {
 
     expect(bundledCliAppId).toBe("baijimu-cli");
     expect(body).toContain("tools/baijimu-cli/APP_ID");
-    expect(body).toContain("select(.appId == $app_id)");
-    expect(body).toContain("select(.latestVersion.manifest.appId == $app_id)");
+    expect(body).toContain("verify-consumer-market.mjs");
+    expect(body).toContain("BAIJIMU_CLI_MARKET_SOURCE");
     expect(body).not.toContain(".latestVersion.repo ==");
   });
 

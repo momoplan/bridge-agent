@@ -68,14 +68,59 @@ pub(super) async fn baijimu_cli_status() -> Result<managed_tool::ManagedToolStat
 
 #[tauri::command]
 pub(super) async fn install_baijimu_cli_update(
-    version: String,
-    source: String,
-    checksum: String,
-    archive_path: Option<String>,
+    state: tauri::State<'_, DesktopState>,
+    install_source: local_app_contract::InstallSource,
 ) -> Result<managed_tool::ManagedToolStatus, String> {
-    managed_tool::install_update(&source, &version, &checksum, archive_path.as_deref())
+    let consumer = market_consumer::market_consumer(&state.config_path).await?;
+    let listing = consumer
+        .reader
+        .version(&consumer.credential, &install_source)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|error| error.to_string())?;
+    validate_market_host_compatibility(&market_listing_presentation(listing.clone())?)?;
+    let artifact = bridge_agent::market_distribution::select_artifact(
+        &listing.frozen_version,
+        normalized_platform(),
+        std::env::consts::ARCH,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("当前平台没有可用的工具制品")?;
+    if artifact.size_bytes > 128 * 1024 * 1024 {
+        return Err("工具制品超过 128 MiB".into());
+    }
+    let mut response = consumer
+        .reader
+        .artifact(&consumer.credential, &install_source, artifact.artifact_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "读取工具制品失败")? {
+        if bytes.len() as u64 + chunk.len() as u64 > artifact.size_bytes {
+            return Err("工具制品大小不符".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
+        .map_err(|error| error.to_string())?;
+    let manifest_artifact = manifest
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .and_then(|artifacts| {
+            artifacts.iter().find(|entry| {
+                entry.get("platform").and_then(Value::as_str) == Some(artifact.platform.as_str())
+                    && entry
+                        .get("arch")
+                        .and_then(Value::as_str)
+                        .unwrap_or("universal")
+                        == artifact.architecture
+            })
+        });
+    let archive_path = manifest_artifact
+        .as_ref()
+        .and_then(|value| value.get("archivePath"))
+        .and_then(Value::as_str);
+    managed_tool::install_market_package(&bytes, artifact, install_source, &listing, archive_path)
+        .map_err(|error| error.to_string())?;
     codex_skill::install_bundled().map_err(|err| err.to_string())?;
     let bundled = bundled_baijimu_cli_path();
     managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())

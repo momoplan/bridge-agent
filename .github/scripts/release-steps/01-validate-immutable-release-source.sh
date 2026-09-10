@@ -67,39 +67,6 @@ if [ -z "$cli_app_id" ]; then
   exit 1
 fi
 
-if [ "$GITHUB_EVENT_NAME" = push ]; then
-  market_api_base_url="$(node --input-type=module -e '
-    import fs from "node:fs";
-    const config = JSON.parse(fs.readFileSync("src-tauri/distribution-config.json", "utf8"));
-    const url = new URL(config.marketApiBaseUrl);
-    if (config.schemaVersion !== "1.0.0" || url.protocol !== "https:" ||
-        url.username || url.password || url.search || url.hash ||
-        config.marketApiBaseUrl.trim() !== config.marketApiBaseUrl) {
-      throw new Error("Invalid client market distribution configuration");
-    }
-    process.stdout.write(url.href.replace(/\/$/, ""));
-  ')"
-  for target in \
-    "macos&arch=aarch64" \
-    "windows&arch=x86_64" \
-    "linux&arch=x86_64"; do
-    market_cli_version="$(
-      curl -fsSL --retry 3 --retry-delay 2 \
-        "${market_api_base_url}/apps?platform=${target}" \
-        | jq -er --arg app_id "$cli_app_id" '
-          .[]
-          | select(.appId == $app_id)
-          | select(.latestVersion.manifest.applicationType == "managed_tool")
-          | select(.latestVersion.manifest.appId == $app_id)
-          | select(.latestVersion.revision == ("v" + .latestVersion.version))
-          | select(all(.latestVersion.manifest.artifacts[];
-              .source | startswith("https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/")))
-          | .latestVersion.version
-        '
-    )"
-    if [ "$market_cli_version" != "$cli_version" ]; then
-      echo "Bundled Baijimu CLI $cli_version is not the latest market version $market_cli_version for $target" >&2
-      exit 1
-    fi
-  done
+if [ "$REPAIR_ASSETS_ONLY" != "true" ]; then
+  node .github/scripts/verify-consumer-market.mjs
 fi

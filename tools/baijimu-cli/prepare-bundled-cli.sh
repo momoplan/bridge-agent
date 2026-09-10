@@ -92,6 +92,7 @@ if [ "${BAIJIMU_CLI_USE_RELEASE_ASSET:-false}" = "true" ]; then
     exit 1
   }
   cp "${released_binary}" "${resource_dir}/${binary_name}"
+  node "${repo_root}/.github/scripts/copy-bundled-market-source.mjs" "${repo_root}" "${resource_dir}/${binary_name}"
   chmod 755 "${resource_dir}/${binary_name}" 2>/dev/null || true
   "${resource_dir}/${binary_name}" --version --json
   echo "Prepared pinned Baijimu CLI OSS asset ${asset_name} (${actual_sha256})"

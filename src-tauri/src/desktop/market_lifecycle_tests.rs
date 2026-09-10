@@ -114,42 +114,6 @@ fn normalized_platform_uses_the_rust_target_os_contract() {
     assert_eq!(normalized_platform(), std::env::consts::OS);
 }
 
-fn market_connector(checksum: Option<&str>) -> MarketConnectorApp {
-    MarketConnectorApp {
-        app_id: "com.baijimu.connector.test".to_string(),
-        application_type: "connector".to_string(),
-        name: "Test Connector".to_string(),
-        description: String::new(),
-        source: "https://downloads.example.test/connector.zip".to_string(),
-        repo: "https://github.com/example/connector".to_string(),
-        revision: "0123456789abcdef".to_string(),
-        checksum: checksum.map(str::to_string),
-        archive_path: None,
-        risk: String::new(),
-        risk_level: "medium".to_string(),
-        capability: String::new(),
-        version: "1.0.0".to_string(),
-        published_at: None,
-        icon_data_url: None,
-        release_notes: Vec::new(),
-        configuration_declaration: "undeclared".to_string(),
-        interface_declaration: "undeclared".to_string(),
-        database_declaration: "undeclared".to_string(),
-        config_schema: None,
-        database: None,
-        methods: Vec::new(),
-        events: Vec::new(),
-        method_names: Vec::new(),
-        event_names: Vec::new(),
-        permissions: Vec::new(),
-        compatible: true,
-        compatibility_message: None,
-        minimum_host_version: None,
-        required_host_capabilities: Vec::new(),
-        missing_host_capabilities: Vec::new(),
-    }
-}
-
 #[test]
 fn local_app_install_tasks_track_progress_and_reject_duplicate_active_installs() {
     let manager = LocalAppInstallTaskManager::default();
@@ -272,21 +236,27 @@ fn registered_desktop_commands_exactly_match_composition_root_acl() {
 }
 
 #[test]
-fn market_connector_trust_requires_checksum_and_matching_identity() {
-    let valid = market_connector(Some(&"a".repeat(64)));
-    assert_eq!(
-        required_market_checksum(&valid).unwrap(),
-        format!("sha256:{}", "a".repeat(64))
-    );
-    assert!(validate_market_app_identity(&valid, "com.baijimu.connector.test").is_ok());
-
-    assert!(required_market_checksum(&market_connector(None)).is_err());
-    assert!(required_market_checksum(&market_connector(Some("invalid"))).is_err());
-    assert!(validate_market_app_identity(&valid, "com.example.other").is_err());
-
-    let mut insecure = valid;
-    insecure.source = "http://downloads.example.test/connector.zip".to_string();
-    assert!(validate_market_app_identity(&insecure, "com.baijimu.connector.test").is_err());
+fn market_presentation_preserves_source_without_using_manifest_download_urls() {
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/market-managed-tool-3.0.0.json"
+    ))
+    .unwrap();
+    let listing: local_app_contract::MarketListing = serde_json::from_value(serde_json::json!({
+        "marketKey":"test-market", "listingId":"00000000-0000-0000-0000-000000000001",
+        "frozenVersion": {"contractVersion":"1.0.0", "source": {
+            "application":{"environmentKey":"author-a", "appId":"test-app"}, "version":"1.0.0"
+        }, "content":{"applicationType":"managed_tool", "sourceRevision":"commit-1", "manifest":manifest,
+            "artifacts":[{"artifactId":"00000000-0000-0000-0000-000000000002", "platform":"linux", "architecture":"x86_64", "fileName":"tool.zip", "sizeBytes":18}]
+        }}
+    })).unwrap();
+    let app = market_listing_presentation(listing).unwrap();
+    assert!(app.source.is_empty());
+    assert!(app.checksum.is_none());
+    let local_app_contract::InstallSource::Market { source, .. } = app.install_source.unwrap()
+    else {
+        panic!("market source missing")
+    };
+    assert_eq!(source.application.environment_key.as_str(), "author-a");
 }
 
 #[test]

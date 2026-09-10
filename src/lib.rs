@@ -3,6 +3,7 @@ pub mod config;
 pub mod connector;
 mod event_server;
 pub mod logging;
+pub mod market_distribution;
 mod power;
 pub mod process_environment;
 mod process_identity;

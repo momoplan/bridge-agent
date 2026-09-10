@@ -1,3 +1,4 @@
+import { sameMarketApplication } from "./market-identity";
 import { compareVersions } from "./formatters";
 import type { LocalAppItem, LocalAppUpdateStatus, MarketConnector } from "./types";
 
@@ -7,13 +8,13 @@ export function createLocalAppUpdateSelectors(marketConnectors: readonly MarketC
     if (app.kind !== "connector" || !app.connector || app.connector.reviewStatus !== "PUBLISHED") {
       return undefined;
     }
-    return marketConnectors.find((item) => item.appId === app.connector?.appId);
+    return marketConnectors.find((item) => sameMarketApplication(app.connector?.installSource, item.installSource));
   }
 
   function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
     if (app.kind !== "managed_tool" || !app.managedTool) return undefined;
     return marketConnectors.find((item) =>
-      item.applicationType === "managed_tool" && item.appId === app.managedTool?.id);
+      item.applicationType === "managed_tool" && sameMarketApplication(app.managedTool?.installSource, item.installSource));
   }
 
   function marketAppForLocalApp(app: LocalAppItem): MarketConnector | undefined {

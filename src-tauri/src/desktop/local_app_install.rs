@@ -22,41 +22,40 @@ pub(super) async fn check_connector_app_update(
     if installed.review_status != "PUBLISHED" {
         return Err("该应用版本未在公开市场发布，请使用原注册来源同步".to_string());
     }
-    let market_app = fetch_market_connector_apps(&state.config_path)
+    let selected = installed
+        .install_source
+        .as_ref()
+        .ok_or("该安装记录缺少可验证的来源身份，不能自动匹配公开市场")?;
+    let consumer = market_consumer::market_consumer(&state.config_path).await?;
+    let (market_key, listing_id, source) = match selected {
+        local_app_contract::InstallSource::Market {
+            market_key,
+            listing_id,
+            source,
+            ..
+        } => (market_key, listing_id, source),
+        _ => return Err("该应用属于环境安装来源".into()),
+    };
+    let listing = consumer
+        .listings()
         .await?
         .into_iter()
-        .find(|app| app.app_id == app_id)
-        .ok_or_else(|| "市场中找不到该应用".to_string())?;
-    validate_market_host_compatibility(&market_app)?;
-    validate_market_app_identity(&market_app, app_id)?;
-    let checksum = required_market_checksum(&market_app)?;
-    let resolved_source =
-        resolve_connector_source(&market_app.source, false, Some(&checksum), None).await?;
-    let latest_manifest =
-        load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
-    if latest_manifest.app_id != installed.manifest.app_id {
-        return Err(format!(
-            "更新来源应用 ID 不匹配：当前 `{}`，来源 `{}`",
-            installed.manifest.app_id, latest_manifest.app_id
-        ));
-    }
-    if latest_manifest.version != market_app.version {
-        return Err(format!(
-            "市场版本与安装包清单不匹配：市场 `{}`，安装包 `{}`",
-            market_app.version, latest_manifest.version
-        ));
-    }
-
+        .find(|listing| {
+            &listing.market_key == market_key
+                && &listing.listing_id == listing_id
+                && listing.frozen_version.source.application == source.application
+        })
+        .ok_or("市场中找不到该来源的应用")?;
+    let upgrade = bridge_agent::market_distribution::select_upgrade(Some(selected), &listing)
+        .map_err(|error| error.to_string())?;
+    let latest_version = listing.frozen_version.source.version.to_string();
     Ok(ConnectorAppUpdateStatus {
         app_id: installed.manifest.app_id,
-        name: latest_manifest.name,
-        current_version: installed.manifest.version.clone(),
-        latest_version: latest_manifest.version.clone(),
-        update_available: connector_version_is_newer(
-            &latest_manifest.version,
-            &installed.manifest.version,
-        ),
-        source: market_app.source,
+        name: installed.manifest.name,
+        current_version: installed.manifest.version,
+        latest_version,
+        update_available: upgrade.is_some(),
+        source: String::new(),
     })
 }
 
@@ -73,6 +72,7 @@ pub(super) fn start_connector_app_install(
         name,
         version,
         accept_unreviewed,
+        install_source,
     } = request;
     let identity = RegisteredAppVersionIdentity::parse(app_id, version)?;
     let display_name = name
@@ -106,6 +106,7 @@ pub(super) fn start_connector_app_install(
             &connector_processes,
             &registered_services,
             ConnectorInstallOptions {
+                install_source,
                 identity,
                 replace,
                 start: true,
@@ -154,6 +155,7 @@ pub(super) fn start_connector_app_install(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct StartConnectorAppInstallRequest {
+    pub(super) install_source: Option<local_app_contract::InstallSource>,
     pub(super) operation: LocalAppInstallTaskOperation,
     pub(super) replace: bool,
     pub(super) app_id: String,
@@ -243,17 +245,7 @@ async fn prepare_connector_install(
         );
     }
     ensure_config_exists(config_path).map_err(|err| err.to_string())?;
-    let registered =
-        fetch_registered_install_source(config_path, &options.identity, options.accept_unreviewed)
-            .await?;
-    ensure_registered_install_is_accepted(&registered, options.accept_unreviewed)?;
-    let resolved_source = resolve_connector_source(
-        &registered.source,
-        false,
-        Some(&registered.checksum),
-        options.progress.as_ref(),
-    )
-    .await?;
+    let (resolved_source, provenance) = resolve_install_package(config_path, &options).await?;
     if let Some(progress) = options.progress.as_ref() {
         progress.report(
             LocalAppInstallTaskPhase::Verifying,
@@ -270,7 +262,9 @@ async fn prepare_connector_install(
             &candidate_manifest.version,
         );
     }
-    validate_registered_candidate_identity(&registered, &candidate_manifest)?;
+    provenance
+        .validate_manifest(&candidate_manifest)
+        .map_err(|error| error.to_string())?;
     let bundled_cli = bundled_baijimu_cli_path();
     managed_tool_dependency::ensure_ready(
         &candidate_manifest,
@@ -294,12 +288,6 @@ async fn prepare_connector_install(
     } else {
         false
     };
-    let provenance = ConnectorInstallProvenance::registered(
-        &registered.source,
-        &registered.review_status,
-        &registered.checksum,
-    )
-    .map_err(|err| err.to_string())?;
     let operation_kind = if existing.is_some() && options.replace {
         ConnectorOperationKind::Upgrade
     } else {
@@ -380,3 +368,49 @@ fn report_install_progress(
 }
 
 include!("local_app_install/execution.rs");
+
+async fn resolve_install_package(
+    config_path: &Path,
+    options: &ConnectorInstallOptions,
+) -> Result<(ResolvedConnectorSource, ConnectorInstallProvenance), String> {
+    Ok(match options.install_source.as_ref() {
+        Some(selection @ local_app_contract::InstallSource::Market { .. }) => {
+            if options.accept_unreviewed {
+                return Err("公开市场安装不能同时声明未审核来源".into());
+            }
+            market_consumer::resolve_market_install(
+                config_path,
+                &options.identity,
+                selection,
+                options.progress.as_ref(),
+            )
+            .await?
+        }
+        Some(_) => return Err("环境安装来源必须由环境注册服务解析".into()),
+        None => {
+            if !options.accept_unreviewed {
+                return Err("公开市场安装需要完整 installSource，请重新选择市场条目".into());
+            }
+            let registered =
+                fetch_registered_install_source(config_path, &options.identity, true).await?;
+            ensure_registered_install_is_accepted(&registered, true)?;
+            let resolved = resolve_connector_source(
+                &registered.source,
+                false,
+                Some(&registered.checksum),
+                options.progress.as_ref(),
+            )
+            .await?;
+            let manifest =
+                load_connector_manifest(resolved.path()).map_err(|error| error.to_string())?;
+            validate_registered_candidate_identity(&registered, &manifest)?;
+            let provenance = ConnectorInstallProvenance::registered(
+                &registered.source,
+                &registered.review_status,
+                &registered.checksum,
+            )
+            .map_err(|error| error.to_string())?;
+            (resolved, provenance)
+        }
+    })
+}

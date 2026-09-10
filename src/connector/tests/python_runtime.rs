@@ -376,6 +376,7 @@ bad-python-connector = "bad_python_connector.app:main"
         )
         .unwrap();
         save_install_record(&ConnectorInstallRecord {
+            install_source: None,
             manifest: bad_manifest,
             package_path: bad_package_path.display().to_string(),
             source_path: dir

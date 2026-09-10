@@ -1,3 +1,4 @@
+import { marketSelectionKey } from "./market-identity";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { clientInfo, clientWarn } from "../client-logger";
 import type { BaijimuDeepLinkIntent, LocalAppInstallDeepLinkIntent } from "../deep-link";
@@ -57,9 +58,14 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
     setCustomInstallConfirmed(false);
     setInstallPanelOpen(true);
     const marketApps = await refreshMarketConnectorApps();
-    const marketApp = marketApps.find((app) => app.appId === intent.appId);
+    const matches = marketApps.filter((app) => app.appId === intent.appId);
+    if (matches.length > 1) {
+      setError("该应用 ID 存在多个发布来源，请在市场中明确选择来源");
+      return;
+    }
+    const marketApp = matches[0];
     if (marketApp) {
-      setSelectedMarketAppId(marketApp.appId);
+      setSelectedMarketAppId(marketSelectionKey(marketApp));
       setMessage(intent.shareId ? `已从分享入口打开 ${marketApp.name} 安装` : `已打开 ${marketApp.name} 安装`);
     } else {
       setError(`应用 ${intent.appId} 未公开上架或已撤销`);
@@ -239,7 +245,7 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
   }
 
   async function installLocalApp() {
-    const selectedMarket = installableMarketConnectors.find((app) => app.appId === selectedMarketAppId);
+    const selectedMarket = installableMarketConnectors.find((app) => marketSelectionKey(app) === selectedMarketAppId);
     if (installSourceMode === "market" && selectedMarket?.compatible === false) {
       setError(
         selectedMarket.compatibilityMessage ||
@@ -268,7 +274,15 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       setMessage("");
       setError("");
       setRuntimeConflict(null);
+      if (installSourceMode === "market" && selectedMarket?.applicationType === "managed_tool") {
+        const status = await invoke<ManagedToolStatus>("install_baijimu_cli_update", { installSource: selectedMarket.installSource });
+        setBaijimuCli(status);
+        setInstallPanelOpen(false);
+        setMessage(`${status.name} 已安装到 ${status.installedVersion}`);
+        return;
+      }
       const task = await startLocalAppInstallTask({
+        installSource: installSourceMode === "market" ? selectedMarket?.installSource : null,
         operation: "install",
         replace: true,
         appId,

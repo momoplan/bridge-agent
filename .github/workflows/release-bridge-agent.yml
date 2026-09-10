@@ -58,8 +58,19 @@ jobs:
       - name: Validate immutable release source
         shell: bash
         env:
+          LOCAL_APP_CONSUMER_API_BASE_URL: ${{ vars.LOCAL_APP_CONSUMER_API_BASE_URL }}
+          LOCAL_APP_CONSUMER_WORKSPACE_ID: ${{ vars.LOCAL_APP_CONSUMER_WORKSPACE_ID }}
+          LOCAL_APP_CONSUMER_TOKEN: ${{ secrets.LOCAL_APP_CONSUMER_TOKEN }}
+          BAIJIMU_CLI_MARKET_SOURCE: ${{ vars.BAIJIMU_CLI_MARKET_SOURCE }}
           REPAIR_ASSETS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_assets_only || false }}
         run: bash .github/scripts/release-steps/01-validate-immutable-release-source.sh
+      - name: Preserve verified bundled CLI source
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-cli-market-source
+          path: tools/baijimu-cli/INSTALL_SOURCE.json
+          if-no-files-found: error
       - name: Upsert domestic release
         shell: bash
         env:
@@ -227,10 +238,17 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Download verified bundled CLI source
+        uses: actions/download-artifact@v4
+        with:
+          name: bundled-cli-market-source
+          path: tools/baijimu-cli
+
       - name: Prepare bundled Baijimu CLI
         shell: bash
         env:
           BAIJIMU_CLI_USE_RELEASE_ASSET: "true"
+          BAIJIMU_CLI_REQUIRE_MARKET_SOURCE: "true"
         run: |
           set -euo pipefail
           ./tools/baijimu-cli/prepare-bundled-cli.sh

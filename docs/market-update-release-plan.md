@@ -1,3 +1,5 @@
+> 本文记录 0.6.21 的历史发布方案。当前开发分支已移除中央市场直连配置，最新接入状态见 [市场消费者接入进展](market-listing-consumer-readiness.md)。
+
 # 客户端市场分发与更新
 
 Bridge Agent 0.6.21 将公开市场分发与平台连接配置分开。市场目录和公开版本安装读取 `src-tauri/distribution-config.json` 的 `marketApiBaseUrl`；产品发布配置随客户端版本交付，由通用 URL 校验和路径构造读取。

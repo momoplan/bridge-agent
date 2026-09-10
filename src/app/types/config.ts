@@ -1,3 +1,4 @@
+import type { InstallSource } from "../market-identity";
 import type { ComputerAction, LocalAppConfig, MethodConfig, RelayConfig, RuntimeConfig } from "./runtime";
 import type { UpdateDatabaseContract, UpdateEventContract, UpdateMethodContract } from "../../local-app-updates";
 
@@ -118,6 +119,7 @@ export interface StartRegisteredServiceResult {
 }
 
 export interface ConnectorSummary {
+  installSource?: InstallSource | null;
   appId: string;
   name: string;
   version: string;

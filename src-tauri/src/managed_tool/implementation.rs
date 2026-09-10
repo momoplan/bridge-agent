@@ -171,6 +171,7 @@ fn validate_cli(path: &Path, expected_version: Option<&str>) -> Result<String> {
     Ok(parsed.version)
 }
 
+#[cfg(test)]
 fn normalize_sha256(value: &str) -> Result<String> {
     let value = value.trim().strip_prefix("sha256:").unwrap_or(value.trim());
     if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
