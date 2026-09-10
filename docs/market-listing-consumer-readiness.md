@@ -34,5 +34,9 @@
 - 修正消费地址构造：平台 base URL 的 `/lowcode3` 协议后缀不属于 Partner API 基址；保留环境路径前缀，新增针对根地址及带前缀地址的测试。
 - 完整 npm quality 通过：前端145、核心171、目录合同16、桌面106、迁移12；补充地址修正后的三个消费配置测试通过。浏览器启动/恢复4项通过。
 - 线上消费环境正确 Partner 路径的 context 和 listings 仍返回404。注册 Jenkins 最近成功 local-app-service #9 对应1.0.6；本次新增读取门面在1.1.0，需要独立的平台组件发布和环境安装验证。不能用中央市场公开 listings 的成功代替环境服务验收。
-- 发布工作流的 LOCAL_APP_CONSUMER_API_BASE_URL、LOCAL_APP_CONSUMER_WORKSPACE_ID、LOCAL_APP_CONSUMER_TOKEN 和 BAIJIMU_CLI_MARKET_SOURCE 尚未登记。须在真实环境读取链路可用后配置和验证，不能跳过来源门禁或伪造 INSTALL_SOURCE.json。
+- 发布工作流使用 BAIJIMU_CLI_MARKET_SOURCE 固定来源配置，离线校验后生成 INSTALL_SOURCE.json；环境消费检查独立进行。
 - 不新建内网负载均衡。统一Token基础服务链路按已讨论的现有市场网关方案另行完成；客户端版本尚未生成标签或触发发行。
+
+## 0.7.0 发布校验调整
+
+客户端发布只读取 `BAIJIMU_CLI_MARKET_SOURCE`，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。发布不依赖环境在线或工作区 PAT。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用。环境消费链路已验证 CLI 0.54.0 的来源与三平台制品。

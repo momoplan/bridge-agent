@@ -96,12 +96,14 @@ describe("release workflow repository script availability", () => {
     }
   });
 
-  test("bundled CLI market gate resolves the versioned app identity", () => {
+  test("bundled CLI release validates pinned provenance without live market access", () => {
     const body = jobBody("prepare-domestic-release", "quality-gate");
 
     expect(bundledCliAppId).toBe("baijimu-cli");
     expect(body).toContain("tools/baijimu-cli/APP_ID");
-    expect(body).toContain("verify-consumer-market.mjs");
+    expect(body).toContain("prepare-bundled-market-source.mjs");
+    expect(body).not.toContain("verify-consumer-market.mjs");
+    expect(body).not.toContain("LOCAL_APP_CONSUMER_");
     expect(body).toContain("BAIJIMU_CLI_MARKET_SOURCE");
     expect(body).not.toContain(".latestVersion.repo ==");
   });

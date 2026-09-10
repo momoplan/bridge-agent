@@ -68,5 +68,5 @@ if [ -z "$cli_app_id" ]; then
 fi
 
 if [ "$REPAIR_ASSETS_ONLY" != "true" ]; then
-  node .github/scripts/verify-consumer-market.mjs
+  node .github/scripts/prepare-bundled-market-source.mjs
 fi
