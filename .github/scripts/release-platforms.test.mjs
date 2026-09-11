@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { platformsForAssets, releaseAssets, releasePlatforms } from "./release-platforms.mjs";
+import { publishPlatformAssets } from "./publish-platform-assets.mjs";
 import { assertPlatformSelection, verifyPlatformRelease } from "./verify-platform-release.mjs";
 
 const directories = [];
@@ -78,4 +79,29 @@ describe("platform-specific publication", () => {
     await expect(verifyPlatformRelease("https://update.example.test/latest", "1.2.2", platforms, fakeFetch, binary)).rejects.toThrow(/Incorrect macos/);
     await expect(verifyPlatformRelease("https://update.example.test/latest", "1.2.4", platforms, fakeFetch, binary, true)).rejects.toThrow(/Incorrect macos/);
   });
+});
+
+
+test("publication preserves exact versioned names and registers the complete manifest before any uploads", () => {
+  const platforms = releasePlatforms("macos,windows");
+  const directory = mkdtempSync(join(tmpdir(), "bridge-release-publication-"));
+  directories.push(directory);
+  for (const platform of platforms) for (const format of platform.assets) {
+    const file = join(directory, `Baijimu_1.2.3_${format.filenameSuffix}`);
+    writeFileSync(file, "binary");
+    if (format.signatureRequired) writeFileSync(`${file}.sig`, "signature");
+  }
+  const calls = [];
+  const options = { api: "https://updates.example.test", tag: "bridge-agent-v1.2.3", selection: "macos,windows", directory };
+  expect(publishPlatformAssets(options, (script, args) => calls.push({ script, args }))).toBe("macos,windows");
+  expect(calls).toHaveLength(4);
+  expect(calls[0].script).toBe("register-release-manifest.mjs");
+  expect(calls[0].args.slice(2)).toHaveLength(3);
+  expect(calls.slice(1).every(({ script }) => script === "upload-oss-release-asset.mjs")).toBe(true);
+  calls.length = 0;
+  expect(() => publishPlatformAssets({ ...options, tag: "bridge-agent-v1.2.4" }, (script) => calls.push(script))).toThrow(/Expected exactly one/);
+  expect(calls).toEqual([]);
+  rmSync(join(directory, "Baijimu_1.2.3_universal.app.tar.gz.sig"));
+  expect(() => publishPlatformAssets(options, (script) => calls.push(script))).toThrow(/signature/);
+  expect(calls).toEqual([]);
 });

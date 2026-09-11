@@ -145,6 +145,9 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            TAURI_ENV_PLATFORM=windows npm run prepare:windows-uninstaller:quality
+          fi
           npm run quality
 
   windows-quality-gate:
