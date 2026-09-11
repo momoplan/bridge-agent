@@ -32,7 +32,7 @@
         .unwrap();
 
         let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.platform.base_url, "https://api.baijimu.com/lowcode3");
+        assert_eq!(loaded.platform.base_url, "https://api.baijimu.com");
         assert_eq!(loaded.platform.workspace_id, None);
         assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
         assert_eq!(loaded.upload.inline_limit_bytes, 256 * 1024);
@@ -75,14 +75,14 @@
 
             let loaded = load_config(&path).unwrap();
             assert_eq!(
-                loaded.platform.base_url, "https://api.baijimu.com/lowcode3",
+                loaded.platform.base_url, "https://api.baijimu.com",
                 "legacy url {legacy_url} should normalize to the production API prefix"
             );
         }
     }
 
     #[test]
-    fn leaves_custom_platform_base_url_unchanged() {
+    fn migrates_private_service_prefix_without_changing_origin() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
@@ -92,7 +92,7 @@
         let loaded = load_config(&path).unwrap();
         assert_eq!(
             loaded.platform.base_url,
-            "https://dev.baijimu.test/lowcode3"
+            "https://dev.baijimu.test"
         );
     }
 

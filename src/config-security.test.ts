@@ -66,7 +66,7 @@ describe("production platform endpoints", () => {
     "https://api.baijimu.com",
     "https://api.baijimu.com/lowcode3/"
   ])("migrates the legacy SaaS endpoint %s to the canonical API endpoint", (value) => {
-    expect(normalizePlatformBaseUrl(value)).toBe("https://api.baijimu.com/lowcode3");
+    expect(normalizePlatformBaseUrl(value)).toBe("https://api.baijimu.com");
   });
 
   it("opens the canonical SaaS console independently from the API origin", () => {
@@ -80,5 +80,26 @@ describe("production platform endpoints", () => {
     uiConfig.platform.base_url = "https://customer.example.com/lowcode3";
 
     expect(buildConsoleUrl(uiConfig)).toBe("https://customer.example.com/manager");
+  });
+});
+
+
+describe("environment API root migration", () => {
+  it.each([
+    ["https://private.example.test:9443/team/lowcode3/", "https://private.example.test:9443/team"],
+    ["https://private.example.test:9443/team", "https://private.example.test:9443/team"],
+    ["https://api.baijimu.com:9443/lowcode3", "https://api.baijimu.com:9443"],
+    ["https://unrelated.example.test/manager", "https://unrelated.example.test/manager"]
+  ])("preserves the environment identity for %s", (value, expected) => {
+    expect(normalizePlatformBaseUrl(value)).toBe(expected);
+    expect(normalizePlatformBaseUrl(expected)).toBe(expected);
+  });
+
+  it("keeps the migrated API root through an edit/save round trip", () => {
+    const config = agentConfig("");
+    const saved = fromUiConfig(toUiConfig(config as never));
+    expect(saved.platform.base_url).toBe("https://api.baijimu.com");
+    expect(saved.platform.workspace_id).toBe(42);
+    expect(saved.relay.agent_id).toBe(config.relay.agent_id);
   });
 });

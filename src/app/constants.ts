@@ -1,3 +1,4 @@
+import officialEnvironment from "../../config/official-environment.json";
 import type { ComputerAction } from "./types";
 
 export const DEFAULT_INLINE_LIMIT_BYTES = 256 * 1024;
@@ -119,7 +120,7 @@ export const COMPUTER_DRAG_SCHEMA = {
   }
 };
 
-export const DEFAULT_PLATFORM_BASE_URL = "https://api.baijimu.com/lowcode3";
+export const DEFAULT_PLATFORM_BASE_URL = officialEnvironment.apiBaseUrl;
 export const DEFAULT_CONSOLE_BASE_URL = "https://console.baijimu.com";
 export const DEFAULT_SAFE_COMMANDS = "echo, pwd, ls, git";
 export const FULL_ACCESS_COMMAND = "*";

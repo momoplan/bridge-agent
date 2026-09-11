@@ -1,3 +1,4 @@
+import officialEnvironment from "../../config/official-environment.json";
 import { DEFAULT_CONSOLE_BASE_URL, DEFAULT_PLATFORM_BASE_URL, DEFAULT_SAFE_COMMANDS, FULL_ACCESS_COMMAND, HTTP_SCHEMA, SHELL_SCHEMA } from "./constants";
 import { headersToText, parseJson, prettyJson, sampleJsonValue, textToHeaders, toOptionalNumber, toOptionalText } from "./formatters";
 import type { AgentConfig, EventConfig, MethodConfig, ServiceCapabilitiesDocument, ServiceConfig, ServiceHealthCheck, ServiceStartCommand, UiAgentConfig, UiEventConfig, UiMethodBinding, UiMethodConfig, UiServiceConfig, UiServiceHealthCheck, UiServiceStartCommand, UiShellBinding } from "./types";
@@ -172,16 +173,17 @@ export function normalizePlatformBaseUrl(value: string): string {
   }
   try {
     const url = new URL(normalized);
-    const host = url.hostname.replace(/^www\./, "");
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      return normalized;
+    }
     const path = url.pathname.replace(/\/+$/, "");
     if (
-      (url.hostname === "api.baijimu.com" &&
-        (path === "" || path === "/lowcode3")) ||
-      (host === "baijimu.com" &&
-        (path === "" || path === "/lowcode" || path === "/manager" || path === "/lowcode3"))
+      (url.origin === officialEnvironment.apiBaseUrl || officialEnvironment.legacyApiOrigins.includes(url.origin)) &&
+      (path === "" || officialEnvironment.legacyApiPaths.includes(path))
     ) {
       return DEFAULT_PLATFORM_BASE_URL;
     }
+    return normalized.replace(/\/+$/, "").replace(/\/lowcode3$/, "");
   } catch {
     return normalized;
   }

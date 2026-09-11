@@ -1,4 +1,5 @@
 use super::*;
+mod requests;
 mod shared_environment;
 use shared_environment::{
     configure_shared_cli_environment, shared_credential_matches_environment,
@@ -90,51 +91,7 @@ pub(super) async fn start_browser_auth(
     // Candidate configuration is committed only after authorization.
     config.normalize();
     ensure_browser_auth_agent_id(&mut config);
-    let client = Client::new();
-    let manifest = browser_auth_manifest_json(&config).map_err(|err| err.to_string())?;
-    let base_url = config.platform.base_url.trim_end_matches('/');
-    let mut payload = serde_json::Map::new();
-    if let Some(workspace_id) = config.platform.workspace_id {
-        payload.insert("workspaceId".to_string(), serde_json::json!(workspace_id));
-    }
-    payload.insert(
-        "deviceId".to_string(),
-        serde_json::json!(config.relay.agent_id),
-    );
-    payload.insert(
-        "deviceName".to_string(),
-        serde_json::json!(config.device.name),
-    );
-    payload.insert(
-        "deviceDescription".to_string(),
-        serde_json::json!(config.device.description),
-    );
-    payload.insert("serviceManifest".to_string(), serde_json::json!(manifest));
-    let response = client
-        .post(format!(
-            "{base_url}/api/external-workspace-device-auth/start"
-        ))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        let payload = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "启动浏览器授权失败: {}",
-            describe_upstream_http_failure(status, &content_type, &payload)
-        ));
-    }
-
-    let payload: BrowserAuthStartResponse = response.json().await.map_err(|err| err.to_string())?;
+    let payload = requests::start(&config).await?;
     open::that(payload.verification_uri_complete.clone()).map_err(|err| err.to_string())?;
     Ok(payload)
 }
@@ -145,38 +102,9 @@ pub(super) async fn poll_browser_auth(
     config: AgentConfig,
     device_code: String,
 ) -> Result<BrowserAuthPollResponse, CommandError> {
-    let client = Client::new();
-    let base_url = config.platform.base_url.trim_end_matches('/');
-    let response = client
-        .post(format!(
-            "{base_url}/api/external-workspace-device-auth/poll"
-        ))
-        .json(&serde_json::json!({
-            "deviceCode": device_code
-        }))
-        .send()
+    let payload = requests::poll(&config, &device_code)
         .await
-        .map_err(|err| command_error_message(err.to_string()))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        let payload = response.text().await.unwrap_or_default();
-        return Err(command_error_message(format!(
-            "轮询浏览器授权失败: {}",
-            describe_upstream_http_failure(status, &content_type, &payload)
-        )));
-    }
-
-    let payload: RawBrowserAuthPollResponse = response
-        .json()
-        .await
-        .map_err(|err| command_error_message(err.to_string()))?;
+        .map_err(command_error_message)?;
     if payload.status != "authorized" {
         return Ok(BrowserAuthPollResponse {
             status: payload.status,

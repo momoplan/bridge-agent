@@ -2,7 +2,7 @@ impl AgentConfig {
     pub fn example() -> Self {
         Self {
             platform: PlatformConfig {
-            environment_key: None,                base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
+            environment_key: None,                base_url: environment::official_api_base(),
                 workspace_id: None,
             },
             upload: UploadConfig::default(),

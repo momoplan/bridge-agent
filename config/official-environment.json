@@ -1,1 +1,16 @@
-{"environmentKey":"baijimu","apiBaseUrl":"https://api.baijimu.com"}
+{
+  "environmentKey": "baijimu",
+  "apiBaseUrl": "https://api.baijimu.com",
+  "legacyApiOrigins": [
+    "https://baijimu.com",
+    "https://www.baijimu.com",
+    "http://baijimu.com",
+    "http://www.baijimu.com",
+    "http://api.baijimu.com"
+  ],
+  "legacyApiPaths": [
+    "/lowcode",
+    "/manager",
+    "/lowcode3"
+  ]
+}
