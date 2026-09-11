@@ -21,9 +21,7 @@ fn migrate_legacy_defaults(config: &mut AgentConfig) -> bool {
 }
 
 fn ensure_default_platform_base_url(config: &mut AgentConfig) -> bool {
-    let Some(base_url) = normalize_default_platform_base_url(&config.platform.base_url) else {
-        return false;
-    };
+    let base_url = environment::api_base(&config.platform.base_url);
     if base_url == config.platform.base_url {
         return false;
     }

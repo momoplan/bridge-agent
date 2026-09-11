@@ -1,6 +1,5 @@
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { RefreshCw } from "lucide-react";
-import { DEFAULT_PLATFORM_BASE_URL } from "./constants";
 import { formatAppUpdateProgressButton, formatRelayRegistration, formatRelaySeen, formatTime } from "./formatters";
 import { Card, InfoRow } from "./ui-primitives";
 import type { AppUpdateCheckState, AppUpdateProgress, AppUpdateStatus, AppVersionInfo, DetailPanel, LogEntry, RuntimeSnapshot, SettingsSection, UiAgentConfig } from "./types";
@@ -85,7 +84,7 @@ export function DetailPanelContent(props: DetailPanelContentProps) {
         >
           <div className="status-detail-grid connection-summary-grid">
             <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-            <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
+            <InfoRow label="平台" value={config.platform.base_url} />
             <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
           </div>
           <div className="section-tabs">
@@ -248,7 +247,7 @@ export function SettingsPage(props: SettingsPageProps) {
         >
           <div className="status-detail-grid connection-summary-grid">
             <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-            <InfoRow label="平台" value={DEFAULT_PLATFORM_BASE_URL} />
+            <InfoRow label="平台" value={config.platform.base_url} />
             <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
           </div>
           <div className="section-tabs">

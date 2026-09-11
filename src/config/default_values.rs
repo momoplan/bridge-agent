@@ -58,38 +58,11 @@ fn default_health_check_http_method() -> String {
 }
 
 fn default_platform_config() -> PlatformConfig {    PlatformConfig {
-            environment_key: None,        base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
+            environment_key: None,        base_url: environment::official_api_base(),
         workspace_id: None,
     }
 }
 
-fn normalize_default_platform_base_url(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let Ok(url) = Url::parse(trimmed) else {
-        return None;
-    };
-    let host = url.host_str()?;
-    let normalized_host = host.trim_start_matches("www.");
-    if normalized_host != "baijimu.com" && host != "api.baijimu.com" {
-        return None;
-    }
-    if !matches!(url.scheme(), "https" | "http") {
-        return None;
-    }
-
-    let path = url.path().trim_end_matches('/');
-    match (host, path) {
-        ("api.baijimu.com", "" | "/" | "/lowcode3") => Some(DEFAULT_PLATFORM_BASE_URL.to_string()),
-        (_, "" | "/" | "/lowcode" | "/manager" | "/lowcode3") => {
-            Some(DEFAULT_PLATFORM_BASE_URL.to_string())
-        }
-        _ => None,
-    }
-}
 
 impl Default for UploadConfig {
     fn default() -> Self {

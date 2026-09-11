@@ -18,7 +18,6 @@ use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.baijimu.com/ws/agent";
 const LEGACY_DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:8080/ws/agent";
-const DEFAULT_PLATFORM_BASE_URL: &str = "https://api.baijimu.com/lowcode3";
 const DEFAULT_CONFIG_FILE_NAME: &str = "agent-config.json";
 const DEVELOPMENT_CONFIG_FILE_NAME: &str = "agent-config.development.json";
 const LEGACY_DEFAULT_AGENT_ID: &str = "devbox";
@@ -344,6 +343,7 @@ mod tests {
     include!("config/tests/registration.rs");
     include!("config/tests/migrations.rs");
     include!("config/tests/identity.rs");
+    include!("config/tests/platform_upgrade.rs");
 }
 
 pub mod environment;
