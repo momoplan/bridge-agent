@@ -50,12 +50,36 @@ it("allows retry after a failed signed installation without erasing the error", 
   expect(document.getElementById("desktop-recovery")!.hidden).toBe(false);
 });
 
-it("renders error payloads as text and disposes global error listeners", () => {
-  window.dispatchEvent(new ErrorEvent("error", { message: "<img src=x onerror=alert(1)>" }));
+it("renders fatal error payloads as text and ignores failure after disposal", () => {
+  shell.fail(new Error("<img src=x onerror=alert(1)>"));
   const detail = document.getElementById("recovery-detail")!;
   expect(detail.querySelector("img")).toBeNull();
   expect(detail.textContent).toContain("<img");
   shell.dispose();
-  window.dispatchEvent(new ErrorEvent("error", { message: "after disposal" }));
+  shell.fail(new Error("after disposal"));
   expect(detail.textContent).not.toContain("after disposal");
+});
+
+it("does not replace a fatal error with a later startup timeout", async () => {
+  shell.fail(new Error("business module failed"));
+  await vi.advanceTimersByTimeAsync(21000);
+  expect(document.getElementById("recovery-detail")!.textContent).toBe("business module failed");
+  expect(fixture.calls.filter((call) => call === "report_frontend_failure")).toHaveLength(1);
+});
+
+it("keeps a mounted desktop visible after unrelated global errors before and after readiness", async () => {
+  const notify = () => {
+    window.dispatchEvent(new ErrorEvent("error", { message: "optional resource error" }));
+    const rejection = new Event("unhandledrejection");
+    Object.assign(rejection, { reason: new Error("optional request failed") });
+    window.dispatchEvent(rejection);
+  };
+  notify();
+  document.getElementById("root")!.innerHTML = "<div>rendered</div>";
+  shell.ready();
+  notify();
+  await vi.advanceTimersByTimeAsync(21000);
+  expect(document.getElementById("desktop-recovery")!.hidden).toBe(true);
+  expect(document.getElementById("root")!.hidden).toBe(false);
+  expect(fixture.calls).not.toContain("report_frontend_failure");
 });

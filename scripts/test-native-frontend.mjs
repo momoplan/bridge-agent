@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,8 +6,10 @@ import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dirname, "..");
 const target = join(root, "src-tauri", "target");
 const temporary = mkdtempSync(join(tmpdir(), "baijimu-frontend-smoke-"));
+const config = JSON.parse(readFileSync(join(root, "src-tauri/tauri.conf.json"), "utf8"));
 const environment = { ...process.env,
-  TAURI_CONFIG: JSON.stringify({ identifier: "com.baijimu.bridgeagent.frontend-smoke", productName: "Baijimu Frontend Smoke" }),
+  TAURI_CONFIG: JSON.stringify({ identifier: "com.baijimu.bridgeagent.frontend-smoke", productName: "Baijimu Frontend Smoke",
+    app: { security: { devCsp: config.app.security.csp } } }),
   CARGO_TARGET_DIR: target,
 };
 delete environment.BRIDGE_AGENT_UPDATE_API_URL;

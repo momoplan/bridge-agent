@@ -21,8 +21,13 @@
       if (!config.config.services.length) throw new Error("smoke requires nonempty config");
       const health = await invoke("get_startup_health");
       if (!health.frontendReady) { busy = false; return; }
-      window.dispatchEvent(new ErrorEvent("error", { error: new Error("native WebView fault injection") }));
       const panel = document.getElementById("desktop-recovery");
+      const root = document.getElementById("root");
+      if (!panel.hidden || root.hidden || !root.getBoundingClientRect().height) throw new Error("populated desktop is hidden by recovery");
+      window.dispatchEvent(new ErrorEvent("error", { error: new Error("native nonfatal error injection") }));
+      if (!panel.hidden || root.hidden) throw new Error("nonfatal error hid the desktop");
+      root.replaceChildren();
+      await new Promise((resolve) => setTimeout(resolve, 3500));
       if (panel.hidden || !panel.getBoundingClientRect().height) throw new Error("recovery panel is not visible");
       if (!document.getElementById("root").hidden) throw new Error("failed business root remains visible");
       document.getElementById("recovery-check").click();

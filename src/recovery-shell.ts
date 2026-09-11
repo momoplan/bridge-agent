@@ -17,8 +17,9 @@ export function startRecoveryShell(document: Document, reload = () => location.r
   const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
   function fail(error: unknown) {
-    if (disposed) return;
+    if (disposed || failed) return;
     failed = true;
+    window.clearTimeout(bootTimeout);
     root.hidden = true;
     panel.hidden = false;
     title.textContent = "界面暂时无法显示";
@@ -69,12 +70,8 @@ export function startRecoveryShell(document: Document, reload = () => location.r
     if (installing) status.textContent = event.payload.message;
   }).then((unlisten) => disposed ? unlisten() : disposers.push(unlisten)).catch(() => {});
 
-  const onError = (event: ErrorEvent) => fail(event.error ?? event.message);
-  const onRejection = (event: PromiseRejectionEvent) => fail(event.reason);
-  window.addEventListener("error", onError);
-  window.addEventListener("unhandledrejection", onRejection);
-  disposers.push(() => window.removeEventListener("error", onError));
-  disposers.push(() => window.removeEventListener("unhandledrejection", onRejection));
+  // Global errors are recorded by bootstrap-diagnostics. Only a failed business
+  // import/render, an absent root, or a stalled mount can take over the window.
   const pulse = () => {
     if (mounted && !failed && !root.firstElementChild) fail("界面内容已意外退出，请重试或安装官方更新。");
     void invoke("frontend_heartbeat").catch(() => {});
@@ -90,6 +87,7 @@ export function startRecoveryShell(document: Document, reload = () => location.r
     ready() {
       if (failed || disposed) return;
       mounted = true;
+      window.clearTimeout(bootTimeout);
       panel.hidden = true;
       root.hidden = false;
     },
