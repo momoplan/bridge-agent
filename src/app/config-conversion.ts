@@ -4,6 +4,7 @@ import type { AgentConfig, EventConfig, MethodConfig, ServiceCapabilitiesDocumen
 export function toUiConfig(config: AgentConfig): UiAgentConfig {
   return {
     platform: {
+      environment_key: config.platform.environment_key,
       base_url: normalizePlatformBaseUrl(config.platform.base_url),
       workspace_id:
         config.platform.workspace_id == null ? "" : String(config.platform.workspace_id)
@@ -32,6 +33,7 @@ export function toUiConfig(config: AgentConfig): UiAgentConfig {
 export function fromUiConfig(config: UiAgentConfig): AgentConfig {
   return {
     platform: {
+      environment_key: config.platform.environment_key,
       base_url: normalizePlatformBaseUrl(config.platform.base_url),
       workspace_id: toOptionalNumber(config.platform.workspace_id)
     },

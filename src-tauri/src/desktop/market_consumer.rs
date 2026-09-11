@@ -11,8 +11,6 @@ pub(super) struct MarketConsumer {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedAuthentication {
-    current_environment: String,
-    current_workspace_id: u64,
     environments: BTreeMap<String, ConsumerEnvironment>,
     credentials: Vec<ConsumerCredential>,
 }
@@ -20,12 +18,14 @@ struct SharedAuthentication {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConsumerEnvironment {
+    environment_key: Option<String>,
     base_url: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConsumerCredential {
+    environment_key: Option<String>,
     base_url: Option<String>,
     client_id: Option<String>,
     token: String,
@@ -36,20 +36,32 @@ struct ConsumerCredential {
 
 fn credential_for(config: &AgentConfig, document: SharedAuthentication) -> Result<String, String> {
     let workspace = config.platform.workspace_id.ok_or("请先完成工作区授权")?;
-    let environment = document
-        .environments
-        .get(&document.current_environment)
-        .ok_or("当前授权缺少环境绑定")?;
-    if document.current_workspace_id != workspace
-        || environment.base_url.trim_end_matches('/')
-            != config.platform.base_url.trim_end_matches('/')
-    {
-        return Err("当前工作区授权与客户端环境不一致，请重新授权".into());
+    use bridge_agent::config::environment::{api_base, bound_key, is_official, official_key};
+    let key = bound_key(
+        config.platform.environment_key.as_deref(),
+        &config.platform.base_url,
+    )
+    .ok_or("当前设备缺少环境身份，请在目标环境重新授权")?;
+    if let Some(environment) = document.environments.get(&key) {
+        if environment
+            .environment_key
+            .as_deref()
+            .is_some_and(|value| value != key)
+            || api_base(&environment.base_url) != api_base(&config.platform.base_url)
+        {
+            return Err("当前设备的环境绑定与授权目录不一致".into());
+        }
     }
     let mut matches = document.credentials.into_iter().filter(|credential| {
-        credential.base_url.as_deref().is_some_and(|url| {
-            url.trim_end_matches('/') == config.platform.base_url.trim_end_matches('/')
-        }) && credential.client_id.as_deref() == Some(config.relay.agent_id.as_str())
+        credential.environment_key.as_deref().map_or_else(
+            || {
+                credential.base_url.as_deref().map_or_else(
+                    || key == official_key() && is_official(&config.platform.base_url),
+                    |url| api_base(url) == api_base(&config.platform.base_url),
+                )
+            },
+            |bound| bound == key,
+        ) && credential.client_id.as_deref() == Some(config.relay.agent_id.as_str())
             && credential.source.as_deref() == Some("bridge-agent")
             && credential.token_type == "pat"
             && credential.workspace_ids.contains(&workspace)
@@ -208,6 +220,7 @@ mod tests {
         let mut config = AgentConfig::example();
         config.platform.base_url = "https://consumer.example.test".into();
         config.platform.workspace_id = Some(7);
+        config.platform.environment_key = Some("consumer".into());
         config.relay.agent_id = "device-a".into();
         config
     }
@@ -249,13 +262,43 @@ mod tests {
         }
     }
     #[test]
-    fn credential_selection_rejects_ambiguous_or_switched_workspace() {
+    fn credential_selection_rejects_ambiguity_but_ignores_cli_workspace() {
         let mut value = document();
         let duplicate = value["credentials"][0].clone();
         value["credentials"].as_array_mut().unwrap().push(duplicate);
         assert!(resolve(value).is_err());
         let mut value = document();
         value["currentWorkspaceId"] = 8.into();
-        assert!(resolve(value).is_err());
+        value["currentEnvironment"] = "another-cli-environment".into();
+        assert_eq!(resolve(value).unwrap(), "test-pat");
+    }
+    #[test]
+    fn official_legacy_pat_needs_no_base_url() {
+        let mut cfg = AgentConfig::example();
+        cfg.platform.workspace_id = Some(7);
+        cfg.relay.agent_id = "device-a".into();
+        let mut value = document();
+        value["credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("baseUrl");
+        assert_eq!(
+            credential_for(&cfg, serde_json::from_value(value.clone()).unwrap()).unwrap(),
+            "test-pat"
+        );
+        cfg.platform.base_url = "https://private.example.test".into();
+        assert!(credential_for(&cfg, serde_json::from_value(value).unwrap()).is_err());
+    }
+    #[test]
+    fn environment_identity_separates_identical_device_and_workspace_ids() {
+        let mut value = document();
+        value["credentials"][0]["environmentKey"] = "author-other".into();
+        assert!(resolve(value.clone()).is_err());
+        value["credentials"][0]["environmentKey"] = "consumer".into();
+        value["credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("baseUrl");
+        assert_eq!(resolve(value).unwrap(), "test-pat");
     }
 }

@@ -172,6 +172,15 @@ pub(super) async fn save_config(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
 ) -> Result<ConfigDocument, String> {
+    let previous = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
+    if !previous.relay.token.is_empty()
+        && (bridge_agent::config::environment::api_base(&previous.platform.base_url)
+            != bridge_agent::config::environment::api_base(&config.platform.base_url)
+            || previous.platform.workspace_id != config.platform.workspace_id
+            || previous.platform.environment_key != config.platform.environment_key)
+    {
+        return Err("切换环境或工作区请先完成浏览器授权，原连接尚未修改".into());
+    }
     save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;

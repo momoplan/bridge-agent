@@ -1,4 +1,9 @@
 use super::*;
+mod shared_environment;
+use shared_environment::{
+    configure_shared_cli_environment, shared_credential_matches_environment,
+    validate_shared_environment_binding,
+};
 
 #[derive(Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +43,8 @@ pub(super) struct RawBrowserAuthPollResponse {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AuthorizedPayload {
+    #[serde(rename = "environmentKey")]
+    pub(super) environment_key: String,
     #[serde(rename = "workspaceId")]
     pub(super) workspace_id: u64,
     #[serde(rename = "deviceId")]
@@ -72,11 +79,17 @@ pub(super) async fn start_browser_auth(
     config: AgentConfig,
 ) -> Result<BrowserAuthStartResponse, String> {
     let mut config = config;
-    let normalized = config.normalize();
-    let agent_id_changed = ensure_browser_auth_agent_id(&mut config);
-    if normalized || agent_id_changed {
-        save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    if let Ok(previous) = load_agent_config(&state.config_path) {
+        if bridge_agent::config::environment::api_base(&previous.platform.base_url)
+            != bridge_agent::config::environment::api_base(&config.platform.base_url)
+        {
+            config.platform.workspace_id = None;
+            config.platform.environment_key = None;
+        }
     }
+    // Candidate configuration is committed only after authorization.
+    config.normalize();
+    ensure_browser_auth_agent_id(&mut config);
     let client = Client::new();
     let manifest = browser_auth_manifest_json(&config).map_err(|err| err.to_string())?;
     let base_url = config.platform.base_url.trim_end_matches('/');
@@ -176,12 +189,31 @@ pub(super) async fn poll_browser_auth(
     let authorized = payload
         .authorized_payload
         .ok_or_else(|| command_error_message("授权成功但缺少 authorizedPayload"))?;
+    if let Ok(previous) = load_agent_config(&state.config_path) {
+        use bridge_agent::config::environment::{api_base, bound_key};
+        if api_base(&previous.platform.base_url) == api_base(&config.platform.base_url)
+            && bound_key(
+                previous.platform.environment_key.as_deref(),
+                &previous.platform.base_url,
+            )
+            .is_some_and(|key| key != authorized.environment_key)
+        {
+            return Err(command_error_message(
+                "授权地址返回了不同的环境身份，请检查环境配置",
+            ));
+        }
+    }
     let mut updated = config;
+    if authorized.environment_key.is_empty()
+        || authorized.environment_key.trim() != authorized.environment_key
+    {
+        return Err(command_error_message("授权返回的 environmentKey 无效"));
+    }
     apply_authorized_device_credentials(&mut updated, &authorized);
-    save_agent_config(&state.config_path, &updated)
-        .map_err(|err| command_error_message(err.to_string()))?;
     log_shared_cli_auth_result(&state.runtime, write_shared_cli_auth(&updated, &authorized))
         .await?;
+    save_agent_config(&state.config_path, &updated)
+        .map_err(|err| command_error_message(err.to_string()))?;
     let runtime = restart_agent_from_saved_config(&state)
         .await
         .map_err(CommandError::from)?;
@@ -241,6 +273,7 @@ pub(super) fn apply_authorized_device_credentials(
     config: &mut AgentConfig,
     authorized: &AuthorizedPayload,
 ) {
+    config.platform.environment_key = Some(authorized.environment_key.clone());
     config.platform.workspace_id = Some(authorized.workspace_id);
     config.relay.agent_id = authorized.device_id.clone();
     config.relay.url = authorized.relay_ws_url.clone();
@@ -279,7 +312,25 @@ pub(super) fn write_shared_cli_auth_at(
     authorized: &AuthorizedPayload,
 ) -> anyhow::Result<()> {
     let local_client_token = validate_shared_cli_auth_payload(authorized)?;
+    use fs2::FileExt;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_path = path.with_file_name(format!(
+        "{}.lock",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("auth.json")
+    ));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
     let mut document = load_shared_cli_auth_document(path)?;
+    validate_shared_environment_binding(&document, config, authorized)?;
     configure_shared_cli_environment(&mut document, config, authorized);
     let credentials =
         merged_shared_cli_credentials(&document, config, authorized, local_client_token);
@@ -326,39 +377,6 @@ fn load_shared_cli_auth_document(path: &Path) -> anyhow::Result<Value> {
     Ok(document)
 }
 
-fn configure_shared_cli_environment(
-    document: &mut Value,
-    config: &AgentConfig,
-    authorized: &AuthorizedPayload,
-) {
-    let base_url = config.platform.base_url.trim_end_matches('/');
-    let alias = document
-        .get("environments")
-        .and_then(Value::as_object)
-        .and_then(|environments| {
-            environments.iter().find(|(_, environment)| {
-                environment
-                    .get("baseUrl")
-                    .and_then(Value::as_str)
-                    .is_some_and(|url| url.trim_end_matches('/') == base_url)
-            })
-        })
-        .map(|(alias, _)| alias.clone())
-        .unwrap_or_else(|| format!("device-{}", authorized.device_id));
-    document["currentEnvironment"] = serde_json::json!(alias);
-    document["currentWorkspaceId"] = serde_json::json!(authorized.workspace_id);
-    if !document
-        .get("environments")
-        .map(|value| value.is_object())
-        .unwrap_or(false)
-    {
-        document["environments"] = serde_json::json!({});
-    }
-    document["environments"][&alias] = serde_json::json!({
-        "baseUrl": config.platform.base_url.trim_end_matches('/'),
-    });
-}
-
 fn merged_shared_cli_credentials(
     document: &Value,
     config: &AgentConfig,
@@ -382,25 +400,31 @@ fn merged_shared_cli_credentials(
         .collect();
     let mut seen_credentials = HashSet::new();
     credentials.retain(|credential| {
+        let namespace = credential
+            .get("environmentKey")
+            .or_else(|| credential.get("baseUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or("official-default");
         let identity = credential
             .get("credentialId")
             .and_then(Value::as_str)
-            .map(|value| format!("id:{value}"))
+            .map(|value| format!("{namespace}:id:{value}"))
             .or_else(|| {
                 credential
                     .get("token")
                     .and_then(Value::as_str)
-                    .map(|value| format!("token:{value}"))
+                    .map(|value| format!("{namespace}:token:{value}"))
             });
         identity.is_none_or(|value| seen_credentials.insert(value))
     });
     credentials.retain(|item| {
-        !credential_has_workspace(item, authorized.workspace_id)
+        !shared_credential_matches_environment(item, config, authorized)
+            || !credential_has_workspace(item, authorized.workspace_id)
             || item.get("clientId").and_then(|value| value.as_str())
                 != Some(authorized.device_id.as_str())
     });
     credentials.push(serde_json::json!({
-        "baseUrl": config.platform.base_url.trim_end_matches('/'),
+        "environmentKey": authorized.environment_key,
         "credentialId": authorized.local_client_key_id,
         "userId": authorized.local_client_user_id,
         "workspaceIds": [authorized.workspace_id],

@@ -198,6 +198,7 @@ export interface LocalAppUpdateStatus {
 export interface UiAgentConfig {
   platform: {
     base_url: string;
+    environment_key?: string | null;
     workspace_id: string;
   };
   upload: {

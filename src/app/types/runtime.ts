@@ -77,6 +77,7 @@ export interface RelayConfig {
 
 export interface PlatformConfig {
   base_url: string;
+    environment_key?: string | null;
   workspace_id: number | null;
 }
 

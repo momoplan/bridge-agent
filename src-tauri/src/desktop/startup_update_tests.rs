@@ -194,7 +194,7 @@ fn shared_cli_auth_path_should_live_under_home_config() {
 }
 
 #[test]
-fn shared_cli_auth_sets_authorized_workspace_as_current_and_preserves_other_credentials() {
+fn shared_cli_auth_preserves_cli_selection_and_other_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("auth.json");
     fs::write(
@@ -217,7 +217,8 @@ fn shared_cli_auth_sets_authorized_workspace_as_current_and_preserves_other_cred
     )
     .unwrap();
     let config = AgentConfig::example();
-    let authorized = AuthorizedPayload {
+    let mut authorized = AuthorizedPayload {
+        environment_key: "baijimu".into(),
         workspace_id: 1082,
         device_id: "wenya".to_string(),
         relay_ws_url: "wss://relay.example.test".to_string(),
@@ -250,7 +251,13 @@ fn shared_cli_auth_sets_authorized_workspace_as_current_and_preserves_other_cred
     write_shared_cli_auth_at(&path, &config, &authorized).unwrap();
 
     let document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["currentWorkspaceId"], 1082);
+    assert_eq!(document["currentWorkspaceId"], 1201);
+    assert_eq!(document["currentEnvironment"], "prod");
+    assert_eq!(
+        document["environments"]["baijimu"]["environmentKey"],
+        "baijimu"
+    );
+    assert_eq!(document["credentials"][1]["environmentKey"], "baijimu");
     assert_eq!(document["schemaVersion"], 2);
     assert!(document.get("machineCredentials").is_none());
     assert_eq!(document["credentials"].as_array().unwrap().len(), 2);
@@ -271,6 +278,21 @@ fn shared_cli_auth_sets_authorized_workspace_as_current_and_preserves_other_cred
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+
+    // A new environment may issue the same credential and device IDs.
+    let mut private_config = config.clone();
+    private_config.platform.base_url = "https://private.example.test/lowcode3".into();
+    authorized.environment_key = "private-a".into();
+    write_shared_cli_auth_at(&path, &private_config, &authorized).unwrap();
+    write_shared_cli_auth_at(&path, &private_config, &authorized).unwrap();
+    let before = fs::read(&path).unwrap();
+    let document: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(document["credentials"].as_array().unwrap().len(), 3);
+    assert_eq!(document["currentEnvironment"], "prod");
+    assert_eq!(document["currentWorkspaceId"], 1201);
+    private_config.platform.base_url = "https://different.example.test/lowcode3".into();
+    assert!(write_shared_cli_auth_at(&path, &private_config, &authorized).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]

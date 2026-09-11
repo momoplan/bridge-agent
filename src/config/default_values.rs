@@ -57,9 +57,8 @@ fn default_health_check_http_method() -> String {
     "GET".to_string()
 }
 
-fn default_platform_config() -> PlatformConfig {
-    PlatformConfig {
-        base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
+fn default_platform_config() -> PlatformConfig {    PlatformConfig {
+            environment_key: None,        base_url: DEFAULT_PLATFORM_BASE_URL.to_string(),
         workspace_id: None,
     }
 }

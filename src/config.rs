@@ -47,6 +47,8 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformConfig {
+    #[serde(default)]
+    pub environment_key: Option<String>,
     pub base_url: String,
     #[serde(default)]
     pub workspace_id: Option<u64>,
@@ -343,3 +345,5 @@ mod tests {
     include!("config/tests/migrations.rs");
     include!("config/tests/identity.rs");
 }
+
+pub mod environment;
