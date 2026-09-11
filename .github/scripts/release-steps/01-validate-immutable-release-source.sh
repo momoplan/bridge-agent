@@ -8,10 +8,7 @@ case "$RELEASE_TAG" in
 esac
 
 version="${RELEASE_TAG#bridge-agent-v}"
-if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-  echo "Invalid release version: $version" >&2
-  exit 1
-fi
+node .github/scripts/release-version.mjs "$version"
 
 assert_version() {
   local label="$1"
@@ -38,7 +35,7 @@ if [ -z "$tag_commit" ]; then
 fi
 
 git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-if [ "$GITHUB_EVENT_NAME" = push ]; then
+if [ "$REPAIR_ASSETS_ONLY" != "true" ]; then
   if [ "$tag_commit" != "$GITHUB_SHA" ]; then
     echo "Release tag $RELEASE_TAG points to $tag_commit, expected $GITHUB_SHA" >&2
     exit 1

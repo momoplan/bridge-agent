@@ -60,6 +60,20 @@ function cargoPackageVersion(path) {
 }
 
 describe("release workflow repository script availability", () => {
+  test("only manual releases select platforms and preflight the service before signing", () => {
+    const source = readFileSync(".github/workflows/release-bridge-agent.yml", "utf8");
+    const triggers = source.slice(source.indexOf("on:"), source.indexOf("\nenv:"));
+    expect(triggers).toContain("workflow_dispatch:");
+    expect(triggers).not.toContain("push:");
+    expect(triggers).toContain("release_platforms:");
+    const selection = jobBody("select-platforms", "frontend-recovery-gate");
+    expect(selection).toContain("verify-platform-release.mjs preflight");
+    expect(selection).not.toContain("SSL_COM_");
+    expect(jobBody("prepare-domestic-release", "quality-gate")).toContain("needs: select-platforms");
+    expect(jobBody("release", "mirror-domestic-release")).toContain("fromJSON(needs.select-platforms.outputs.matrix)");
+    expect(jobBody("verify-update-service")).toContain("RELEASE_PLATFORMS: ${{ needs.mirror-domestic-release.outputs.platforms }}");
+  });
+
   test("white-screen repair compares against the signed MSI payload, not the unsigned build intermediate", () => {
     const smoke = readFileSync(".github/scripts/release-steps/16-smoke-test-windows-white-screen-repair.ps1", "utf8");
     expect(smoke).toContain('Get-AuthenticodeSignature -LiteralPath $installed');
@@ -78,7 +92,7 @@ describe("release workflow repository script availability", () => {
     expect(qualityWorkflow).toContain("runner: [macos-15, windows-latest]");
     expect(gate).toContain("uses: ./.github/actions/frontend-recovery");
     expect(qualityWorkflow).toContain("uses: ./.github/actions/frontend-recovery");
-    expect(release).toContain("needs: [prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]");
+    expect(release).toContain("needs: [select-platforms, prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]");
     expect(action).toContain("npm run test:browser");
     expect(action).toContain("npm run test:native");
     expect(release.indexOf("repair-with-new-version")).toBeGreaterThan(0);
@@ -136,14 +150,15 @@ describe("release workflow repository script availability", () => {
 
     expect(workflow).not.toContain("--draft");
     expect(workflow).not.toContain("publish_only:");
-    expect(mirrorBody).toContain("register-release-manifest.mjs");
-    expect(mirrorBody.indexOf("register-release-manifest.mjs")).toBeLessThan(
-      mirrorBody.indexOf('upload_asset "$target"'),
+    expect(mirrorBody).toContain("publish-platform-assets.mjs");
+    const publisher = readFileSync(".github/scripts/publish-platform-assets.mjs", "utf8");
+    expect(publisher.indexOf('run("register-release-manifest.mjs"')).toBeLessThan(
+      publisher.indexOf('run("upload-oss-release-asset.mjs"'),
     );
     expect(verifyBody).toContain(
       "needs.mirror-domestic-release.result == 'success'",
     );
-    expect(workflow).not.toContain("/publish");
+    expect(workflow).not.toContain('"$api/releases/$RELEASE_TAG/publish"');
   });
 
   test("Windows quality gate runs workspace tests and real PATH registry writes", () => {
@@ -212,15 +227,13 @@ describe("release workflow repository script availability", () => {
     expect(workflow).not.toContain("release-policy");
   });
 
-  test("published client metadata is verified through the canonical CDN", () => {
+  test("published metadata uses platform-scoped queries and registered download URLs", () => {
     const body = jobBody("verify-update-service");
-
-    expect(body).toContain(
-      "^https://download\\\\.baijimu\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
-    );
-    expect(body).not.toContain(
-      "^https://[a-z0-9][a-z0-9-]*\\\\.oss-[a-z0-9-]+\\\\.aliyuncs\\\\.com/lowcode/direct-uploads/bridge-agent-release/",
-    );
+    expect(body).toContain("verify-platform-release.mjs verify");
+    const verifier = readFileSync(".github/scripts/verify-platform-release.mjs", "utf8");
+    expect(verifier).toContain('url.searchParams.set("platform", platform.id)');
+    expect(verifier).toContain('new URL(assets[0].downloadUrl)');
+    expect(verifier).toContain('asset.downloadUrl === update.url');
   });
 
   test("Linux dependency installation keeps bounded retries and network timeouts", () => {

@@ -20,16 +20,12 @@ retry_gh() {
 }
 
 release_notes="$(mktemp)"
-cat > "$release_notes" <<'NOTES'
-百积木桌面端发布。
-
-Download the installer for your platform from the Assets section below:
-- macOS: universal `.dmg` (works on both Intel and Apple Silicon)
-- Windows: `.msi` installer that downloads WebView2 only when it is missing
-- Linux: `.AppImage` / `.deb` / archive
-
-This release is built automatically by GitHub Actions from the tagged source.
-NOTES
+node --input-type=module - "$release_notes" <<'JS'
+import { writeFileSync } from 'node:fs';
+import { releasePlatforms } from './.github/scripts/release-platforms.mjs';
+const platforms = releasePlatforms(process.env.RELEASE_PLATFORMS);
+writeFileSync(process.argv[2], `百积木桌面端发布。\n\n本次平台：${platforms.map(p => p.name).join(', ')}。\n未列出的平台继续使用各自已发布的版本。\n\nBuilt by GitHub Actions from the immutable release source.\n`);
+JS
 
 release_create_args=(
   "$RELEASE_TAG"

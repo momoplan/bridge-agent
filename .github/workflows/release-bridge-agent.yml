@@ -1,19 +1,15 @@
 name: release-bridge-agent
 
 on:
-  push:
-    tags:
-      - "bridge-agent-v*"
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing release tag to retry or repair, for example bridge-agent-v0.1.110
-        required: true
-        type: string
       release_platforms:
-        description: Comma-separated keys from .github/release-platforms.json; empty selects all registered platforms
+        description: "Platforms to publish, comma-separated: macos,windows,linux. Empty defaults to macOS; repair preserves existing assets."
         required: false
-        default: ""
+        type: string
+      release_tag:
+        description: Immutable release tag matching the selected main commit; existing tag for asset repair
+        required: true
         type: string
       repair_assets_only:
         description: Reuse the existing signed GitHub Release assets and repair OSS distribution and updater metadata
@@ -23,6 +19,7 @@ on:
 
 env:
   RELEASE_PLATFORMS: ${{ inputs.release_platforms || '' }}
+  REPAIR_ASSETS_ONLY: ${{ inputs.repair_assets_only || false }}
 
 permissions:
   contents: write
@@ -32,6 +29,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select-platforms:
+    name: Select release platforms
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.selection.outputs.matrix }}
+      quality_runner: ${{ steps.selection.outputs.quality_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+      - id: selection
+        run: node .github/scripts/release-platforms.mjs
+      - name: Verify platform-aware update service before signing
+        env:
+          BRIDGE_AGENT_UPDATE_API_URL: ${{ secrets.BRIDGE_AGENT_UPDATE_API_URL }}
+        run: |
+          set -euo pipefail
+          api="$(node .github/scripts/release-service-url.mjs update "$BRIDGE_AGENT_UPDATE_API_URL")"
+          node .github/scripts/verify-platform-release.mjs preflight "$api"
+
   frontend-recovery-gate:
     name: Release frontend recovery (${{ matrix.runner }})
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
@@ -52,9 +69,7 @@ jobs:
 
   prepare-domestic-release:
     name: Prepare domestic release
-    outputs:
-      matrix: ${{ steps.platforms.outputs.matrix }}
-      quality_runner: ${{ steps.platforms.outputs.quality_runner }}
+    needs: select-platforms
     runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
@@ -65,15 +80,6 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
           fetch-depth: 0
-
-      - name: Resolve selected release platforms
-        id: platforms
-        shell: bash
-        run: |
-          set -euo pipefail
-          plan="$(node .github/scripts/release-platforms.mjs)"
-          echo "matrix=$(jq -c .matrix <<<"$plan")" >> "$GITHUB_OUTPUT"
-          echo "quality_runner=$(jq -r .qualityRunner <<<"$plan")" >> "$GITHUB_OUTPUT"
 
       - name: Validate immutable release source
         shell: bash
@@ -96,9 +102,9 @@ jobs:
         run: bash .github/scripts/release-steps/02-upsert-domestic-release.sh
   quality-gate:
     name: Release quality gate
-    needs: prepare-domestic-release
+    needs: select-platforms
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
-    runs-on: ${{ needs.prepare-domestic-release.outputs.quality_runner }}
+    runs-on: ${{ needs.select-platforms.outputs.quality_runner }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
@@ -193,12 +199,12 @@ jobs:
           & ./.github/scripts/release-steps/03-check-windows-rust-targets.ps1
   release:
     name: ${{ matrix.name }}
-    needs: [prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]
+    needs: [select-platforms, prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare-domestic-release.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.select-platforms.outputs.matrix) }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
@@ -501,7 +507,9 @@ jobs:
           RELEASE_TARGET: ${{ matrix.name }}
         run: bash .github/scripts/release-steps/17-upload-bundles-to-github-release.sh
   mirror-domestic-release:
-    name: Mirror release bundles to Gitee
+    name: Publish selected release bundles to OSS
+    outputs:
+      platforms: ${{ steps.publication.outputs.platforms }}
     runs-on: ubuntu-22.04
     needs: [prepare-domestic-release, release]
     if: >-
@@ -539,6 +547,7 @@ jobs:
             --pattern 'Baijimu_*'
 
       - name: Upload release bundles to OSS and register metadata
+        id: publication
         shell: bash
         env:
           BRIDGE_AGENT_RELEASE_API_URL: ${{ secrets.BRIDGE_AGENT_RELEASE_API_URL }}
@@ -554,6 +563,7 @@ jobs:
         && needs.mirror-domestic-release.result == 'success'
       }}
     env:
+      RELEASE_PLATFORMS: ${{ needs.mirror-domestic-release.outputs.platforms }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:

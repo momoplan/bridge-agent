@@ -1,53 +1,53 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const catalog = JSON.parse(readFileSync(new URL("../release-platforms.json", import.meta.url), "utf8"));
+export const catalogPath = fileURLToPath(new URL("../release-platforms.json", import.meta.url));
 
-export function resolveReleasePlan(selection, version, platforms = catalog) {
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
-    throw new Error("Invalid release version");
+export function releasePlatforms(input = "", catalog = JSON.parse(readFileSync(catalogPath, "utf8"))) {
+  const requested = input.trim() ? input.split(",").map((id) => id.trim()) : catalog.defaultPlatforms;
+  if (!requested.length || new Set(requested).size !== requested.length) {
+    throw new Error("Select one or more distinct release platforms");
   }
-  const keys = selection?.trim() ? selection.split(",").map((key) => key.trim()) : Object.keys(platforms);
-  if (!keys.length || new Set(keys).size !== keys.length || keys.some((key) => !Object.hasOwn(platforms, key))) {
-    throw new Error("Release platforms must be distinct catalog keys");
-  }
-  const selected = keys.map((key) => platforms[key]);
-  const assets = selected.flatMap((platform) => platform.assets.map((asset) => ({
-    target: platform.name,
-    name: `Baijimu_${version}_${asset.suffix}`,
-    signatureRequired: asset.signatureRequired,
-    updaters: asset.updaters ?? [],
-  })));
-  return {
-    matrix: { include: selected.map(({ name, runner, tauri_args, rust_targets }) => ({ name, runner, tauri_args, rust_targets })) },
-    qualityRunner: selected[0].qualityRunner,
-    assets,
-    updaters: assets.flatMap((asset) => asset.updaters.map((updater) => ({ ...updater, name: asset.name }))),
-  };
+  return requested.map((id) => {
+    const platform = catalog.platforms.find((entry) => entry.id === id);
+    if (!platform) throw new Error(`Unknown release platform: ${id}`);
+    return platform;
+  });
 }
 
-export function validateReleaseFiles(plan, directory) {
-  const expected = new Set();
-  for (const asset of plan.assets) {
-    expected.add(asset.name);
-    expected.add(`${asset.name}.sig`);
-    const paths = asset.signatureRequired ? [asset.name, `${asset.name}.sig`] : [asset.name];
-    for (const name of paths) {
-      const path = join(directory, name);
-      if (!statSync(path, { throwIfNoEntry: false })?.isFile() || statSync(path).size === 0) {
-        throw new Error(`Missing release bundle or required signature: ${name}`);
-      }
+export function releaseAssets(directory, platforms, version) {
+  const files = readdirSync(directory).filter((name) => statSync(join(directory, name)).isFile());
+  const assets = platforms.flatMap((platform) => platform.assets.map((format) => {
+    const matches = files.filter((name) => version ? name === `Baijimu_${version}_${format.filenameSuffix}` : name.endsWith(format.suffix));
+    if (matches.length !== 1) throw new Error(`Expected exactly one ${platform.id} ${format.suffix} asset, found ${matches.length}`);
+    const name = matches[0];
+    const file = join(directory, name);
+    if (!statSync(file).size) throw new Error(`Empty release asset: ${name}`);
+    if (format.signatureRequired && (!files.includes(`${name}.sig`) || !readFileSync(`${file}.sig`, "utf8").trim())) {
+      throw new Error(`Missing updater signature: ${name}`);
     }
-  }
-  for (const name of readdirSync(directory)) {
-    if (!expected.has(name)) throw new Error(`Unexpected release asset outside selected platforms: ${name}`);
-  }
+    return { target: platform.name, name, file, signatureRequired: format.signatureRequired };
+  }));
+  const expected = new Set(assets.flatMap((asset) => [asset.name, ...(asset.signatureRequired ? [`${asset.name}.sig`] : [])]));
+  const unexpected = files.filter((name) => !expected.has(name));
+  if (unexpected.length) throw new Error(`Release contains unselected or unexpected assets: ${unexpected.join(", ")}`);
+  return assets;
+}
+
+export function platformsForAssets(directory, input = "", repair = false) {
+  if (!repair || input.trim()) return releasePlatforms(input);
+  // Repair preserves the original platform set, including historical all-platform releases.
+  const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+  const files = readdirSync(directory);
+  return releasePlatforms(catalog.platforms.filter((platform) =>
+    platform.assets.some(({ suffix }) => files.some((name) => name.endsWith(suffix))),
+  ).map(({ id }) => id).join(","), { ...catalog, defaultPlatforms: [] });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const version = process.env.RELEASE_TAG?.replace(/^bridge-agent-v/, "");
-  const plan = resolveReleasePlan(process.env.RELEASE_PLATFORMS, version);
-  if (process.argv[2]) validateReleaseFiles(plan, process.argv[2]);
-  console.log(JSON.stringify(plan));
+  const platforms = releasePlatforms(process.env.RELEASE_PLATFORMS);
+  const matrix = { include: platforms.map(({ id, name, runner, tauri_args, rust_targets }) => ({ id, name, runner, tauri_args, rust_targets })) };
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\nquality_runner=${platforms[0].qualityRunner}\nplatforms=${platforms.map(({ id }) => id).join(",")}\n`);
+  console.log(JSON.stringify(matrix));
 }
