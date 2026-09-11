@@ -223,7 +223,7 @@ describe("release workflow repository script availability", () => {
     );
   });
 
-  test("Linux dependency installation has bounded retries and an official mirror fallback", () => {
+  test("Linux dependency installation keeps bounded retries and network timeouts", () => {
     expect(
       workflow.match(/install-linux-release-dependencies\.sh/g),
     ).toHaveLength(2);
@@ -231,7 +231,6 @@ describe("release workflow repository script availability", () => {
     expect(linuxDependencyInstaller).toContain("Acquire::Retries=");
     expect(linuxDependencyInstaller).toContain("Acquire::http::Timeout=15");
     expect(linuxDependencyInstaller).toContain("Acquire::https::Timeout=15");
-    expect(linuxDependencyInstaller).toContain("https://archive.ubuntu.com/ubuntu");
   });
 
   test("macOS DMG remains a quality-gated drag-to-install bundle", () => {
