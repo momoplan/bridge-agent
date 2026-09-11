@@ -28,7 +28,7 @@ function createExecutable(path, contents) {
 
 describe("Linux release dependency installation", () => {
   test.runIf(process.platform !== "win32")(
-    "replaces the unavailable runner mirror and bounds every apt command",
+    "preserves runner mirror priorities and bounds every apt command",
     () => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), "bridge-agent-apt-test-"));
       temporaryDirectories.push(fixtureRoot);
@@ -42,8 +42,9 @@ describe("Linux release dependency installation", () => {
       writeFileSync(
         mirrorList,
         [
-          "http://azure.archive.ubuntu.com/ubuntu",
-          "https://archive.ubuntu.com/ubuntu",
+          "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1",
+          "https://archive.ubuntu.com/ubuntu/\tpriority:2",
+          "https://security.ubuntu.com/ubuntu/\tpriority:3",
           "",
         ].join("\n"),
       );
@@ -71,6 +72,9 @@ describe("Linux release dependency installation", () => {
         ].join("\n"),
       );
 
+      const originalMirrors = readFileSync(mirrorList, "utf8");
+      const originalSources = readFileSync(join(aptRoot, "sources.list"), "utf8");
+
       const result = spawnSync("bash", [scriptPath], {
         encoding: "utf8",
         env: {
@@ -86,12 +90,8 @@ describe("Linux release dependency installation", () => {
       });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(readFileSync(mirrorList, "utf8")).not.toContain(
-        "azure.archive.ubuntu.com",
-      );
-      expect(readFileSync(join(aptRoot, "sources.list"), "utf8")).toContain(
-        "https://archive.ubuntu.com/ubuntu",
-      );
+      expect(readFileSync(mirrorList, "utf8")).toBe(originalMirrors);
+      expect(readFileSync(join(aptRoot, "sources.list"), "utf8")).toBe(originalSources);
 
       const commands = readFileSync(commandLog, "utf8");
       expect(commands).toContain("--signal=TERM 42s");
