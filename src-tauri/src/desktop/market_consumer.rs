@@ -27,11 +27,12 @@ struct ConsumerEnvironment {
 struct ConsumerCredential {
     environment_key: Option<String>,
     base_url: Option<String>,
-    client_id: Option<String>,
     token: String,
     token_type: String,
     workspace_ids: Vec<u64>,
-    source: Option<String>,
+    credential_id: Option<String>,
+    issued_at: Option<String>,
+    issued_at_epoch_seconds: Option<u64>,
 }
 
 fn credential_for(config: &AgentConfig, document: SharedAuthentication) -> Result<String, String> {
@@ -52,7 +53,7 @@ fn credential_for(config: &AgentConfig, document: SharedAuthentication) -> Resul
             return Err("当前设备的环境绑定与授权目录不一致".into());
         }
     }
-    let mut matches = document.credentials.into_iter().filter(|credential| {
+    let matches = document.credentials.into_iter().filter(|credential| {
         credential.environment_key.as_deref().map_or_else(
             || {
                 credential.base_url.as_deref().map_or_else(
@@ -61,19 +62,20 @@ fn credential_for(config: &AgentConfig, document: SharedAuthentication) -> Resul
                 )
             },
             |bound| bound == key,
-        ) && credential.client_id.as_deref() == Some(config.relay.agent_id.as_str())
-            && credential.source.as_deref() == Some("bridge-agent")
-            && credential.token_type == "pat"
+        ) && credential.token_type == "pat"
             && credential.workspace_ids.contains(&workspace)
     });
     let credential = matches
-        .next()
-        .ok_or("缺少当前设备的工作区读取凭证，请重新授权")?;
-    if matches.next().is_some()
-        || credential.token.is_empty()
-        || credential.token.trim() != credential.token
-    {
-        return Err("当前设备的工作区读取凭证不唯一或无效".into());
+        // Match the CLI's ordering without using its currently selected workspace.
+        .max_by(|left, right| {
+            left.issued_at_epoch_seconds
+                .cmp(&right.issued_at_epoch_seconds)
+                .then_with(|| left.issued_at.cmp(&right.issued_at))
+                .then_with(|| left.credential_id.cmp(&right.credential_id))
+        })
+        .ok_or("缺少当前环境和工作区的 PAT，请登录对应工作区")?;
+    if credential.token.is_empty() || credential.token.trim() != credential.token {
+        return Err("当前环境和工作区的 PAT 无效，请登录对应工作区".into());
     }
     Ok(credential.token)
 }
@@ -247,11 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn credential_is_bound_to_consumer_environment_workspace_and_device() {
+    fn credential_is_bound_to_consumer_environment_and_workspace() {
         assert_eq!(resolve(document()).unwrap(), "test-pat");
         for (field, value) in [
             ("baseUrl", Value::from("https://author.example.test")),
-            ("clientId", Value::from("device-b")),
             ("workspaceIds", serde_json::json!([8])),
             ("tokenType", Value::from("jwt")),
             ("baseUrl", Value::Null),
@@ -262,15 +263,82 @@ mod tests {
         }
     }
     #[test]
-    fn credential_selection_rejects_ambiguity_but_ignores_cli_workspace() {
-        let mut value = document();
-        let duplicate = value["credentials"][0].clone();
-        value["credentials"].as_array_mut().unwrap().push(duplicate);
-        assert!(resolve(value).is_err());
+    fn credential_selection_ignores_cli_workspace() {
         let mut value = document();
         value["currentWorkspaceId"] = 8.into();
         value["currentEnvironment"] = "another-cli-environment".into();
         assert_eq!(resolve(value).unwrap(), "test-pat");
+    }
+    #[test]
+    fn pat_source_and_device_are_not_market_permissions() {
+        for source in [
+            Value::Null,
+            "cli-login".into(),
+            "manual".into(),
+            "bridge-agent".into(),
+        ] {
+            for device in [Value::Null, "device-a".into(), "device-b".into()] {
+                let mut value = document();
+                value["credentials"][0]["source"] = source.clone();
+                value["credentials"][0]["clientId"] = device;
+                assert_eq!(resolve(value).unwrap(), "test-pat");
+            }
+        }
+    }
+    #[test]
+    fn newest_matching_pat_is_selected_independently_of_array_order() {
+        for field in ["issuedAtEpochSeconds", "issuedAt", "credentialId"] {
+            let mut value = document();
+            let mut newer = value["credentials"][0].clone();
+            let (old, new) = match field {
+                "issuedAtEpochSeconds" => (Value::from(1), Value::from(2)),
+                "issuedAt" => ("2026-01-01T00:00:00Z".into(), "2026-01-02T00:00:00Z".into()),
+                _ => ("credential-a".into(), "credential-b".into()),
+            };
+            value["credentials"][0][field] = old;
+            newer[field] = new;
+            newer["token"] = "newer-pat".into();
+            newer["source"] = "cli-login".into();
+            newer["clientId"] = Value::Null;
+            value["credentials"].as_array_mut().unwrap().push(newer);
+            assert_eq!(resolve(value.clone()).unwrap(), "newer-pat");
+            value["credentials"].as_array_mut().unwrap().reverse();
+            assert_eq!(resolve(value).unwrap(), "newer-pat");
+        }
+    }
+    #[test]
+    fn newer_unrelated_credentials_do_not_override_workspace_selection() {
+        for (field, other) in [
+            ("workspaceIds", serde_json::json!([8])),
+            ("environmentKey", "other".into()),
+            ("tokenType", "jwt".into()),
+        ] {
+            let mut value = document();
+            let mut unrelated = value["credentials"][0].clone();
+            unrelated[field] = other;
+            unrelated["issuedAtEpochSeconds"] = 100.into();
+            unrelated["token"] = "unrelated-pat".into();
+            value["credentials"].as_array_mut().unwrap().push(unrelated);
+            assert_eq!(resolve(value).unwrap(), "test-pat");
+        }
+    }
+    #[test]
+    fn duplicate_records_do_not_invalidate_the_same_pat() {
+        let mut value = document();
+        let duplicate = value["credentials"][0].clone();
+        value["credentials"].as_array_mut().unwrap().push(duplicate);
+        assert_eq!(resolve(value).unwrap(), "test-pat");
+    }
+    #[test]
+    fn invalid_selected_pat_is_reported_without_trying_older_credentials() {
+        for token in ["", " invalid-pat "] {
+            let mut value = document();
+            let mut newer = value["credentials"][0].clone();
+            newer["issuedAtEpochSeconds"] = 100.into();
+            newer["token"] = token.into();
+            value["credentials"].as_array_mut().unwrap().push(newer);
+            assert!(resolve(value).unwrap_err().contains("PAT 无效"));
+        }
     }
     #[test]
     fn official_legacy_pat_needs_no_base_url() {
@@ -282,6 +350,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("baseUrl");
+        value["credentials"][0]["source"] = "cli-login".into();
+        value["credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("clientId");
         assert_eq!(
             credential_for(&cfg, serde_json::from_value(value.clone()).unwrap()).unwrap(),
             "test-pat"

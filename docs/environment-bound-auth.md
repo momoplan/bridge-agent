@@ -9,3 +9,9 @@ CLI 首次连接使用 `baijimu auth login --base-url https://environment.exampl
 Bridge 在设置中编辑目标 API 地址后发起浏览器授权，在目标环境选择工作区。授权取消或失败不覆盖原连接；成功后保存新的环境/工作区/设备绑定。修改地址时不会把旧工作区 ID 带入新环境。环境身份与既有同地址绑定冲突时拒绝保存。
 
 发布顺序：access-credential-service 0.9.0、device-service 0.6.0 → CLI 0.55.0 → 内置该 CLI 的 Bridge 0.8.0。已有官方授权按缺省规则继续读取；旧 CLI 不具备环境字段保存和隔离能力，需要随客户端升级。
+
+## 市场读取凭证
+
+Bridge 按自身绑定的环境和工作区选择共享授权文件中的 PAT，来源 `source` 和设备 `clientId` 不作为市场读取的权限条件。CLI 登录、手工登记和设备授权产生的 PAT 均可参与选择；服务端验证令牌有效性、用户及工作区读取权限。Relay 的设备授权独立处理。
+
+存在多条匹配凭证时，沿用 CLI 的排序：依次比较 `issuedAtEpochSeconds`、`issuedAt`、`credentialId`，优先较新记录。不会受 CLI 当前环境或工作区切换影响，也不会在选中凭证失败后尝试其他身份。官方环境仍支持缺少环境字段的历史凭证；私有环境必须具备明确的环境绑定。
