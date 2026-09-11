@@ -1,0 +1,34 @@
+{
+  "linux": {
+    "name": "Linux x64",
+    "runner": "ubuntu-22.04",
+    "qualityRunner": "ubuntu-22.04",
+    "tauri_args": "--bundles appimage,deb",
+    "rust_targets": "",
+    "assets": [
+      { "suffix": "amd64.deb", "signatureRequired": false },
+      { "suffix": "amd64.AppImage", "signatureRequired": true, "updaters": [{ "target": "linux", "arch": "x86_64" }] }
+    ]
+  },
+  "macos": {
+    "name": "macOS Universal",
+    "runner": "macos-15-intel",
+    "qualityRunner": "macos-15",
+    "tauri_args": "--target universal-apple-darwin --bundles app,dmg",
+    "rust_targets": "aarch64-apple-darwin x86_64-apple-darwin",
+    "assets": [
+      { "suffix": "universal.app.tar.gz", "signatureRequired": true, "updaters": [{ "target": "darwin", "arch": "aarch64" }, { "target": "darwin", "arch": "x86_64" }] },
+      { "suffix": "universal.dmg", "signatureRequired": false }
+    ]
+  },
+  "windows": {
+    "name": "Windows x64",
+    "runner": "windows-latest",
+    "qualityRunner": "windows-latest",
+    "tauri_args": "--bundles msi",
+    "rust_targets": "",
+    "assets": [
+      { "suffix": "x64_zh-CN.msi", "signatureRequired": true, "updaters": [{ "target": "windows", "arch": "x86_64" }] }
+    ]
+  }
+}

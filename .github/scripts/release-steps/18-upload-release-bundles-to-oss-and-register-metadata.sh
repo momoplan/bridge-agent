@@ -27,32 +27,14 @@ upload_asset() {
   fi
 }
 
-shopt -s nullglob
-windows=(release-assets/*.msi)
-macos_tar=(release-assets/*.app.tar.gz)
-macos_dmg=(release-assets/*.dmg)
-linux_deb=(release-assets/*.deb)
-linux_appimage=(release-assets/*.AppImage)
-if [ "${#windows[@]}" -ne 1 ] ||
-   [ "${#macos_tar[@]}" -ne 1 ] ||
-   [ "${#macos_dmg[@]}" -ne 1 ] ||
-   [ "${#linux_deb[@]}" -ne 1 ] ||
-   [ "${#linux_appimage[@]}" -ne 1 ]; then
-  echo "Expected exactly one release bundle for each published format" >&2
-  find release-assets -maxdepth 1 -type f -print | sort
-  exit 1
-fi
+plan="$(node .github/scripts/release-platforms.mjs release-assets)"
+entries=()
+while IFS=$'\t' read -r target name signature_required; do
+  entries+=("${target}::release-assets/${name}::${signature_required}")
+done < <(jq -r '.assets[] | [.target, .name, (.signatureRequired | tostring)] | @tsv' <<<"$plan")
 
-node .github/scripts/register-release-manifest.mjs \
-  "$api" "$RELEASE_TAG" \
-  "Windows x64::${windows[0]}::true" \
-  "macOS Universal::${macos_tar[0]}::true" \
-  "macOS Universal::${macos_dmg[0]}::false" \
-  "Linux x64::${linux_deb[0]}::false" \
-  "Linux x64::${linux_appimage[0]}::true"
+node .github/scripts/register-release-manifest.mjs "$api" "$RELEASE_TAG" "${entries[@]}"
 
-upload_asset "Windows x64" "${windows[0]}"
-upload_asset "macOS Universal" "${macos_tar[0]}"
-upload_asset "macOS Universal" "${macos_dmg[0]}"
-upload_asset "Linux x64" "${linux_deb[0]}"
-upload_asset "Linux x64" "${linux_appimage[0]}"
+while IFS=$'\t' read -r target name; do
+  upload_asset "$target" "release-assets/$name"
+done < <(jq -r '.assets[] | [.target, .name] | @tsv' <<<"$plan")

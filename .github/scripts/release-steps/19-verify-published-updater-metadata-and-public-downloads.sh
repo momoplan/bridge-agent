@@ -6,12 +6,15 @@ fi
 latest_api="$(node .github/scripts/release-service-url.mjs update "$BRIDGE_AGENT_UPDATE_API_URL")"
 version="${RELEASE_TAG#bridge-agent-v}"
 
+plan="$(node .github/scripts/release-platforms.mjs)"
+
 latest_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
   --connect-timeout 20 \
   "${latest_api}?currentVersion=0.0.0")"
-jq -e --arg version "$version" '
+jq -e --arg version "$version" --argjson plan "$plan" '
   .version == $version
-  and (.assets | length == 5)
+  and (([.assets[] | {target, name}] | sort_by(.target, .name))
+    == ([$plan.assets[] | {target, name}] | sort_by(.target, .name)))
   and all(.assets[];
     .provider == "baijimu-oss"
     and (.downloadUrl
@@ -19,9 +22,7 @@ jq -e --arg version "$version" '
   )
 ' <<<"$latest_payload" >/dev/null
 
-for target_arch in darwin:aarch64 windows:x86_64 linux:x86_64; do
-  target="${target_arch%%:*}"
-  arch="${target_arch#*:}"
+while IFS=$'\t' read -r target arch name; do
   updater_payload="$(curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
     --connect-timeout 20 \
     "${latest_api}/tauri?target=${target}&arch=${arch}&currentVersion=0.0.0")"
@@ -31,7 +32,9 @@ for target_arch in darwin:aarch64 windows:x86_64 linux:x86_64; do
     | .url
     | select(test("^https://download\\.baijimu\\.com/lowcode/direct-uploads/bridge-agent-release/"))
   ' <<<"$updater_payload")"
+  expected_url="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .downloadUrl' <<<"$latest_payload")"
+  test "$updater_url" = "$expected_url"
   curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
     --connect-timeout 20 --range 0-0 --max-time 120 \
     --output /dev/null "$updater_url"
-done
+done < <(jq -r '.updaters[] | [.target, .arch, .name] | @tsv' <<<"$plan")

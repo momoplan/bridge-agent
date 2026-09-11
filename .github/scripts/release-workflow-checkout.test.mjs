@@ -138,7 +138,7 @@ describe("release workflow repository script availability", () => {
     expect(workflow).not.toContain("publish_only:");
     expect(mirrorBody).toContain("register-release-manifest.mjs");
     expect(mirrorBody.indexOf("register-release-manifest.mjs")).toBeLessThan(
-      mirrorBody.indexOf('upload_asset "Windows x64"'),
+      mirrorBody.indexOf('upload_asset "$target"'),
     );
     expect(verifyBody).toContain(
       "needs.mirror-domestic-release.result == 'success'",

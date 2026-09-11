@@ -10,11 +10,19 @@ on:
         description: Existing release tag to retry or repair, for example bridge-agent-v0.1.110
         required: true
         type: string
+      release_platforms:
+        description: Comma-separated keys from .github/release-platforms.json; empty selects all registered platforms
+        required: false
+        default: ""
+        type: string
       repair_assets_only:
         description: Reuse the existing signed GitHub Release assets and repair OSS distribution and updater metadata
         required: false
         default: false
         type: boolean
+
+env:
+  RELEASE_PLATFORMS: ${{ inputs.release_platforms || '' }}
 
 permissions:
   contents: write
@@ -44,6 +52,9 @@ jobs:
 
   prepare-domestic-release:
     name: Prepare domestic release
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+      quality_runner: ${{ steps.platforms.outputs.quality_runner }}
     runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
@@ -54,6 +65,15 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
           fetch-depth: 0
+
+      - name: Resolve selected release platforms
+        id: platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$(node .github/scripts/release-platforms.mjs)"
+          echo "matrix=$(jq -c .matrix <<<"$plan")" >> "$GITHUB_OUTPUT"
+          echo "quality_runner=$(jq -r .qualityRunner <<<"$plan")" >> "$GITHUB_OUTPUT"
 
       - name: Validate immutable release source
         shell: bash
@@ -76,8 +96,9 @@ jobs:
         run: bash .github/scripts/release-steps/02-upsert-domestic-release.sh
   quality-gate:
     name: Release quality gate
+    needs: prepare-domestic-release
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.repair_assets_only }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ needs.prepare-domestic-release.outputs.quality_runner }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
@@ -110,6 +131,7 @@ jobs:
           rustup default stable
 
       - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
         run: .github/scripts/install-linux-release-dependencies.sh
 
       - name: Run release checks
@@ -176,20 +198,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: macOS Universal
-            runner: macos-15-intel
-            tauri_args: --target universal-apple-darwin --bundles app,dmg
-            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
-          - name: Windows x64
-            runner: windows-latest
-            tauri_args: --bundles msi
-            rust_targets: ""
-          - name: Linux x64
-            runner: ubuntu-22.04
-            tauri_args: --bundles appimage,deb
-            rust_targets: ""
+      matrix: ${{ fromJSON(needs.prepare-domestic-release.outputs.matrix) }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
