@@ -132,7 +132,6 @@ impl MarketDistribution {
     ) -> Result<(), ContractError> {
         let mut ids = HashSet::new();
         let mut applications = HashSet::new();
-        let mut previous = after;
         for listing in &page.items {
             validate_listing(listing)?;
             if listing.market_key != self.market_key {
@@ -143,14 +142,13 @@ impl MarketDistribution {
             }
             if !ids.insert(listing.listing_id)
                 || !applications.insert(&listing.frozen_version.source.application)
-                || previous.is_some_and(|id| listing.listing_id <= id)
+                || after == Some(listing.listing_id)
             {
                 return Err(ContractError::new(
                     "items",
                     "duplicate identity or non-advancing catalog page",
                 ));
             }
-            previous = Some(listing.listing_id);
         }
         if let Some(cursor) = page.next_cursor {
             if page.items.last().map(|item| item.listing_id) != Some(cursor) {
@@ -173,5 +171,5 @@ fn require_id(id: Uuid, path: &str) -> Result<(), ContractError> {
 
 fn validate_listing(listing: &MarketListing) -> Result<(), ContractError> {
     require_id(listing.listing_id, "listingId")?;
-    listing.frozen_version.validate()
+    listing.validate()
 }

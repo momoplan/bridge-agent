@@ -29,6 +29,17 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
         }],
     };
     MarketListing {
+        contract_version: local_app_contract::DISTRIBUTION_CONTRACT_VERSION
+            .parse()
+            .unwrap(),
+        presentation: local_app_contract::ApplicationPresentation {
+            name: "Example tool".into(),
+            description: "Description".into(),
+            publisher: None,
+            capability: None,
+            risk: None,
+            icon: None,
+        },
         market_key: "public-market".to_owned().try_into().unwrap(),
         listing_id: Uuid::from_u128(id),
         frozen_version: FrozenVersion::new(source, content).unwrap(),
@@ -224,6 +235,39 @@ fn invalid_pagination_cannot_loop_or_merge_source_applications() {
     assert!(market()
         .validate_page(Some(Uuid::from_u128(1)), &page)
         .is_err());
+}
+
+#[test]
+fn catalog_rank_order_does_not_require_increasing_uuid_values() {
+    let page = MarketPage {
+        items: vec![
+            listing("environment-a", "1.0.0", 90),
+            listing("environment-b", "1.0.0", 5),
+        ],
+        next_cursor: Some(Uuid::from_u128(5)),
+    };
+    market()
+        .validate_page(Some(Uuid::from_u128(80)), &page)
+        .unwrap();
+    let next = MarketPage {
+        items: vec![listing("environment-c", "1.0.0", 3)],
+        next_cursor: None,
+    };
+    market().validate_page(page.next_cursor, &next).unwrap();
+    assert!(market()
+        .validate_page(Some(Uuid::from_u128(5)), &page)
+        .is_err());
+}
+
+#[test]
+fn reviewed_presentation_and_distribution_contract_are_validated() {
+    let item = listing("environment-a", "1.0.0", 1);
+    let mut invalid = item.clone();
+    invalid.contract_version = "1.0.0".parse().unwrap();
+    assert!(resolve_exact(&selection(&item), &invalid).is_err());
+    invalid = item.clone();
+    invalid.presentation.name.clear();
+    assert!(resolve_exact(&selection(&item), &invalid).is_err());
 }
 
 #[test]

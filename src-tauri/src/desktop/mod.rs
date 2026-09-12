@@ -137,6 +137,9 @@ use core_foundation::string::CFString;
 
 #[cfg(test)]
 mod market_lifecycle_tests;
+
+#[cfg(test)]
+mod market_live_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
