@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent-desktop"
-version = "0.8.3"
+version = "0.8.4"
 description = "百积木本地连接客户端"
 edition = "2021"
 
@@ -8,7 +8,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "063df86d0e57920b712541734dd2cfd5f83e539b", version = "=1.1.0" }
+local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "53d8520c09b567e8b611beb2c125d6fee41086a1", version = "=2.0.0" }
 anyhow = "1.0"
 axum = "0.8"
 bridge-agent = { path = ".." }

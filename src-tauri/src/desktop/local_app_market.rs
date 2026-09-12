@@ -144,19 +144,10 @@ pub(super) async fn fetch_market_connector_apps(
 pub(super) fn market_listing_presentation(
     listing: local_app_contract::MarketListing,
 ) -> Result<MarketConnectorApp, String> {
-    listing
-        .frozen_version
-        .validate()
-        .map_err(|error| error.to_string())?;
+    listing.validate().map_err(|error| error.to_string())?;
     let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
         .map_err(|error| error.to_string())?;
-    let field = |name: &str| {
-        manifest
-            .get(name)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
+    let display = &listing.presentation;
     let source = listing.frozen_version.source.clone();
     let selection = local_app_contract::InstallSource::Market {
         market_key: listing.market_key,
@@ -166,11 +157,18 @@ pub(super) fn market_listing_presentation(
     };
     let mut presentation = MarketConnectorApp::from(RawMarketConnectorApp {
         app_id: source.application.app_id.as_str().to_owned(),
-        name: field("name"),
-        description: field("description"),
-        risk: field("risk"),
-        risk_level: Some(field("riskLevel")),
-        capability: field("capability"),
+        name: display.name.clone(),
+        description: display.description.clone(),
+        risk: display
+            .risk
+            .as_ref()
+            .map(|risk| risk.description.clone())
+            .unwrap_or_default(),
+        risk_level: display
+            .risk
+            .as_ref()
+            .map(|risk| risk.level.as_str().to_owned()),
+        capability: display.capability.clone().unwrap_or_default(),
         latest_version: RawMarketConnectorVersion {
             version: source.version.to_string(),
             source: String::new(),
@@ -188,6 +186,17 @@ pub(super) fn market_listing_presentation(
     presentation.checksum = None;
     presentation.archive_path = None;
     presentation.install_source = Some(selection);
+    presentation.icon_data_url = display
+        .icon
+        .as_ref()
+        .map(|icon| {
+            connector_icon_data_url(&ConnectorIcon {
+                media_type: icon.media_type.clone(),
+                data: icon.data.clone(),
+            })
+            .map_err(|error| error.to_string())
+        })
+        .transpose()?;
     if bridge_agent::market_distribution::select_artifact(
         &listing.frozen_version,
         normalized_platform(),

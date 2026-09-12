@@ -206,9 +206,9 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                       </div>
                       <div className="market-detail-meta">
                         <div><span>版本</span><strong>{selectedMarket.version}</strong></div>
-                        <div><span>主要能力</span><strong>{selectedMarket.capability}</strong></div>
+                        {selectedMarket.capability && <div><span>主要能力</span><strong>{selectedMarket.capability}</strong></div>}
                       </div>
-                      <div className={`market-permission-card ${selectedMarketIncompatible ? "incompatible" : ""}`}>
+                      {(selectedMarketIncompatible || selectedMarket.risk) && <div className={`market-permission-card ${selectedMarketIncompatible ? "incompatible" : ""}`}>
                         {selectedMarketIncompatible ? (
                           <AlertTriangle size={18} aria-hidden="true" />
                         ) : (
@@ -223,7 +223,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                               : selectedMarket.risk}
                           </p>
                         </div>
-                      </div>
+                      </div>}
                       {selectedMarket.requiredHostCapabilities.length > 0 ? (
                         <div className="market-requirements">
                           <strong>所需主机能力</strong>

@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent-desktop"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2594,8 +2594,8 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-app-contract"
-version = "1.1.0"
-source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=063df86d0e57920b712541734dd2cfd5f83e539b#063df86d0e57920b712541734dd2cfd5f83e539b"
+version = "2.0.0"
+source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=53d8520c09b567e8b611beb2c125d6fee41086a1#53d8520c09b567e8b611beb2c125d6fee41086a1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5203,7 +5203,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

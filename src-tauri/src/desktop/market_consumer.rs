@@ -121,13 +121,22 @@ impl MarketConsumer {
     pub(super) async fn listings(&self) -> Result<Vec<MarketListing>, String> {
         let mut cursor = None;
         let mut items = Vec::new();
+        let mut identities = std::collections::HashSet::new();
+        let mut applications = std::collections::HashSet::new();
         loop {
             let page = self
                 .reader
                 .page(&self.credential, cursor)
                 .await
                 .map_err(|error| error.to_string())?;
-            items.extend(page.items);
+            for item in page.items {
+                if !identities.insert(item.listing_id)
+                    || !applications.insert(item.frozen_version.source.application.clone())
+                {
+                    return Err("市场目录包含重复的条目或来源应用，无法继续读取".into());
+                }
+                items.push(item);
+            }
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => return Ok(items),
