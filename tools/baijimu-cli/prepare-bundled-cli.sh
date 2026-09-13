@@ -160,6 +160,7 @@ else
   cp "${cli_dir}/target/release/${binary_name}" "${resource_dir}/${binary_name}"
 fi
 
+node "${repo_root}/.github/scripts/copy-bundled-market-source.mjs" "${repo_root}" "${resource_dir}/${binary_name}"
 chmod 755 "${resource_dir}/${binary_name}" 2>/dev/null || true
 
 "${resource_dir}/${binary_name}" --version --json

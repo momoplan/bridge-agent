@@ -14,7 +14,7 @@ export function createLocalAppUpdateSelectors(marketConnectors: readonly MarketC
   function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
     if (app.kind !== "managed_tool" || !app.managedTool) return undefined;
     return marketConnectors.find((item) =>
-      item.applicationType === "managed_tool" && sameMarketApplication(app.managedTool?.installSource, item.installSource));
+      item.applicationType === "managed_tool" && sameMarketApplication(app.managedTool?.updateSource, item.installSource));
   }
 
   function marketAppForLocalApp(app: LocalAppItem): MarketConnector | undefined {

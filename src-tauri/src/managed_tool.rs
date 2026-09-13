@@ -37,6 +37,7 @@ const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 #[serde(rename_all = "camelCase")]
 pub struct ManagedToolStatus {
     pub install_source: Option<local_app_contract::InstallSource>,
+    pub update_source: Option<local_app_contract::InstallSource>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -103,17 +104,8 @@ fn bootstrap_bundled_inner(source: Option<&Path>) -> Result<ManagedToolStatus> {
                 }
             }
             if let Some(bundled) = source {
-                if let Ok(version) = validate_cli(bundled, None) {
-                    if version_is_newer(&version, &state.active_version)? {
-                        import_binary(
-                            bundled,
-                            &version,
-                            "bundled-upgrade",
-                            None,
-                            bundled_market_source(bundled, &version)?,
-                        )?;
-                        return inspect_inner(Some(bundled));
-                    }
+                if reconcile_bundled_release(&state, bundled)? {
+                    return inspect_inner(Some(bundled));
                 }
             }
             repair_launcher(&version_binary_path(&state.active_version))?;
@@ -186,6 +178,7 @@ fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
     let Some(state) = load_state()? else {
         return Ok(ManagedToolStatus {
             install_source: None,
+            update_source: None,
             id: TOOL_ID.to_string(),
             name: TOOL_NAME.to_string(),
             description: TOOL_DESCRIPTION.to_string(),
@@ -247,6 +240,7 @@ fn inspect_inner(bundled_source: Option<&Path>) -> Result<ManagedToolStatus> {
     }
 
     Ok(ManagedToolStatus {
+        update_source: managed_update_source(&state, bundled_source)?,
         install_source: state.install_source,
         id: TOOL_ID.to_string(),
         name: TOOL_NAME.to_string(),
@@ -422,9 +416,13 @@ fn activate_candidate(
         .and_then(|state| (state.active_version != version).then(|| state.active_version.clone()));
     let state = ManagedToolState {
         install_source,
-        previous_install_source: previous_state
-            .as_ref()
-            .and_then(|state| state.install_source.clone()),
+        previous_install_source: previous_state.as_ref().and_then(|state| {
+            if state.active_version == version {
+                state.previous_install_source.clone()
+            } else {
+                state.install_source.clone()
+            }
+        }),
         schema_version: 1,
         active_version: version.to_string(),
         previous_version: previous_version.or_else(|| {
@@ -487,6 +485,7 @@ fn replace_file(source: &Path, target: &Path) -> Result<()> {
 }
 
 include!("managed_tool/implementation.rs");
+include!("managed_tool/bundled.rs");
 
 fn bundled_market_source(
     binary: &Path,

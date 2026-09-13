@@ -118,6 +118,7 @@ export interface MarketConnector {
 }
 
 export interface ManagedToolStatus {
+  updateSource: InstallSource | null;
   installSource?: InstallSource | null;
   id: string;
   name: string;

@@ -268,15 +268,6 @@ async fn run_desktop_business_after_update_gate(startup: DesktopBusinessStartup)
 }
 
 pub(super) fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> anyhow::Result<()> {
-    if unified_app_id_managed_cli_root().is_dir() && !legacy_managed_cli_root().exists() {
-        let skill_path = codex_skill::install_bundled()?;
-        diagnostics.info(format!(
-            "managed Baijimu CLI bootstrap skipped after unified app ID migration: root={} codex_skill={}",
-            unified_app_id_managed_cli_root().display(),
-            skill_path.display()
-        ));
-        return Ok(());
-    }
     let source = bundled_baijimu_cli_path();
     let status = managed_tool::bootstrap_bundled(source.as_deref())?;
     let skill_path = codex_skill::install_bundled()?;
@@ -288,29 +279,6 @@ pub(super) fn install_bundled_baijimu_cli(diagnostics: &StartupDiagnostics) -> a
         skill_path.display()
     ));
     Ok(())
-}
-
-pub(super) fn legacy_managed_cli_root() -> PathBuf {
-    managed_cli_root_for_app_id("com.baijimu.cli")
-}
-
-pub(super) fn unified_app_id_managed_cli_root() -> PathBuf {
-    managed_cli_root_for_app_id("baijimu-cli")
-}
-
-pub(super) fn managed_cli_root_for_app_id(app_id: &str) -> PathBuf {
-    #[cfg(windows)]
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data)
-            .join("Baijimu")
-            .join("apps")
-            .join(app_id);
-    }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("baijimu")
-        .join("apps")
-        .join(app_id)
 }
 
 pub(super) fn bootstrap_bundled_baijimu_cli(

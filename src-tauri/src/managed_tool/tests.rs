@@ -372,3 +372,6 @@ fn bundled_market_source_survives_upgrade_and_rollback() {
     std::env::remove_var("BAIJIMU_MANAGED_TOOL_ROOT");
     std::env::remove_var("BAIJIMU_MANAGED_BIN_DIR");
 }
+
+#[cfg(unix)]
+mod migration_tests;
