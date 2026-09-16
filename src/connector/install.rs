@@ -178,7 +178,6 @@ fn complete_connector_install(
     config_saved: &mut bool,
 ) -> Result<ConnectorInstallResult> {
     copy_connector_package(source, package_path)?;
-    let package_checksum = connector_package_sha256(package_path)?;
     resolve_installed_start_commands(
         services,
         package_path,
@@ -204,7 +203,7 @@ fn complete_connector_install(
         source_reference: provenance.source_reference.clone(),
         review_status: provenance.review_status.clone(),
         source_checksum: provenance.source_checksum.clone(),
-        package_checksum: Some(package_checksum),
+        package_checksum: None,
         installed_at_epoch_ms: previous_record
             .map(|record| record.installed_at_epoch_ms)
             .unwrap_or(now),

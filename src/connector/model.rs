@@ -349,6 +349,7 @@ pub struct ConnectorInstallRecord {
     pub review_status: String,
     #[serde(default)]
     pub source_checksum: Option<String>,
+    // Historical metadata only. New installations are identified by source and version.
     #[serde(default)]
     pub package_checksum: Option<String>,
     pub installed_at_epoch_ms: u64,

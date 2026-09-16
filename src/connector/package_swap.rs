@@ -442,68 +442,6 @@ fn copy_connector_package(source: &Path, destination: &Path) -> Result<()> {
     copy_dir_recursive(source, destination)
 }
 
-fn connector_package_sha256(package_path: &Path) -> Result<String> {
-    let mut files = Vec::new();
-    collect_connector_package_files(package_path, package_path, &mut files)?;
-    files.sort();
-
-    let mut digest = Sha256::new();
-    digest.update(b"bridge-agent-connector-package-v1\0");
-    let mut buffer = [0_u8; 64 * 1024];
-    for relative_path in files {
-        let relative = relative_path.to_string_lossy();
-        digest.update((relative.len() as u64).to_le_bytes());
-        digest.update(relative.as_bytes());
-        let path = package_path.join(&relative_path);
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("failed to inspect connector file {}", path.display()))?;
-        digest.update(metadata.len().to_le_bytes());
-        let mut file = fs::File::open(&path)
-            .with_context(|| format!("failed to hash connector file {}", path.display()))?;
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .with_context(|| format!("failed to hash connector file {}", path.display()))?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
-}
-
-fn collect_connector_package_files(
-    root: &Path,
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("failed to read connector package {}", directory.display()))?
-    {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_connector_package_files(root, &entry.path(), files)?;
-        } else if file_type.is_file() {
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .with_context(|| {
-                        format!(
-                            "connector file {} escaped package {}",
-                            entry.path().display(),
-                            root.display()
-                        )
-                    })?
-                    .to_path_buf(),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("failed to create directory {}", destination.display()))?;

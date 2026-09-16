@@ -198,22 +198,7 @@ pub(super) async fn resolve_market_install(
     fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
     extract_connector_archive(&bytes, kind, &extract_dir)?;
     let path = find_extracted_connector_root(&extract_dir)?;
-    let package_manifest: Value = serde_json::from_slice(
-        &fs::read(path.join("connector.json")).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let frozen_manifest: Value =
-        serde_json::from_str(listing.frozen_version.content.manifest.as_json())
-            .map_err(|error| error.to_string())?;
-    if package_manifest != frozen_manifest {
-        return Err("安装包清单与已审核的冻结版本不一致".into());
-    }
-    let manifest = load_connector_manifest(&path).map_err(|error| error.to_string())?;
-    let provenance = ConnectorInstallProvenance::frozen_market(selection.clone(), &listing)
-        .map_err(|error| error.to_string())?;
-    provenance
-        .validate_manifest(&manifest)
-        .map_err(|error| error.to_string())?;
+    let provenance = market_package_provenance(&path, selection, &listing)?;
     Ok((
         ResolvedConnectorSource::Archive {
             path,
@@ -222,6 +207,26 @@ pub(super) async fn resolve_market_install(
         provenance,
     ))
 }
+
+// The owner freezes the release. The consumer checks its identity and validates
+// the package contract; serialized manifest content is not a second identity.
+fn market_package_provenance(
+    path: &Path,
+    selection: &local_app_contract::InstallSource,
+    listing: &local_app_contract::MarketListing,
+) -> Result<ConnectorInstallProvenance, String> {
+    let provenance = ConnectorInstallProvenance::frozen_market(selection.clone(), listing)
+        .map_err(|error| error.to_string())?;
+    let manifest = load_connector_manifest(path).map_err(|error| error.to_string())?;
+    provenance
+        .validate_manifest(&manifest)
+        .map_err(|error| error.to_string())?;
+    Ok(provenance)
+}
+
+#[cfg(test)]
+#[path = "market_package_tests.rs"]
+mod package_tests;
 
 #[cfg(test)]
 mod tests {
