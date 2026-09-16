@@ -108,6 +108,31 @@ fn upgrade_preserves_stable_listing_and_complete_source_identity() {
 }
 
 #[test]
+fn same_version_with_different_content_is_not_an_upgrade() {
+    let installed = listing("environment-a", "1.0.0", 1);
+    let mut candidate = installed.clone();
+    candidate.frozen_version.content.manifest = ManifestDocument::parse(
+        candidate
+            .frozen_version
+            .content
+            .manifest
+            .as_json()
+            .replace("immutable/app.zip", "another/app.zip"),
+    )
+    .unwrap();
+    assert_ne!(
+        candidate.frozen_version.content.manifest.as_json(),
+        installed.frozen_version.content.manifest.as_json()
+    );
+    candidate.frozen_version.content.source_revision = "another-commit".into();
+    candidate.frozen_version.content.artifacts[0].size_bytes += 1;
+    assert!(resolve_exact(&selection(&installed), &candidate).is_ok());
+    assert!(select_upgrade(Some(&selection(&installed)), &candidate)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn missing_or_private_provenance_cannot_fall_back_to_market() {
     let item = listing("environment-a", "1.0.0", 1);
     assert!(select_upgrade(None, &item).is_err());

@@ -310,7 +310,6 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
                 {app.connector ? (
                   <>
                     <InfoRow label="上次同步" value={formatTime(app.connector.lastSyncedAtEpochMs)} />
-                    <InfoRow label="内容摘要" value={app.connector.packageChecksum ?? "旧版本未记录"} />
                     <InfoRow
                       label="启动策略"
                       value={app.connector.startPolicy === "manual" ? "用户授权后手动启动" : "自动启动"}

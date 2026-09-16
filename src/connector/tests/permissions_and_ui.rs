@@ -262,10 +262,7 @@
         assert_eq!(ui.title.as_deref(), Some("设置"));
         assert!(ui.default_view);
         assert_eq!(summary.review_status, "DRAFT");
-        assert!(summary
-            .package_checksum
-            .as_deref()
-            .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71));
+        assert!(summary.package_checksum.is_none());
 
         let market_checksum = format!("sha256:{}", "a".repeat(64));
         let provenance = ConnectorInstallProvenance::registered(

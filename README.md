@@ -154,7 +154,7 @@ Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、�
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
-Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；尚未公开审核的登记版本也只通过精确 `appId + version` 安装，并要求用户显式确认。Git 地址、revision 和制品位置由平台注册表解析，不能作为用户安装输入。未登记、已撤销、本地目录和身份不一致的包全部拒绝安装。安装记录只保存服务器 appId、登记证据、审核状态和内容摘要。
+Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；尚未公开审核的登记版本也只通过精确 `appId + version` 安装，并要求用户显式确认。Git 地址、revision 和制品位置由平台注册表解析，不能作为用户安装输入。未登记、已撤销、本地目录和身份不一致的包全部拒绝安装。安装身份以登记来源、appId 和精确 SemVer 版本为准；同一来源的更新仅按 SemVer 优先级判断。客户端验证包内 appId、版本与所选登记身份一致并校验清单合法性，不比较包内清单与市场清单的完整内容，也不生成安装目录摘要。同一版本的冻结与不可变性由发布方保证，内容变更应发布新版本。制品下载校验属于传输完整性验证，不参与版本身份或升级判断。
 
 Bridge Agent 还会按 appId 在应用私有数据目录生成权限为 `0600` 的调用 token，通过
 `BAIJIMU_LOCAL_APP_TOKEN_FILE` 注入应用，并为健康检查及全部本地 HTTP 能力自动添加 Bearer
