@@ -172,7 +172,12 @@ fn resolve_desktop_config(diagnostics: &StartupDiagnostics) -> (PathBuf, Option<
 fn desktop_builder(launch: &DesktopLaunch) -> tauri::Builder<tauri::Wry> {
     let diagnostics = launch.diagnostics.clone();
     let ui_protocol = LocalAppUiProtocol::new(launch.diagnostics.clone());
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // WebView2 injects even main-frame-only initialization scripts into iframes.
+    // Withhold the native sender and its invoke key from every child frame.
+    #[cfg(windows)]
+    let builder = builder.invoke_system(include_str!("main_frame_ipc.js"));
+    builder
         .manage(ui_protocol.clone())
         .register_asynchronous_uri_scheme_protocol(
             LOCAL_APP_UI_SCHEME,

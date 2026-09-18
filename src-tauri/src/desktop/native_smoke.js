@@ -64,7 +64,7 @@ async function verifyNativeLocalAppUi(invoke) {
         }
         if (event.data?.type === "native-ui-smoke-failed") fail(event.data.error);
         if (event.data?.type === "native-ui-smoke-complete") {
-          if (!event.data.parentBlocked || event.data.nativeIpcExposed || event.data.bridgeVersion !== 1) {
+          if (!event.data.parentBlocked || !event.data.nativeIpcBlocked || event.data.bridgeVersion !== 1) {
             fail("native local app isolation or bridge contract failed"); return;
           }
           completed.add(index);
