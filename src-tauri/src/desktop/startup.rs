@@ -331,7 +331,6 @@ pub(super) struct DesktopBusinessStartup {
     pub(super) config_path: PathBuf,
     pub(super) startup_health: StartupHealthManager,
     pub(super) diagnostics: StartupDiagnostics,
-    pub(super) local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     pub(super) local_apps: LocalAppsChangeNotifier,
     pub(super) registered_services: RegisteredServiceMonitor,
     pub(super) registered_service_request_rx: RegisteredServiceMonitorReceiver,
@@ -339,7 +338,7 @@ pub(super) struct DesktopBusinessStartup {
 
 pub(super) fn mark_business_startup_skipped(startup_health: &StartupHealthManager, reason: &str) {
     for (id, label) in [
-        ("local_app_ui_server", "本地应用界面服务"),
+        ("local_app_control_server", "本机应用控制服务"),
         ("managed_cli", "Baijimu CLI"),
         ("agent_runtime", "Agent 运行时"),
     ] {

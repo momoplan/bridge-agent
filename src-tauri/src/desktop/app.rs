@@ -23,7 +23,6 @@ struct DesktopServices {
     runtime_log_streaming: Arc<AtomicBool>,
     main_window_visible: Arc<AtomicBool>,
     quitting: Arc<AtomicBool>,
-    local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
 }
 
 impl DesktopServices {
@@ -41,7 +40,6 @@ impl DesktopServices {
             runtime_log_streaming: Arc::new(AtomicBool::new(false)),
             main_window_visible: Arc::new(AtomicBool::new(false)),
             quitting: Arc::new(AtomicBool::new(false)),
-            local_app_ui: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -52,7 +50,6 @@ impl DesktopServices {
             connector_processes: self.connector_processes.clone(),
             config_path: launch.config_path.clone(),
             quitting: Arc::clone(&self.quitting),
-            local_app_ui: Arc::clone(&self.local_app_ui),
             local_apps: self.local_apps.clone(),
             local_app_install_tasks: self.local_app_install_tasks.clone(),
             startup_health: launch.startup_health.clone(),
@@ -79,7 +76,6 @@ struct DesktopSetup {
     registered_services: RegisteredServiceMonitor,
     registered_service_request_rx: RegisteredServiceMonitorReceiver,
     local_apps: LocalAppsChangeNotifier,
-    local_app_ui: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
     runtime_log_streaming: Arc<AtomicBool>,
 }
 
@@ -175,7 +171,23 @@ fn resolve_desktop_config(diagnostics: &StartupDiagnostics) -> (PathBuf, Option<
 
 fn desktop_builder(launch: &DesktopLaunch) -> tauri::Builder<tauri::Wry> {
     let diagnostics = launch.diagnostics.clone();
-    tauri::Builder::default()
+    let ui_protocol = LocalAppUiProtocol::new(launch.diagnostics.clone());
+    let builder = tauri::Builder::default();
+    // WebView2 injects even main-frame-only initialization scripts into iframes.
+    // Withhold the native sender and its invoke key from every child frame.
+    #[cfg(windows)]
+    let builder = builder.invoke_system(include_str!("main_frame_ipc.js"));
+    builder
+        .manage(ui_protocol.clone())
+        .register_asynchronous_uri_scheme_protocol(
+            LOCAL_APP_UI_SCHEME,
+            move |_context, request, responder| {
+                let protocol = ui_protocol.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(protocol.respond(request))
+                });
+            },
+        )
         .plugin(tauri_plugin_single_instance::init(
             move |app, argv, _cwd| handle_single_instance(app, argv, &diagnostics),
         ))
@@ -248,7 +260,6 @@ fn configure_desktop_callbacks(
         registered_services: services.registered_services.clone(),
         registered_service_request_rx: services.registered_service_request_rx,
         local_apps: services.local_apps.clone(),
-        local_app_ui: Arc::clone(&services.local_app_ui),
         runtime_log_streaming: Arc::clone(&services.runtime_log_streaming),
     };
     builder
@@ -341,7 +352,6 @@ fn setup_desktop(
         config_path: setup.config_path,
         startup_health: setup.startup_health,
         diagnostics: setup.diagnostics.clone(),
-        local_app_ui: setup.local_app_ui,
         local_apps: setup.local_apps,
         registered_services: setup.registered_services,
         registered_service_request_rx: setup.registered_service_request_rx,
