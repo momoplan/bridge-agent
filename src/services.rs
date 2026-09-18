@@ -71,9 +71,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SM_YVIRTUALSCREEN, WHEEL_DELTA,
 };
 
+// Immutable directory snapshots let in-flight calls survive a registry refresh
+// without holding the registry lock across external I/O.
+#[derive(Clone)]
 pub struct ServiceRegistry {
-    services: BTreeMap<String, RuntimeService>,
-    local_apps: BTreeMap<String, RuntimeLocalApp>,
+    services: Arc<BTreeMap<String, RuntimeService>>,
+    local_apps: Arc<BTreeMap<String, RuntimeLocalApp>>,
 }
 
 struct RuntimeService {
