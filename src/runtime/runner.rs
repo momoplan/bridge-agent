@@ -166,6 +166,7 @@ impl RuntimeRunner {
             ),
             last_relay_seen: tokio::time::Instant::now(),
             pending_events: PendingEventWaiters::new(),
+            invocations: FuturesUnordered::new(),
         }
         .run(shutdown_rx, apply_rx, event_rx, audit_rx)
         .await
@@ -317,9 +318,11 @@ impl RelayConnection<'_> {
         match message {
             AgentMessage::RegisteredAck(ack) => self.handle_registered_ack(ack).await,
             AgentMessage::EventAck(ack) => self.handle_event_ack(ack).await,
-            AgentMessage::InvokeRequest(request) => self.handle_invoke_request(request).await?,
+            AgentMessage::InvokeRequest(request) => {
+                self.queue_invocation(AgentMessage::InvokeRequest(request)).await?
+            }
             AgentMessage::LocalAppInvokeRequest(request) => {
-                self.handle_local_app_invoke_request(request).await?
+                self.queue_invocation(AgentMessage::LocalAppInvokeRequest(request)).await?
             }
             AgentMessage::Error(err) => {
                 self.runner
@@ -334,7 +337,7 @@ impl RelayConnection<'_> {
         Ok(())
     }
 
-    async fn handle_registered_ack(&self, ack: crate::protocol::RegisteredAck) {
+    async fn handle_registered_ack(&mut self, ack: crate::protocol::RegisteredAck) {
         self.runner.update_registered_snapshot(&ack).await;
         self.runner
             .push_log(
@@ -378,64 +381,7 @@ impl RelayConnection<'_> {
             .await;
     }
 
-    async fn handle_invoke_request(&mut self, request: crate::protocol::InvokeRequest) -> Result<()> {
-        let service = request.service.clone();
-        let method = request.method.clone();
-        let request_id = request.request_id.clone();
-        self.runner.push_log_with_metadata(
-            "info",
-            &format!("invoke {service}.{method} started"),
-            LogMetadata::category("invoke").service(service.clone()).method(method.clone()).request_id(request_id.clone()).outcome("started"),
-        ).await;
-        let result = self.runner.registry.read().await.invoke(
-            request.request_id,
-            &service,
-            &method,
-            request.arguments,
-            request.timeout_secs,
-        ).await;
-        let (level, outcome, suffix) = if result.success {
-            ("info", "succeeded", String::new())
-        } else {
-            let error = result.error.as_ref().map(|err| format!("{}: {}", err.code, err.message)).unwrap_or_else(|| "unknown error".to_string());
-            ("warn", "failed", format!(": {error}"))
-        };
-        self.runner.push_log_with_metadata(
-            level,
-            &format!("invoke {service}.{method} {outcome} in {}ms{suffix}", result.duration_ms),
-            LogMetadata::category("invoke").service(service).method(method).request_id(request_id).outcome(outcome).duration_ms(result.duration_ms),
-        ).await;
-        write_json(&mut self.write, &AgentMessage::InvokeResult(result)).await
-    }
 
-    async fn handle_local_app_invoke_request(
-        &mut self,
-        request: crate::protocol::LocalAppInvokeRequest,
-    ) -> Result<()> {
-        let app_id = request.app_id.clone();
-        let method = request.method.clone();
-        let request_id = request.request_id.clone();
-        self.runner.push_log_with_metadata(
-            "info",
-            &format!("local app invoke {app_id}.{method} started"),
-            LogMetadata::category("local_app_invoke").method(method.clone()).request_id(request_id.clone()).outcome("started"),
-        ).await;
-        let result = self.runner.registry.read().await.invoke_local_app(
-            request.request_id,
-            request.workspace_id,
-            &app_id,
-            &method,
-            request.arguments,
-            request.timeout_secs,
-        ).await;
-        let outcome = if result.success { "succeeded" } else { "failed" };
-        self.runner.push_log_with_metadata(
-            if result.success { "info" } else { "warn" },
-            &format!("local app invoke {app_id}.{method} {outcome} in {}ms", result.duration_ms),
-            LogMetadata::category("local_app_invoke").method(method).request_id(request_id).outcome(outcome).duration_ms(result.duration_ms),
-        ).await;
-        write_json(&mut self.write, &AgentMessage::LocalAppInvokeResult(result)).await
-    }
 }
 
 type RelayWebSocket = tokio_tungstenite::WebSocketStream<
@@ -455,6 +401,8 @@ struct RelayConnection<'a> {
     keepalive: tokio::time::Interval,
     last_relay_seen: tokio::time::Instant,
     pending_events: PendingEventWaiters,
+    // Owned by this connection: dropping it cancels pending futures, never replays them.
+    invocations: FuturesUnordered<BoxFuture<'a, AgentMessage>>,
 }
 
 impl RelayConnection<'_> {
@@ -482,6 +430,9 @@ impl RelayConnection<'_> {
                 }
                 _ = self.keepalive.tick() => {
                     self.send_keepalive().await?;
+                }
+                Some(result) = self.invocations.next(), if !self.invocations.is_empty() => {
+                    write_json(&mut self.write, &result).await?;
                 }
                 message = self.read.next() => {
                     self.handle_frame(message.context("relay websocket ended")??).await?;

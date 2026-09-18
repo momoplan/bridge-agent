@@ -36,8 +36,8 @@ impl ServiceRegistry {
         }
 
         Ok(Self {
-            services,
-            local_apps,
+            services: Arc::new(services),
+            local_apps: Arc::new(local_apps),
         })
     }
 
@@ -81,8 +81,8 @@ impl ServiceRegistry {
         }
 
         Ok(Self {
-            services,
-            local_apps,
+            services: Arc::new(services),
+            local_apps: Arc::new(local_apps),
         })
     }
 
@@ -144,8 +144,8 @@ impl ServiceRegistry {
         }
 
         Ok(Self {
-            services,
-            local_apps,
+            services: Arc::new(services),
+            local_apps: Arc::new(local_apps),
         })
     }
 

@@ -14,7 +14,7 @@ use crate::windows_process::{
     inspect_windows_process, terminate_windows_process, windows_process_is_running,
 };
 use anyhow::{bail, Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
@@ -240,6 +240,7 @@ impl Default for ManagedState {
 include!("runtime/manager.rs");
 include!("runtime/event_server_runtime.rs");
 include!("runtime/runner.rs");
+include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
@@ -273,6 +274,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     include!("runtime/tests/core.rs");
+    include!("runtime/tests/concurrent_invocations.rs");
     include!("runtime/tests/locks.rs");
     include!("runtime/tests/authorization.rs");
     include!("runtime/tests/startup.rs");
