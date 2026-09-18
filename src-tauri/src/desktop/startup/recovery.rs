@@ -202,7 +202,6 @@ async fn run_desktop_business_after_update_gate(startup: DesktopBusinessStartup)
         config_path,
         startup_health,
         diagnostics,
-        local_app_ui,
         local_apps,
         registered_services,
         registered_service_request_rx,
@@ -243,10 +242,9 @@ async fn run_desktop_business_after_update_gate(startup: DesktopBusinessStartup)
         return;
     }
 
-    start_local_app_ui_server(
-        local_app_ui,
+    start_local_app_control_server(
         startup_health.clone(),
-        LocalAppUiServerDependencies {
+        LocalAppControlServerDependencies {
             diagnostics: diagnostics.clone(),
             config_path: config_path.clone(),
             runtime: runtime.clone(),

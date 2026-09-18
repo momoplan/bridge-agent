@@ -1,10 +1,8 @@
 use super::*;
 
 #[derive(Clone)]
-pub(super) struct LocalAppUiHttpState {
-    pub(super) ui_token: String,
+pub(super) struct LocalAppControlHttpState {
     pub(super) control_token: String,
-    pub(super) diagnostics: StartupDiagnostics,
     pub(super) config_path: PathBuf,
     pub(super) runtime: AgentRuntimeManager,
     pub(super) connector_lifecycles: ConnectorLifecycleManager,
@@ -14,7 +12,7 @@ pub(super) struct LocalAppUiHttpState {
 }
 
 #[derive(Clone)]
-pub(super) struct LocalAppUiServerDependencies {
+pub(super) struct LocalAppControlServerDependencies {
     pub(super) diagnostics: StartupDiagnostics,
     pub(super) config_path: PathBuf,
     pub(super) runtime: AgentRuntimeManager,
@@ -73,129 +71,62 @@ pub(super) struct LocalAppControlUninstallQuery {
     pub(super) force: bool,
 }
 
-pub(super) const LOCAL_APP_UI_BRIDGE_SCRIPT: &str = r#"(() => {
-  const REQUEST_TYPE = "baijimu:local-app:invoke";
-  const RESPONSE_TYPE = "baijimu:local-app:response";
-  const READY_TYPE = "baijimu:local-app:ready";
-  const HELLO_TYPE = "baijimu:local-app:hello";
-  const pending = new Map();
-  let sequence = 0;
-
-  const announceReady = () => {
-    window.parent.postMessage({ type: READY_TYPE, version: 1 }, "*");
-  };
-
-  window.addEventListener("message", (event) => {
-    if (event.source !== window.parent) return;
-    const message = event.data;
-    if (message && message.type === HELLO_TYPE && message.version === 1) {
-      announceReady();
-      return;
-    }
-    if (!message || message.type !== RESPONSE_TYPE || message.version !== 1) return;
-    const request = pending.get(message.requestId);
-    if (!request) return;
-    pending.delete(message.requestId);
-    clearTimeout(request.timeout);
-    if (message.ok) request.resolve(message.data);
-    else request.reject(new Error(message.error || "本地应用管理操作失败"));
-  });
-
-  const api = Object.freeze({
-    version: 1,
-    invoke(operation, payload = null) {
-      if (typeof operation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(operation)) {
-        return Promise.reject(new Error("management operation 名称无效"));
-      }
-      const requestId = `${Date.now().toString(36)}-${(++sequence).toString(36)}`;
-      return new Promise((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          pending.delete(requestId);
-          reject(new Error("本地应用管理操作超时"));
-        }, 65000);
-        pending.set(requestId, { resolve, reject, timeout });
-        window.parent.postMessage({
-          type: REQUEST_TYPE,
-          version: 1,
-          requestId,
-          operation,
-          payload
-        }, "*");
-      });
-    }
-  });
-
-  Object.defineProperty(window, "baijimuLocalApp", {
-    value: api,
-    configurable: false,
-    enumerable: true,
-    writable: false
-  });
-  announceReady();
-  window.addEventListener("pageshow", announceReady);
-})();
-"#;
-
-pub(super) fn start_local_app_ui_server(
-    endpoint: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+pub(super) fn start_local_app_control_server(
     startup_health: StartupHealthManager,
-    dependencies: LocalAppUiServerDependencies,
+    dependencies: LocalAppControlServerDependencies,
 ) {
-    startup_health.set_component("local_app_ui_server", "本地应用界面服务", "starting", None);
+    startup_health.set_component(
+        "local_app_control_server",
+        "本机应用控制服务",
+        "starting",
+        None,
+    );
     tauri::async_runtime::spawn(async move {
-        run_local_app_ui_server(endpoint, startup_health, dependencies).await;
+        run_local_app_control_server(startup_health, dependencies).await;
     });
 }
 
-async fn run_local_app_ui_server(
-    endpoint: Arc<RwLock<Option<LocalAppUiEndpoint>>>,
+async fn run_local_app_control_server(
     startup_health: StartupHealthManager,
-    dependencies: LocalAppUiServerDependencies,
+    dependencies: LocalAppControlServerDependencies,
 ) {
     let diagnostics = dependencies.diagnostics.clone();
-    let (listener, port) = match bind_local_app_ui_listener().await {
+    let (listener, port) = match bind_local_app_control_listener().await {
         Ok(bound) => bound,
         Err(detail) => {
-            mark_local_app_ui_server_failed(&startup_health, &diagnostics, detail);
+            mark_local_app_control_server_failed(&startup_health, &diagnostics, detail);
             return;
         }
     };
-    let (state, control_token) = match prepare_local_app_ui_state(&endpoint, dependencies, port) {
-        Ok(prepared) => prepared,
-        Err(detail) => {
-            mark_local_app_ui_server_failed(&startup_health, &diagnostics, detail);
-            return;
-        }
-    };
+    let (state, control_token) = prepare_local_app_control_state(dependencies);
     let control_path = local_app_control_discovery_path(&state.config_path);
     if let Err(detail) = write_local_app_control_discovery(&control_path, port, &control_token) {
-        mark_local_app_ui_server_failed(&startup_health, &diagnostics, detail);
+        mark_local_app_control_server_failed(&startup_health, &diagnostics, detail);
         return;
     }
     startup_health.set_component(
-        "local_app_ui_server",
-        "本地应用界面服务",
+        "local_app_control_server",
+        "本机应用控制服务",
         "ready",
         Some(format!("127.0.0.1:{port}")),
     );
-    diagnostics.info(format!("local app UI server listening on 127.0.0.1:{port}"));
-    let serve_result = axum::serve(listener, local_app_ui_router(state)).await;
+    diagnostics.info(format!(
+        "local app control server listening on 127.0.0.1:{port}"
+    ));
+    let serve_result = axum::serve(listener, local_app_control_router(state)).await;
     let _ = fs::remove_file(&control_path);
     if let Err(err) = serve_result {
-        diagnostics.error(format!("local app UI server stopped: {err:#}"));
-        if let Ok(mut value) = endpoint.write() {
-            *value = None;
-        }
+        diagnostics.error(format!("local app control server stopped: {err:#}"));
         startup_health.set_component(
-            "local_app_ui_server",
-            "本地应用界面服务",
+            "local_app_control_server",
+            "本机应用控制服务",
             "degraded",
             Some(format!("服务已停止: {err}")),
         );
     }
 }
 
-async fn bind_local_app_ui_listener() -> Result<(tokio::net::TcpListener, u16), String> {
+async fn bind_local_app_control_listener() -> Result<(tokio::net::TcpListener, u16), String> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .map_err(|err| format!("无法监听本机端口: {err}"))?;
@@ -206,24 +137,13 @@ async fn bind_local_app_ui_listener() -> Result<(tokio::net::TcpListener, u16), 
     Ok((listener, port))
 }
 
-fn prepare_local_app_ui_state(
-    endpoint: &RwLock<Option<LocalAppUiEndpoint>>,
-    dependencies: LocalAppUiServerDependencies,
-    port: u16,
-) -> Result<(LocalAppUiHttpState, String), String> {
-    let ui_token = uuid::Uuid::new_v4().simple().to_string();
+fn prepare_local_app_control_state(
+    dependencies: LocalAppControlServerDependencies,
+) -> (LocalAppControlHttpState, String) {
     let control_token = uuid::Uuid::new_v4().simple().to_string();
-    *endpoint
-        .write()
-        .map_err(|_| "本地应用界面状态锁已损坏".to_string())? = Some(LocalAppUiEndpoint {
-        port,
-        token: ui_token.clone(),
-    });
-    Ok((
-        LocalAppUiHttpState {
-            ui_token,
+    (
+        LocalAppControlHttpState {
             control_token: control_token.clone(),
-            diagnostics: dependencies.diagnostics,
             config_path: dependencies.config_path,
             runtime: dependencies.runtime,
             connector_lifecycles: dependencies.connector_lifecycles,
@@ -232,10 +152,10 @@ fn prepare_local_app_ui_state(
             local_apps: dependencies.local_apps,
         },
         control_token,
-    ))
+    )
 }
 
-fn local_app_ui_router(state: LocalAppUiHttpState) -> Router {
+fn local_app_control_router(state: LocalAppControlHttpState) -> Router {
     Router::new()
         .route("/api/v1/status", get(local_app_control_status_handler))
         .route(
@@ -267,23 +187,20 @@ fn local_app_ui_router(state: LocalAppUiHttpState) -> Router {
             "/api/v1/local-apps/{app_id}/management/{operation}",
             post(local_app_control_management_handler),
         )
-        .route("/{token}/{app_id}/", get(local_app_ui_entry_handler))
-        .route(
-            "/{token}/{app_id}/{*asset_path}",
-            get(local_app_ui_asset_handler),
-        )
         .with_state(state)
 }
 
-fn mark_local_app_ui_server_failed(
+fn mark_local_app_control_server_failed(
     startup_health: &StartupHealthManager,
     diagnostics: &StartupDiagnostics,
     detail: String,
 ) {
-    diagnostics.error(format!("failed to start local app UI server: {detail}"));
+    diagnostics.error(format!(
+        "failed to start local app control server: {detail}"
+    ));
     startup_health.set_component(
-        "local_app_ui_server",
-        "本地应用界面服务",
+        "local_app_control_server",
+        "本机应用控制服务",
         "degraded",
         Some(detail),
     );
@@ -327,7 +244,7 @@ pub(super) fn write_local_app_control_discovery(
 }
 
 pub(super) fn local_app_control_is_authorized(
-    state: &LocalAppUiHttpState,
+    state: &LocalAppControlHttpState,
     headers: &HeaderMap,
 ) -> bool {
     headers

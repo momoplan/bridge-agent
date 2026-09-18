@@ -99,18 +99,7 @@ fn local_app_ui_hosts_are_isolated_per_connector() {
     assert_ne!(first, second);
     assert!(first.ends_with(".localhost"));
 
-    let mut headers = HeaderMap::new();
-    headers.insert(header::HOST, format!("{first}:32123").parse().unwrap());
-    assert!(local_app_ui_request_host_matches(
-        &headers,
-        token,
-        "com.baijimu.connector.first"
-    ));
-    assert!(!local_app_ui_request_host_matches(
-        &headers,
-        token,
-        "com.baijimu.connector.second"
-    ));
+
 }
 
 #[test]

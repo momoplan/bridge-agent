@@ -1,4 +1,20 @@
-# Local app UI handshake diagnostics
+# Native local app UI verification
+
+Run `npm run build && npm run test:native` to exercise the real Tauri resource handler on macOS
+and Windows. The test creates two isolated local app records, loads HTML and an ES module through
+`baijimu-app`, verifies distinct origins and a management bridge round trip, and verifies that child
+frames cannot read the host document or access its native IPC. It runs with business startup skipped:
+no loopback UI listener or DNS resolution is available or needed. The release frontend gate runs it
+on both platforms before signing.
+
+UI resources use native custom schemes on macOS/Linux and Wry-intercepted HTTP-shaped custom
+protocol URLs on Windows. The Windows URL is handled inside WebView2; it is not sent to DNS or a
+loopback server. The loopback HTTP service is now exclusively the authenticated local CLI control API.
+
+## Historical HTTP handshake reproducer
+
+The following harness reproduces the pre-0.8.6 HTTP loading boundary for diagnostics of older clients.
+
 
 This harness reproduces the production WebKit boundary without starting Bridge Agent. It reports
 the child frame origin, whether `event.source` matches the iframe, and whether the ready message is

@@ -9,6 +9,7 @@ mod local_app_http;
 mod local_app_install;
 mod local_app_management;
 mod local_app_market;
+mod local_app_ui;
 mod market_consumer;
 #[cfg(debug_assertions)]
 mod native_smoke;
@@ -29,6 +30,7 @@ use local_app_http::*;
 use local_app_install::*;
 use local_app_management::*;
 use local_app_market::*;
+use local_app_ui::*;
 use recovery::*;
 use runtime_commands::*;
 use startup::*;
@@ -59,7 +61,6 @@ use local_app::{
 use crate::window_layout::{fit_main_window_to_work_area, WindowLayoutOutcome, WindowLayoutPolicy};
 use anyhow::Context as _;
 use axum::{
-    body::Body,
     extract::{Path as AxumPath, Query as AxumQuery, State as AxumState},
     http::{header, HeaderMap, Response as HttpResponse, StatusCode},
     response::{IntoResponse, Response as AxumResponse},
@@ -107,7 +108,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, RwLock,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{

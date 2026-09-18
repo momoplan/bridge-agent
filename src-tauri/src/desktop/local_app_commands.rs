@@ -103,10 +103,9 @@ pub(super) async fn stop_registered_service(
 #[tauri::command]
 pub(super) fn connector_app_ui_url(
     id: String,
-    state: tauri::State<'_, DesktopState>,
+    state: tauri::State<'_, LocalAppUiProtocol>,
 ) -> Result<String, String> {
-    let id = id.trim();
-    let record = show_connector(id).map_err(|err| err.to_string())?;
+    let record = show_connector(id.trim()).map_err(|err| err.to_string())?;
     let ui = record
         .manifest
         .ui
@@ -114,19 +113,7 @@ pub(super) fn connector_app_ui_url(
         .ok_or_else(|| format!("应用 {} 没有声明内嵌界面", record.manifest.name))?;
     resolve_connector_ui_entry(Path::new(&record.package_path), ui)
         .map_err(|err| err.to_string())?;
-    let endpoint = state
-        .local_app_ui
-        .read()
-        .map_err(|_| "本地应用界面状态锁已损坏".to_string())?
-        .clone()
-        .ok_or_else(|| "本地应用界面服务当前不可用，请在诊断页查看启动状态".to_string())?;
-    Ok(format!(
-        "http://{}:{}/{}/{}/",
-        local_app_ui_host(&endpoint.token, &record.manifest.app_id),
-        endpoint.port,
-        endpoint.token,
-        record.manifest.app_id
-    ))
+    Ok(state.url(&record.manifest.app_id))
 }
 
 #[tauri::command]

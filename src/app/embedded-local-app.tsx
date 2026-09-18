@@ -117,7 +117,7 @@ export function LocalAppEmbeddedUi(props: { appId: string; title: string }) {
       setLoadError(
         iframeLoadedRef.current
           ? "应用界面已加载，但通信桥接未就绪。请在“诊断 > 日志”中查看 local_app_ui 记录。"
-          : "应用界面未能从本机 UI 服务加载。请在“诊断 > 日志”中查看 local_app_ui 记录。",
+          : "应用界面资源加载失败。请在“诊断 > 日志”中查看 local_app_ui 记录。",
       );
     }, 10000);
     return () => window.clearTimeout(timer);
