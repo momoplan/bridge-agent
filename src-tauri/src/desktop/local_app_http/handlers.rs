@@ -104,6 +104,7 @@ pub(super) async fn local_app_control_install_handler(
             &state.registered_services,
             ConnectorInstallOptions {
                 install_source: request.install_source,
+                source_identity_migration: false,
                 identity,
                 replace: request.replace,
                 start: request.start,
@@ -184,6 +185,7 @@ pub(super) async fn local_app_control_sync_handler(
             &state.registered_services,
             ConnectorInstallOptions {
                 install_source: record.install_source,
+                source_identity_migration: false,
                 identity,
                 replace: true,
                 start: true,

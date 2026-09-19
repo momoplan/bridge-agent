@@ -52,6 +52,7 @@ pub(super) struct LocalAppControlSyncRequest {
 #[derive(Clone)]
 pub(super) struct ConnectorInstallOptions {
     pub(super) install_source: Option<local_app_contract::InstallSource>,
+    pub(super) source_identity_migration: bool,
     pub(super) identity: RegisteredAppVersionIdentity,
     pub(super) replace: bool,
     pub(super) start: bool,

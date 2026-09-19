@@ -1,20 +1,28 @@
-import { sameMarketApplication } from "./market-identity";
+import { sameSourceApplication, type InstallSource } from "./market-identity";
 import { compareVersions } from "./formatters";
 import type { LocalAppItem, LocalAppUpdateStatus, MarketConnector } from "./types";
 
 // Read-only derivations must not depend on action factories or their initialization order.
 export function createLocalAppUpdateSelectors(marketConnectors: readonly MarketConnector[]) {
+  function newestForSource(source: InstallSource | null | undefined, applicationType?: string): MarketConnector | undefined {
+    return marketConnectors
+      .filter((item) => (!applicationType || item.applicationType === applicationType)
+        && sameSourceApplication(source, item.installSource))
+      .reduce<MarketConnector | undefined>((latest, candidate) =>
+        !latest || compareVersions(candidate.version, latest.version) > 0 ? candidate : latest,
+      undefined);
+  }
+
   function marketConnectorForLocalApp(app: LocalAppItem): MarketConnector | undefined {
     if (app.kind !== "connector" || !app.connector || app.connector.reviewStatus !== "PUBLISHED") {
       return undefined;
     }
-    return marketConnectors.find((item) => sameMarketApplication(app.connector?.installSource, item.installSource));
+    return newestForSource(app.connector.installSource);
   }
 
   function marketManagedToolForLocalApp(app: LocalAppItem): MarketConnector | undefined {
     if (app.kind !== "managed_tool" || !app.managedTool) return undefined;
-    return marketConnectors.find((item) =>
-      item.applicationType === "managed_tool" && sameMarketApplication(app.managedTool?.updateSource, item.installSource));
+    return newestForSource(app.managedTool.updateSource, "managed_tool");
   }
 
   function marketAppForLocalApp(app: LocalAppItem): MarketConnector | undefined {

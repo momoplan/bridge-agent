@@ -41,3 +41,18 @@ it("does not infer an update source from an app ID alone", () => {
   const selectors = createLocalAppUpdateSelectors([market("0.4.0")]);
   expect(selectors.localAppUpdateStatus(installed("0.3.0"))).toBeUndefined();
 });
+
+it("chooses the newest version for a source application across distribution routes", () => {
+  const previousRoute = market("0.4.0");
+  const newerRoute = {
+    ...market("0.5.0"),
+    installSource: {
+      ...source("0.5.0"),
+      marketKey: "replacement-market",
+      listingId: "replacement-listing"
+    }
+  } as MarketConnector;
+  const selectors = createLocalAppUpdateSelectors([previousRoute, newerRoute]);
+  expect(selectors.localAppUpdateStatus(installed("0.3.0", source("0.2.0"))))
+    .toMatchObject({ latestVersion: "0.5.0", updateAvailable: true });
+});

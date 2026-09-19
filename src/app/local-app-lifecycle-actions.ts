@@ -165,6 +165,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
         installSource: marketApp.installSource,
+        sourceIdentityMigration: false,
         operation: "upgrade",
         replace: true,
         appId: app.connector.appId,
@@ -204,6 +205,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setError("");
       setRuntimeConflict(null);
       const task = await startLocalAppInstallTask({
+        sourceIdentityMigration: false,
         operation: "sync",
         replace: true,
         appId: app.connector.appId,

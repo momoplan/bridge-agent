@@ -209,6 +209,21 @@ fn complete_connector_install(
             .unwrap_or(now),
         last_synced_at_epoch_ms: now,
     })?;
+    if provenance.source_identity_migration
+        && previous_record.is_some_and(|record| record.install_source.is_none())
+    {
+        if let Some(selection) = provenance.install_source.as_ref() {
+            let source = match selection {
+                local_app_contract::InstallSource::Market { source, .. }
+                | local_app_contract::InstallSource::Environment { source } => source,
+            };
+            tracing::info!(
+                app_id = %source.application.app_id.as_str(),
+                environment_key = %source.application.environment_key.as_str(),
+                "migrated legacy connector installation to an explicit source application identity"
+            );
+        }
+    }
 
     Ok(ConnectorInstallResult {
         app_id: manifest.app_id.clone(),
@@ -490,21 +505,23 @@ fn validate_install_replacement(
 
     if let Some(selected) = provenance.install_source.as_ref() {
         if let Some(previous) = previous_record {
-            let existing = previous.install_source.as_ref()
-                .context("existing installation has no verified source identity; source migration is required before upgrade")?;
             let application = |identity: &local_app_contract::InstallSource| match identity {
                 local_app_contract::InstallSource::Market { source, .. }
                 | local_app_contract::InstallSource::Environment { source } => source.application.clone(),
             };
-            if application(existing) != application(selected) {
-                bail!("different source applications cannot replace the same installation");
-            }
-            match (existing, selected) {
-                (local_app_contract::InstallSource::Market { market_key: old_market, listing_id: old_listing, .. },
-                 local_app_contract::InstallSource::Market { market_key: new_market, listing_id: new_listing, .. })
-                    if old_market == new_market && old_listing == new_listing => {},
-                (local_app_contract::InstallSource::Environment { .. }, local_app_contract::InstallSource::Environment { .. }) => {},
-                _ => bail!("installation distribution authority cannot change during upgrade"),
+            match previous.install_source.as_ref() {
+                Some(existing) if application(existing) != application(selected) => {
+                    bail!("different source applications cannot replace the same installation");
+                }
+                Some(_) => {}
+                None if provenance.source_identity_migration => {
+                    if application(selected).app_id.as_str() != previous.manifest.app_id {
+                        bail!("source identity migration does not match the installed application");
+                    }
+                }
+                None => {
+                    bail!("existing installation has no verified source identity; explicit source identity migration is required before upgrade");
+                }
             }
         }
     }

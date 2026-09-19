@@ -12,9 +12,8 @@ export function marketSelectionKey(app: { installSource?: InstallSource | null }
   return JSON.stringify([source.marketKey, source.listingId]);
 }
 
-export function sameMarketApplication(left?: InstallSource | null, right?: InstallSource | null): boolean {
-  return left?.kind === "market" && right?.kind === "market"
-    && left.marketKey === right.marketKey && left.listingId === right.listingId
+export function sameSourceApplication(left?: InstallSource | null, right?: InstallSource | null): boolean {
+  return left != null && right != null
     && left.source.application.environmentKey === right.source.application.environmentKey
     && left.source.application.appId === right.source.application.appId;
 }

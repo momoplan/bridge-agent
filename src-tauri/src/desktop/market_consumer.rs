@@ -149,6 +149,7 @@ pub(super) async fn resolve_market_install(
     config_path: &Path,
     identity: &RegisteredAppVersionIdentity,
     selection: &local_app_contract::InstallSource,
+    source_identity_migration: bool,
     progress: Option<&LocalAppInstallProgressReporter>,
 ) -> Result<(ResolvedConnectorSource, ConnectorInstallProvenance), String> {
     let consumer = market_consumer(config_path).await?;
@@ -198,7 +199,8 @@ pub(super) async fn resolve_market_install(
     fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
     extract_connector_archive(&bytes, kind, &extract_dir)?;
     let path = find_extracted_connector_root(&extract_dir)?;
-    let provenance = market_package_provenance(&path, selection, &listing)?;
+    let provenance =
+        market_package_provenance(&path, selection, &listing, source_identity_migration)?;
     Ok((
         ResolvedConnectorSource::Archive {
             path,
@@ -214,9 +216,14 @@ fn market_package_provenance(
     path: &Path,
     selection: &local_app_contract::InstallSource,
     listing: &local_app_contract::MarketListing,
+    source_identity_migration: bool,
 ) -> Result<ConnectorInstallProvenance, String> {
-    let provenance = ConnectorInstallProvenance::frozen_market(selection.clone(), listing)
-        .map_err(|error| error.to_string())?;
+    let provenance = ConnectorInstallProvenance::frozen_market(
+        selection.clone(),
+        listing,
+        source_identity_migration,
+    )
+    .map_err(|error| error.to_string())?;
     let manifest = load_connector_manifest(path).map_err(|error| error.to_string())?;
     provenance
         .validate_manifest(&manifest)

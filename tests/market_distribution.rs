@@ -86,13 +86,19 @@ fn same_app_and_version_from_other_environment_cannot_resolve_or_upgrade() {
 }
 
 #[test]
-fn market_and_listing_are_both_checked() {
+fn market_and_listing_do_not_define_upgrade_lineage() {
     let installed = listing("environment-a", "1.0.0", 1);
     let mut other = listing("environment-a", "1.0.1", 2);
-    assert!(select_upgrade(Some(&selection(&installed)), &other).is_err());
+    assert_eq!(
+        select_upgrade(Some(&selection(&installed)), &other).unwrap(),
+        Some(selection(&other))
+    );
     other.listing_id = installed.listing_id;
     other.market_key = "other-market".to_owned().try_into().unwrap();
-    assert!(select_upgrade(Some(&selection(&installed)), &other).is_err());
+    assert_eq!(
+        select_upgrade(Some(&selection(&installed)), &other).unwrap(),
+        Some(selection(&other))
+    );
     assert!(market().version_url(&selection(&other)).is_err());
 }
 
@@ -133,13 +139,17 @@ fn same_version_with_different_content_is_not_an_upgrade() {
 }
 
 #[test]
-fn missing_or_private_provenance_cannot_fall_back_to_market() {
+fn missing_identity_is_blocked_but_distribution_route_can_change() {
     let item = listing("environment-a", "1.0.0", 1);
     assert!(select_upgrade(None, &item).is_err());
     let private = InstallSource::Environment {
         source: item.frozen_version.source.clone(),
     };
-    assert!(select_upgrade(Some(&private), &item).is_err());
+    let newer = listing("environment-a", "1.0.1", 2);
+    assert_eq!(
+        select_upgrade(Some(&private), &newer).unwrap(),
+        Some(selection(&newer))
+    );
     assert!(resolve_exact(&private, &item).is_err());
     assert!(market().version_url(&private).is_err());
 }
