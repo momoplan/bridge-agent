@@ -27,23 +27,20 @@ pub(super) async fn check_connector_app_update(
         .as_ref()
         .ok_or("该安装记录缺少可验证的来源身份，不能自动匹配公开市场")?;
     let consumer = market_consumer::market_consumer(&state.config_path).await?;
-    let (market_key, listing_id, source) = match selected {
-        local_app_contract::InstallSource::Market {
-            market_key,
-            listing_id,
-            source,
-            ..
-        } => (market_key, listing_id, source),
-        _ => return Err("该应用属于环境安装来源".into()),
+    let source = match selected {
+        local_app_contract::InstallSource::Market { source, .. }
+        | local_app_contract::InstallSource::Environment { source } => source,
     };
     let listing = consumer
         .listings()
         .await?
         .into_iter()
-        .find(|listing| {
-            &listing.market_key == market_key
-                && &listing.listing_id == listing_id
-                && listing.frozen_version.source.application == source.application
+        .filter(|listing| listing.frozen_version.source.application == source.application)
+        .max_by(|left, right| {
+            left.frozen_version
+                .source
+                .version
+                .precedence_cmp(&right.frozen_version.source.version)
         })
         .ok_or("市场中找不到该来源的应用")?;
     let upgrade = bridge_agent::market_distribution::select_upgrade(Some(selected), &listing)
@@ -73,6 +70,7 @@ pub(super) fn start_connector_app_install(
         version,
         accept_unreviewed,
         install_source,
+        source_identity_migration,
     } = request;
     let identity = RegisteredAppVersionIdentity::parse(app_id, version)?;
     let display_name = name
@@ -107,6 +105,7 @@ pub(super) fn start_connector_app_install(
             &registered_services,
             ConnectorInstallOptions {
                 install_source,
+                source_identity_migration,
                 identity,
                 replace,
                 start: true,
@@ -156,6 +155,7 @@ pub(super) fn start_connector_app_install(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct StartConnectorAppInstallRequest {
     pub(super) install_source: Option<local_app_contract::InstallSource>,
+    pub(super) source_identity_migration: bool,
     pub(super) operation: LocalAppInstallTaskOperation,
     pub(super) replace: bool,
     pub(super) app_id: String,
@@ -382,6 +382,7 @@ async fn resolve_install_package(
                 config_path,
                 &options.identity,
                 selection,
+                options.source_identity_migration,
                 options.progress.as_ref(),
             )
             .await?

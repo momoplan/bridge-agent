@@ -51,7 +51,7 @@ fn validate_package(
         serde_json::to_vec(manifest).unwrap(),
     )
     .unwrap();
-    market_package_provenance(directory.path(), selected, listing)
+    market_package_provenance(directory.path(), selected, listing, false)
 }
 
 #[test]

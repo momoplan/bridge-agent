@@ -360,16 +360,22 @@ pub struct ConnectorInstallRecord {
 #[derive(Debug, Clone)]
 pub struct ConnectorInstallProvenance {
     install_source: Option<local_app_contract::InstallSource>,
+    source_identity_migration: bool,
     source_reference: Option<String>,
     review_status: String,
     source_checksum: Option<String>,
 }
 
 impl ConnectorInstallProvenance {
-    pub fn frozen_market(selection: local_app_contract::InstallSource, listing: &local_app_contract::MarketListing) -> Result<Self> {
+    pub fn frozen_market(
+        selection: local_app_contract::InstallSource,
+        listing: &local_app_contract::MarketListing,
+        source_identity_migration: bool,
+    ) -> Result<Self> {
         crate::market_distribution::resolve_exact(&selection, listing)?;
         Ok(Self {
             install_source: Some(selection),
+            source_identity_migration,
             source_reference: None,
             review_status: "PUBLISHED".into(),
             source_checksum: None,
@@ -402,6 +408,7 @@ impl ConnectorInstallProvenance {
         let source_checksum = normalize_sha256_checksum(source_checksum)?;
         Ok(Self {
             install_source: None,
+            source_identity_migration: false,
             source_reference: Some(source_reference),
             review_status,
             source_checksum: Some(source_checksum),

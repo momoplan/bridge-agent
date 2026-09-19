@@ -76,6 +76,7 @@ export interface LocalAppItem {
 
 export interface StartConnectorAppInstallRequest {
   installSource?: InstallSource | null;
+  sourceIdentityMigration: boolean;
   operation: LocalAppInstallTaskOperation;
   replace: boolean;
   appId: string;

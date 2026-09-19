@@ -28,7 +28,8 @@ pub fn resolve_exact<'a>(
     }
 }
 
-/// Only select a newer release for an already proven market/source binding.
+/// Only select a newer release for an already proven source application.
+/// Market and listing identify a distribution route, not application lineage.
 /// Missing provenance is a migration blocker, never a request to infer an owner.
 /// This function does not authorize installation or mutate an installation record.
 pub fn select_upgrade(
@@ -36,30 +37,32 @@ pub fn select_upgrade(
     candidate: &MarketListing,
 ) -> Result<Option<InstallSource>, ContractError> {
     validate_listing(candidate)?;
-    let Some(InstallSource::Market {
-        market_key,
-        listing_id,
-        version,
-        source,
-    }) = installed
-    else {
+    let Some(installed) = installed else {
         return Err(ContractError::new(
             "installed.source",
-            "proven market installation identity required",
+            "proven source application identity required",
         ));
     };
-    if market_key != &candidate.market_key
-        || listing_id != &candidate.listing_id
-        || source.application != candidate.frozen_version.source.application
-        || version != &source.version
-    {
+    let source = match installed {
+        InstallSource::Market {
+            version, source, ..
+        } if version == &source.version => source,
+        InstallSource::Market { .. } => {
+            return Err(ContractError::new(
+                "installed.source.version",
+                "installed market version differs from source version",
+            ));
+        }
+        InstallSource::Environment { source } => source,
+    };
+    if source.application != candidate.frozen_version.source.application {
         return Err(ContractError::new(
             "installed.source",
-            "upgrade cannot cross market, listing or source application",
+            "upgrade cannot cross source applications",
         ));
     }
     let next = &candidate.frozen_version.source.version;
-    if next.precedence_cmp(version) != Ordering::Greater {
+    if next.precedence_cmp(&source.version) != Ordering::Greater {
         return Ok(None);
     }
     Ok(Some(InstallSource::Market {

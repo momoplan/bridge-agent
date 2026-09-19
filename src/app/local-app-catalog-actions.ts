@@ -269,6 +269,21 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       setError("请先确认注册来源权限");
       return;
     }
+    const existingConnector = connectorAppsRef.current.find((app) => app.appId === appId);
+    let sourceIdentityMigration = false;
+    if (installSourceMode === "market" && existingConnector && !existingConnector.installSource) {
+      const sourceApplication = selectedMarket?.installSource?.source.application;
+      if (!sourceApplication) {
+        setError("选择的市场版本缺少来源应用身份");
+        return;
+      }
+      if (!window.confirm(
+        `“${existingConnector.name}”是旧版安装记录，尚未登记来源应用身份。继续会将其认领为 ${sourceApplication.environmentKey} / ${sourceApplication.appId}，并用所选市场版本覆盖升级。市场与条目仅作为本次分发记录。是否继续？`
+      )) {
+        return;
+      }
+      sourceIdentityMigration = true;
+    }
     try {
       setInstallBusy(true);
       setMessage("");
@@ -283,7 +298,8 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       }
       const task = await startLocalAppInstallTask({
         installSource: installSourceMode === "market" ? selectedMarket?.installSource : null,
-        operation: "install",
+        sourceIdentityMigration,
+        operation: existingConnector ? "upgrade" : "install",
         replace: true,
         appId,
         name: installSourceMode === "market" ? selectedMarket?.name ?? null : null,
