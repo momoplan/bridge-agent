@@ -404,7 +404,6 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setCapabilityTestBusy(testKey);
       setError("");
       const result = await invoke<CapabilityInvokeResult>("test_local_app_capability", {
-        config: fromUiConfig(config),
         appId: localApp.appId,
         method: method.name,
         arguments: parseJson(draft)

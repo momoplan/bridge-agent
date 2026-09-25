@@ -1,9 +1,25 @@
 #[tauri::command]
 pub(super) async fn test_local_app_capability(
     state: tauri::State<'_, DesktopState>,
-    config: AgentConfig,
     app_id: String,
     method: String,
+    arguments: Value,
+    timeout_secs: Option<u64>,
+) -> Result<InvokeResult, String> {
+    invoke_saved_local_app_capability(
+        &state.config_path,
+        &app_id,
+        &method,
+        arguments,
+        timeout_secs,
+    )
+    .await
+}
+
+async fn invoke_saved_local_app_capability(
+    config_path: &Path,
+    app_id: &str,
+    method: &str,
     arguments: Value,
     timeout_secs: Option<u64>,
 ) -> Result<InvokeResult, String> {
@@ -16,7 +32,17 @@ pub(super) async fn test_local_app_capability(
         return Err("能力名不能为空".to_string());
     }
 
-    let config_base_dir = resolve_config_base_dir(&state.config_path);
+    // Identity and bindings come from the host's saved authorization, never UI drafts.
+    let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
+    if !config_is_authorized(&config) {
+        return Err("请先完成设备工作区授权，再测试本地应用能力".into());
+    }
+    let workspace_id = config
+        .platform
+        .workspace_id
+        .filter(|value| *value > 0)
+        .ok_or("设备授权缺少有效工作区，请重新授权")?;
+    let config_base_dir = resolve_config_base_dir(config_path);
     let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir)
         .await
         .map_err(|err| format!("构建本地应用运行环境失败: {err}"))?;
@@ -25,7 +51,7 @@ pub(super) async fn test_local_app_capability(
     Ok(registry
         .invoke_local_app(
             request_id,
-            None,
+            Some(workspace_id),
             app_id,
             method,
             arguments,
@@ -305,3 +331,7 @@ mod tests {
         assert_eq!(description, "HTTP 502 Bad Gateway: upstream unavailable");
     }
 }
+
+#[cfg(test)]
+#[path = "capability_tests.rs"]
+mod capability_tests;
