@@ -8,6 +8,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
     async fn capture(headers: HeaderMap, Json(arguments): Json<Value>) -> Json<Value> {
         Json(json!({"ok": true, "data": {
             "workspace": headers.get("x-baijimu-workspace-id").unwrap().to_str().unwrap(),
+            "authorization": headers.get("authorization").unwrap().to_str().unwrap(),
             "arguments": arguments
         }}))
     }
@@ -20,6 +21,8 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
     });
     let directory = tempfile::tempdir().unwrap();
     let config_path = directory.path().join("config.json");
+    let token_path = directory.path().join("management-token");
+    fs::write(&token_path, "test-private-app-token").unwrap();
     let mut config = AgentConfig::example();
     config.platform.workspace_id = Some(73);
     config.relay.token = "test-device-credential".into();
@@ -30,7 +33,15 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
         description: String::new(),
         enabled: true,
         health_check: None,
-        start_command: None,
+        start_command: Some(ServiceStartCommand::ShellCommand {
+            command: vec!["unused-test-start".into()],
+            cwd: None,
+            env: BTreeMap::from([(
+                "BAIJIMU_LOCAL_APP_TOKEN_FILE".into(),
+                token_path.display().to_string(),
+            )]),
+            timeout_secs: Some(1),
+        }),
         stop_command: None,
         methods: vec![MethodConfig {
             name: "request".into(),
@@ -61,6 +72,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
         let data = result.data.unwrap();
         assert_eq!(data["workspace"], workspace.to_string());
         assert_eq!(data["arguments"], arguments);
+        assert_eq!(data["authorization"], "Bearer test-private-app-token");
     }
     server.abort();
 }
