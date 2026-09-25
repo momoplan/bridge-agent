@@ -22,7 +22,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
     let directory = tempfile::tempdir().unwrap();
     let config_path = directory.path().join("config.json");
     let token_path = directory.path().join("management-token");
-    fs::write(&token_path, "test-private-app-token").unwrap();
+    fs::write(&token_path, "bjm_app_test_workspace_private_runtime_token").unwrap();
     let mut config = AgentConfig::example();
     config.platform.workspace_id = Some(73);
     config.relay.token = "test-device-credential".into();
@@ -72,7 +72,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
         let data = result.data.unwrap();
         assert_eq!(data["workspace"], workspace.to_string());
         assert_eq!(data["arguments"], arguments);
-        assert_eq!(data["authorization"], "Bearer test-private-app-token");
+        assert_eq!(data["authorization"], "Bearer bjm_app_test_workspace_private_runtime_token");
     }
     server.abort();
 }
