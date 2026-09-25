@@ -1,5 +1,6 @@
 use super::*;
-use bridge_agent::config::{HttpBinding, MethodBinding, MethodConfig, ResponseMode};
+use bridge_agent::config::{HttpBinding, MethodBinding, MethodConfig};
+use bridge_agent::protocol::ResponseMode;
 use serde_json::json;
 
 #[tokio::test]
