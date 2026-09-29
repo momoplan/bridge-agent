@@ -83,9 +83,14 @@ fn verify_stopped(config: &Path, roots: &[&Path]) -> Result<()> {
                 .canonicalize()
                 .is_ok_and(|path| canonical_roots.iter().any(|root| path.starts_with(root)))
     };
+    let own_pid = Pid::from_u32(std::process::id());
+    let own_threads = system.process(own_pid).and_then(|process| process.tasks());
     for process in system.processes().values() {
         // Our required directory arguments identify the migration targets, not a writer.
-        if process.pid() == Pid::from_u32(std::process::id()) {
+        // Linux also exposes the process's worker threads as individual task records.
+        if process.pid() == own_pid
+            || own_threads.is_some_and(|threads| threads.contains(&process.pid()))
+        {
             continue;
         }
         ensure!(
