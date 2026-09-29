@@ -427,7 +427,7 @@ fn handle_window_event(
 }
 
 fn register_desktop_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    let handler = tauri::generate_handler![
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         frontend_heartbeat,
         report_frontend_failure,
         open_native_recovery,
