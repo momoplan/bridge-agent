@@ -78,6 +78,37 @@ mod identity_startup_tests {
     use super::*;
 
     #[test]
+    fn desktop_launches_owner_migration_before_reading_old_installation_source() {
+        // The repository quality entrypoint runs root integration tests before desktop tests,
+        // producing the actual owner executable; exercise the production launch arguments.
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repository.join("target"));
+        let binary = target.join("debug").join(if cfg!(windows) {
+            "bridge-agent-environment-identity-migration.exe"
+        } else {
+            "bridge-agent-environment-identity-migration"
+        });
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config/agent-config.json");
+        let apps = root.path().join("local-apps");
+        let managed = root.path().join("managed");
+        fs::create_dir_all(apps.join("example")).unwrap();
+        let record = apps.join("example/install.json");
+        fs::write(&record, br#"{"installSource":{"kind":"market","marketKey":"legacy","listingId":"00000000-0000-0000-0000-000000000001","version":"1.0.0","source":{"application":{"environmentKey":"author","appId":"example"},"version":"1.0.0"}}}"#).unwrap();
+        run_identity_migration(&binary, &config, &apps, &managed).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        let _: local_app_contract::InstallSource =
+            local_app_contract::decode(&serde_json::to_vec(&value["installSource"]).unwrap())
+                .unwrap();
+        assert!(record
+            .with_extension("json.before-environment-identity-3")
+            .is_file());
+        run_identity_migration(&binary, &config, &apps, &managed).unwrap();
+    }
+
+    #[test]
     fn migration_gate_keeps_recovery_available_and_blocks_business_writers() {
         for command in [
             "install_app_update",
