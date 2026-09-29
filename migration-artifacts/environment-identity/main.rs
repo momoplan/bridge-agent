@@ -1,4 +1,4 @@
-//! Offline Bridge-owned migration, versioned and shipped with the host release.
+//! Bridge-owned offline/startup migration, versioned and shipped with the host release.
 mod source;
 mod startup;
 #[cfg(test)]
