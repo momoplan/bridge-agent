@@ -71,16 +71,30 @@ fn verify_stopped(config: &Path, roots: &[&Path]) -> Result<()> {
             "Bridge is still running"
         );
     }
+    let mut canonical_roots = Vec::new();
+    for root in roots {
+        if root.try_exists()? {
+            canonical_roots.push(root.canonicalize()?);
+        }
+    }
+    let uses_installation = |path: &Path| {
+        roots.iter().any(|root| path.starts_with(root))
+            || path
+                .canonicalize()
+                .is_ok_and(|path| canonical_roots.iter().any(|root| path.starts_with(root)))
+    };
     for process in system.processes().values() {
+        // Our required directory arguments identify the migration targets, not a writer.
+        if process.pid() == Pid::from_u32(std::process::id()) {
+            continue;
+        }
         ensure!(
-            !roots.iter().any(|root| {
-                process.exe().is_some_and(|path| path.starts_with(root))
-                    || process.cwd().is_some_and(|path| path.starts_with(root))
-                    || process
-                        .cmd()
-                        .iter()
-                        .any(|arg| Path::new(arg).starts_with(root))
-            }),
+            !(process.exe().is_some_and(uses_installation)
+                || process.cwd().is_some_and(uses_installation)
+                || process
+                    .cmd()
+                    .iter()
+                    .any(|arg| uses_installation(Path::new(arg)))),
             "an application is still using its installation"
         );
     }
