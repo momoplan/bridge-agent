@@ -176,7 +176,7 @@ fn registered_desktop_commands_exactly_match_composition_root_acl() {
     let permissions = include_str!("../../permissions/main.toml");
     let handler_section = backend
         .split_once("tauri::generate_handler![")
-        .and_then(|(_, rest)| rest.split_once("])"))
+        .and_then(|(_, rest)| rest.split_once(']'))
         .map(|(section, _)| section)
         .expect("desktop backend must register a Tauri command handler");
     let allow_section = permissions
