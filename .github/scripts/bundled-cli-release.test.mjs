@@ -28,6 +28,16 @@ const defenderUpdateScriptPath =
 const prepareScript = readFileSync(scriptPath, "utf8");
 const temporaryDirectories = [];
 
+it("pins actual release checksums for every supported CLI platform at VERSION", () => {
+  const entries = readFileSync("tools/baijimu-cli/SHA256SUMS", "utf8")
+    .trim().split(/\r?\n/).map(line => line.trim().split(/\s+/));
+  expect(entries.map(([, name]) => name).sort()).toEqual(
+    ["macos-universal", "windows-x64", "linux-x64"]
+      .map(platform => `baijimu-cli-${pinnedCliVersion}-${platform}.zip`).sort(),
+  );
+  for (const [checksum] of entries) expect(checksum).toMatch(/^[a-f0-9]{64}$/);
+});
+
 function createFixture() {
   const root = mkdtempSync(join(tmpdir(), "baijimu-cli-release-test-"));
   temporaryDirectories.push(root);
