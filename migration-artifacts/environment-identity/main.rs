@@ -1,5 +1,6 @@
-//! Offline Bridge-owned migration, versioned and shipped with the host release.
+//! Bridge-owned offline/startup migration, versioned and shipped with the host release.
 mod source;
+mod startup;
 #[cfg(test)]
 mod tests;
 
@@ -24,8 +25,17 @@ struct Args {
     #[arg(long)]
     managed_apps_dir: PathBuf,
     /// Explicit acknowledgement that host and application writers have been stopped.
-    #[arg(long, required = true)]
+    #[arg(long, required_unless_present = "prepare_startup")]
     host_already_stopped: bool,
+    /// Stop configured applications before migration, while desktop business startup is gated.
+    #[arg(long, conflicts_with = "host_already_stopped")]
+    prepare_startup: bool,
+    #[arg(
+        long,
+        requires = "prepare_startup",
+        required_if_eq("prepare_startup", "true")
+    )]
+    config: Option<PathBuf>,
 }
 
 #[derive(serde::Deserialize)]
@@ -36,11 +46,17 @@ struct Discovery {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    ensure!(args.host_already_stopped, "stop the host before migration");
-    verify_stopped(
-        &args.config_dir,
-        &[&args.local_apps_dir, &args.managed_apps_dir],
-    )?;
+    ensure!(
+        args.host_already_stopped || args.prepare_startup,
+        "stop the host before migration"
+    );
+    ensure!(
+        args.config_dir.is_absolute()
+            && args.local_apps_dir.is_absolute()
+            && args.managed_apps_dir.is_absolute(),
+        "migration directories must be absolute"
+    );
+    fs::create_dir_all(&args.config_dir)?;
     let lock_path = args.config_dir.join("environment-identity-migration.lock");
     let lock = OpenOptions::new()
         .create(true)
@@ -51,7 +67,18 @@ fn main() -> Result<()> {
     lock.try_lock_exclusive()
         .context("another identity migration is running")?;
     let files = discover(&args.local_apps_dir, &args.managed_apps_dir)?;
-    migrate(&files)?;
+    let changes = plan(&files)?;
+    if !changes.is_empty() {
+        verify_host_stopped(&args.config_dir, &System::new_all())?;
+        if args.prepare_startup {
+            startup::stop_applications(args.config.as_deref().context("missing startup config")?)?;
+        }
+        verify_stopped(
+            &args.config_dir,
+            &[&args.local_apps_dir, &args.managed_apps_dir],
+        )?;
+        apply(changes)?;
+    }
     FileExt::unlock(&lock)?;
     println!("Environment identity migration completed; source-less records remain unclaimed");
     Ok(())
@@ -63,14 +90,7 @@ fn verify_stopped(config: &Path, roots: &[&Path]) -> Result<()> {
         "migration directories must be absolute"
     );
     let system = System::new_all();
-    let discovery = config.join("local-app-control.json");
-    if discovery.is_file() {
-        let record: Discovery = serde_json::from_slice(&fs::read(discovery)?)?;
-        ensure!(
-            system.process(Pid::from_u32(record.pid)).is_none(),
-            "Bridge is still running"
-        );
-    }
+    verify_host_stopped(config, &system)?;
     let mut canonical_roots = Vec::new();
     for root in roots {
         if root.try_exists()? {
@@ -101,6 +121,18 @@ fn verify_stopped(config: &Path, roots: &[&Path]) -> Result<()> {
                     .iter()
                     .any(|arg| uses_installation(Path::new(arg)))),
             "an application is still using its installation"
+        );
+    }
+    Ok(())
+}
+
+fn verify_host_stopped(config: &Path, system: &System) -> Result<()> {
+    let discovery = config.join("local-app-control.json");
+    if discovery.is_file() {
+        let record: Discovery = serde_json::from_slice(&fs::read(discovery)?)?;
+        ensure!(
+            system.process(Pid::from_u32(record.pid)).is_none(),
+            "Bridge is still running"
         );
     }
     Ok(())
@@ -150,7 +182,9 @@ fn collect_sidecars(root: &Path, files: &mut Vec<(PathBuf, bool)>) -> Result<()>
     Ok(())
 }
 
-fn migrate(files: &[(PathBuf, bool)]) -> Result<()> {
+type Change = (PathBuf, Vec<u8>, Vec<u8>);
+
+fn plan(files: &[(PathBuf, bool)]) -> Result<Vec<Change>> {
     // Parse every candidate first: invalid provenance cannot cause a partially applied plan.
     let mut changes = Vec::new();
     for (path, sidecar) in files {
@@ -158,12 +192,21 @@ fn migrate(files: &[(PathBuf, bool)]) -> Result<()> {
         if let Some(next) = source::convert(&original, *sidecar)
             .with_context(|| format!("invalid provenance in {}", path.display()))?
         {
-            changes.push((path, original, next));
+            changes.push((path.clone(), original, next));
         }
     }
+    Ok(changes)
+}
+
+#[cfg(test)]
+fn migrate(files: &[(PathBuf, bool)]) -> Result<()> {
+    apply(plan(files)?)
+}
+
+fn apply(changes: Vec<Change>) -> Result<()> {
     for (path, original, next) in changes {
         ensure!(
-            fs::read(path)? == original,
+            fs::read(&path)? == original,
             "installation changed during migration"
         );
         let backup = path.with_extension("json.before-environment-identity-3");

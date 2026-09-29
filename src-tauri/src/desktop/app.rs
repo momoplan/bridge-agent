@@ -427,7 +427,7 @@ fn handle_window_event(
 }
 
 fn register_desktop_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    builder.invoke_handler(tauri::generate_handler![
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         frontend_heartbeat,
         report_frontend_failure,
         open_native_recovery,
@@ -482,7 +482,25 @@ fn register_desktop_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::Buil
         baijimu_cli_status,
         install_baijimu_cli_update,
         rollback_baijimu_cli
-    ])
+    ];
+    builder.invoke_handler(move |invoke| {
+        let migration_ready = invoke
+            .message
+            .webview()
+            .state::<DesktopState>()
+            .startup_health
+            .snapshot()
+            .components
+            .iter()
+            .any(|component| component.id == "config_migration" && component.status == "ready");
+        if !command_allowed_before_migration(invoke.message.command()) && !migration_ready {
+            invoke
+                .resolver
+                .reject("配置迁移尚未完成，业务操作暂不可用；请查看启动状态。");
+            return true;
+        }
+        handler(invoke)
+    })
 }
 
 fn handle_desktop_run_event(app: &tauri::AppHandle, event: tauri::RunEvent, context: &DesktopRun) {

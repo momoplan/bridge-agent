@@ -159,10 +159,10 @@ fn migrate_desktop_config(
         "configuration migration started after startup update gate: config={}",
         config_path.display()
     ));
-    match migrate_legacy_config_before_startup(config_path) {
+    match migrate_installations_before_startup(config_path) {
         Ok(true) => {
             diagnostics.info(format!(
-                "legacy app ID configuration migration completed before startup: config={}",
+                "configuration and installation migration completed before startup: config={}",
                 config_path.display()
             ));
             startup_health.set_component(
@@ -179,7 +179,7 @@ fn migrate_desktop_config(
         }
         Err(err) => {
             diagnostics.error(format!(
-                "failed to migrate legacy app ID configuration before startup: {err:#}"
+                "failed to migrate configuration and installations before startup: {err:#}"
             ));
             startup_health.set_component(
                 "config_migration",

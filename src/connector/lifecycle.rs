@@ -58,3 +58,12 @@ pub fn stop_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStart
         lifecycle,
     })
 }
+
+/// Run an already configured lifecycle command without decoding installation metadata.
+/// Used by the owner migration while business startup is blocked.
+pub fn run_lifecycle_command(
+    app_id: &str,
+    command: &ServiceStartCommand,
+) -> Result<ConnectorLifecycleResult> {
+    run_start_command(app_id, command, &BTreeMap::new())
+}
