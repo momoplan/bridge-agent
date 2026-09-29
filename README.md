@@ -727,25 +727,19 @@ gh workflow run release-bridge-agent.yml \
   -f release_tag=bridge-agent-v0.1.110
 ```
 
-已有版本需要重新同步签名制品、OSS 和更新元数据，并同时提升最低支持版本时，必须使用同一工作流的
-`repair_assets_only` 入口；工作流会先读取并保留 release service 当前的 `releasePageUrl`，再通过受支持的
-策略 API 完整更新和回读策略，不直接修改数据库：
+已有版本需要重新同步签名制品、OSS 和更新元数据时，使用同一工作流的
+`repair_assets_only` 入口。工作流只修复原版本已有平台的分发，不移动标签、重新签名或修改强制更新策略。
 
-```bash
-gh workflow run release-bridge-agent.yml \
-  --ref main \
-  -f release_tag=bridge-agent-v0.2.33 \
-  -f repair_assets_only=true \
-  -f minimum_supported_version=0.2.33 \
-  -f force_update_message='必须升级到 0.2.33 后继续使用。'
-```
+强制更新策略由平台管理员在客户端发布管理页面设置，通过
+`lowcode-back` 的 `PUT /lowcodeback/api/bridge-agent-release/policy` 保存和审计。
+发布 Token 没有修改策略的权限，工作流也不接受 `minimum_supported_version` 或 `force_update_message` 参数。
 
-`minimum_supported_version` 必须是稳定的三段版本号，且不得高于 `release_tag`。策略保持
-`forceUpdate=false`，由服务端仅对低于最低支持版本的客户端返回强制更新；工作流会验证旧版本被强更、
-最低支持版本自身不被强更。
+最低支持版本是全局策略。提高门槛前必须确认 macOS、Windows 和 Linux 均已发布不低于该门槛的版本，
+并验证各平台下载和更新签名。保持 `forceUpdate=false`，设置 `minimumSupportedVersion`；
+服务端根据请求的 `currentVersion` 只强制旧版升级。设置后验证旧版被强更、目标版本与更新版本不被强更。
+离线客户端在重新联网检查更新后执行升级。
 
-修复发布要求新提交是原 tag 提交的后代，且版本号不变；工作流不会移动或覆盖既有
-GitHub tag。普通正式发布不要使用 `workflow_dispatch`，直接推送新 tag。
+正式发布使用 `workflow_dispatch`，传入不可变 `release_tag` 和显式平台集合；推送标签本身不触发发布。
 
 macOS 自动签名和公证前，需要先在仓库的 GitHub Secrets 里配置这些值：
 
