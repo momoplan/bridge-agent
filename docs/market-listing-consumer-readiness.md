@@ -6,9 +6,9 @@
 
 ## 当前实现
 
-- 桌面市场目录、精确版本与制品改为访问当前消费环境的 local-app-service。服务 context 返回权威 marketKey；来源 environmentKey 保留市场冻结合同中的原值。
+- 桌面市场目录、精确版本与制品改为访问当前消费环境的 local-app-service。不再查询独立市场身份；来源 environmentKey 保留市场冻结合同中的原值。
 - 当前设备工作区 PAT 只发送到消费环境；凭证必须显式绑定该环境 API 地址。新增绑定记录由设备授权写入；缺少绑定的历史凭证要求重新授权，不猜测所属环境。
-- 市场卡片以 marketKey/listingId 区分，展示来源环境。安装请求传递完整 InstallSource；升级校验 marketKey/listingId/environmentKey/appId，精确版本包含 build metadata。
+- 市场卡片以 environmentKey/appId 区分，展示来源环境。本机安装请求指定 environmentKey/appId/version，由宿主解析稳定 listingId；升级仅允许相同来源应用，精确版本包含 build metadata。
 - Connector 安装与托管 CLI 安装使用环境服务返回的冻结制品；清单里的 source URL 不作为下载入口。Connector 验证安装包完整清单与审核快照一致。
 - Connector 安装记录和摘要、托管 CLI 状态保存 InstallSource。CLI 回滚切换对应来源记录；来源不明的历史记录不会自动匹配市场升级。
 - 内置 CLI 的来源由发布预检从消费环境核实并随二进制携带，导入、升级和回滚保留来源记录；缺失来源的旧制品保持未证明状态。发布构建必须具备匹配版本的来源文件。

@@ -10,7 +10,7 @@ pub(super) struct MarketConsumer {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SharedAuthentication {
+pub(super) struct SharedAuthentication {
     environments: BTreeMap<String, ConsumerEnvironment>,
     credentials: Vec<ConsumerCredential>,
 }
@@ -35,7 +35,10 @@ struct ConsumerCredential {
     issued_at_epoch_seconds: Option<u64>,
 }
 
-fn credential_for(config: &AgentConfig, document: SharedAuthentication) -> Result<String, String> {
+pub(super) fn credential_for(
+    config: &AgentConfig,
+    document: SharedAuthentication,
+) -> Result<String, String> {
     let workspace = config.platform.workspace_id.ok_or("请先完成工作区授权")?;
     use bridge_agent::config::environment::{api_base, bound_key, is_official, official_key};
     let key = bound_key(
@@ -99,7 +102,7 @@ pub(super) async fn market_consumer(config_path: &Path) -> Result<MarketConsumer
 }
 
 // platform.base_url may name the lowcode API; Partner routes share its parent base.
-fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
+pub(super) fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
     let base = platform_base.trim_end_matches('/');
     let base = base.strip_suffix("/lowcode3").unwrap_or(base);
     let mut url = reqwest::Url::parse(base).map_err(|_| "当前环境地址无效")?;
@@ -118,6 +121,20 @@ fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
 }
 
 impl MarketConsumer {
+    pub(super) async fn selection(
+        &self,
+        source: &local_app_contract::SourceVersion,
+    ) -> Result<local_app_contract::InstallSource, String> {
+        let selection =
+            bridge_agent::market_distribution::resolve_source(source, &self.listings().await?)
+                .map_err(|error| error.to_string())?;
+        self.reader
+            .version(&self.credential, &selection)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(selection)
+    }
+
     pub(super) async fn listings(&self) -> Result<Vec<MarketListing>, String> {
         let mut cursor = None;
         let mut items = Vec::new();

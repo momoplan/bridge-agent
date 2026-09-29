@@ -300,6 +300,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & "src-tauri/scripts/sign-windows-artifact.ps1" -FilePath "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe"
+          & "src-tauri/scripts/sign-windows-artifact.ps1" -FilePath "src-tauri/resources/bin/bridge-agent-environment-identity-migration.exe"
 
       - name: Prepare Apple notarization credentials
         if: runner.os == 'macOS'

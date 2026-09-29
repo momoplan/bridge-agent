@@ -3,11 +3,11 @@ import { pathToFileURL } from "node:url";
 
 export function prepareBundledMarketSource(selection, appId, version) {
   const nonempty = value => typeof value === "string" && value.trim() === value && value.length > 0;
-  if (selection?.kind !== "market" || !nonempty(selection.marketKey) || !nonempty(selection.listingId) ||
+  if (selection?.kind !== "market" || !nonempty(selection.listingId) ||
       !nonempty(selection.source?.application?.environmentKey) ||
       selection.source.application.appId !== appId || selection.version !== version ||
       selection.source.version !== version) throw new Error("Bundled CLI provenance does not match its pinned identity");
-  return { kind: "market", marketKey: selection.marketKey, listingId: selection.listingId,
+  return { kind: "market", listingId: selection.listingId,
     source: { application: { environmentKey: selection.source.application.environmentKey, appId }, version }, version };
 }
 

@@ -12,7 +12,7 @@ interface LocalAppCatalogDependencies { applyRuntimeSnapshot: (snapshot: Runtime
 
 export function createLocalAppCatalogActions(state: AppControllerState, dependencies: LocalAppCatalogDependencies) {
   const { applyRuntimeSnapshot, formatApplyMessage, handleCommandError, installableMarketConnectors, refreshRegisteredServiceStatuses } = dependencies;
-  const { authorizationStateRef, connectorAppsRef, customInstallConfirmed, installSourceMode, localAppInstallTasksRef, localAppUpdateRefreshRef, registeredInstallAppId, registeredInstallVersion, selectedMarketAppId, setActivePage, setBaijimuCli, setConnectorApps, setCustomInstallConfirmed, setError, setInstallBusy, setInstallPanelOpen, setInstallSourceMode, setLocalAppInstallTasks, setMarketAppQuery, setMarketConnectors, setMarketLoadError, setMarketLoading, setMessage, setPendingUpgradeAppId, setRuntimeConflict, setSelectedLocalAppId, setSelectedMarketAppId, setServiceStartBusy } = state;
+  const { authorizationStateRef, connectorAppsRef, customInstallConfirmed, installSourceMode, localAppInstallTasksRef, localAppUpdateRefreshRef, registeredInstallEnvironmentKey, registeredInstallAppId, registeredInstallVersion, selectedMarketAppId, setActivePage, setBaijimuCli, setConnectorApps, setCustomInstallConfirmed, setError, setInstallBusy, setInstallPanelOpen, setInstallSourceMode, setLocalAppInstallTasks, setMarketAppQuery, setMarketConnectors, setMarketLoadError, setMarketLoading, setMessage, setPendingUpgradeAppId, setRuntimeConflict, setSelectedLocalAppId, setSelectedMarketAppId, setServiceStartBusy } = state;
   async function openLocalAppDeepLinkIntent(intent: LocalAppInstallDeepLinkIntent) {
     setActivePage("apps");
     setMessage("");
@@ -257,11 +257,11 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       installSourceMode === "market" ? selectedMarket?.appId ?? "" : registeredInstallAppId;
     const version =
       installSourceMode === "market" ? selectedMarket?.version ?? "" : registeredInstallVersion;
-    if (!appId || !version) {
+    if (!appId || !version || (installSourceMode === "custom" && !registeredInstallEnvironmentKey)) {
       setError(
         installSourceMode === "market"
           ? "请选择要安装的应用"
-          : "请输入已在平台注册的 appId 和精确版本"
+          : "请输入来源环境 key、appId 和精确版本"
       );
       return;
     }
@@ -269,10 +269,14 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       setError("请先确认注册来源权限");
       return;
     }
+    const installSource = installSourceMode === "market" ? selectedMarket?.installSource : {
+      kind: "environment" as const,
+      source: { application: { environmentKey: registeredInstallEnvironmentKey, appId }, version }
+    };
     const existingConnector = connectorAppsRef.current.find((app) => app.appId === appId);
     let sourceIdentityMigration = false;
-    if (installSourceMode === "market" && existingConnector && !existingConnector.installSource) {
-      const sourceApplication = selectedMarket?.installSource?.source.application;
+    if (existingConnector && !existingConnector.installSource) {
+      const sourceApplication = installSource?.source.application;
       if (!sourceApplication) {
         setError("选择的市场版本缺少来源应用身份");
         return;
@@ -297,7 +301,7 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
         return;
       }
       const task = await startLocalAppInstallTask({
-        installSource: installSourceMode === "market" ? selectedMarket?.installSource : null,
+        installSource,
         sourceIdentityMigration,
         operation: existingConnector ? "upgrade" : "install",
         replace: true,

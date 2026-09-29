@@ -14,45 +14,14 @@ pub struct MarketReader {
 }
 
 impl MarketReader {
-    /// Discover the market key from the authenticated consumer Owner, never from a domain.
+    /// Bind to the configured authenticated consumer endpoint, not a separate market identity.
     pub async fn connect(
         base_url: &str,
         workspace: u64,
-        credential: &str,
+        _credential: &str,
         timeout: Duration,
     ) -> Result<Self> {
-        let mut endpoint = Url::parse(base_url).context("invalid consumer API base")?;
-        if workspace == 0
-            || timeout.is_zero()
-            || endpoint.scheme() != "https"
-            || endpoint.host_str().is_none()
-            || !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-            || base_url.trim() != base_url
-        {
-            bail!("explicit consumer HTTPS API base and workspace are required");
-        }
-        endpoint
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("invalid consumer base"))?
-            .pop_if_empty()
-            .push("context");
-        endpoint
-            .query_pairs_mut()
-            .append_pair("workspaceId", &workspace.to_string());
-        let client = Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
-            .build()?;
-        let response = send(&client, endpoint, credential).await?;
-        let market_key: local_app_contract::MarketKey = decode(response).await?;
-        Ok(Self {
-            distribution: MarketDistribution::new(market_key, base_url, workspace)?,
-            client,
-        })
+        Self::new(MarketDistribution::new(base_url, workspace)?, timeout)
     }
 
     pub fn new(distribution: MarketDistribution, timeout: Duration) -> Result<Self> {
@@ -129,7 +98,7 @@ impl MarketReader {
     }
 }
 
-async fn decode<T: DeserializeOwned>(response: Response) -> Result<T> {
+pub(super) async fn decode<T: DeserializeOwned>(response: Response) -> Result<T> {
     let bytes = response
         .bytes()
         .await
@@ -143,7 +112,7 @@ async fn decode<T: DeserializeOwned>(response: Response) -> Result<T> {
         .context("consumer response has no data")
 }
 
-async fn send(client: &Client, url: Url, credential: &str) -> Result<Response> {
+pub(super) async fn send(client: &Client, url: Url, credential: &str) -> Result<Response> {
     if credential.is_empty() || credential.trim() != credential {
         bail!("consumer workspace credential required");
     }

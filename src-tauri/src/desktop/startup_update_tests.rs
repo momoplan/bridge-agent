@@ -295,43 +295,4 @@ fn shared_cli_auth_preserves_cli_selection_and_other_credentials() {
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
-#[test]
-fn market_git_source_converts_to_github_archive() {
-    let archive = connector_archive_download_url(
-        "https://github.com/momoplan/wechat-bridge-collector.git",
-        Some("v0.2.3"),
-        false,
-    )
-    .unwrap();
-    assert_eq!(
-        archive.as_deref(),
-        Some("https://github.com/momoplan/wechat-bridge-collector/archive/v0.2.3.zip")
-    );
-}
-
-#[test]
-fn custom_git_source_keeps_git_clone_path() {
-    let archive = connector_archive_download_url(
-        "https://github.com/momoplan/wechat-bridge-collector.git",
-        Some("v0.2.3"),
-        true,
-    )
-    .unwrap();
-    assert!(archive.is_none());
-}
-
-#[test]
-fn archive_source_downloads_directly() {
-    let archive = connector_archive_download_url(
-        "https://download.baijimu.com/connectors/wechat.zip",
-        None,
-        false,
-    )
-    .unwrap();
-    assert_eq!(
-        archive.as_deref(),
-        Some("https://download.baijimu.com/connectors/wechat.zip")
-    );
-}
-
 include!("startup_update_tests/connectors.rs");

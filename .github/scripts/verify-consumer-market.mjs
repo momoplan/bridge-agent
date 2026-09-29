@@ -6,7 +6,7 @@ export async function verifyConsumerMarket({ baseUrl, workspaceId, token, select
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash ||
       baseUrl.trim() !== baseUrl || !/^[1-9][0-9]*$/.test(workspaceId) ||
       !token || token.trim() !== token || /[\r\n]/.test(token)) throw new Error("Invalid consumer market access configuration");
-  if (selection?.kind !== "market" || !selection.marketKey || !selection.listingId ||
+  if (selection?.kind !== "market" || !selection.listingId ||
       !selection.source?.application?.environmentKey || selection.source.application.appId !== appId ||
       selection.version !== version || selection.source.version !== version) throw new Error("Bundled tool requires an exact market source binding");
   async function get(path, after) {
@@ -19,7 +19,6 @@ export async function verifyConsumerMarket({ baseUrl, workspaceId, token, select
     if (envelope.contractVersion !== "1.0.0" || envelope.errorCode !== "0" || envelope.data == null) throw new Error("Invalid consumer CModel response");
     return envelope.data;
   }
-  if (await get("context") !== selection.marketKey) throw new Error("Consumer market binding changed");
   let after;
   let match;
   const cursors = new Set();
@@ -27,7 +26,7 @@ export async function verifyConsumerMarket({ baseUrl, workspaceId, token, select
     const page = await get("listings", after);
     if (!Array.isArray(page.items)) throw new Error("Invalid market page");
     for (const listing of page.items) {
-      if (listing.marketKey !== selection.marketKey) throw new Error("Unexpected market authority");
+      if (listing.contractVersion !== "3.0.0") throw new Error("Unsupported market read contract");
       if (listing.listingId === selection.listingId) {
         if (match) throw new Error("Duplicate catalog entry");
         match = listing;

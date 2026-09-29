@@ -305,24 +305,6 @@ async fn prepare_connector_install(
     })
 }
 
-fn validate_registered_candidate_identity(
-    registered: &RegisteredInstallSource,
-    candidate: &ConnectorManifest,
-) -> Result<(), String> {
-    if candidate.app_id == registered.identity.app_id
-        && candidate.version == registered.identity.version.to_string()
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "注册版本与安装包清单不匹配：注册 `{}@{}`，安装包 `{}@{}`",
-        registered.identity.app_id,
-        registered.identity.version,
-        candidate.app_id,
-        candidate.version
-    ))
-}
-
 async fn execute_connector_install(
     config_path: &Path,
     runtime_manager: &AgentRuntimeManager,
@@ -387,31 +369,18 @@ async fn resolve_install_package(
             )
             .await?
         }
-        Some(_) => return Err("环境安装来源必须由环境注册服务解析".into()),
-        None => {
+        Some(local_app_contract::InstallSource::Environment { source }) => {
             if !options.accept_unreviewed {
-                return Err("公开市场安装需要完整 installSource，请重新选择市场条目".into());
+                return Err("来源环境安装需要显式接受环境授权版本".into());
             }
-            let registered =
-                fetch_registered_install_source(config_path, &options.identity, true).await?;
-            ensure_registered_install_is_accepted(&registered, true)?;
-            let resolved = resolve_connector_source(
-                &registered.source,
-                false,
-                Some(&registered.checksum),
+            environment_install::resolve(
+                config_path,
+                source,
+                options.source_identity_migration,
                 options.progress.as_ref(),
             )
-            .await?;
-            let manifest =
-                load_connector_manifest(resolved.path()).map_err(|error| error.to_string())?;
-            validate_registered_candidate_identity(&registered, &manifest)?;
-            let provenance = ConnectorInstallProvenance::registered(
-                &registered.source,
-                &registered.review_status,
-                &registered.checksum,
-            )
-            .map_err(|error| error.to_string())?;
-            (resolved, provenance)
+            .await?
         }
+        None => return Err("安装必须显式提供来源环境与应用身份，请重新选择安装来源".into()),
     })
 }

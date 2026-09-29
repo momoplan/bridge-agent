@@ -1,10 +1,11 @@
 [package]
 name = "bridge-agent"
-version = "0.8.9"
+version = "0.9.0"
 edition = "2021"
+default-run = "bridge-agent"
 
 [build-dependencies]
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 toml = "0.8"
 
 [dependencies]
@@ -16,14 +17,16 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "5.0"
 futures-util = "0.3"
-local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "53d8520c09b567e8b611beb2c125d6fee41086a1", version = "=2.0.0" }
+fs2 = "0.4"
+sysinfo = "0.33"
+local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "128e7a2fbf4550aca483d67d94fcd045387e863f", version = "=3.0.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pep440_rs = "0.7.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.10"
 tempfile = "3.20"
 tokio = { version = "1.45", features = ["full"] }
@@ -63,3 +66,7 @@ keyring = "4.1.5"
 libc = "0.2"
 
 [dev-dependencies]
+
+[[bin]]
+name = "bridge-agent-environment-identity-migration"
+path = "migration-artifacts/environment-identity/main.rs"

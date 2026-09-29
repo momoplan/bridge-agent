@@ -2,11 +2,6 @@ use super::*;
 
 pub(super) const UPDATE_USER_AGENT: &str =
     concat!("bridge-agent-desktop/", env!("CARGO_PKG_VERSION"));
-pub(super) const CONNECTOR_DOWNLOAD_USER_AGENT: &str = concat!(
-    "Baijimu-Connector-Installer/",
-    env!("CARGO_PKG_VERSION"),
-    " Wget/1.21.4"
-);
 pub(super) const UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 pub(super) const UNIFIED_APP_ID_MIGRATION_BINARY: &str = "bridge-agent-unified-app-id-migration";
 pub(super) const UNIFIED_APP_ID_MIGRATION_LEDGER: &str = "unified-app-id-migration-ledger.json";
@@ -57,7 +52,8 @@ pub(super) const STARTUP_STATE_FILE_NAME: &str = "bridge-agent-desktop-startup-s
 pub(super) const INTERACTIVE_RESTART_MARKER_FILE_NAME: &str =
     "bridge-agent-desktop-interactive-restart";
 pub(super) const LOCAL_APP_CONTROL_FILE_NAME: &str = "local-app-control.json";
-pub(super) const LOCAL_APP_CONTROL_SCHEMA_VERSION: &str = "2.0.0";
+pub(super) const LOCAL_APP_CONTROL_SCHEMA_VERSION: &str =
+    local_app_contract::DEVICE_CONTROL_CONTRACT_VERSION;
 pub(super) const SAFE_MODE_FAILURE_THRESHOLD: u32 = 2;
 #[cfg(windows)]
 pub(super) const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;

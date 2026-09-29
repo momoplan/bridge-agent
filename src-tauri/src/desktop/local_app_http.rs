@@ -32,16 +32,7 @@ pub(super) struct LocalAppControlDiscovery {
     pub(super) started_at_epoch_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct LocalAppControlInstallRequest {
-    pub(super) install_source: Option<local_app_contract::InstallSource>,
-    pub(super) app_id: String,
-    pub(super) version: String,
-    pub(super) replace: bool,
-    pub(super) start: bool,
-    pub(super) accept_unreviewed: bool,
-}
+pub(super) type LocalAppControlInstallRequest = local_app_contract::DeviceInstallRequest;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

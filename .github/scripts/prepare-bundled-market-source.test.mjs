@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { prepareBundledMarketSource } from "./prepare-bundled-market-source.mjs";
-const source = { kind: "market", marketKey: "market-a", listingId: "listing-a", version: "1.2.3",
+const source = { kind: "market", listingId: "listing-a", version: "1.2.3",
   source: { application: { environmentKey: "author-a", appId: "cli-a" }, version: "1.2.3" } };
 it("preserves pinned provenance without network access or credentials", () => {
   expect(prepareBundledMarketSource(source, "cli-a", "1.2.3")).toEqual(source);

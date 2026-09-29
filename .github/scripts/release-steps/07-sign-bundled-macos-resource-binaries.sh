@@ -9,6 +9,7 @@ done
 resource_binaries=(
   "src-tauri/resources/bin/baijimu"
   "src-tauri/resources/bin/bridge-agent-unified-app-id-migration"
+  "src-tauri/resources/bin/bridge-agent-environment-identity-migration"
 )
 for binary in "${resource_binaries[@]}"; do
   if [ ! -x "$binary" ]; then

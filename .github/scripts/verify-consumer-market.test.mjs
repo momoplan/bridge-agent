@@ -5,16 +5,16 @@ function fixture() {
   const options = {
     baseUrl: "https://consumer.example.test/partner/v1/local-app-service/api/local-app-market/",
     workspaceId: "7", token: "test-pat", appId: "example-cli", version: "1.2.3",
-    selection: { kind: "market", marketKey: "public-market", listingId: "catalog-1", version: "1.2.3",
+    selection: { kind: "market", listingId: "catalog-1", version: "1.2.3",
       source: { application: { environmentKey: "author-a", appId: "example-cli" }, version: "1.2.3" } }
   };
-  const listing = { marketKey: "public-market", listingId: "catalog-1", frozenVersion: {
+  const listing = { contractVersion: "3.0.0", listingId: "catalog-1", frozenVersion: {
     source: structuredClone(options.selection.source), content: { applicationType: "managed_tool", artifacts: [{ artifactId: "artifact-1" }] }
   } };
   const calls = [];
   const request = async (url, init) => {
     calls.push({ url, init });
-    const data = url.pathname.endsWith("/context") ? "public-market" : { items: [listing], nextCursor: null };
+    const data = { items: [listing], nextCursor: null };
     return { status: 200, json: async () => ({ contractVersion: "1.0.0", errorCode: "0", data }) };
   };
   return { options, listing, calls, request };
@@ -23,7 +23,7 @@ describe("consumer market release verification", () => {
   it("reads only the configured consumer owner with a workspace credential", async () => {
     const { options, calls, request } = fixture();
     await expect(verifyConsumerMarket(options, request)).resolves.toEqual({ listingId: "catalog-1", version: "1.2.3" });
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     for (const { url, init } of calls) {
       expect(url.origin).toBe("https://consumer.example.test");
       expect(url.searchParams.get("workspaceId")).toBe("7");

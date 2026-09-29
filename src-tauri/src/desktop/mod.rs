@@ -3,6 +3,7 @@ use crate::{codex_skill, local_app, macos_installation, managed_tool, managed_to
 mod app;
 mod auth;
 mod constants;
+mod environment_install;
 mod local_app_archive;
 mod local_app_commands;
 mod local_app_http;

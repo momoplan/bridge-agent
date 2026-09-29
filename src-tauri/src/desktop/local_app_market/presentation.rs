@@ -341,16 +341,6 @@ pub(super) fn with_revision(source: &str, revision: Option<&str>) -> String {
     }
 }
 
-pub(super) fn split_source_revision(source: &str) -> (String, Option<String>) {
-    let source = source.trim();
-    match source.rsplit_once('#') {
-        Some((base, revision)) if !base.is_empty() && !revision.is_empty() => {
-            (base.to_string(), Some(revision.to_string()))
-        }
-        _ => (source.to_string(), None),
-    }
-}
-
 pub(super) fn normalized_platform() -> &'static str {
     std::env::consts::OS
 }
@@ -363,9 +353,4 @@ pub(super) fn is_git_connector_source(source: &str) -> bool {
         || value.starts_with("git://")
         || parse_https_git_repo(value, "github.com").is_some()
         || parse_https_git_repo(value, "gitee.com").is_some()
-}
-
-pub(super) fn is_http_connector_source(source: &str) -> bool {
-    let value = source.trim();
-    value.starts_with("https://") || value.starts_with("http://")
 }

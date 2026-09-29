@@ -4,12 +4,12 @@ export interface SourceVersion {
 }
 export type InstallSource =
   | { kind: "environment"; source: SourceVersion }
-  | { kind: "market"; marketKey: string; listingId: string; version: string; source: SourceVersion };
+  | { kind: "market"; listingId: string; version: string; source: SourceVersion };
 
 export function marketSelectionKey(app: { installSource?: InstallSource | null }): string {
   const source = app.installSource;
   if (source?.kind !== "market") return "";
-  return JSON.stringify([source.marketKey, source.listingId]);
+  return JSON.stringify([source.source.application.environmentKey, source.source.application.appId]);
 }
 
 export function sameSourceApplication(left?: InstallSource | null, right?: InstallSource | null): boolean {

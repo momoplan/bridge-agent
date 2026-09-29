@@ -19,48 +19,19 @@ fn registered_app_version_identity_requires_exact_semver() {
 }
 
 #[test]
-fn registered_install_url_preserves_base_path_and_encodes_identity() {
-    let identity = RegisteredAppVersionIdentity::parse(
-        "app/with/slash".to_string(),
-        "3.0.1+macos".to_string(),
-    )
-    .unwrap();
-    let url = registered_install_url("https://api.example.com/lowcode3/", &identity).unwrap();
-    assert_eq!(
-        url.as_str(),
-        "https://api.example.com/lowcode3/api/local-app-registry/apps/app%2Fwith%2Fslash/versions/3.0.1+macos"
-    );
-}
-
-#[test]
-fn unreviewed_registered_version_requires_explicit_acceptance() {
-    let registered = RegisteredInstallSource {
-        identity: RegisteredAppVersionIdentity::parse("app-1".to_string(), "3.0.1".to_string())
-            .unwrap(),
-        review_status: "DRAFT".to_string(),
-        name: "测试应用".to_string(),
-        publisher: "测试发布者".to_string(),
-        source: "https://example.invalid/app.zip".to_string(),
-        checksum: "0".repeat(64),
-    };
-    let error = ensure_registered_install_is_accepted(&registered, false).unwrap_err();
-    assert!(error.contains("尚未经过市场公开审核"));
-    assert!(error.contains("app-1@3.0.1"));
-    assert!(ensure_registered_install_is_accepted(&registered, true).is_ok());
-}
-
-#[test]
 fn local_app_install_contract_accepts_identity_and_rejects_source_url() {
     let request: LocalAppControlInstallRequest = serde_json::from_value(serde_json::json!({
         "appId": "app-1",
+        "environmentKey": "author-a",
+        "sourceIdentityMigration": false,
         "version": "3.0.1",
         "replace": true,
         "start": true,
         "acceptUnreviewed": true
     }))
     .unwrap();
-    assert_eq!(request.app_id, "app-1");
-    assert_eq!(request.version, "3.0.1");
+    assert_eq!(request.app_id.as_str(), "app-1");
+    assert_eq!(request.version.to_string(), "3.0.1");
 
     assert!(
         serde_json::from_value::<LocalAppControlInstallRequest>(serde_json::json!({
@@ -242,8 +213,8 @@ fn market_presentation_preserves_source_without_using_manifest_download_urls() {
     ))
     .unwrap();
     let listing: local_app_contract::MarketListing = serde_json::from_value(serde_json::json!({
-        "contractVersion":"2.0.0", "presentation":{"name":"Reviewed CLI title","description":"Reviewed description","publisher":null,"capability":"Run platform commands","risk":{"level":"medium","description":"Runs local commands"},"icon":null},
-        "marketKey":"test-market", "listingId":"00000000-0000-0000-0000-000000000001",
+        "contractVersion":"3.0.0", "presentation":{"name":"Reviewed CLI title","description":"Reviewed description","publisher":null,"capability":"Run platform commands","risk":{"level":"medium","description":"Runs local commands"},"icon":null},
+         "listingId":"00000000-0000-0000-0000-000000000001",
         "frozenVersion": {"contractVersion":"1.0.0", "source": {
             "application":{"environmentKey":"author-a", "appId":"test-app"}, "version":"1.0.0"
         }, "content":{"applicationType":"managed_tool", "sourceRevision":"commit-1", "manifest":manifest,
