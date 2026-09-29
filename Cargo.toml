@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 default-run = "bridge-agent"
 
@@ -9,6 +9,8 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 toml = "0.8"
 
 [dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "ca7cfc8c291cf438d046688521c43b5c3ed0733a", default-features = false }
 anyhow = "1.0"
 axum = "0.8"
 baijimu-cmodel-core = { version = "=5.0.0", git = "https://gitee.com/zxflimit_admin/baijimu-contracts.git", rev = "213e7efbcc06984820690e87a2cd27f6d552254b" }

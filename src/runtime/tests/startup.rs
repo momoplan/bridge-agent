@@ -3,6 +3,8 @@
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_concurrent_start".to_string();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
@@ -45,6 +47,8 @@
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
@@ -106,6 +110,8 @@
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_duplicate_start".to_string();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());

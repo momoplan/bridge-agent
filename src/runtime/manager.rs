@@ -74,7 +74,7 @@ impl AgentRuntimeManager {
             }
         };
 
-        let handles = spawn_runtime_task(
+        let handles = match spawn_runtime_task(
             Arc::clone(&self.inner),
             config,
             config_path,
@@ -82,7 +82,13 @@ impl AgentRuntimeManager {
             runtime_lock,
             ws_url,
             registry,
-        );
+        ) {
+            Ok(handles) => handles,
+            Err(error) => {
+                self.force_stopped_with_error(error.to_string()).await;
+                return Err(error);
+            }
+        };
 
         let mut state = self.inner.state.lock().await;
         state.shutdown = Some(handles.shutdown);
@@ -337,7 +343,8 @@ fn spawn_runtime_task(
     runtime_lock: RuntimeInstanceLock,
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
-) -> RuntimeTaskHandles {
+) -> Result<RuntimeTaskHandles> {
+    let event_queue = EventQueue::open(&database_path(config_path)?, QueueIdentity::from_config(&config)?)?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (apply, apply_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
@@ -348,7 +355,7 @@ fn spawn_runtime_task(
         config: config.clone(),
         config_path: config_path.to_path_buf(),
         registry: Arc::clone(&registry),
-        event_tx,
+        event_queue: event_queue.clone(),
         apply_tx: apply.clone(),
         audit_tx,
     };
@@ -359,6 +366,7 @@ fn spawn_runtime_task(
         config_path: config_path.display().to_string(),
         ws_url,
         registry,
+        event_queue: event_queue.clone(),
     };
     let task = tokio::spawn(
         RuntimeTask {
@@ -367,6 +375,8 @@ fn spawn_runtime_task(
             _runtime_lock: runtime_lock,
             event_server,
             runner,
+            event_queue,
+            event_tx,
             shutdown_rx,
             apply_rx,
             event_rx,
@@ -374,10 +384,12 @@ fn spawn_runtime_task(
         }
         .run(),
     );
-    RuntimeTaskHandles { shutdown, apply, task }
+    Ok(RuntimeTaskHandles { shutdown, apply, task })
 }
 
 struct RuntimeTask {
+    event_queue: EventQueue,
+    event_tx: mpsc::Sender<LocalAppEventSubmission>,
     inner: Arc<RuntimeInner>,
     log_limit: usize,
     _runtime_lock: RuntimeInstanceLock,
@@ -392,6 +404,7 @@ struct RuntimeTask {
 impl RuntimeTask {
     async fn run(mut self) {
         let system_sleep_prevention = acquire_system_sleep_prevention(&self.inner, self.log_limit).await;
+        let queue_worker = tokio::spawn(run_event_delivery(self.event_queue.clone(), self.event_tx.clone(), PathBuf::from(&self.runner.config_path), self.shutdown_rx.clone()));
         let event_server_task = tokio::spawn(self.event_server.run(self.shutdown_rx.clone()));
         if let Err(err) = self.runner.run(
             self.shutdown_rx,
@@ -408,6 +421,8 @@ impl RuntimeTask {
             ).await;
             self.runner.push_log("error", &format!("runtime stopped with error: {err:#}")).await;
         }
+        queue_worker.abort();
+        let _ = queue_worker.await;
         if !event_server_task.is_finished() {
             event_server_task.abort();
         }

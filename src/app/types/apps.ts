@@ -3,7 +3,7 @@ import type { DesktopPage } from "../../components/DesktopShell";
 import type { LocalAppInstallTask, LocalAppInstallTaskOperation } from "../../local-app-install-tasks";
 import type { UpdateContractDeclaration, UpdateDatabaseContract, UpdateEventContract, UpdateMethodContract } from "../../local-app-updates";
 import type { ConnectorPermission, ConnectorSummary } from "./config";
-export type SettingsSection = "identity" | "connection" | "runtime";
+export type SettingsSection = "identity" | "connection" | "runtime" | "events";
 export type AppPage = DesktopPage;
 export type DetailPanel = "system" | "settings" | "logs" | "manifest";
 export type LocalAppKind = "connector" | "managed_tool" | "built_in" | "custom";

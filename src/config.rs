@@ -88,6 +88,8 @@ pub struct DeviceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     #[serde(default)]
+    pub event_delivery: crate::event_delivery::StoragePolicy,
+    #[serde(default)]
     pub node_path: Option<String>,
     #[serde(default)]
     pub python_path: Option<String>,

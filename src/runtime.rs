@@ -1,4 +1,5 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::event_delivery::{database_path, EventQueue, QueueIdentity};
 use crate::event_server::LocalEventServer;
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
@@ -280,3 +281,5 @@ mod tests {
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");
 }
+
+include!("runtime/event_delivery_worker.rs");

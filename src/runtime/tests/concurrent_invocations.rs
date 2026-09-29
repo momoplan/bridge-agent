@@ -1,3 +1,4 @@
+use crate::event_delivery::{EventQueue, QueueIdentity};
 use super::{LocalAppEventSubmission, RuntimeInner, RuntimeRegistryUpdate, RuntimeRunner};
 use crate::services::ServiceRegistry;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
@@ -50,6 +51,8 @@ impl InvocationHarness {
                 "type":"http","url":format!("http://{addr}/invoke"),
                 "http_method":"POST","headers":{},"timeout_secs":60}});
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.services = vec![serde_json::from_value(json!({
             "name":"test-service","description":"test","enabled":true,"methods":[method.clone()]
         }))
@@ -71,6 +74,9 @@ impl InvocationHarness {
         let (events, mut event_rx) = mpsc::channel(8);
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
         let runner = RuntimeRunner {
+            event_queue: EventQueue::open(&dir.path().join("events.sqlite"), QueueIdentity {
+                environment: "test".into(), workspace_id:42, device_id: config.relay.agent_id.clone(),
+            }).unwrap(),
             inner: Arc::new(RuntimeInner::default()),
             log_limit: 100,
             config,
@@ -175,7 +181,7 @@ async fn slow_local_call_does_not_block_results_ping_events_or_registry_refresh(
     h.events
         .send(LocalAppEventSubmission {
             event: serde_json::from_value(json!({"eventId":"evt-concurrent","appId":"test-app",
-            "event":"changed","payload":{}}))
+            "event":"changed","payload":{},"targetConsumers":["worker"]}))
             .unwrap(),
             response,
         })
@@ -205,7 +211,7 @@ async fn slow_local_call_does_not_block_results_ping_events_or_registry_refresh(
                         h.socket
                             .send(Message::Text(
                                 json!({"type":"event_ack","eventId":"evt-concurrent",
-                            "appId":"test-app","matchedSubscriptionCount":1})
+                            "appId":"test-app","receipts":[{"consumerId":"worker","receipt":{"status":"processed","duplicate":false}}]})
                                 .to_string()
                                 .into(),
                             ))

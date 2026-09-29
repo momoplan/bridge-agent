@@ -1,3 +1,4 @@
+import type { EventStorageStats } from "./types/runtime";
 import { invoke } from "@tauri-apps/api/core";
 import { clientWarn } from "../client-logger";
 import { resolveStartupUpdateGate } from "../startup-update-gate";
@@ -175,6 +176,8 @@ export function createDesktopActions(state: AppControllerState, dependencies: De
       setMessage("");
       setError("");
       setRuntimeConflict(null);
+      const preview = await invoke<EventStorageStats>("event_storage_statistics", { policy: config.runtime.event_delivery });
+      if (preview.expiring_events > 0 && !window.confirm(`保存后将清理 ${preview.expiring_events} 条过期事件，停止这些事件的重试。是否继续？`)) return;
       const document = await invoke<ConfigDocument>("save_config", {
         config: fromUiConfig(config)
       });

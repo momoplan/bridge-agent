@@ -354,3 +354,23 @@ pub(super) async fn test_capability(
 }
 
 include!("runtime_commands/capabilities.rs");
+
+#[tauri::command]
+pub(super) async fn event_storage_statistics(
+    state: tauri::State<'_, DesktopState>,
+    policy: bridge_agent::event_delivery::StoragePolicy,
+) -> Result<bridge_agent::event_delivery::StorageStats, String> {
+    use bridge_agent::event_delivery::{database_path, EventQueue, QueueIdentity, StorageStats};
+    policy.validate().map_err(|e| e.to_string())?;
+    let path = database_path(&state.config_path).map_err(|e| e.to_string())?;
+    if !path.exists() {
+        return Ok(StorageStats::default());
+    }
+    let config = load_agent_config(&state.config_path).map_err(|e| e.to_string())?;
+    let identity = QueueIdentity::from_config(&config).map_err(|e| e.to_string())?;
+    let queue = tokio::task::spawn_blocking(move || EventQueue::open(&path, identity))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    queue.statistics(policy).await.map_err(|e| e.to_string())
+}

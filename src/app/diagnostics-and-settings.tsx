@@ -100,6 +100,7 @@ export function DetailPanelContent(props: DetailPanelContentProps) {
             >
               连接
             </button>
+            <button className={`section-tab ${activeSettingsSection === "events" ? "active" : ""}`} onClick={() => setActiveSettingsSection("events")}>事件与存储</button>
             <button
               className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
               onClick={() => setActiveSettingsSection("runtime")}
@@ -263,6 +264,7 @@ export function SettingsPage(props: SettingsPageProps) {
             >
               连接
             </button>
+            <button className={`section-tab ${activeSettingsSection === "events" ? "active" : ""}`} onClick={() => setActiveSettingsSection("events")}>事件与存储</button>
             <button
               className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
               onClick={() => setActiveSettingsSection("runtime")}

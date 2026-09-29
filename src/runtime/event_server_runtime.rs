@@ -4,7 +4,7 @@ struct LocalEventServerRuntime {
     config: AgentConfig,
     config_path: PathBuf,
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalAppEventSubmission>,
+    event_queue: EventQueue,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
 }
@@ -22,7 +22,7 @@ impl LocalEventServerRuntime {
                 &self.config,
                 self.config_path.clone(),
                 Arc::clone(&self.registry),
-                self.event_tx.clone(),
+                self.event_queue.clone(),
                 self.apply_tx.clone(),
                 self.audit_tx.clone(),
             )

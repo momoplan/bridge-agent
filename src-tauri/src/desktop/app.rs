@@ -434,6 +434,7 @@ fn register_desktop_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::Buil
         load_config,
         python_runtime_status,
         save_config,
+        event_storage_statistics,
         save_service,
         delete_service,
         start_agent,

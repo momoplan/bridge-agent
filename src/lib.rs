@@ -1,6 +1,7 @@
 mod cmodel_response;
 pub mod config;
 pub mod connector;
+pub mod event_delivery;
 mod event_server;
 pub mod logging;
 pub mod market_distribution;
