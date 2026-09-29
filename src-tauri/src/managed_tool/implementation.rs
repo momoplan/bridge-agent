@@ -225,7 +225,7 @@ fn save_state(state: &ManagedToolState) -> Result<()> {
     Ok(())
 }
 
-fn managed_root() -> PathBuf {
+pub(crate) fn managed_root() -> PathBuf {
     if let Some(root) = std::env::var_os("BAIJIMU_MANAGED_TOOL_ROOT") {
         return PathBuf::from(root);
     }

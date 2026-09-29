@@ -386,3 +386,5 @@ where
 }
 
 include!("startup/recovery.rs");
+
+include!("startup/identity_migration.rs");
