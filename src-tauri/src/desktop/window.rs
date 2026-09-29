@@ -1,10 +1,8 @@
 use super::*;
 
+#[cfg(windows)]
 pub(super) fn configure_desktop_command(command: &mut Command) {
-    #[cfg(windows)]
     command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
-    #[cfg(not(windows))]
-    let _ = command;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

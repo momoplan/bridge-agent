@@ -29,7 +29,7 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
         }],
     };
     MarketListing {
-        contract_version: local_app_contract::DISTRIBUTION_CONTRACT_VERSION
+        contract_version: local_app_contract::MARKET_READ_CONTRACT_VERSION
             .parse()
             .unwrap(),
         presentation: local_app_contract::ApplicationPresentation {
@@ -40,7 +40,6 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
             risk: None,
             icon: None,
         },
-        market_key: "public-market".to_owned().try_into().unwrap(),
         listing_id: Uuid::from_u128(id),
         frozen_version: FrozenVersion::new(source, content).unwrap(),
     }
@@ -48,7 +47,6 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
 
 fn selection(item: &MarketListing) -> InstallSource {
     InstallSource::Market {
-        market_key: item.market_key.clone(),
         listing_id: item.listing_id,
         version: item.frozen_version.source.version.clone(),
         source: item.frozen_version.source.clone(),
@@ -56,12 +54,7 @@ fn selection(item: &MarketListing) -> InstallSource {
 }
 
 fn market() -> MarketDistribution {
-    MarketDistribution::new(
-        "public-market".to_owned().try_into().unwrap(),
-        "https://consumer.example.test/api/local-app-market/",
-        42,
-    )
-    .unwrap()
+    MarketDistribution::new("https://consumer.example.test/api/local-app-market/", 42).unwrap()
 }
 
 #[test]
@@ -94,12 +87,11 @@ fn market_and_listing_do_not_define_upgrade_lineage() {
         Some(selection(&other))
     );
     other.listing_id = installed.listing_id;
-    other.market_key = "other-market".to_owned().try_into().unwrap();
     assert_eq!(
         select_upgrade(Some(&selection(&installed)), &other).unwrap(),
         Some(selection(&other))
     );
-    assert!(market().version_url(&selection(&other)).is_err());
+    assert!(market().version_url(&selection(&other)).is_ok());
 }
 
 #[test]
@@ -208,10 +200,7 @@ fn market_base_rejects_credential_and_ambiguous_targets() {
         " https://example.test",
         "/relative",
     ] {
-        assert!(
-            MarketDistribution::new("market".to_owned().try_into().unwrap(), url, 42).is_err(),
-            "{url}"
-        );
+        assert!(MarketDistribution::new(url, 42).is_err(), "{url}");
     }
 }
 
@@ -416,4 +405,36 @@ fn universal_package_is_supported_without_crossing_platforms() {
             .artifact_id,
         Uuid::from_u128(11)
     );
+}
+
+#[test]
+fn install_resolves_only_the_requested_source_and_exact_version() {
+    use bridge_agent::market_distribution::resolve_source;
+    let latest = listing("author-a", "2.0.0", 11);
+    let foreign = listing("author-b", "2.0.0", 12);
+    let mut requested = latest.frozen_version.source.clone();
+    requested.version = "1.0.0".parse().unwrap();
+    let selected = resolve_source(&requested, &[foreign.clone(), latest.clone()]).unwrap();
+    let exact = listing("author-a", "1.0.0", 11);
+    assert_eq!(selected, selection(&exact));
+    assert!(resolve_exact(&selected, &latest).is_err());
+    assert!(resolve_exact(&selected, &exact).is_ok());
+    assert!(resolve_source(&requested, &[foreign]).is_err());
+    assert!(resolve_source(&requested, &[latest.clone(), latest]).is_err());
+}
+
+#[test]
+fn private_install_does_not_send_credentials_to_a_foreign_source() {
+    use bridge_agent::market_distribution::EnvironmentReader;
+    let reader = EnvironmentReader::new(
+        "author-a".to_owned().try_into().unwrap(),
+        "https://author.example.test/partner/v1/local-app-service/api/local-apps",
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    let source = listing("author-a", "1.0.0", 1).frozen_version.source;
+    assert_eq!(reader.version_url(&source).unwrap().as_str(),
+        "https://author.example.test/partner/v1/local-app-service/api/local-apps/test-app/versions/1.0.0");
+    let foreign = listing("author-b", "1.0.0", 1).frozen_version.source;
+    assert!(reader.version_url(&foreign).is_err());
 }

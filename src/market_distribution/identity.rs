@@ -2,6 +2,34 @@ use super::validate_listing;
 use local_app_contract::{ContractError, InstallSource, MarketListing};
 use std::cmp::Ordering;
 
+/// Catalog IDs are distribution details resolved from the requested source application.
+/// The selected version may be older than the catalog's latest version.
+pub fn resolve_source(
+    requested: &local_app_contract::SourceVersion,
+    listings: &[MarketListing],
+) -> Result<InstallSource, ContractError> {
+    let mut matched = None;
+    for listing in listings {
+        validate_listing(listing)?;
+        if listing.frozen_version.source.application == requested.application
+            && matched.replace(listing.listing_id).is_some()
+        {
+            return Err(ContractError::new("source", "ambiguous source application"));
+        }
+    }
+    let listing_id = matched.ok_or_else(|| {
+        ContractError::new(
+            "source",
+            "requested source application is not in the public catalog",
+        )
+    })?;
+    Ok(InstallSource::Market {
+        listing_id,
+        version: requested.version.clone(),
+        source: requested.clone(),
+    })
+}
+
 /// Preserve the complete, explicitly requested identity at the response boundary.
 pub fn resolve_exact<'a>(
     requested: &InstallSource,
@@ -10,12 +38,10 @@ pub fn resolve_exact<'a>(
     validate_listing(returned)?;
     match requested {
         InstallSource::Market {
-            market_key,
             listing_id,
             version,
             source,
-        } if market_key == &returned.market_key
-            && listing_id == &returned.listing_id
+        } if listing_id == &returned.listing_id
             && source == &returned.frozen_version.source
             && version == &source.version =>
         {
@@ -23,7 +49,7 @@ pub fn resolve_exact<'a>(
         }
         _ => Err(ContractError::new(
             "installSource",
-            "returned market, listing, source application or exact version differs from request",
+            "returned listing, source application or exact version differs from request",
         )),
     }
 }
@@ -66,7 +92,6 @@ pub fn select_upgrade(
         return Ok(None);
     }
     Ok(Some(InstallSource::Market {
-        market_key: candidate.market_key.clone(),
         listing_id: candidate.listing_id,
         version: next.clone(),
         source: candidate.frozen_version.source.clone(),

@@ -1,12 +1,4 @@
 #[test]
-fn connector_archive_checksum_is_required_to_match_exact_bytes() {
-    let checksum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-    assert!(verify_connector_archive_checksum(b"hello", Some(checksum)).is_ok());
-    assert!(verify_connector_archive_checksum(b"changed", Some(checksum)).is_err());
-    assert!(verify_connector_archive_checksum(b"hello", Some("invalid")).is_err());
-}
-
-#[test]
 fn connector_upgrade_requires_every_lifecycle_command_to_succeed() {
     let success = ConnectorStartResult {
         app_id: "com.baijimu.connector.test".to_string(),

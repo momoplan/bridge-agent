@@ -65,18 +65,6 @@ pub(super) struct RawMarketConnectorVersion {
     pub(super) compatibility: Option<RawMarketHostCompatibility>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct RawRegisteredLocalApp {
-    pub(super) app_id: String,
-    pub(super) registration_status: String,
-    pub(super) review_status: String,
-    pub(super) name: String,
-    pub(super) publisher: String,
-    pub(super) platforms: Vec<String>,
-    pub(super) version: RawMarketConnectorVersion,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RegisteredAppVersionIdentity {
     pub(super) app_id: String,
@@ -98,16 +86,6 @@ impl RegisteredAppVersionIdentity {
             version: parsed_version,
         })
     }
-}
-
-#[derive(Debug)]
-pub(super) struct RegisteredInstallSource {
-    pub(super) identity: RegisteredAppVersionIdentity,
-    pub(super) review_status: String,
-    pub(super) name: String,
-    pub(super) publisher: String,
-    pub(super) source: String,
-    pub(super) checksum: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,7 +128,6 @@ pub(super) fn market_listing_presentation(
     let display = &listing.presentation;
     let source = listing.frozen_version.source.clone();
     let selection = local_app_contract::InstallSource::Market {
-        market_key: listing.market_key,
         listing_id: listing.listing_id,
         version: source.version.clone(),
         source: source.clone(),
@@ -211,120 +188,12 @@ pub(super) fn market_listing_presentation(
     Ok(presentation)
 }
 
-pub(super) fn registered_install_url(
-    base_url: &str,
-    identity: &RegisteredAppVersionIdentity,
-) -> Result<reqwest::Url, String> {
-    let version = identity.version.to_string();
-    let mut url = reqwest::Url::parse(base_url.trim_end_matches('/'))
-        .map_err(|err| format!("本地应用注册中心地址无效: {err}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "本地应用注册中心地址不能作为路径基址".to_string())?
-        .pop_if_empty()
-        .extend([
-            "api",
-            "local-app-registry",
-            "apps",
-            identity.app_id.as_str(),
-            "versions",
-            version.as_str(),
-        ]);
-    Ok(url)
-}
-
-pub(super) async fn fetch_registered_install_source(
-    config_path: &Path,
-    identity: &RegisteredAppVersionIdentity,
-    accept_unreviewed: bool,
-) -> Result<RegisteredInstallSource, String> {
-    let platform = normalized_platform();
-    let arch = std::env::consts::ARCH;
-    let mut url = if accept_unreviewed {
-        let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
-        registered_install_url(&config.platform.base_url, identity)?
-    } else {
-        return Err("公开市场安装必须使用完整 installSource".into());
-    };
-    url.query_pairs_mut()
-        .append_pair("platform", platform)
-        .append_pair("arch", arch)
-        .append_pair("hostVersion", env!("CARGO_PKG_VERSION"))
-        .append_pair("hostCapabilities", &LOCAL_APP_HOST_CAPABILITIES.join(","));
-    let response = Client::new()
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("查询本地应用注册版本失败: {err}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "应用 {}@{} 未注册、已撤销或不支持当前平台: HTTP {status} {body}",
-            identity.app_id, identity.version
-        ));
-    }
-    let registered: RawRegisteredLocalApp = response
-        .json()
-        .await
-        .map_err(|err| format!("解析本地应用注册版本失败: {err}"))?;
-    let registered_identity = RegisteredAppVersionIdentity::parse(
-        registered.app_id.clone(),
-        registered.version.version.clone(),
-    )?;
-    if registered_identity != *identity || registered.registration_status != "ACTIVE" {
-        return Err("注册中心返回的应用身份或状态与请求不一致".to_string());
-    }
-    let _ = &registered.platforms;
-    let checksum = registered
-        .version
-        .checksum
-        .as_deref()
-        .ok_or_else(|| "注册版本缺少安装 checksum".to_string())?;
-    let digest = checksum.strip_prefix("sha256:").unwrap_or(checksum);
-    if digest.len() != 64
-        || !digest
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err("注册版本 checksum 格式无效".to_string());
-    }
-    Ok(RegisteredInstallSource {
-        identity: registered_identity,
-        review_status: registered.review_status,
-        name: registered.name,
-        publisher: registered.publisher,
-        source: registered.version.source,
-        checksum: digest.to_ascii_lowercase(),
-    })
-}
-
-pub(super) fn ensure_registered_install_is_accepted(
-    registered: &RegisteredInstallSource,
-    accept_unreviewed: bool,
-) -> Result<(), String> {
-    if registered.review_status == "PUBLISHED" || accept_unreviewed {
-        return Ok(());
-    }
-    Err(format!(
-        "应用 {}（{}@{}，发布者 {}）尚未经过市场公开审核；确认开发者和权限后显式允许安装未审核版本",
-        registered.name,
-        registered.identity.app_id,
-        registered.identity.version,
-        registered.publisher
-    ))
-}
-
 #[tauri::command]
 pub(super) async fn show_connector_app(id: String) -> Result<ConnectorInstallRecord, String> {
     show_connector(id.trim()).map_err(|err| err.to_string())
 }
 
 pub(super) enum ResolvedConnectorSource {
-    Local(PathBuf),
-    Git {
-        path: PathBuf,
-        _temp_dir: tempfile::TempDir,
-    },
     Archive {
         path: PathBuf,
         _temp_dir: tempfile::TempDir,
@@ -334,63 +203,9 @@ pub(super) enum ResolvedConnectorSource {
 impl ResolvedConnectorSource {
     pub(super) fn path(&self) -> &Path {
         match self {
-            Self::Local(path) => path.as_path(),
-            Self::Git { path, .. } => path.as_path(),
             Self::Archive { path, .. } => path.as_path(),
         }
     }
-}
-
-pub(super) async fn resolve_connector_source(
-    source: &str,
-    allow_git: bool,
-    expected_checksum: Option<&str>,
-    progress: Option<&LocalAppInstallProgressReporter>,
-) -> Result<ResolvedConnectorSource, String> {
-    let (source, git_revision) = split_source_revision(source);
-    if let Some(archive_url) =
-        connector_archive_download_url(&source, git_revision.as_deref(), allow_git)?
-    {
-        return resolve_connector_archive_source(&archive_url, expected_checksum, progress).await;
-    }
-
-    if is_git_connector_source(&source) {
-        if !allow_git {
-            return Err(
-                "市场本地应用不能依赖本机 git，请将安装源发布为 .zip 或 .tar.gz 下载包。"
-                    .to_string(),
-            );
-        }
-        let temp_dir = tempfile::tempdir().map_err(|err| err.to_string())?;
-        let checkout_path = temp_dir.path().join("connector");
-        let mut command = Command::new("git");
-        configure_desktop_command(&mut command);
-        command.args(["clone", "--depth", "1"]);
-        if let Some(revision) = git_revision.as_deref().filter(|value| !value.is_empty()) {
-            command.args(["--branch", revision]);
-        }
-        let output = command
-            .arg(&source)
-            .arg(&checkout_path)
-            .output()
-            .map_err(|err| format!("执行 git clone 失败: {err}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "下载本地应用失败: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        return Ok(ResolvedConnectorSource::Git {
-            path: checkout_path,
-            _temp_dir: temp_dir,
-        });
-    }
-
-    let path = PathBuf::from(source);
-    if !path.exists() {
-        return Err(format!("本地路径不存在: {}", path.display()));
-    }
-    Ok(ResolvedConnectorSource::Local(path))
 }
 
 impl From<RawMarketConnectorApp> for MarketConnectorApp {

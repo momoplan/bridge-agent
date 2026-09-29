@@ -95,7 +95,18 @@ pub(super) async fn local_app_control_install_handler(
         return local_app_control_error(StatusCode::UNAUTHORIZED, "本机应用控制凭证无效");
     }
     let result = async {
-        let identity = RegisteredAppVersionIdentity::parse(request.app_id, request.version)?;
+        request.validate().map_err(|error| error.to_string())?;
+        let source = request.source();
+        let identity = RegisteredAppVersionIdentity::parse(
+            request.app_id.as_str().to_owned(),
+            request.version.to_string(),
+        )?;
+        let selection = if request.accept_unreviewed {
+            Some(local_app_contract::InstallSource::Environment { source })
+        } else {
+            let consumer = market_consumer::market_consumer(&state.config_path).await?;
+            Some(consumer.selection(&source).await?)
+        };
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,
@@ -103,8 +114,8 @@ pub(super) async fn local_app_control_install_handler(
             &state.connector_processes,
             &state.registered_services,
             ConnectorInstallOptions {
-                install_source: request.install_source,
-                source_identity_migration: false,
+                install_source: selection,
+                source_identity_migration: request.source_identity_migration,
                 identity,
                 replace: request.replace,
                 start: request.start,

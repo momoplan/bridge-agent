@@ -15,7 +15,7 @@ it("delivers only the verified source matching the pinned bundled binary", () =>
       env: { ...process.env, BAIJIMU_CLI_REQUIRE_MARKET_SOURCE: "true" }, encoding: "utf8"
     });
     expect(run().status).not.toBe(0);
-    const source = { kind: "market", marketKey: "fixture-market", listingId: "00000000-0000-0000-0000-000000000001",
+    const source = { kind: "market", listingId: "00000000-0000-0000-0000-000000000001",
       version: "1.2.3", source: { application: { environmentKey: "fixture-env", appId: "fixture-cli" }, version: "1.2.3" } };
     const path = join(root, "tools/baijimu-cli/INSTALL_SOURCE.json");
     writeFileSync(path, JSON.stringify(source));
@@ -58,7 +58,7 @@ it.skipIf(process.platform === "win32")("source builds enforce and copy the same
     });
     expect(run().status).not.toBe(0);
     expect(existsSync(`${binary}.market.json`)).toBe(false);
-    const source = { kind: "market", marketKey: "fixture-market", listingId: "fixture-listing",
+    const source = { kind: "market", listingId: "fixture-listing",
       version: "1.2.3", source: { application: { environmentKey: "fixture-env", appId: "fixture-cli" }, version: "1.2.3" } };
     writeFileSync(join(tools, "INSTALL_SOURCE.json"), JSON.stringify(source));
     const result = run();

@@ -29,3 +29,23 @@ case "$RUNNER_OS" in
     exit 1
     ;;
 esac
+
+# The source-identity converter is an internal binary of the same Bridge release.
+identity_binary="bridge-agent-environment-identity-migration"
+case "$RUNNER_OS" in
+  macOS)
+    for target in x86_64-apple-darwin aarch64-apple-darwin; do
+      CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --bin "$identity_binary" --target "$target"
+    done
+    lipo -create "$target_dir/x86_64-apple-darwin/release/$identity_binary" "$target_dir/aarch64-apple-darwin/release/$identity_binary" -output "$output_dir/$identity_binary"
+    chmod 755 "$output_dir/$identity_binary"
+    ;;
+  Windows)
+    CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --bin "$identity_binary"
+    cp "$target_dir/release/$identity_binary.exe" "$output_dir/$identity_binary.exe"
+    ;;
+  Linux)
+    CARGO_TARGET_DIR="$target_dir" cargo build --locked --release --bin "$identity_binary"
+    install -m 755 "$target_dir/release/$identity_binary" "$output_dir/$identity_binary"
+    ;;
+esac

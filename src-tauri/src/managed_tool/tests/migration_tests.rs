@@ -56,7 +56,7 @@ impl Drop for TestInstallation {
 
 fn market_source(version: &str) -> local_app_contract::InstallSource {
     serde_json::from_value(serde_json::json!({
-        "kind":"market", "marketKey":"test-market",
+        "kind":"market",
         "listingId":"00000000-0000-0000-0000-000000000001",
         "version":version,
         "source":{"application":{"environmentKey":"test-source","appId":TOOL_ID},"version":version}
@@ -139,8 +139,8 @@ fn same_version_with_an_existing_source_is_not_reassigned() {
     let fixture = TestInstallation::new();
     let bundled = fixture.bundled("0.2.0");
     let mut selection = market_source("0.2.0");
-    if let local_app_contract::InstallSource::Market { market_key, .. } = &mut selection {
-        *market_key = serde_json::from_value(serde_json::json!("another-market")).unwrap();
+    if let local_app_contract::InstallSource::Market { source, .. } = &mut selection {
+        source.application.environment_key = "another-environment".to_owned().try_into().unwrap();
     }
     import_binary(&bundled, "0.2.0", "market", None, Some(selection.clone())).unwrap();
     let persisted = fs::read(state_path()).unwrap();

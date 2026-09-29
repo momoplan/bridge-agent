@@ -9,9 +9,10 @@ foreach ($file in $diagnosticFiles) {
 $requiredSignedExecutables = @(
   Get-ChildItem -Path "src-tauri/binaries" -Filter "bridge-agent-uninstaller-*.exe" -File -ErrorAction Stop
   Get-Item -LiteralPath "src-tauri/resources/bin/bridge-agent-unified-app-id-migration.exe" -ErrorAction Stop
+  Get-Item -LiteralPath "src-tauri/resources/bin/bridge-agent-environment-identity-migration.exe" -ErrorAction Stop
 )
-if ($requiredSignedExecutables.Count -ne 2) {
-  throw "Expected the signed Windows uninstaller and migration resource, found $($requiredSignedExecutables.Count)"
+if ($requiredSignedExecutables.Count -ne 3) {
+  throw "Expected the signed Windows uninstaller and migration resources, found $($requiredSignedExecutables.Count)"
 }
 foreach ($file in $requiredSignedExecutables) {
   $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName

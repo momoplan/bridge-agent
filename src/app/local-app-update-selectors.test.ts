@@ -4,7 +4,7 @@ import type { InstallSource } from "./market-identity";
 import type { LocalAppItem, MarketConnector } from "./types";
 
 function source(version: string, environmentKey = "official-source"): InstallSource {
-  return { kind: "market", marketKey: "official-market", listingId: "cli-listing", version,
+  return { kind: "market", listingId: "cli-listing", version,
     source: { application: { environmentKey, appId: "fixture-cli" }, version } };
 }
 
@@ -48,7 +48,6 @@ it("chooses the newest version for a source application across distribution rout
     ...market("0.5.0"),
     installSource: {
       ...source("0.5.0"),
-      marketKey: "replacement-market",
       listingId: "replacement-listing"
     }
   } as MarketConnector;

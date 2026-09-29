@@ -1,48 +1,35 @@
 //! Stateless market reader routed through the consumer environment local-app service.
 //! Full source identity is preserved independently of the consumer environment.
-use local_app_contract::{ContractError, InstallSource, MarketKey, MarketListing, MarketPage};
+use local_app_contract::{ContractError, InstallSource, MarketListing, MarketPage};
 use std::collections::HashSet;
 use url::Url;
 use uuid::Uuid;
 
+mod environment;
 mod identity;
 mod reader;
-pub use identity::{resolve_exact, select_artifact, select_upgrade};
+pub use environment::EnvironmentReader;
+pub use identity::{resolve_exact, resolve_source, select_artifact, select_upgrade};
 pub use reader::MarketReader;
 
-/// The caller supplies the market key and consumer environment service API base URL.
+/// The caller supplies its authorized consumer environment service API base URL.
 /// A source environment's identity must never be inferred from this address.
 #[derive(Debug, Clone)]
 pub struct MarketDistribution {
-    market_key: MarketKey,
     base_url: Url,
     workspace_id: u64,
 }
 
 impl MarketDistribution {
-    pub fn new(
-        market_key: MarketKey,
-        base_url: &str,
-        workspace_id: u64,
-    ) -> Result<Self, ContractError> {
-        let url = Url::parse(base_url)
-            .map_err(|_| ContractError::new("market.baseUrl", "invalid URL"))?;
-        if workspace_id == 0
-            || base_url.trim() != base_url
-            || url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
+    pub fn new(base_url: &str, workspace_id: u64) -> Result<Self, ContractError> {
+        if workspace_id == 0 {
             return Err(ContractError::new(
-                "market.baseUrl",
-                "explicit HTTPS authority without credentials, query or fragment required",
+                "workspaceId",
+                "authorized workspace is required",
             ));
         }
+        let url = validate_endpoint(base_url)?;
         Ok(Self {
-            market_key,
             base_url: url,
             workspace_id,
         })
@@ -108,11 +95,10 @@ impl MarketDistribution {
     fn market_selection(&self, selection: &InstallSource) -> Result<(Uuid, String), ContractError> {
         match selection {
             InstallSource::Market {
-                market_key,
                 listing_id,
                 version,
                 source,
-            } if market_key == &self.market_key && version == &source.version => {
+            } if version == &source.version => {
                 require_id(*listing_id, "listingId")?;
                 Ok((*listing_id, version.to_string()))
             }
@@ -134,12 +120,6 @@ impl MarketDistribution {
         let mut applications = HashSet::new();
         for listing in &page.items {
             validate_listing(listing)?;
-            if listing.market_key != self.market_key {
-                return Err(ContractError::new(
-                    "marketKey",
-                    "unexpected market authority",
-                ));
-            }
             if !ids.insert(listing.listing_id)
                 || !applications.insert(&listing.frozen_version.source.application)
                 || after == Some(listing.listing_id)
@@ -172,4 +152,23 @@ fn require_id(id: Uuid, path: &str) -> Result<(), ContractError> {
 fn validate_listing(listing: &MarketListing) -> Result<(), ContractError> {
     require_id(listing.listing_id, "listingId")?;
     listing.validate()
+}
+
+pub(super) fn validate_endpoint(base_url: &str) -> Result<Url, ContractError> {
+    let url =
+        Url::parse(base_url).map_err(|_| ContractError::new("market.baseUrl", "invalid URL"))?;
+    if base_url.trim() != base_url
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ContractError::new(
+            "market.baseUrl",
+            "explicit HTTPS authority without credentials, query or fragment required",
+        ));
+    }
+    Ok(url)
 }

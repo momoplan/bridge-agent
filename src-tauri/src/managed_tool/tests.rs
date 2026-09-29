@@ -355,7 +355,7 @@ fn bundled_market_source_survives_upgrade_and_rollback() {
     let bundled = temp.path().join("bundled-cli");
     let source_path = temp.path().join("bundled-cli.market.json");
     let source = |version: &str| serde_json::json!({
-        "kind":"market", "marketKey":"test-market", "listingId":"00000000-0000-0000-0000-000000000001",
+        "kind":"market",  "listingId":"00000000-0000-0000-0000-000000000001",
         "version":version, "source":{"application":{"environmentKey":"source-a","appId":TOOL_ID},"version":version}
     });
     write_fake_cli(&bundled, "0.1.0");

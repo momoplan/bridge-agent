@@ -10,6 +10,7 @@ $msi = Get-ChildItem `
 if (-not $msi) {
   throw "Windows MSI artifact was not found for Defender scan"
 }
-$files = @($cli.Path, $migration.Path, $msi.FullName)
+$identityMigration = Resolve-Path "src-tauri/resources/bin/bridge-agent-environment-identity-migration.exe"
+$files = @($cli.Path, $migration.Path, $identityMigration.Path, $msi.FullName)
 & "src-tauri/scripts/verify-windows-defender.ps1" `
   -FilePath $files

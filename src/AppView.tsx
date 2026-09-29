@@ -115,6 +115,8 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
     setMarketAppQuery,
     marketLoading,
     marketLoadError,
+    registeredInstallEnvironmentKey,
+    setRegisteredInstallEnvironmentKey,
     registeredInstallAppId,
     setRegisteredInstallAppId,
     registeredInstallVersion,
@@ -374,6 +376,8 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
         marketLoadError={marketLoadError}
         marketLoading={marketLoading}
         refreshMarketConnectorApps={refreshMarketConnectorApps}
+        registeredInstallEnvironmentKey={registeredInstallEnvironmentKey}
+        setRegisteredInstallEnvironmentKey={setRegisteredInstallEnvironmentKey}
         registeredInstallAppId={registeredInstallAppId}
         registeredInstallVersion={registeredInstallVersion}
         selectedMarketAppId={selectedMarketAppId}

@@ -8,7 +8,7 @@ fn fixture_market_provenance(
     })).unwrap();
     ConnectorInstallProvenance {
         install_source: Some(local_app_contract::InstallSource::Market {
-            market_key: local_app_contract::MarketKey::try_from("test-market".to_owned()).unwrap(), listing_id, version: version.parse().unwrap(), source
+            listing_id, version: version.parse().unwrap(), source
         }),
         source_identity_migration: false,
         source_reference: None, review_status: "PUBLISHED".into(), source_checksum: None,

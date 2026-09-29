@@ -20,6 +20,8 @@ interface InstallLocalAppPanelProps {
   marketLoadError: string;
   marketLoading: boolean;
   refreshMarketConnectorApps: () => Promise<MarketConnector[]>;
+  registeredInstallEnvironmentKey: string;
+  setRegisteredInstallEnvironmentKey: Dispatch<SetStateAction<string>>;
   registeredInstallAppId: string;
   registeredInstallVersion: string;
   selectedMarketAppId: string;
@@ -36,7 +38,7 @@ interface InstallLocalAppPanelProps {
 }
 
 export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
-  const { appUpdate, appUpdateCheckState, appUpdateProgress, customInstallConfirmed, installBusy, installLocalApp, installPanelOpen, installSourceMode, installableMarketConnectors, marketAppQuery, marketLoadError, marketLoading, refreshMarketConnectorApps, registeredInstallAppId, registeredInstallVersion, selectedMarketAppId, setCustomInstallConfirmed, setInstallPanelOpen, setInstallSourceMode, setMarketAppQuery, setRegisteredInstallAppId, setRegisteredInstallVersion, setSelectedMarketAppId, updateBusy, upgradeClientForMarketApp, visibleMarketConnectors } = props;
+  const { appUpdate, appUpdateCheckState, appUpdateProgress, customInstallConfirmed, installBusy, installLocalApp, installPanelOpen, installSourceMode, installableMarketConnectors, marketAppQuery, marketLoadError, marketLoading, refreshMarketConnectorApps, registeredInstallEnvironmentKey, setRegisteredInstallEnvironmentKey, registeredInstallAppId, registeredInstallVersion, selectedMarketAppId, setCustomInstallConfirmed, setInstallPanelOpen, setInstallSourceMode, setMarketAppQuery, setRegisteredInstallAppId, setRegisteredInstallVersion, setSelectedMarketAppId, updateBusy, upgradeClientForMarketApp, visibleMarketConnectors } = props;
     if (!installPanelOpen) {
       return null;
     }
@@ -250,8 +252,11 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
               <div className="custom-install-form">
                 <div className="custom-install-intro">
                   <strong>安装已注册但未公开上架的应用</strong>
-                  <p>输入 appId 和精确版本；客户端会从平台注册中心解析安装内容，并在下载前核验登记状态。</p>
+                  <p>输入来源环境 key、appId 和精确版本；客户端使用该环境的授权读取冻结版本。</p>
                 </div>
+                <Field label="来源环境 key" wide>
+                  <input value={registeredInstallEnvironmentKey} onChange={(event) => setRegisteredInstallEnvironmentKey(event.target.value)} placeholder="environmentKey" />
+                </Field>
                 <Field label="appId" wide>
                   <input
                     value={registeredInstallAppId}
@@ -324,7 +329,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                 (installSourceMode === "market" && !selectedMarket) ||
                 (installSourceMode === "market" && marketPrimaryAction?.disabled === true) ||
                 (installSourceMode === "custom" &&
-                  (!registeredInstallAppId || !registeredInstallVersion || !customInstallConfirmed))
+                  (!registeredInstallEnvironmentKey || !registeredInstallAppId || !registeredInstallVersion || !customInstallConfirmed))
               }
             >
               {installBusy
