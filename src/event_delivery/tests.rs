@@ -238,3 +238,25 @@ fn host_handoff_receipts_match_connector_protocol_fixture() {
         assert_eq!(serde_json::to_value(receipt).unwrap(), fixtures[index]);
     }
 }
+
+#[test]
+fn storage_identity_uses_the_existing_environment_authority() {
+    let mut config = crate::AgentConfig::example();
+    config.platform.workspace_id = Some(42);
+    config.platform.environment_key = None;
+    let identity = QueueIdentity::from_config(&config).unwrap();
+    assert_eq!(
+        identity.environment,
+        crate::config::environment::official_key()
+    );
+    assert_eq!(identity.workspace_id, 42);
+    config.platform.base_url = "https://private.example.test".into();
+    assert!(QueueIdentity::from_config(&config).is_err());
+    config.platform.environment_key = Some("private-test".into());
+    assert_eq!(
+        QueueIdentity::from_config(&config).unwrap().environment,
+        "private-test"
+    );
+    config.platform.workspace_id = None;
+    assert!(QueueIdentity::from_config(&config).is_err());
+}

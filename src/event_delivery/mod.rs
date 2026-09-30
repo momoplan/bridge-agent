@@ -58,12 +58,11 @@ pub struct QueueIdentity {
 impl QueueIdentity {
     pub fn from_config(config: &crate::AgentConfig) -> Result<Self> {
         Ok(Self {
-            environment: config
-                .platform
-                .environment_key
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("event storage requires an environment identity"))?,
+            environment: crate::config::environment::bound_key(
+                config.platform.environment_key.as_deref(),
+                &config.platform.base_url,
+            )
+            .ok_or_else(|| anyhow::anyhow!("event storage requires an environment identity"))?,
             workspace_id: config
                 .platform
                 .workspace_id
