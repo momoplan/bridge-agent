@@ -24,6 +24,7 @@ const CONNECTOR_ICON_MEDIA_TYPE: &str = "image/png";
 const CONNECTOR_ICON_EDGE_PX: u32 = 256;
 const CONNECTOR_ICON_MAX_BYTES: usize = 128 * 1024;
 const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
+    crate::event_delivery::LOCAL_EVENT_HANDOFF_CAPABILITY,
     "connector.setup.v1",
     "connector.asset-upload.v1",
     HOST_MANAGED_PROCESS_CAPABILITY,

@@ -1,3 +1,4 @@
+import { EventStorageSettings } from "./event-storage-settings";
 import type { Dispatch, SetStateAction } from "react";
 import { DEFAULT_INLINE_LIMIT_BYTES, DEFAULT_PLATFORM_BASE_URL } from "./constants";
 import { emptyToNull } from "./config-conversion";
@@ -31,6 +32,8 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
     }
 
     switch (activeSettingsSection) {
+      case "events":
+        return <EventStorageSettings policy={config.runtime.event_delivery} onChange={value => updateRuntime("event_delivery", value)} />;
       case "identity":
         return (
           <div className="form-grid">

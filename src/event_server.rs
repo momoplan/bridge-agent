@@ -5,10 +5,11 @@ use crate::config::{
 use crate::connector::{
     authorize_connector_asset_upload, authorize_connector_event, connector_declares_asset_upload,
 };
+use crate::event_delivery::EventQueue;
 use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::LocalAppEventEmitted;
-use crate::runtime::{LocalAppEventSubmission, RuntimeAuditLog, RuntimeRegistryUpdate};
+use crate::runtime::{RuntimeAuditLog, RuntimeRegistryUpdate};
 use crate::services::ServiceRegistry;
 #[cfg(windows)]
 use crate::windows_process::{inspect_windows_process, terminate_windows_process};
@@ -23,6 +24,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use relay::contracts::{channel::AppPayload, device_events::LocalEventAccepted};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,14 +36,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, watch, RwLock};
-use tokio::time::{sleep, timeout};
-use uuid::Uuid;
+use tokio::sync::{mpsc, watch, RwLock};
+use tokio::time::sleep;
 
 const PORT_RECLAIM_BIND_RETRIES: usize = 20;
 const PORT_RECLAIM_RETRY_DELAY: Duration = Duration::from_millis(150);
 const MAX_CONNECTOR_ASSET_BYTES: u64 = 5 * 1024 * 1024;
-const LOCAL_APP_EVENT_FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct LocalEventServer {
     bind: SocketAddr,
@@ -52,7 +52,7 @@ pub(crate) struct LocalEventServer {
 #[derive(Clone)]
 struct EventServerState {
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_tx: mpsc::Sender<LocalAppEventSubmission>,
+    event_queue: EventQueue,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
@@ -128,18 +128,6 @@ struct EmitLocalAppEventRequest {
     occurred_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EmitLocalAppEventResponse {
-    accepted: bool,
-    persisted: bool,
-    matched_subscription_count: usize,
-    duplicate: bool,
-    event_id: String,
-    app_id: String,
-    event: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RegisterServiceRequest {
@@ -198,7 +186,7 @@ impl LocalEventServer {
         config: &AgentConfig,
         config_path: PathBuf,
         registry: Arc<RwLock<ServiceRegistry>>,
-        event_tx: mpsc::Sender<LocalAppEventSubmission>,
+        event_queue: EventQueue,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {
@@ -228,7 +216,7 @@ impl LocalEventServer {
             listener,
             state: EventServerState {
                 registry,
-                event_tx,
+                event_queue,
                 apply_tx,
                 audit_tx,
                 config_path,

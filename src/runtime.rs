@@ -1,4 +1,5 @@
 use crate::config::{load_config, resolve_config_base_dir, AgentConfig};
+use crate::event_delivery::{database_path, EventQueue, QueueIdentity};
 use crate::event_server::LocalEventServer;
 use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
@@ -244,6 +245,7 @@ include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
+include!("runtime/event_delivery_worker.rs");
 
 #[cfg(test)]
 mod tests {

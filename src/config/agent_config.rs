@@ -20,6 +20,7 @@ impl AgentConfig {
                 tags: vec!["desktop".to_string(), "local".to_string()],
             },
             runtime: RuntimeConfig {
+                event_delivery: Default::default(),
                 node_path: None,
                 python_path: None,
                 default_timeout_secs: default_timeout_secs(),
@@ -49,6 +50,7 @@ impl AgentConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.runtime.event_delivery.validate()?;
         if self.platform.base_url.trim().is_empty() {
             bail!("platform.base_url cannot be empty");
         }

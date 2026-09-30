@@ -94,6 +94,7 @@ export interface DeviceConfig {
 }
 
 export interface RuntimeConfig {
+  event_delivery: EventStoragePolicy;
   node_path?: string | null;
   python_path?: string | null;
   default_timeout_secs: number;
@@ -334,4 +335,21 @@ export interface StartupHealthSnapshot {
   frontendReady: boolean;
   startupLogPath: string;
   components: StartupComponentHealth[];
+}
+
+export interface EventStoragePolicy {
+  automatic_cleanup: boolean;
+  retention_days: number;
+  capacity_bytes: number;
+  diagnostic_retention_days: number;
+}
+export interface EventStorageStats {
+  pending_events: number;
+  logical_bytes: number;
+  physical_bytes: number;
+  oldest_received_at: number | null;
+  expiring_events: number;
+  expiring_bytes: number;
+  last_cleanup_at: number | null;
+  last_cleanup_expired: number;
 }

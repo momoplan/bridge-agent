@@ -93,6 +93,8 @@
         });
 
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_event_server_recovery".to_string();
         config.relay.reconnect_secs = 1;
@@ -202,14 +204,14 @@
 
     #[test]
     fn relay_decoder_accepts_device_event_ack() {
-        let message = r#"{"type":"event_ack","eventId":"evt-1","appId":"camera","duplicate":true,"matchedSubscriptionCount":2}"#;
+        let message = r#"{"type":"event_ack","eventId":"evt-1","appId":"camera","receipts":[{"consumerId":"worker","receipt":{"status":"processed","duplicate":true}}]}"#;
 
         match decode_relay_message(message).unwrap().unwrap() {
             AgentMessage::EventAck(ack) => {
                 assert_eq!(ack.event_id, "evt-1");
                 assert_eq!(ack.app_id, "camera");
-                assert!(ack.duplicate);
-                assert_eq!(ack.matched_subscription_count, 2);
+                assert_eq!(ack.receipts.len(), 1);
+                assert_eq!(ack.receipts[0].consumer_id, "worker");
             }
             other => panic!("expected event_ack, got {other:?}"),
         }

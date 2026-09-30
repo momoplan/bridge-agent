@@ -1,4 +1,5 @@
 struct RuntimeRunner {
+    event_queue: EventQueue,
     inner: Arc<RuntimeInner>,
     log_limit: usize,
     config: AgentConfig,
@@ -64,6 +65,7 @@ impl RuntimeRunner {
         event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> bool {
+        self.event_queue.subscriptions(None).await.ok();
         match timeout(
             Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS),
             connect_async(self.ws_url.as_str()),
@@ -113,6 +115,7 @@ impl RuntimeRunner {
     }
 
     async fn enter_backoff(&self, error: String, log_message: &str) {
+        if let Err(error) = self.event_queue.subscriptions(None).await { tracing::error!(%error, "cannot invalidate device subscriptions"); }
         self.update_snapshot(
             RuntimeStatus::Backoff,
             Some(error),
@@ -318,6 +321,7 @@ impl RelayConnection<'_> {
         match message {
             AgentMessage::RegisteredAck(ack) => self.handle_registered_ack(ack).await,
             AgentMessage::EventAck(ack) => self.handle_event_ack(ack).await,
+            AgentMessage::DeviceSubscriptions(snapshot) => self.runner.event_queue.subscriptions(Some(snapshot)).await?,
             AgentMessage::InvokeRequest(request) => {
                 self.queue_invocation(AgentMessage::InvokeRequest(request)).await?
             }
@@ -360,25 +364,7 @@ impl RelayConnection<'_> {
         for waiter in waiters {
             let _ = waiter.send(Ok(ack.clone()));
         }
-        let outcome = if ack.matched_subscription_count == 0 {
-            "ignored"
-        } else if ack.duplicate {
-            "deduplicated"
-        } else {
-            "persisted"
-        };
-        self.runner
-            .push_log_with_metadata(
-                "info",
-                &format!(
-                    "local app event {} acknowledged by relay with {} matching subscription(s)",
-                    ack.event_id, ack.matched_subscription_count
-                ),
-                LogMetadata::category("local_app_event")
-                    .event_id(ack.event_id)
-                    .outcome(outcome),
-            )
-            .await;
+
     }
 
 

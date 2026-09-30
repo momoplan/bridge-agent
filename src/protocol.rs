@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const AGENT_PROTOCOL_VERSION: &str = "3.0.0";
+pub const AGENT_PROTOCOL_VERSION: &str = "4.0.0";
 pub const AGENT_PROTOCOL_FEATURE_REGISTERED_ACK: &str = "registered_ack";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2: &str = "local_app_events_v2";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3: &str = "local_app_capabilities_v3";
@@ -17,6 +17,7 @@ pub enum AgentMessage {
     LocalAppInvokeResult(InvokeResult),
     LocalAppEventEmitted(LocalAppEventEmitted),
     EventAck(EventAck),
+    DeviceSubscriptions(DeviceSubscriptions),
     Error(ProtocolError),
 }
 
@@ -86,28 +87,7 @@ pub struct LocalAppDefinition {
     pub events: Vec<EventDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LocalAppEventEmitted {
-    pub event_id: String,
-    pub app_id: String,
-    pub event: String,
-    #[serde(default)]
-    pub payload: Value,
-    #[serde(default)]
-    pub occurred_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EventAck {
-    pub event_id: String,
-    pub app_id: String,
-    #[serde(default)]
-    pub duplicate: bool,
-    #[serde(default)]
-    pub matched_subscription_count: usize,
-}
+pub use relay::contracts::device_events::{DeviceSubscriptions, EventAck, LocalAppEventEmitted};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {

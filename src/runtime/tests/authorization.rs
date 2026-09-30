@@ -49,6 +49,8 @@
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
+        config.platform.environment_key = Some("test".into());
+        config.platform.workspace_id = Some(1);
         config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_reauthorization_required".to_string();
         config.relay.token = "rejected-token".to_string();
