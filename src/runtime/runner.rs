@@ -75,7 +75,7 @@ impl RuntimeRunner {
         while !*shutdown_rx.borrow() {
             tokio::select! {
                 _ = shutdown_rx.changed() => break,
-                Some(update) = apply_rx.recv() => self.apply_registry_update(update).await,
+                Some(update) = apply_rx.recv() => { self.apply_registry_update(update).await; },
                 Some(audit) = audit_rx.recv() => self.push_audit_log(audit).await,
             }
         }
