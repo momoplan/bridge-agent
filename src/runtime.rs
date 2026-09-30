@@ -245,6 +245,7 @@ include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
+include!("runtime/event_delivery_worker.rs");
 
 #[cfg(test)]
 mod tests {
@@ -281,5 +282,3 @@ mod tests {
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");
 }
-
-include!("runtime/event_delivery_worker.rs");

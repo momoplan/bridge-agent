@@ -218,3 +218,23 @@ async fn another_login_cannot_send_or_acknowledge_previous_identity_events() {
         .unwrap();
     assert_eq!(q.statistics(p).await.unwrap().pending_events, 1);
 }
+
+#[test]
+fn host_handoff_receipts_match_connector_protocol_fixture() {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/host-event-receipts.json"
+    ))
+    .unwrap();
+    for (index, status) in [LocalAcceptance::Queued, LocalAcceptance::NoSubscribers]
+        .into_iter()
+        .enumerate()
+    {
+        let receipt = LocalEventAccepted {
+            contract_version: Default::default(),
+            event_id: "stable".into(),
+            app_id: "app".into(),
+            status,
+        };
+        assert_eq!(serde_json::to_value(receipt).unwrap(), fixtures[index]);
+    }
+}

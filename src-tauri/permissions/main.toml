@@ -11,6 +11,7 @@ commands.allow = [
   "stop_agent",
   "stop_conflicting_runtime",
   "runtime_snapshot",
+  "event_storage_statistics",
   "apply_saved_config_to_runtime",
   "test_capability",
   "test_local_app_capability",
