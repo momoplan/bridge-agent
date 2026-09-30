@@ -5,7 +5,7 @@ use super::{
 };
 use anyhow::{ensure, Result};
 use local_app_contract::{EnvironmentKey, FrozenVersion, SourceVersion};
-use reqwest::{Client, Response, Url};
+use reqwest::{header, Client, ClientBuilder, Response, Url};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -16,18 +16,18 @@ pub struct EnvironmentReader {
 }
 
 impl EnvironmentReader {
-    pub fn new(environment: EnvironmentKey, endpoint: &str, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        environment: EnvironmentKey,
+        endpoint: &str,
+        workspace: u64,
+        timeout: Duration,
+    ) -> Result<Self> {
         // Reuse the same HTTPS authority validation; no market lookup is performed.
         validate_endpoint(endpoint)?;
-        ensure!(!timeout.is_zero(), "request timeout must be positive");
         Ok(Self {
             environment,
             endpoint: Url::parse(endpoint)?,
-            client: Client::builder()
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(timeout)
-                .build()?,
+            client: workspace_client(workspace, timeout)?.build()?,
         })
     }
 
@@ -81,3 +81,21 @@ impl EnvironmentReader {
         send(&self.client, url, credential).await
     }
 }
+
+// The PAT can authorize more than one workspace; the source owner must receive
+// the device's selected recipient workspace for both metadata and artifact reads.
+fn workspace_client(workspace: u64, timeout: Duration) -> Result<ClientBuilder> {
+    ensure!(workspace > 0, "consumer workspace required");
+    ensure!(!timeout.is_zero(), "request timeout must be positive");
+    let mut headers = header::HeaderMap::new();
+    headers.insert("x-workspace-id", workspace.to_string().parse()?);
+    Ok(Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .timeout(timeout))
+}
+
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod tests;

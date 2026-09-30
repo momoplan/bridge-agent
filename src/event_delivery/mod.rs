@@ -58,7 +58,14 @@ pub struct QueueIdentity {
 impl QueueIdentity {
     /// Saved browser authorization is the identity source, including while Relay is offline.
     pub fn from_authorized_config(config: &crate::AgentConfig) -> Option<Self> {
-        if config.relay.token.trim().is_empty() || config.relay.agent_id.trim().is_empty() {
+        if config.relay.token.trim().is_empty()
+            || config.relay.agent_id.trim().is_empty()
+            || config
+                .platform
+                .environment_key
+                .as_deref()
+                .is_none_or(|key| key.is_empty() || key.trim() != key)
+        {
             return None;
         }
         Self::from_config(config).ok()
@@ -66,12 +73,11 @@ impl QueueIdentity {
 
     pub fn from_config(config: &crate::AgentConfig) -> Result<Self> {
         Ok(Self {
-            environment: config
-                .platform
-                .environment_key
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("event storage requires an environment identity"))?,
+            environment: crate::config::environment::bound_key(
+                config.platform.environment_key.as_deref(),
+                &config.platform.base_url,
+            )
+            .ok_or_else(|| anyhow::anyhow!("event storage requires an environment identity"))?,
             workspace_id: config
                 .platform
                 .workspace_id
