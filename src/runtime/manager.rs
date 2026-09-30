@@ -344,7 +344,9 @@ fn spawn_runtime_task(
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
 ) -> Result<RuntimeTaskHandles> {
-    let event_queue = EventQueue::open(&database_path(config_path)?, QueueIdentity::from_config(&config)?)?;
+    let event_queue = QueueIdentity::from_authorized_config(&config)
+        .map(|identity| EventQueue::open(&database_path(config_path)?, identity))
+        .transpose()?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (apply, apply_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(LOCAL_EVENT_QUEUE_CAPACITY);
@@ -388,7 +390,7 @@ fn spawn_runtime_task(
 }
 
 struct RuntimeTask {
-    event_queue: EventQueue,
+    event_queue: Option<EventQueue>,
     event_tx: mpsc::Sender<LocalAppEventSubmission>,
     inner: Arc<RuntimeInner>,
     log_limit: usize,
@@ -403,8 +405,14 @@ struct RuntimeTask {
 
 impl RuntimeTask {
     async fn run(mut self) {
-        let system_sleep_prevention = acquire_system_sleep_prevention(&self.inner, self.log_limit).await;
-        let queue_worker = tokio::spawn(run_event_delivery(self.event_queue.clone(), self.event_tx.clone(), PathBuf::from(&self.runner.config_path), self.shutdown_rx.clone()));
+        let system_sleep_prevention = if self.event_queue.is_some() {
+            acquire_system_sleep_prevention(&self.inner, self.log_limit).await
+        } else {
+            None
+        };
+        let queue_worker = self.event_queue.map(|queue| tokio::spawn(run_event_delivery(
+            queue, self.event_tx.clone(), PathBuf::from(&self.runner.config_path), self.shutdown_rx.clone(),
+        )));
         let event_server_task = tokio::spawn(self.event_server.run(self.shutdown_rx.clone()));
         if let Err(err) = self.runner.run(
             self.shutdown_rx,
@@ -421,8 +429,10 @@ impl RuntimeTask {
             ).await;
             self.runner.push_log("error", &format!("runtime stopped with error: {err:#}")).await;
         }
-        queue_worker.abort();
-        let _ = queue_worker.await;
+        if let Some(queue_worker) = queue_worker {
+            queue_worker.abort();
+            let _ = queue_worker.await;
+        }
         if !event_server_task.is_finished() {
             event_server_task.abort();
         }

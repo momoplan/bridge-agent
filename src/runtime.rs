@@ -279,6 +279,7 @@ mod tests {
     include!("runtime/tests/concurrent_invocations.rs");
     include!("runtime/tests/locks.rs");
     include!("runtime/tests/authorization.rs");
+    include!("runtime/tests/unauthorized_control.rs");
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");
 }

@@ -52,7 +52,7 @@ pub(crate) struct LocalEventServer {
 #[derive(Clone)]
 struct EventServerState {
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_queue: EventQueue,
+    event_queue: Option<EventQueue>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     config_path: PathBuf,
@@ -186,7 +186,7 @@ impl LocalEventServer {
         config: &AgentConfig,
         config_path: PathBuf,
         registry: Arc<RwLock<ServiceRegistry>>,
-        event_queue: EventQueue,
+        event_queue: Option<EventQueue>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
     ) -> Result<Option<Self>> {

@@ -56,6 +56,14 @@ pub struct QueueIdentity {
     pub device_id: String,
 }
 impl QueueIdentity {
+    /// Saved browser authorization is the identity source, including while Relay is offline.
+    pub fn from_authorized_config(config: &crate::AgentConfig) -> Option<Self> {
+        if config.relay.token.trim().is_empty() || config.relay.agent_id.trim().is_empty() {
+            return None;
+        }
+        Self::from_config(config).ok()
+    }
+
     pub fn from_config(config: &crate::AgentConfig) -> Result<Self> {
         Ok(Self {
             environment: config

@@ -74,9 +74,9 @@ impl InvocationHarness {
         let (events, mut event_rx) = mpsc::channel(8);
         let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
         let runner = RuntimeRunner {
-            event_queue: EventQueue::open(&dir.path().join("events.sqlite"), QueueIdentity {
+            event_queue: Some(EventQueue::open(&dir.path().join("events.sqlite"), QueueIdentity {
                 environment: "test".into(), workspace_id:42, device_id: config.relay.agent_id.clone(),
-            }).unwrap(),
+            }).unwrap()),
             inner: Arc::new(RuntimeInner::default()),
             log_limit: 100,
             config,
