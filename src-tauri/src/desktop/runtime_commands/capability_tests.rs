@@ -24,6 +24,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
     let token_path = directory.path().join("management-token");
     fs::write(&token_path, "bjm_app_test_workspace_private_runtime_token").unwrap();
     let mut config = AgentConfig::example();
+    config.platform.environment_key = Some("authorized-test".into());
     config.platform.workspace_id = Some(73);
     config.relay.token = "test-device-credential".into();
     config.local_apps.push(LocalAppConfig {
@@ -79,10 +80,16 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
 
 #[tokio::test]
 async fn saved_local_app_test_rejects_missing_authorization_before_dispatch() {
-    for (workspace, token) in [(None, "credential"), (Some(73), ""), (Some(0), "credential")] {
+    for (environment, workspace, token) in [
+        (Some("authorized-test"), None, "credential"),
+        (Some("authorized-test"), Some(73), ""),
+        (Some("authorized-test"), Some(0), "credential"),
+        (None, Some(73), "credential"),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.json");
         let mut config = AgentConfig::example();
+        config.platform.environment_key = environment.map(str::to_string);
         config.platform.workspace_id = workspace;
         config.relay.token = token.into();
         save_agent_config(&config_path, &config).unwrap();
