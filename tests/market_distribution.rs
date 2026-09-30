@@ -429,6 +429,7 @@ fn private_install_does_not_send_credentials_to_a_foreign_source() {
     let reader = EnvironmentReader::new(
         "author-a".to_owned().try_into().unwrap(),
         "https://author.example.test/partner/v1/local-app-service/api/local-apps",
+        42,
         std::time::Duration::from_secs(10),
     )
     .unwrap();

@@ -30,6 +30,10 @@ pub(super) async fn resolve(
     let reader = EnvironmentReader::new(
         source.application.environment_key.clone(),
         endpoint.as_str(),
+        config
+            .platform
+            .workspace_id
+            .ok_or("设备缺少已授权的工作区身份")?,
         Duration::from_secs(60),
     )
     .map_err(|error| error.to_string())?;
