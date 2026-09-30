@@ -4,6 +4,7 @@
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
+        config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_concurrent_start".to_string();
@@ -48,6 +49,7 @@
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
+        config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
         config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
@@ -111,6 +113,7 @@
         let config_path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
+        config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
         config.relay.url = "ws://127.0.0.1:9/ws/agent".to_string();
         config.relay.agent_id = "dev_duplicate_start".to_string();

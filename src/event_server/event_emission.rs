@@ -9,6 +9,10 @@ async fn emit_local_app_event(
             "local event API is disabled",
         ));
     }
+    let queue = state.event_queue.as_ref().ok_or_else(|| EventApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "device authorization required before event handoff",
+    ))?;
     let app_id = request.app_id.trim();
     let event_name = request.event.trim();
     if app_id.is_empty() || event_name.is_empty() {
@@ -47,7 +51,7 @@ async fn emit_local_app_event(
     };
     let policy = crate::event_delivery::read_policy(&state.config_path).await
         .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
-    let receipt = state.event_queue.admit(event, policy).await
+    let receipt = queue.admit(event, policy).await
         .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }

@@ -367,7 +367,8 @@ pub(super) async fn event_storage_statistics(
         return Ok(StorageStats::default());
     }
     let config = load_agent_config(&state.config_path).map_err(|e| e.to_string())?;
-    let identity = QueueIdentity::from_config(&config).map_err(|e| e.to_string())?;
+    let identity = QueueIdentity::from_authorized_config(&config)
+        .ok_or_else(|| "请完成浏览器授权后查看事件存储".to_string())?;
     let queue = tokio::task::spawn_blocking(move || EventQueue::open(&path, identity))
         .await
         .map_err(|e| e.to_string())?

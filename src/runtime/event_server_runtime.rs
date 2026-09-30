@@ -4,7 +4,7 @@ struct LocalEventServerRuntime {
     config: AgentConfig,
     config_path: PathBuf,
     registry: Arc<RwLock<ServiceRegistry>>,
-    event_queue: EventQueue,
+    event_queue: Option<EventQueue>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
 }

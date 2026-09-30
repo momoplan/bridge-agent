@@ -11,14 +11,13 @@
         let registry = Arc::new(RwLock::new(
             ServiceRegistry::from_config(&config, dir.path()).unwrap(),
         ));
-        let event_queue = test_event_queue(dir.path(), &config);
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel();
         let (audit_tx, _audit_rx) = mpsc::unbounded_channel();
         let server = LocalEventServer::bind(
             &config,
             config_path.clone(),
             registry,
-            event_queue,
+            None,
             apply_tx,
             audit_tx,
         )
@@ -98,9 +97,3 @@
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();
     }
-
-fn test_event_queue(dir: &std::path::Path, config: &AgentConfig) -> crate::event_delivery::EventQueue {
-    crate::event_delivery::EventQueue::open(&dir.join("events.sqlite"),crate::event_delivery::QueueIdentity {
-        environment:"test".into(),workspace_id:42,device_id:config.relay.agent_id.clone(),
-    }).unwrap()
-}

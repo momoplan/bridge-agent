@@ -240,16 +240,6 @@ async fn prepare_and_start_authorized_runtime(
         ));
         Some(detail)
     };
-    if !config_is_authorized(&config) {
-        diagnostics.info("bridge-agent runtime auto start skipped: device is not authorized yet");
-        startup_health.set_component(
-            "agent_runtime",
-            "Agent 运行时",
-            "ready",
-            Some("设备尚未授权，未自动连接".to_string()),
-        );
-        return None;
-    }
     diagnostics.info("bridge-agent config loaded for auto start");
     diagnostics.info("automatic agent start requested");
     if let Err(err) = start_runtime_from_saved_config(runtime, config_path).await {
@@ -268,10 +258,12 @@ async fn prepare_and_start_authorized_runtime(
         if let Some(detail) = connector_sync_failure_detail {
             startup_health.set_component("agent_runtime", "Agent 运行时", "degraded", Some(detail));
         } else {
-            startup_health.set_component("agent_runtime", "Agent 运行时", "ready", None);
+            let detail = (!config_is_authorized(&config))
+                .then(|| "本地控制服务已启动，请完成浏览器授权".to_string());
+            startup_health.set_component("agent_runtime", "Agent 运行时", "ready", detail);
         }
     }
-    Some(config)
+    config_is_authorized(&config).then_some(config)
 }
 
 async fn start_automatic_connectors(
@@ -319,7 +311,7 @@ async fn start_automatic_connectors(
 }
 
 pub(super) fn config_is_authorized(config: &AgentConfig) -> bool {
-    config.platform.workspace_id.is_some() && !config.relay.token.trim().is_empty()
+    bridge_agent::event_delivery::QueueIdentity::from_authorized_config(config).is_some()
 }
 
 pub(super) struct DesktopBusinessStartup {

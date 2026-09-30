@@ -94,6 +94,7 @@
 
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
+        config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
         config.relay.url = format!("ws://{relay_addr}/ws/agent");
         config.relay.agent_id = "dev_event_server_recovery".to_string();

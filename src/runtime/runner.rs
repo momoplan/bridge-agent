@@ -1,5 +1,5 @@
 struct RuntimeRunner {
-    event_queue: EventQueue,
+    event_queue: Option<EventQueue>,
     inner: Arc<RuntimeInner>,
     log_limit: usize,
     config: AgentConfig,
@@ -16,6 +16,9 @@ impl RuntimeRunner {
         event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
+        if self.event_queue.is_none() {
+            return self.run_local_control(shutdown_rx, apply_rx, audit_rx).await;
+        }
         loop {
             if *shutdown_rx.borrow() {
                 break;
@@ -58,6 +61,27 @@ impl RuntimeRunner {
         Ok(())
     }
 
+    async fn run_local_control(
+        &self,
+        mut shutdown_rx: watch::Receiver<bool>,
+        apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
+        audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
+    ) -> Result<()> {
+        self.update_snapshot(
+            RuntimeStatus::AuthorizationRequired,
+            Some("设备身份不完整，请完成浏览器授权；本地控制服务仍可用".into()),
+            self.config.relay.agent_id.clone(), self.config.relay.url.clone(), self.config_path.clone(),
+        ).await;
+        while !*shutdown_rx.borrow() {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                Some(update) = apply_rx.recv() => { self.apply_registry_update(update).await; },
+                Some(audit) = audit_rx.recv() => self.push_audit_log(audit).await,
+            }
+        }
+        Ok(())
+    }
+
     async fn connect_once(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,
@@ -65,7 +89,9 @@ impl RuntimeRunner {
         event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> bool {
-        self.event_queue.subscriptions(None).await.ok();
+        if let Some(queue) = &self.event_queue {
+            queue.subscriptions(None).await.ok();
+        }
         match timeout(
             Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS),
             connect_async(self.ws_url.as_str()),
@@ -115,7 +141,11 @@ impl RuntimeRunner {
     }
 
     async fn enter_backoff(&self, error: String, log_message: &str) {
-        if let Err(error) = self.event_queue.subscriptions(None).await { tracing::error!(%error, "cannot invalidate device subscriptions"); }
+        if let Some(queue) = &self.event_queue {
+            if let Err(error) = queue.subscriptions(None).await {
+                tracing::error!(%error, "cannot invalidate device subscriptions");
+            }
+        }
         self.update_snapshot(
             RuntimeStatus::Backoff,
             Some(error),
@@ -321,7 +351,9 @@ impl RelayConnection<'_> {
         match message {
             AgentMessage::RegisteredAck(ack) => self.handle_registered_ack(ack).await,
             AgentMessage::EventAck(ack) => self.handle_event_ack(ack).await,
-            AgentMessage::DeviceSubscriptions(snapshot) => self.runner.event_queue.subscriptions(Some(snapshot)).await?,
+            AgentMessage::DeviceSubscriptions(snapshot) => self.runner.event_queue.as_ref()
+                .context("device authorization required for event subscriptions")?
+                .subscriptions(Some(snapshot)).await?,
             AgentMessage::InvokeRequest(request) => {
                 self.queue_invocation(AgentMessage::InvokeRequest(request)).await?
             }
