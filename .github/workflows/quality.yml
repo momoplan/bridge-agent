@@ -103,6 +103,13 @@ jobs:
           $env:TAURI_ENV_PLATFORM = "windows"
           npm run prepare:windows-uninstaller:quality
 
+      - name: Run full Windows release quality checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm run quality
+
       - name: Run Windows Rust quality gates
         shell: pwsh
         run: |

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 
 export function readExpandedReleaseWorkflow(workflowPath) {
-  let workflow = readFileSync(workflowPath, "utf8");
+  let workflow = readFileSync(workflowPath, "utf8").replace(/\r\n/g, "\n");
   workflow = workflow.replace(
     /^        run: bash (\.github\/scripts\/release-steps\/[^\n]+)$/gm,
     (_match, scriptPath) => inlineScript(scriptPath),
@@ -15,6 +15,7 @@ export function readExpandedReleaseWorkflow(workflowPath) {
 
 function inlineScript(scriptPath) {
   const body = readFileSync(scriptPath, "utf8")
+    .replace(/\r\n/g, "\n")
     .trimEnd()
     .split("\n")
     .map((line) => `          ${line}`)
