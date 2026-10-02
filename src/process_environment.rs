@@ -201,7 +201,7 @@ fn probe_user_shell_path(shell: &Path, timeout: Duration) -> Result<String> {
     let mut child = command
         .spawn()
         .with_context(|| format!("start current user shell {}", shell.display()))?;
-    let pid = child.id();
+    let tree = crate::process_tree::Tree::attach(child.id())?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         let output_size = stdout_capture
@@ -210,7 +210,8 @@ fn probe_user_shell_path(shell: &Path, timeout: Duration) -> Result<String> {
             .context("inspect current user shell PATH capture")?
             .len();
         if output_size > USER_SHELL_PATH_PROBE_MAX_BYTES {
-            terminate_probe_process_group(pid, &mut child);
+            tree.terminate()?;
+            crate::process_tree::reap(&mut child)?;
             bail!(
                 "current user shell PATH probe exceeded {} bytes",
                 USER_SHELL_PATH_PROBE_MAX_BYTES
@@ -220,7 +221,8 @@ fn probe_user_shell_path(shell: &Path, timeout: Duration) -> Result<String> {
             break status;
         }
         if Instant::now() >= deadline {
-            terminate_probe_process_group(pid, &mut child);
+            tree.terminate()?;
+            crate::process_tree::reap(&mut child)?;
             bail!(
                 "current user shell PATH probe timed out after {}ms",
                 timeout.as_millis()
@@ -228,6 +230,7 @@ fn probe_user_shell_path(shell: &Path, timeout: Duration) -> Result<String> {
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    tree.finish()?;
     if !status.success() {
         bail!("current user shell PATH probe exited with {status}");
     }
@@ -263,17 +266,6 @@ fn configure_shell_probe_command(command: &mut Command, shell: &Path, probe: &st
     } else {
         command.args(["-ilc", probe]);
     }
-}
-
-#[cfg(unix)]
-fn terminate_probe_process_group(pid: u32, child: &mut std::process::Child) {
-    if let Ok(process_group) = libc::pid_t::try_from(pid) {
-        unsafe {
-            libc::killpg(process_group, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(windows)]

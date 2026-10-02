@@ -16,12 +16,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, watch, Mutex, Notify};
 use tokio::time::{timeout, Duration};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
-#[cfg(windows)]
-const WINDOWS_CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-#[cfg(windows)]
-const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECTOR_RUNTIME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
@@ -145,7 +139,7 @@ impl ConnectorProcessManager {
             .map_err(|err| format!("创建本地应用运行目录 {} 失败: {err}", data_dir.display()))?;
         let stdout = append_log_file(&data_dir.join("runtime.stdout.log"))?;
         let stderr = append_log_file(&data_dir.join("runtime.stderr.log"))?;
-        let mut child = spawn_foreground_process(&app_id, command, stdout, stderr)?;
+        let (mut child, tree) = spawn_foreground_process(&app_id, command, stdout, stderr)?;
         let pid = child
             .id()
             .ok_or_else(|| format!("本地应用 `{app_id}` 启动后没有进程 ID"))?;
@@ -167,7 +161,7 @@ impl ConnectorProcessManager {
         let changed = Arc::clone(&self.changed);
         let supervised_id = app_id.clone();
         tauri::async_runtime::spawn(async move {
-            let exit = supervise_process(&mut child, pid, stop_rx).await;
+            let exit = supervise_process(&mut child, tree, stop_rx).await;
             let _ = exit_tx.send(Some(exit));
             let mut processes = inner.lock().await;
             if processes
@@ -209,7 +203,15 @@ impl ConnectorProcessManager {
             return Ok(result);
         }
 
-        let Some(mut handle) = self.inner.lock().await.remove(&app_id) else {
+        // Clone the watch receiver under a short lock. Keep ownership registered
+        // until the supervisor has actually observed process exit.
+        let handle = {
+            let processes = self.inner.lock().await;
+            processes
+                .get(&app_id)
+                .map(|handle| (handle.pid, handle.exit_rx.clone()))
+        };
+        let Some((pid, mut exit_rx)) = handle else {
             // The connector shutdown command is deliberately idempotent. Running it also
             // cleans up a process left by an older Bridge Agent version.
             let result = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await?;
@@ -219,20 +221,26 @@ impl ConnectorProcessManager {
         self.changed.notify_waiters();
 
         let graceful = run_legacy_stop(app_id.clone(), config_path.to_path_buf()).await;
-        if wait_for_exit(&mut handle.exit_rx, GRACEFUL_STOP_TIMEOUT)
+        if wait_for_exit(&mut exit_rx, GRACEFUL_STOP_TIMEOUT)
             .await
             .is_none()
         {
-            if let Some(stop_tx) = handle.stop_tx.take() {
+            let stop_tx = {
+                let mut processes = self.inner.lock().await;
+                processes
+                    .get_mut(&app_id)
+                    .and_then(|handle| handle.stop_tx.take())
+            };
+            if let Some(stop_tx) = stop_tx {
                 let _ = stop_tx.send(());
             }
         }
-        let exit = wait_for_exit(&mut handle.exit_rx, FORCE_STOP_TIMEOUT)
+        let exit = wait_for_exit(&mut exit_rx, FORCE_STOP_TIMEOUT)
             .await
             .ok_or_else(|| {
                 format!(
                     "Bridge Agent 无法在超时时间内停止本地应用 `{app_id}` 的进程树（PID {}）",
-                    handle.pid
+                    pid
                 )
             })?;
         let graceful_stderr = match graceful {

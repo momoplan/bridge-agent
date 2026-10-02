@@ -9,7 +9,7 @@
         assert_eq!(service_names, vec!["computer", "shell"]);
     }
     #[test]
-    fn load_config_removes_legacy_disabled_local_java_example() {
+    fn migrate_config_removes_legacy_disabled_local_java_example() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
@@ -18,7 +18,7 @@
             .push(legacy_default_local_java_service(false));
 
         fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
 
         assert!(!loaded
             .services
@@ -29,7 +29,7 @@
     }
 
     #[test]
-    fn load_config_keeps_user_modified_local_java_service() {
+    fn migrate_config_keeps_user_modified_local_java_service() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
@@ -38,7 +38,7 @@
             .push(legacy_default_local_java_service(true));
 
         fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
 
         assert!(loaded
             .services

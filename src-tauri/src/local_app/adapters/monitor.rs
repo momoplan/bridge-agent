@@ -5,7 +5,7 @@ use super::health_http::{
     RegisteredServiceState, RegisteredServiceStatus,
 };
 use super::process::ConnectorProcessManager;
-use bridge_agent::{ensure_config_exists, load_config as load_agent_config, show_connector};
+use bridge_agent::{load_config as load_agent_config, show_connector};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,7 +53,6 @@ pub(crate) async fn collect_local_app_runtime_statuses(
     connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
 ) -> Result<Vec<LocalAppRuntimeStatus>, String> {
-    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let client = Client::builder()
         .timeout(Duration::from_secs(3))
@@ -111,7 +110,6 @@ pub(crate) async fn collect_local_app_runtime_statuses(
 async fn collect_registered_service_statuses(
     config_path: &Path,
 ) -> Result<Vec<RegisteredServiceStatus>, String> {
-    ensure_config_exists(config_path).map_err(|err| err.to_string())?;
     let config = load_agent_config(config_path).map_err(|err| err.to_string())?;
     let client = Client::builder()
         .timeout(Duration::from_secs(3))
@@ -245,4 +243,23 @@ pub(crate) fn start_runtime_monitor(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    #[tokio::test]
+    async fn status_queries_never_create_missing_configuration() {
+        let scratch = tempfile::tempdir().unwrap();
+        let config = scratch.path().join("config.json");
+        assert!(collect_registered_service_statuses(&config).await.is_err());
+        assert!(collect_local_app_runtime_statuses(
+            &config,
+            &ConnectorLifecycleManager::default(),
+            &ConnectorProcessManager::default()
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
 }

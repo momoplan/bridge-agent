@@ -313,8 +313,7 @@ pub(super) async fn run_start_command(
             }
             enrich_user_command_environment(command.first().map(String::as_str), &mut env);
             let mut process = AsyncCommand::new(&command[0]);
-            #[cfg(windows)]
-            process.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+            bridge_agent::process_tree::configure(process.as_std_mut());
             process.args(command.iter().skip(1));
             if let Some(cwd) = cwd
                 .as_deref()
@@ -342,17 +341,32 @@ pub(super) async fn run_start_command(
             let mut child = process
                 .spawn()
                 .map_err(|err| format!("启动服务 `{service}` 失败: {err}"))?;
+            let tree = bridge_agent::process_tree::Tree::attach(
+                child.id().expect("spawned child has pid"),
+            )
+            .map_err(|err| {
+                let _ = child.start_kill();
+                err.to_string()
+            })?;
             let (status, timed_out) = match timeout(Duration::from_secs(timeout_secs), child.wait())
                 .await
             {
                 Ok(Ok(status)) => (Some(status), false),
                 Ok(Err(err)) => return Err(format!("等待服务 `{service}` 启动命令失败: {err}")),
                 Err(_) => {
-                    let _ = child.start_kill();
-                    let _ = timeout(Duration::from_secs(3), child.wait()).await;
+                    tree.terminate().map_err(|err| err.to_string())?;
+                    timeout(Duration::from_secs(3), child.wait())
+                        .await
+                        .map_err(|_| format!("服务 `{service}` 的进程退出尚未确认"))?
+                        .map_err(|err| err.to_string())?;
                     (None, true)
                 }
             };
+            if status.as_ref().is_some_and(|status| status.success()) {
+                tree.detach().map_err(|err| err.to_string())?;
+            } else {
+                tree.finish().map_err(|err| err.to_string())?;
+            }
             let stdout = read_lifecycle_capture(&service, "stdout", &stdout_capture)?;
             let mut stderr = read_lifecycle_capture(&service, "stderr", &stderr_capture)?;
             if timed_out {

@@ -38,22 +38,18 @@ fn run_start_command_with_user_path(
                 child.current_dir(cwd);
             }
             child.envs(&lifecycle_env);
-            let stdout_capture = tempfile::NamedTempFile::new().with_context(|| {
-                format!("failed to create stdout capture for local app `{app_id}`")
-            })?;
-            let stderr_capture = tempfile::NamedTempFile::new().with_context(|| {
-                format!("failed to create stderr capture for local app `{app_id}`")
-            })?;
-            child
-                .stdout(Stdio::from(stdout_capture.reopen().with_context(|| {
-                    format!("failed to open stdout capture for local app `{app_id}`")
-                })?))
-                .stderr(Stdio::from(stderr_capture.reopen().with_context(|| {
-                    format!("failed to open stderr capture for local app `{app_id}`")
-                })?));
+            let (stdout_capture, stderr_capture) = lifecycle_captures(app_id, &mut child)?;
+            crate::process_tree::configure(&mut child);
             let mut child = child.spawn().with_context(|| {
                 format!("failed to run lifecycle command for local app `{app_id}`")
             })?;
+            let tree = match crate::process_tree::Tree::attach(child.id()) {
+                Ok(tree) => tree,
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(error);
+                }
+            };
             let deadline = Instant::now() + Duration::from_secs(timeout_secs.unwrap_or(20).max(1));
             let (status, timed_out) = loop {
                 if let Some(status) = child.try_wait().with_context(|| {
@@ -62,14 +58,26 @@ fn run_start_command_with_user_path(
                     break (status, false);
                 }
                 if Instant::now() >= deadline {
-                    terminate_lifecycle_process_tree(&mut child);
-                    let status = child.wait().with_context(|| {
-                        format!("failed to reap timed out local app `{app_id}` command")
-                    })?;
+                    tree.terminate()?;
+                    let reap_deadline = Instant::now() + Duration::from_secs(2);
+                    let status = loop {
+                        if let Some(status) = child.try_wait()? {
+                            break status;
+                        }
+                        if Instant::now() >= reap_deadline {
+                            bail!("timed out waiting for local app `{app_id}` process exit after termination");
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    };
                     break (status, true);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             };
+            if !timed_out && status.success() {
+                tree.detach()?;
+            } else {
+                tree.finish()?;
+            }
             // Lifecycle launchers may daemonize a descendant. On Windows that
             // descendant can inherit every inheritable stdio handle even when its
             // own output is redirected. A pipe therefore cannot be drained by
@@ -118,17 +126,20 @@ fn read_lifecycle_capture(
     Ok(bytes)
 }
 
-fn terminate_lifecycle_process_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let mut terminate = Command::new("taskkill.exe");
-        configure_connector_command(&mut terminate);
-        let _ = terminate
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .output();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = child.kill();
-    }
+fn lifecycle_captures(
+    app_id: &str,
+    child: &mut Command,
+) -> Result<(tempfile::NamedTempFile, tempfile::NamedTempFile)> {
+    let stdout_capture = tempfile::NamedTempFile::new()
+        .with_context(|| format!("failed to create stdout capture for local app `{app_id}`"))?;
+    let stderr_capture = tempfile::NamedTempFile::new()
+        .with_context(|| format!("failed to create stderr capture for local app `{app_id}`"))?;
+    child
+        .stdout(Stdio::from(stdout_capture.reopen().with_context(|| {
+            format!("failed to open stdout capture for local app `{app_id}`")
+        })?))
+        .stderr(Stdio::from(stderr_capture.reopen().with_context(|| {
+            format!("failed to open stderr capture for local app `{app_id}`")
+        })?));
+    Ok((stdout_capture, stderr_capture))
 }

@@ -295,7 +295,11 @@ fn windows_registry_path_values() -> Vec<String> {
 fn windows_registry_path_value(key: &str) -> Option<String> {
     let mut command = StdCommand::new(windows_system32_exe("reg.exe"));
     command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
-    let output = command.args(["query", key, "/v", "Path"]).output().ok()?;
+    let output = crate::process_tree::output(
+        command.args(["query", key, "/v", "Path"]),
+        Duration::from_secs(3),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }

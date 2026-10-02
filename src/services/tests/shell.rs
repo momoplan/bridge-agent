@@ -262,7 +262,7 @@
             let data = result.data.unwrap();
             status = data["status"].as_str().unwrap().to_string();
             if status != "RUNNING" {
-                assert_eq!(data["timedOut"].as_bool(), Some(true));
+                assert_eq!(data["timedOut"].as_bool(), Some(true), "{data}");
                 assert_eq!(data["error"]["code"].as_str(), Some("TIMEOUT"));
                 break;
             }
@@ -372,3 +372,55 @@
         assert_eq!(status, "SUCCEEDED");
         assert!(stdout.contains("bridge-agent-late"));
     }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_descendants_cannot_hold_completion_open_after_exit_cancel_or_timeout() {
+    use super::{run_shell_command, PreparedShellExec, ShellExecutionStatus};
+    for mode in ["exit", "cancel", "timeout"] {
+        let scratch = tempdir().unwrap();
+        let marker = scratch.path().join("descendant-survived");
+        let script = format!(
+            "(sleep 2; touch '{}') & echo ready; {}",
+            marker.display(),
+            if mode == "exit" { "exit 0" } else { "sleep 30" }
+        );
+        let prepared = PreparedShellExec {
+            command_args: vec!["/bin/sh".into(), "-c".into(), script],
+            cwd: scratch.path().to_path_buf(),
+            env: std::env::vars().collect(),
+            stdin: Some("x".repeat(1024 * 1024)),
+            timeout_secs: Some(if mode == "timeout" { 1 } else { 30 }),
+            path_for_diagnostics: String::new(),
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(run_shell_command(prepared, Some(cancel_rx), None));
+        if mode == "cancel" {
+            sleep(Duration::from_millis(150)).await;
+            cancel_tx.send(()).unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("owned descendants must not keep output collection running")
+            .unwrap();
+        let expected = match mode {
+            "exit" => ShellExecutionStatus::Succeeded,
+            "cancel" => ShellExecutionStatus::Canceled,
+            _ => ShellExecutionStatus::TimedOut,
+        };
+        assert_eq!(
+            result.status, expected,
+            "{mode}: {:?} {:?}",
+            result.error, result.stdout
+        );
+        assert!(
+            result.stdout.contains("ready"),
+            "{mode}: {:?} {:?} {:?}",
+            result.status,
+            result.stdout,
+            result.error
+        );
+        sleep(Duration::from_millis(2200)).await;
+        assert!(!marker.exists(), "descendant survived {mode}");
+    }
+}

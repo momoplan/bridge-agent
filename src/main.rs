@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use bridge_agent::{
-    clear_relay_credentials, default_config_path, ensure_config_exists,
-    install_rustls_crypto_provider, list_connectors, load_config, save_config, show_connector,
-    start_connector, uninstall_connector_with_options, AgentConfig, AgentRuntimeManager,
-    ConnectorUninstallOptions, ServiceConfig, ServiceRegistration,
+    clear_relay_credentials, default_config_path, install_rustls_crypto_provider, list_connectors,
+    load_config, save_config, show_connector, start_connector, uninstall_connector_with_options,
+    AgentConfig, AgentRuntimeManager, ConnectorUninstallOptions, ServiceConfig,
+    ServiceRegistration,
 };
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(config: Option<PathBuf>) -> Result<()> {
     let config_path = config.unwrap_or(default_config_path()?);
-    ensure_config_exists(&config_path)?;
+    bridge_agent::initialize_config(&config_path)?;
 
     let runtime = AgentRuntimeManager::new();
     runtime
@@ -168,7 +168,7 @@ async fn register_service_command(
     replace: bool,
 ) -> Result<()> {
     let config_path = config.unwrap_or(default_config_path()?);
-    ensure_config_exists(&config_path)?;
+    bridge_agent::initialize_config(&config_path)?;
     let content = std::fs::read_to_string(&file)
         .with_context(|| format!("failed to read service registration {}", file.display()))?;
     let service_file: ServiceRegistrationFile =
@@ -202,7 +202,7 @@ async fn register_service_command(
 
 async fn unregister_service_command(name: String, config: Option<PathBuf>) -> Result<()> {
     let config_path = config.unwrap_or(default_config_path()?);
-    ensure_config_exists(&config_path)?;
+    bridge_agent::initialize_config(&config_path)?;
     let mut config = load_config(&config_path)?;
     let normalized = name.trim();
     let initial_len = config.services.len();
@@ -217,7 +217,6 @@ async fn unregister_service_command(name: String, config: Option<PathBuf>) -> Re
 
 async fn list_services_command(config: Option<PathBuf>) -> Result<()> {
     let config_path = config.unwrap_or(default_config_path()?);
-    ensure_config_exists(&config_path)?;
     let config = load_config(&config_path)?;
     println!("{}", serde_json::to_string_pretty(&config.services)?);
     Ok(())

@@ -1,7 +1,7 @@
 use crate::config::{
-    ensure_config_exists, load_config, save_config, AgentConfig, LocalAppConfig,
-    RegistrationHealthCheck, RegistrationMethod, RegistrationTransport, RuntimeConfig,
-    ServiceConfig, ServiceRegistration, ServiceStartCommand,
+    load_config, save_config, AgentConfig, LocalAppConfig, RegistrationHealthCheck,
+    RegistrationMethod, RegistrationTransport, RuntimeConfig, ServiceConfig, ServiceRegistration,
+    ServiceStartCommand,
 };
 use crate::process_environment::{
     current_user_command_path, enrich_user_command_environment_with_path,

@@ -3,17 +3,19 @@ use super::*;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConnectorManagementCommandError {
-    pub(super) code: &'static str,
+    pub(super) code: String,
     pub(super) message: String,
+    pub(super) data: Option<Box<Value>>,
     pub(super) lifecycle: Option<Box<ConnectorLifecycleSnapshot>>,
 }
 
 impl ConnectorManagementCommandError {
     pub(super) fn message(message: impl Into<String>) -> Self {
         Self {
-            code: "connector_management_failed",
+            code: "connector_management_failed".into(),
             message: message.into(),
             lifecycle: None,
+            data: None,
         }
     }
 }
@@ -21,8 +23,9 @@ impl ConnectorManagementCommandError {
 impl From<Box<ConnectorManagementNotReady>> for ConnectorManagementCommandError {
     fn from(error: Box<ConnectorManagementNotReady>) -> Self {
         Self {
-            code: error.code,
+            code: error.code.into(),
             message: error.message,
+            data: None,
             lifecycle: Some(Box::new(error.lifecycle)),
         }
     }
@@ -73,9 +76,7 @@ pub(super) async fn invoke_connector_management_with_context(
                 .expect("stopped connector must reject management requests"),
         ));
     }
-    let result = invoke_connector_management_request(id, operation, payload)
-        .await
-        .map_err(ConnectorManagementCommandError::message);
+    let result = invoke_connector_management_request(id, operation, payload).await;
     drop(management_permit);
     result
 }
@@ -84,7 +85,7 @@ pub(super) async fn invoke_connector_management_request(
     id: String,
     operation: String,
     payload: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, ConnectorManagementCommandError> {
     let request = resolve_connector_management_request(&id, &operation, payload.as_ref())?;
     send_connector_management_request(request, payload).await
 }
@@ -180,8 +181,10 @@ fn resolve_connector_management_request(
 async fn send_connector_management_request(
     resolved: ResolvedManagementRequest,
     payload: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, ConnectorManagementCommandError> {
     let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(60))
         .build()
@@ -191,32 +194,26 @@ async fn send_connector_management_request(
         "POST" => client
             .post(&resolved.url)
             .json(&payload.unwrap_or_else(|| serde_json::json!({}))),
-        method => return Err(format!("不支持的本机应用管理方法: {method}")),
+        method => return Err(format!("不支持的本机应用管理方法: {method}").into()),
     };
-    let response = request
+    let mut response = request
         .bearer_auth(resolved.token)
         .send()
         .await
-        .map_err(|err| format!("调用本机应用管理接口失败: {err}"))?;
+        .map_err(management_transport_error)?;
     let status = response.status();
     if response
         .content_length()
         .is_some_and(|size| size > LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES as u64)
     {
-        return Err(format!(
-            "本机应用管理响应超过 {} 字节限制",
-            LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES
-        ));
+        return Err(management_response_too_large());
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|err| format!("读取本机应用管理响应失败: {err}"))?;
-    if body.len() > LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES {
-        return Err(format!(
-            "本机应用管理响应超过 {} 字节限制",
-            LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES
-        ));
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(management_transport_error)? {
+        if chunk.len() > LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES.saturating_sub(body.len()) {
+            return Err(management_response_too_large());
+        }
+        body.extend_from_slice(&chunk);
     }
     let document: Value = serde_json::from_slice(&body)
         .map_err(|err| format!("本机应用管理接口返回了无效 JSON: {err}"))?;
@@ -225,7 +222,70 @@ async fn send_connector_management_request(
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("本机应用管理操作失败");
-        return Err(format!("{message}（HTTP {status}）"));
+        return Err(ConnectorManagementCommandError {
+            code: document
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .unwrap_or("connector_management_failed")
+                .to_string(),
+            message: format!("{message}（HTTP {status}）"),
+            data: document
+                .get("data")
+                .or_else(|| document.pointer("/error/data"))
+                .cloned()
+                .map(Box::new),
+            lifecycle: None,
+        });
     }
     Ok(document.get("data").cloned().unwrap_or(Value::Null))
 }
+
+impl From<String> for ConnectorManagementCommandError {
+    fn from(message: String) -> Self {
+        Self::message(message)
+    }
+}
+
+fn management_transport_error(error: reqwest::Error) -> ConnectorManagementCommandError {
+    let (code, explanation) = if error.is_timeout() {
+        (
+            "connector_management_timeout",
+            "本机应用管理请求超时；应用操作可能仍在执行，请先查询状态",
+        )
+    } else if error.is_connect() {
+        (
+            "connector_management_unreachable",
+            "无法连接本机应用管理服务",
+        )
+    } else {
+        (
+            "connector_management_transport_failed",
+            "本机应用管理请求传输失败",
+        )
+    };
+    ConnectorManagementCommandError {
+        code: code.into(),
+        message: format!(
+            "{explanation}: {:#}",
+            anyhow::Error::new(error.without_url())
+        ),
+        data: None,
+        lifecycle: None,
+    }
+}
+
+fn management_response_too_large() -> ConnectorManagementCommandError {
+    ConnectorManagementCommandError {
+        code: "connector_management_response_too_large".into(),
+        message: format!(
+            "本机应用管理响应超过 {} 字节限制",
+            LOCAL_APP_UI_MAX_MANAGEMENT_RESPONSE_BYTES
+        ),
+        data: None,
+        lifecycle: None,
+    }
+}
+
+#[cfg(test)]
+#[path = "local_app_management_tests.rs"]
+mod tests;

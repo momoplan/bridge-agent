@@ -329,9 +329,9 @@ mod tests {
     use super::{
         browser_auth_manifest_json, config_file_name_for_build, default_shell_exec_allow_commands,
         ensure_browser_auth_agent_id, format_default_device_name, load_config,
-        manifest_preview_json, reset_invalid_config, save_config, AgentConfig, HttpBinding,
-        MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration,
-        ServiceStartCommand,
+        manifest_preview_json, migrate_config, reset_invalid_config, save_config, AgentConfig,
+        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
+        ServiceRegistration, ServiceStartCommand,
     };
     use crate::protocol::ResponseMode;
     use serde_json::json;

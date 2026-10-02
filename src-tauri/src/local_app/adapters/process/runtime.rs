@@ -44,7 +44,7 @@ fn spawn_foreground_process(
     start_command: ServiceStartCommand,
     stdout: std::fs::File,
     stderr: std::fs::File,
-) -> Result<Child, String> {
+) -> Result<(Child, bridge_agent::process_tree::Tree), String> {
     let ServiceStartCommand::ShellCommand {
         command,
         cwd,
@@ -66,81 +66,57 @@ fn spawn_foreground_process(
     if let Some(cwd) = cwd.as_deref().map(str::trim).filter(|cwd| !cwd.is_empty()) {
         process.current_dir(cwd);
     }
-    #[cfg(unix)]
-    process.as_std_mut().process_group(0);
-    #[cfg(windows)]
-    process.creation_flags(WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP);
-    process
+    process.kill_on_drop(true);
+    bridge_agent::process_tree::configure(process.as_std_mut());
+    let mut child = process
         .spawn()
-        .map_err(|err| format!("启动本地应用 `{app_id}` 的前台进程失败: {err}"))
+        .map_err(|err| format!("启动本地应用 `{app_id}` 的前台进程失败: {err}"))?;
+    let tree = bridge_agent::process_tree::Tree::attach(child.id().expect("spawned child has pid"))
+        .map_err(|err| {
+            let _ = child.start_kill();
+            format!("纳管本地应用进程树失败: {err}")
+        })?;
+    Ok((child, tree))
 }
 
 async fn supervise_process(
     child: &mut Child,
-    pid: u32,
+    tree: bridge_agent::process_tree::Tree,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> ManagedConnectorExit {
-    tokio::select! {
-        status = child.wait() => exit_from_wait(status),
-        _ = &mut stop_rx => terminate_process_tree(child, pid).await,
-    }
-}
-
-async fn terminate_process_tree(child: &mut Child, pid: u32) -> ManagedConnectorExit {
-    #[cfg(unix)]
-    {
-        signal_unix_process_group(pid, libc::SIGTERM);
-        if let Ok(status) = timeout(GRACEFUL_STOP_TIMEOUT, child.wait()).await {
-            return exit_from_wait(status);
+    let status = tokio::select! {
+        status = child.wait() => status,
+        _ = &mut stop_rx => {
+            // Termination itself never launches a second unbounded subprocess.
+            let _ = tree.terminate();
+            match timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(status) => status,
+                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "exit not yet confirmed")),
+            }
         }
-        signal_unix_process_group(pid, libc::SIGKILL);
-    }
-    #[cfg(windows)]
-    {
-        let mut taskkill = Command::new("taskkill.exe");
-        taskkill.creation_flags(WINDOWS_CREATE_NO_WINDOW);
-        let _ = taskkill
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .await;
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        let _ = child.start_kill();
-    }
-    match timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(status) => exit_from_wait(status),
-        Err(_) => {
-            let _ = child.start_kill();
-            let status = child.wait().await;
-            exit_from_wait(status)
-        }
-    }
-}
-
-#[cfg(unix)]
-fn signal_unix_process_group(pid: u32, signal: libc::c_int) {
-    let Ok(process_group) = libc::pid_t::try_from(pid) else {
-        return;
     };
-    // `killpg(2)` has identical semantics on macOS and Linux and avoids the
-    // platform-specific command-line parsing of negative PIDs by /bin/kill.
-    unsafe {
-        libc::killpg(process_group, signal);
-    }
-}
-
-fn exit_from_wait(result: std::io::Result<std::process::ExitStatus>) -> ManagedConnectorExit {
-    match result {
-        Ok(status) => ManagedConnectorExit {
-            code: status.code(),
-            detail: format!("宿主管理的进程已退出（{status}）"),
-        },
-        Err(err) => ManagedConnectorExit {
-            code: None,
-            detail: format!("等待宿主管理的进程退出失败: {err}"),
-        },
+    // This is a background supervisor, not the stop request. A failed wait must
+    // not remove a still-owned process from the registry. Callers wait with a
+    // deadline and can report stopping/timeout while supervision continues.
+    let mut status = status;
+    loop {
+        if let Ok(exit) = &status {
+            if tree.finish().is_ok() {
+                return ManagedConnectorExit {
+                    code: exit.code(),
+                    detail: format!("宿主管理的进程已退出（{exit}）"),
+                };
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = tree.terminate();
+        status = match timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(status) => status,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "exit not yet confirmed",
+            )),
+        };
     }
 }
 
@@ -261,13 +237,12 @@ mod tests {
             env: BTreeMap::new(),
             timeout_secs: None,
         };
-        let mut child =
+        let (mut child, tree) =
             spawn_foreground_process("com.baijimu.connector.test", command, stdout, stderr)
                 .unwrap();
-        let pid = child.id().unwrap();
         let (stop_tx, stop_rx) = oneshot::channel();
         let supervised =
-            tokio::spawn(async move { supervise_process(&mut child, pid, stop_rx).await });
+            tokio::spawn(async move { supervise_process(&mut child, tree, stop_rx).await });
 
         stop_tx.send(()).unwrap();
         let exit = timeout(Duration::from_secs(10), supervised)
@@ -307,10 +282,11 @@ mod tests {
             timeout_secs: None,
         };
 
-        let mut child =
+        let (mut child, tree) =
             spawn_foreground_process("com.baijimu.connector.path-test", command, stdout, stderr)
                 .unwrap();
         let status = child.wait().await.unwrap();
+        tree.terminate().unwrap();
         assert!(status.success());
         let resolved = std::fs::read_to_string(output).unwrap();
         assert!(resolved.trim().ends_with("/env"), "{resolved}");

@@ -96,7 +96,8 @@ export function LocalAppEmbeddedUi(props: { appId: string; title: string }) {
               version: 1,
               requestId: request.requestId,
               ok: false,
-              error: readError(error)
+              error: readError(error),
+              errorDetails: typeof error === "object" && error !== null ? error : undefined
             },
             uiOrigin
           );
