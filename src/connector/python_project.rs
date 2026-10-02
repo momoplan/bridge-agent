@@ -101,13 +101,11 @@ fn create_python_env(env_path: &Path, base_python: &str) -> Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let mut create = Command::new(base_python);
     configure_connector_command(&mut create);
-    let output = create
-        .args(["-m", "venv"])
-        .arg(env_path)
-        .output()
-        .with_context(|| {
-            format!("failed to create Python environment with `{base_python} -m venv`")
-        })?;
+    let output = crate::process_tree::output(
+        create.args(["-m", "venv"]).arg(env_path),
+        Duration::from_secs(180),
+    )
+    .with_context(|| format!("failed to create Python environment with `{base_python} -m venv`"))?;
     if !output.status.success() {
         bail!(
             "failed to create Python connector environment {}\nstdout:\n{}\nstderr:\n{}",
@@ -122,13 +120,14 @@ fn create_python_env(env_path: &Path, base_python: &str) -> Result<()> {
 fn python_env_uses_base_interpreter(env_python: &Path, base_python: &Path) -> bool {
     let mut inspect = Command::new(env_python);
     configure_connector_command(&mut inspect);
-    let output = inspect
-        .args([
+    let output = crate::process_tree::output(
+        inspect.args([
             "-I",
             "-c",
             "import os,sys; print(os.path.realpath(sys._base_executable))",
-        ])
-        .output();
+        ]),
+        Duration::from_secs(3),
+    );
     let Ok(output) = output else {
         return false;
     };
@@ -204,8 +203,15 @@ fn resolve_python_for_project(
                 requirement.unwrap_or_default()
             )
         })?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     for candidate in python_candidates(runtime_config) {
-        if python_matches_requirement(&candidate, specifiers.as_ref()) {
+        let budget = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(3));
+        if budget.is_zero() {
+            break;
+        }
+        if python_matches_requirement(&candidate, specifiers.as_ref(), budget) {
             return Ok(candidate.display().to_string());
         }
     }
@@ -227,8 +233,15 @@ pub fn inspect_python_runtime(runtime_config: &RuntimeConfig) -> PythonRuntimeSt
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
+    let deadline = Instant::now() + Duration::from_secs(10);
     for candidate in python_candidates(runtime_config) {
-        let Some(version) = python_version(&candidate) else {
+        let budget = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(3));
+        if budget.is_zero() {
+            break;
+        }
+        let Some(version) = python_version_with_timeout(&candidate, budget) else {
             continue;
         };
         let version_text = version.to_string();

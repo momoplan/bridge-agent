@@ -138,7 +138,6 @@ pub(super) async fn rollback_baijimu_cli() -> Result<managed_tool::ManagedToolSt
 pub(super) async fn load_config(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<ConfigDocument, String> {
-    ensure_config_exists(&state.config_path).map_err(|err| format!("{err:#}"))?;
     let config = load_agent_config(&state.config_path).map_err(|err| format!("{err:#}"))?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| format!("{err:#}"))?;
     let runtime = state.runtime.snapshot().await;
@@ -155,7 +154,6 @@ pub(super) async fn python_runtime_status(
     state: tauri::State<'_, DesktopState>,
     python_path: Option<String>,
 ) -> Result<bridge_agent::PythonRuntimeStatus, String> {
-    ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
     let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     if let Some(path) = python_path {
         config.runtime.python_path = if path.trim().is_empty() {
@@ -164,7 +162,9 @@ pub(super) async fn python_runtime_status(
             Some(path)
         };
     }
-    Ok(inspect_python_runtime(&config.runtime))
+    tokio::task::spawn_blocking(move || inspect_python_runtime(&config.runtime))
+        .await
+        .map_err(|err| format!("Python 检测任务失败: {err}"))
 }
 
 #[tauri::command]

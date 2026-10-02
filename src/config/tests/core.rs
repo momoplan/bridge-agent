@@ -88,14 +88,14 @@
     }
 
     #[test]
-    fn load_config_migrates_legacy_plaintext_relay_token() {
+    fn migrate_config_migrates_legacy_plaintext_relay_token() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.relay.token = "legacy-secret".to_string();
         fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
 
         assert_eq!(loaded.relay.token, "legacy-secret");
         assert!(!fs::read_to_string(&path).unwrap().contains("legacy-secret"));
@@ -104,7 +104,7 @@
                 .unwrap()
                 .contains("legacy-secret")
         );
-        assert_eq!(load_config(&path).unwrap().relay.token, "legacy-secret");
+        assert_eq!(migrate_config(&path).unwrap().relay.token, "legacy-secret");
     }
 
     #[test]
@@ -129,7 +129,7 @@
     }
 
     #[test]
-    fn load_config_removes_legacy_codex_binary_overrides() {
+    fn migrate_config_removes_legacy_codex_binary_overrides() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = serde_json::to_value(AgentConfig::example()).unwrap();
@@ -155,7 +155,7 @@
         }]);
         fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
         let ServiceStartCommand::ShellCommand { env, .. } =
             loaded.services[0].start_command.as_ref().unwrap();
         assert!(!env.contains_key("CODEX_CONNECTOR_CODEX_BINARY"));
@@ -208,14 +208,14 @@
     }
 
     #[test]
-    fn load_config_migrates_legacy_default_device_name_when_identity_is_available() {
+    fn migrate_config_migrates_legacy_default_device_name_when_identity_is_available() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent-config.json");
         let mut config = AgentConfig::example();
         config.device.name = "我的百积木".to_string();
         save_config(&path, &config).unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
 
         if loaded.device.name != "我的百积木" {
             assert!(!loaded.device.name.trim().is_empty());
@@ -250,3 +250,34 @@
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.services.len(), 2);
     }
+
+#[test]
+fn reading_legacy_config_never_imports_or_rewrites_it() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.json");
+    let mut config = AgentConfig::example();
+    config.relay.token = "legacy-read-only-token".into();
+    let original = serde_json::to_string_pretty(&config).unwrap();
+    fs::write(&path, &original).unwrap();
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(
+        load_config(&path).unwrap().relay.token,
+        "legacy-read-only-token"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert!(load_config(&directory.path().join("missing.json")).is_err());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn saving_configuration_does_not_bootstrap_removed_default_services() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    let mut config = AgentConfig::example();
+    config.services.clear();
+    save_config(&path, &config).unwrap();
+    assert!(load_config(&path).unwrap().services.is_empty());
+    assert!(!migrate_config(&path).unwrap().services.is_empty());
+}

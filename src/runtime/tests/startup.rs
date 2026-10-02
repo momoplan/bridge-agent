@@ -37,11 +37,14 @@
         let relay_addr = relay_listener.local_addr().unwrap();
         let health_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let health_addr = health_listener.local_addr().unwrap();
+        let (health_started_tx, health_started_rx) = oneshot::channel();
+        let (release_health_tx, release_health_rx) = oneshot::channel();
         let health_server = tokio::spawn(async move {
             let Ok((socket, _)) = health_listener.accept().await else {
                 return;
             };
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = health_started_tx.send(());
+            let _ = release_health_rx.await;
             drop(socket);
         });
 
@@ -64,7 +67,7 @@
                 url: format!("http://{health_addr}/health"),
                 http_method: "GET".to_string(),
                 headers: BTreeMap::new(),
-                timeout_secs: Some(1),
+                timeout_secs: Some(60),
                 expect_status: Some(200),
                 body_contains: None,
             }),
@@ -73,16 +76,16 @@
             methods: Vec::new(),
         }];
 
+        // Persist the fixture so the post-connect readiness refresh really runs.
+        crate::config::save_config(&config_path, &config).unwrap();
         let manager = AgentRuntimeManager::new();
-        let started_at = std::time::Instant::now();
         let starting = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(10),
             manager.start(config, &config_path),
         )
         .await
         .expect("runtime start waited for local service readiness")
         .expect("runtime start failed");
-        assert!(started_at.elapsed() < std::time::Duration::from_millis(500));
         assert_eq!(
             starting.agent_id.as_deref(),
             Some("dev_starting_during_service_preparation")
@@ -90,21 +93,27 @@
         assert_ne!(manager.snapshot().await.status, RuntimeStatus::Stopped);
 
         let (relay_socket, _) = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(10),
             relay_listener.accept(),
         )
         .await
         .expect("relay connection waited for local service readiness")
         .expect("relay listener failed");
         let _relay_stream = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(10),
             accept_async(relay_socket),
         )
         .await
         .expect("relay WebSocket handshake waited for local service readiness")
         .expect("relay WebSocket handshake failed");
+        tokio::time::timeout(std::time::Duration::from_secs(10), health_started_rx)
+            .await
+            .expect("local service health request was never started")
+            .unwrap();
+        assert!(!health_server.is_finished(), "health must still be pending at relay connection");
+        release_health_tx.send(()).unwrap();
         manager.stop().await.unwrap();
-        health_server.abort();
+        health_server.await.unwrap();
     }
 
     #[tokio::test]

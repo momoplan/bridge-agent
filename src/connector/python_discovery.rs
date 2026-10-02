@@ -114,7 +114,8 @@ fn is_python_executable_name(name: &str) -> bool {
 fn windows_python_launcher_candidates() -> Vec<PathBuf> {
     let mut launcher = Command::new("py");
     configure_connector_command(&mut launcher);
-    let Ok(output) = launcher.arg("-0p").output() else {
+    let Ok(output) = crate::process_tree::output(launcher.arg("-0p"), Duration::from_secs(3))
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -199,8 +200,9 @@ fn append_macos_python_installations(candidates: &mut Vec<PathBuf>) {
 fn python_matches_requirement(
     candidate: &Path,
     requires_python: Option<&VersionSpecifiers>,
+    timeout: Duration,
 ) -> bool {
-    let Some(version) = python_version(candidate) else {
+    let Some(version) = python_version_with_timeout(candidate, timeout) else {
         return false;
     };
     python_version_matches_requirement(&version, requires_python)
@@ -215,10 +217,10 @@ fn python_version_matches_requirement(
         .unwrap_or(true)
 }
 
-fn python_version(candidate: &Path) -> Option<Version> {
+fn python_version_with_timeout(candidate: &Path, timeout: Duration) -> Option<Version> {
     let mut command = Command::new(candidate);
     configure_connector_command(&mut command);
-    let output = command.arg("--version").output().ok()?;
+    let output = crate::process_tree::output(command.arg("--version"), timeout).ok()?;
     if !output.status.success() {
         return None;
     }

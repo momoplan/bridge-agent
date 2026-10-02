@@ -1,4 +1,27 @@
+/// Read an existing configuration and credential without migration or writes.
 pub fn load_config(path: &Path) -> Result<AgentConfig> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config {}", path.display()))?;
+    let mut config: AgentConfig = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", path.display()))?;
+    config.validate()?;
+    if config.relay.token.trim().is_empty() {
+        if let Some(token) = load_relay_token(path)? {
+            config.relay.token = token;
+        }
+    }
+    Ok(config)
+}
+
+/// Explicit startup/write lifecycle: create missing configuration, then migrate it.
+pub fn initialize_config(path: &Path) -> Result<AgentConfig> {
+    ensure_config_exists(path)?;
+    migrate_config(path)
+}
+
+/// Explicitly import legacy credentials and upgrade configuration on disk.
+pub fn migrate_config(path: &Path) -> Result<AgentConfig> {
+    crate::secret_store::prepare_relay_credentials(path)?;
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let has_legacy_codex_binary_path = config_has_legacy_codex_binary_path(&content);
@@ -53,13 +76,11 @@ fn remove_legacy_codex_binary_overrides(config: &mut AgentConfig) -> bool {
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
-    let mut config = config.clone();
-    config.normalize();
     config.validate()?;
     if !config.relay.token.trim().is_empty() {
         store_relay_token(path, &config.relay.token)?;
     }
-    write_public_config(path, &config)
+    write_public_config(path, config)
 }
 
 fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {

@@ -40,7 +40,7 @@ pub fn install_connector_from_path_with_provenance(
     replace: bool,
     provenance: ConnectorInstallProvenance,
 ) -> Result<ConnectorInstallResult> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let mut config = load_config(config_path)?;
     let original_config = config.clone();
     let source = source
@@ -188,8 +188,16 @@ fn complete_connector_install(
     cleanup_legacy_connector_autostarts_for_manifest(manifest);
 
     let local_app = local_app_from_services(manifest, services, registrations)?;
-    let method_names = local_app.methods.iter().map(|method| method.name.clone()).collect();
-    let event_names = local_app.events.iter().map(|event| event.name.clone()).collect();
+    let method_names = local_app
+        .methods
+        .iter()
+        .map(|method| method.name.clone())
+        .collect();
+    let event_names = local_app
+        .events
+        .iter()
+        .map(|event| event.name.clone())
+        .collect();
     upsert_local_app(&mut config.local_apps, local_app, replace)?;
     save_config(config_path, config)?;
     *config_saved = true;
@@ -283,7 +291,7 @@ pub fn uninstall_connector_with_options(
     config_path: &Path,
     options: ConnectorUninstallOptions,
 ) -> Result<ConnectorSummary> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let record = load_install_record(app_id)?;
     let summary = summary_from_record(record.clone());
     let mut config = load_config(config_path)?;
@@ -360,7 +368,7 @@ pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSumm
 }
 
 pub fn sync_installed_connector(config_path: &Path, app_id: &str) -> Result<ConnectorSummary> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let mut config = load_config(config_path)?;
     let record = load_install_record(app_id)?;
     let summary = sync_installed_connector_record(
@@ -377,7 +385,7 @@ pub fn prepare_installed_connector_runtime(
     config_path: &Path,
     app_id: &str,
 ) -> Result<ConnectorSummary> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let mut config = load_config(config_path)?;
     let record = load_install_record(app_id)?;
     let summary = sync_installed_connector_record(
@@ -391,7 +399,7 @@ pub fn prepare_installed_connector_runtime(
 }
 
 pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorSyncReport> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let records = load_install_records()?;
     if records.is_empty() {
         return Ok(ConnectorSyncReport {
@@ -507,7 +515,9 @@ fn validate_install_replacement(
         if let Some(previous) = previous_record {
             let application = |identity: &local_app_contract::InstallSource| match identity {
                 local_app_contract::InstallSource::Market { source, .. }
-                | local_app_contract::InstallSource::Environment { source } => source.application.clone(),
+                | local_app_contract::InstallSource::Environment { source } => {
+                    source.application.clone()
+                }
             };
             match previous.install_source.as_ref() {
                 Some(existing) if application(existing) != application(selected) => {

@@ -12,7 +12,7 @@ impl AgentRuntimeManager {
     }
 
     pub async fn start_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
-        let config = load_config(path)?;
+        let config = crate::config::initialize_config(path)?;
         self.start(config, path).await
     }
 

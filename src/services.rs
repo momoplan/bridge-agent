@@ -254,7 +254,7 @@ struct ShellExecutionRecord {
     cancel_tx: Option<oneshot::Sender<()>>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum ShellExecutionStatus {
     Running,

@@ -109,14 +109,16 @@ pub(super) fn migrate_legacy_config_before_startup(config_path: &Path) -> anyhow
         )
     })?;
     let config_dir = resolve_config_base_dir(config_path);
-    let output = Command::new(&binary)
-        .arg("--config-dir")
-        .arg(&config_dir)
-        .arg("--config")
-        .arg(config_path)
-        .arg("--host-already-stopped")
-        .output()
-        .with_context(|| format!("failed to start migration artifact {}", binary.display()))?;
+    let output = bridge_agent::process_tree::output(
+        Command::new(&binary)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .arg("--config")
+            .arg(config_path)
+            .arg("--host-already-stopped"),
+        Duration::from_secs(300),
+    )
+    .with_context(|| format!("failed to start migration artifact {}", binary.display()))?;
     if output.status.success() {
         return Ok(true);
     }

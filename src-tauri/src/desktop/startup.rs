@@ -156,7 +156,7 @@ pub(super) fn prepare_config_for_auto_start_with<F>(
 where
     F: FnOnce(&Path) -> anyhow::Result<ConnectorSyncReport>,
 {
-    ensure_config_exists(config_path)?;
+    bridge_agent::initialize_config(config_path)?;
     let sync_report = sync_installed_connectors(config_path)?;
     let config = load_agent_config(config_path)?;
     Ok((config, sync_report))

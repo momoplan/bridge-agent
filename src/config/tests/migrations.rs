@@ -31,7 +31,7 @@
         )
         .unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
         assert_eq!(loaded.platform.base_url, "https://api.baijimu.com");
         assert_eq!(loaded.platform.workspace_id, None);
         assert_eq!(loaded.relay.url, "wss://relay.baijimu.com/ws/agent");
@@ -73,7 +73,7 @@
             config.platform.base_url = legacy_url.to_string();
             save_config(&path, &config).unwrap();
 
-            let loaded = load_config(&path).unwrap();
+            let loaded = migrate_config(&path).unwrap();
             assert_eq!(
                 loaded.platform.base_url, "https://api.baijimu.com",
                 "legacy url {legacy_url} should normalize to the production API prefix"
@@ -89,7 +89,7 @@
         config.platform.base_url = "https://dev.baijimu.test/lowcode3".to_string();
         save_config(&path, &config).unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
         assert_eq!(
             loaded.platform.base_url,
             "https://dev.baijimu.test"
@@ -103,9 +103,9 @@
         let mut config = AgentConfig::example();
         config.runtime.event_server_bind = "0.0.0.0:18081".to_string();
         config.runtime.service_registration_token = None;
-        save_config(&path, &config).unwrap();
+        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
         assert!(!loaded.runtime.service_registration_enabled);
     }
 
@@ -167,7 +167,7 @@
         )
         .unwrap();
 
-        let loaded = load_config(&path).unwrap();
+        let loaded = migrate_config(&path).unwrap();
         let computer = loaded
             .services
             .iter()

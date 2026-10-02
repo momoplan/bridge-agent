@@ -38,6 +38,32 @@ pub fn load_relay_token(config_path: &Path) -> Result<Option<String>> {
     })
 }
 
+/// Permission repair belongs to initialization, never to credential reads.
+pub(crate) fn prepare_relay_credentials(config_path: &Path) -> Result<()> {
+    #[cfg(any(
+        all(test, unix),
+        all(
+            not(test),
+            debug_assertions,
+            any(target_os = "macos", target_os = "linux")
+        )
+    ))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = development_secret_path(config_path);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.permissions().mode() & 0o077 != 0 => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let _ = config_path;
+    Ok(())
+}
+
 pub fn store_relay_token(config_path: &Path, token: &str) -> Result<()> {
     let token = token.trim();
     if token.is_empty() {
@@ -121,8 +147,10 @@ fn load_development_secret(config_path: &Path) -> Result<Option<String>> {
     let path = development_secret_path(config_path);
     match std::fs::read_to_string(&path) {
         Ok(value) => {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("failed to secure {}", path.display()))?;
+            anyhow::ensure!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o077 == 0,
+                "credential file permissions are not private; run configuration initialization"
+            );
             Ok(Some(value))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -489,5 +517,29 @@ mod tests {
 
         delete_development_secret(&config_path).unwrap();
         assert!(load_development_secret(&config_path).unwrap().is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn credential_read_does_not_repair_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let config = scratch.path().join("config.json");
+        store_development_secret(&config, "test-value").unwrap();
+        let secret = development_secret_path(&config);
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_development_secret(&config).is_err());
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        super::prepare_relay_credentials(&config).unwrap();
+        assert_eq!(
+            load_development_secret(&config).unwrap().as_deref(),
+            Some("test-value")
+        );
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

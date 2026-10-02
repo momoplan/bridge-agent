@@ -3,23 +3,25 @@ fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Re
     if lock_path.is_file() {
         let mut install = Command::new(python);
         configure_connector_command(&mut install);
-        let output = install
-            .args([
-                "-I",
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--requirement",
-            ])
-            .arg(&lock_path)
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to install locked Python connector dependencies with {}",
-                    python.display()
-                )
-            })?;
+        let output = crate::process_tree::output(
+            install
+                .args([
+                    "-I",
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--requirement",
+                ])
+                .arg(&lock_path),
+            Duration::from_secs(600),
+        )
+        .with_context(|| {
+            format!(
+                "failed to install locked Python connector dependencies with {}",
+                python.display()
+            )
+        })?;
         if !output.status.success() {
             bail!(
                 "failed to install locked Python connector dependencies for {}\nstdout:\n{}\nstderr:\n{}",
@@ -36,16 +38,18 @@ fn install_python_project_dependencies(package_path: &Path, python: &Path) -> Re
     }
     let mut install = Command::new(python);
     configure_connector_command(&mut install);
-    let output = install
-        .args(["-I", "-m", "pip", "install", "--disable-pip-version-check"])
-        .args(&dependencies)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to install Python connector dependencies with {}",
-                python.display()
-            )
-        })?;
+    let output = crate::process_tree::output(
+        install
+            .args(["-I", "-m", "pip", "install", "--disable-pip-version-check"])
+            .args(&dependencies),
+        Duration::from_secs(600),
+    )
+    .with_context(|| {
+        format!(
+            "failed to install Python connector dependencies with {}",
+            python.display()
+        )
+    })?;
     if !output.status.success() {
         bail!(
             "failed to install Python connector dependencies for {}\nstdout:\n{}\nstderr:\n{}",

@@ -196,10 +196,11 @@ fn release_connector_package_processes(package_path: &Path) -> Result<()> {
     for pid in pids {
         let mut terminate = Command::new("taskkill");
         configure_connector_command(&mut terminate);
-        let taskkill = terminate
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
+        let taskkill = crate::process_tree::output(
+            terminate.args(["/PID", &pid.to_string(), "/T", "/F"]),
+            Duration::from_secs(10),
+        )
+        .with_context(|| format!("failed to terminate connector process tree {pid}"))?;
         if !taskkill.status.success() {
             bail!(
                 "failed to terminate connector process tree {pid}\nstdout:\n{}\nstderr:\n{}",
@@ -245,19 +246,19 @@ Get-CimInstance Win32_Process -ErrorAction Stop |
 "#;
     let mut inspect = Command::new("powershell");
     configure_connector_command(&mut inspect);
-    let output = inspect
-        .args(["-NoProfile", "-Command", script])
-        .env(
+    let output = crate::process_tree::output(
+        inspect.args(["-NoProfile", "-Command", script]).env(
             "BAIJIMU_LOCAL_APP_PACKAGE_TO_RELEASE",
             package_path.as_os_str(),
+        ),
+        Duration::from_secs(5),
+    )
+    .with_context(|| {
+        format!(
+            "failed to inspect Windows processes using connector package {}",
+            package_path.display()
         )
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to inspect Windows processes using connector package {}",
-                package_path.display()
-            )
-        })?;
+    })?;
     if !output.status.success() {
         bail!(
             "failed to inspect Windows processes using connector package {}\nstdout:\n{}\nstderr:\n{}",
@@ -350,10 +351,11 @@ fn signal_connector_package_processes(package_path: &Path, signal: i32) -> Resul
 
 #[cfg(unix)]
 fn connector_package_processes(package_path: &Path) -> Result<Vec<u32>> {
-    let output = Command::new(unix_ps_binary())
-        .args(["-axo", "pid=,command="])
-        .output()
-        .context("failed to inspect Unix processes for connector package use")?;
+    let output = crate::process_tree::output(
+        Command::new(unix_ps_binary()).args(["-axo", "pid=,command="]),
+        Duration::from_secs(5),
+    )
+    .context("failed to inspect Unix processes for connector package use")?;
     if !output.status.success() {
         bail!(
             "failed to inspect Unix processes for connector package use\nstdout:\n{}\nstderr:\n{}",

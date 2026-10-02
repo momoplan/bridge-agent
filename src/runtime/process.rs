@@ -93,8 +93,8 @@ fn describe_process_windows(pid: u32) -> RuntimeProcessInfo {
 
 #[cfg(unix)]
 fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
-    if let Ok(output) = std::process::Command::new("ps")
-        .args([
+    if let Ok(output) = crate::process_tree::output(
+        std::process::Command::new("ps").args([
             "-p",
             &pid.to_string(),
             "-o",
@@ -103,9 +103,9 @@ fn describe_process_unix(pid: u32) -> RuntimeProcessInfo {
             "comm=",
             "-o",
             "args=",
-        ])
-        .output()
-    {
+        ]),
+        Duration::from_secs(3),
+    ) {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = stdout.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -193,19 +193,19 @@ fn terminate_process(pid: u32) -> Result<()> {
 
 #[cfg(unix)]
 fn terminate_process(pid: u32) -> Result<()> {
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status();
+    if pid == 0 || pid > i32::MAX as u32 {
+        bail!("invalid runtime owner pid {pid}");
+    }
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
     if wait_for_process_exit(pid, Duration::from_secs(2)).is_ok() {
         return Ok(());
     }
-    let status = std::process::Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status()
-        .with_context(|| format!("failed to run kill for pid {pid}"))?;
-    if status.success() || !process_is_running(pid) {
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 || !process_is_running(pid) {
         return Ok(());
     }
+
     bail!("failed to terminate runtime owner pid {pid}");
 }
 
@@ -233,13 +233,8 @@ fn process_is_running(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]

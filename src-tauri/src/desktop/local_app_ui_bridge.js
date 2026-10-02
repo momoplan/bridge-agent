@@ -23,7 +23,16 @@
     pending.delete(message.requestId);
     clearTimeout(request.timeout);
     if (message.ok) request.resolve(message.data);
-    else request.reject(new Error(message.error || "本地应用管理操作失败"));
+    else {
+      const error = new Error(message.error || "本地应用管理操作失败");
+      const details = message.errorDetails;
+      if (details && typeof details === "object") {
+        if (typeof details.code === "string") error.code = details.code;
+        if (details.data !== undefined) error.data = details.data;
+        if (details.lifecycle !== undefined) error.lifecycle = details.lifecycle;
+      }
+      request.reject(error);
+    }
   });
 
   const api = Object.freeze({
@@ -36,7 +45,9 @@
       return new Promise((resolve, reject) => {
         const timeout = window.setTimeout(() => {
           pending.delete(requestId);
-          reject(new Error("本地应用管理操作超时"));
+          const error = new Error("本地应用管理请求超时；应用操作可能仍在执行，请先查询状态");
+          error.code = "connector_management_timeout";
+          reject(error);
         }, 65000);
         pending.set(requestId, { resolve, reject, timeout });
         window.parent.postMessage({

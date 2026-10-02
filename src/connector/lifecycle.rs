@@ -7,7 +7,7 @@ pub fn start_connector_with_env(
     config_path: &Path,
     additional_env: &BTreeMap<String, String>,
 ) -> Result<ConnectorStartResult> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     prepare_installed_connector_runtime(config_path, app_id)?;
     let record = load_install_record(app_id)?;
     if record
@@ -39,7 +39,7 @@ pub fn start_connector_with_env(
 }
 
 pub fn stop_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStartResult> {
-    ensure_config_exists(config_path)?;
+    crate::config::initialize_config(config_path)?;
     let record = load_install_record(app_id)?;
     let config = load_config(config_path)?;
     let app = config.local_apps.iter().find(|app| app.app_id == app_id);

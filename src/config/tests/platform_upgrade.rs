@@ -12,7 +12,7 @@ fn upgrade_persists_api_root_without_changing_device_or_credentials() {
     let mut document: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     document["platform"]["base_url"] = json!("https://api.baijimu.com/lowcode3");
     fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-    let upgraded = load_config(&path).unwrap();
+    let upgraded = migrate_config(&path).unwrap();
     assert_eq!(upgraded.platform.base_url, "https://api.baijimu.com");
     assert_eq!(upgraded.platform.workspace_id, config.platform.workspace_id);
     assert_eq!(upgraded.platform.environment_key, config.platform.environment_key);
@@ -22,7 +22,7 @@ fn upgrade_persists_api_root_without_changing_device_or_credentials() {
     let persisted = fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&persisted).contains("test-upgrade-relay-credential"));
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&persisted).unwrap()["platform"]["base_url"], "https://api.baijimu.com");
-    load_config(&path).unwrap();
+    migrate_config(&path).unwrap();
     assert_eq!(fs::read(&path).unwrap(), persisted);
 }
 

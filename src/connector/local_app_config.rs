@@ -171,18 +171,17 @@ fn cleanup_legacy_autostart_label(label: &str) {
         if label.is_empty() {
             return;
         }
-        let uid = Command::new("id")
-            .arg("-u")
-            .output()
+        let uid = crate::process_tree::output(Command::new("id").arg("-u"), Duration::from_secs(3))
             .ok()
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
             .filter(|value| !value.is_empty());
         if let Some(uid) = uid {
             let target = format!("gui/{uid}/{label}");
-            let _ = Command::new("launchctl")
-                .args(["bootout", &target])
-                .output();
+            let _ = crate::process_tree::output(
+                Command::new("launchctl").args(["bootout", &target]),
+                Duration::from_secs(10),
+            );
         }
 
         if let Some(home) = env::var_os("HOME") {

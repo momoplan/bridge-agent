@@ -18,6 +18,7 @@ fn migrate_installations_before_startup(config_path: &Path) -> anyhow::Result<bo
         &bridge_agent::connectors_dir()?,
         managed_apps,
     )?;
+    bridge_agent::initialize_config(config_path)?;
     Ok(config_changed)
 }
 
@@ -30,18 +31,20 @@ fn run_identity_migration(
     let mut command = Command::new(binary);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let output = command
-        .arg("--config-dir")
-        .arg(resolve_config_base_dir(config_path))
-        .arg("--local-apps-dir")
-        .arg(local_apps)
-        .arg("--managed-apps-dir")
-        .arg(managed_apps)
-        .arg("--prepare-startup")
-        .arg("--config")
-        .arg(config_path)
-        .output()
-        .with_context(|| format!("failed to start migration artifact {}", binary.display()))?;
+    let output = bridge_agent::process_tree::output(
+        command
+            .arg("--config-dir")
+            .arg(resolve_config_base_dir(config_path))
+            .arg("--local-apps-dir")
+            .arg(local_apps)
+            .arg("--managed-apps-dir")
+            .arg(managed_apps)
+            .arg("--prepare-startup")
+            .arg("--config")
+            .arg(config_path),
+        Duration::from_secs(300),
+    )
+    .with_context(|| format!("failed to start migration artifact {}", binary.display()))?;
     anyhow::ensure!(
         output.status.success(),
         "environment identity migration failed: {}",
