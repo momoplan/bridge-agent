@@ -8,8 +8,14 @@ async fn mock_response(
     let url = format!("http://{}/management/test", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 4096];
-        socket.read(&mut request).await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before its headers");
+            request.extend_from_slice(&chunk[..read]);
+            assert!(request.len() <= 4096, "unexpected mock request size");
+        }
         let _ = socket.write_all(&response).await;
     });
     (
