@@ -39,7 +39,8 @@
 
         let mut status = String::new();
         let mut stdout = String::new();
-        for _ in 0..20 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let result = registry
                 .invoke(
                     "req-get".to_string(),
@@ -88,7 +89,8 @@
 
         let mut status = String::new();
         let mut stdout = String::new();
-        for _ in 0..200 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let result = registry
                 .invoke(
                     "req-get-stdin".to_string(),
@@ -142,7 +144,8 @@
         let mut status = String::new();
         let mut final_stdout = String::new();
         let mut final_stderr = String::new();
-        for _ in 0..80 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let result = registry
                 .invoke(
                     "req-get-live-output".to_string(),
@@ -202,7 +205,8 @@
 
         let mut status = String::new();
         let mut stdout = String::new();
-        for _ in 0..80 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let result = registry
                 .invoke(
                     "req-start-no-process-timeout-poll".to_string(),
@@ -248,7 +252,8 @@
         let execution_id = start_data["executionId"].as_str().unwrap().to_string();
 
         let mut status = String::new();
-        for _ in 0..80 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let result = registry
                 .invoke(
                     "req-start-explicit-process-timeout-poll".to_string(),
