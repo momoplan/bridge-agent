@@ -111,6 +111,26 @@
     }
 
     #[test]
+    fn prepare_upload_request_uses_relay_camel_case_schema() {
+        let payload = serde_json::to_value(PrepareUploadRequest {
+            agent_id: "devbox".to_string(),
+            content_type: "image/png".to_string(),
+            file_name: "shot.png".to_string(),
+            size_bytes: 123,
+            workspace_id: Some(42),
+            purpose: "computer_screenshot".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(payload["agentId"], "devbox");
+        assert_eq!(payload["contentType"], "image/png");
+        assert_eq!(payload["fileName"], "shot.png");
+        assert_eq!(payload["sizeBytes"], 123);
+        assert_eq!(payload["workspaceId"], 42);
+        assert!(payload.get("agent_id").is_none());
+    }
+
+    #[test]
     fn resolve_cwd_rejects_escape() {
         let base = std::env::temp_dir().join(format!("bridge-agent-test-{}", std::process::id()));
         let nested = base.join("nested");

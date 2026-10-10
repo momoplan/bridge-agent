@@ -476,47 +476,80 @@ cargo run -- run
 
 如果你要给最终用户分发，一般不是让用户跑 `cargo run`，而是直接分发 Tauri 打包后的桌面应用。
 
-## 大截图与个人文件
+## 大截图上传协议
 
-超过 `upload.inline_limit_bytes` 的截图由 `workspace-file-service` 存入设备授权用户的个人空间。
-客户端从共享 CLI 凭据中精确选择 `environmentKey + clientId + workspaceIds` 对应的设备授权 PAT，
-校验环境 API 地址绑定，绝不使用 CLI 当前登录用户、Relay token 或调用者传入的用户编号。
+当 `computer.screenshot` 结果超过 `upload.inline_limit_bytes` 时，`bridge-agent` 不再把整张图内联到 WebSocket 消息里，而是改走上传。默认阈值是 262144 字节，常规桌面截图通常会返回文件引用而不是完整 base64：
 
-1. 向所属环境的 `POST /partner/v1/workspace-file-service/api/personal-files/direct-uploads/prepare`
-   发送 `fileName`、`mimeType`、`source`、`sizeBytes`，个人文件服务预留配额及稳定 `fileId`。
-2. 按返回票据通过 HTTPS PUT 直传对象存储；该请求不携带用户 PAT。
-3. 调用同一 owner 的 `.../direct-uploads/complete`，仅提交 `uploadId`。文件服务核对内容并完成入库。
-4. 只有完成确认成功才经 Relay 返回 `personal_file`；失败直接报告错误，不回退到旧 OSS 接口。
+1. `bridge-agent -> prepare upload`
+2. `bridge-agent -> 直传对象存储 / 文件服务`
+3. `bridge-agent -> relay` 只回文件引用
 
-截图结果示例：
+默认的上传准备接口：
+
+- `POST {relay-origin}/api/bridge-agent/uploads/prepare`
+
+其中 `relay-origin` 会从 `relay.url` 自动推导：
+
+- `wss://relay.baijimu.com/ws/agent` -> `https://relay.baijimu.com/api/bridge-agent/uploads/prepare`
+- `ws://127.0.0.1:8080/ws/agent` -> `http://127.0.0.1:8080/api/bridge-agent/uploads/prepare`（旧默认，仅兼容迁移）
+
+也可以通过 `upload.prepare_url` 显式覆盖。
+
+请求头建议：
+
+- `Authorization: Bearer {relay.token}`
+
+请求体示例：
 
 ```json
 {
-  "result_type": "personal_file",
-  "file": {
-    "contractVersion": "1.0.0",
-    "workspaceId": 42,
-    "userId": 8,
-    "file": {
-      "fileId": "00000000-0000-4000-8000-000000000002",
-      "path": "attachments/computer_screenshot/example/shot.png",
-      "fileName": "shot.png",
-      "mimeType": "image/png",
-      "sizeBytes": 800000,
-      "source": "computer_screenshot"
-    }
-  },
-  "mime_type": "image/png",
-  "width": 3024,
-  "height": 1964,
-  "display_id": null
+  "agent_id": "dev_8f5b7bb6308f4b6f8c0d2cb4b5f8a1a4",
+  "workspace_id": 642,
+  "purpose": "computer_screenshot",
+  "content_type": "image/png",
+  "file_name": "bridge-agent-screenshot-1744718123456.png",
+  "size_bytes": 19905790
 }
 ```
 
-引用中的身份是文件归属信息，不是访问凭据。消费者使用文件所属用户的授权，经同一 owner 的
-`GET /api/personal-files/{fileId}/content` 获取内容；不得将远程控制权限解释为任意个人文件读取权限。
-结果不含对象存储地址、临时下载 URL 或凭据。截图上传入口由授权环境与个人文件 API 合同确定；
-`upload.prepare_url` 仅保留给既有 Connector 上传协议，截图不再使用它。未找到精确设备凭据时要求重新授权，不猜测用户。
+上传准备响应示例：
+
+```json
+{
+  "file_id": "file_123",
+  "upload_url": "https://oss-example/put-signed-url",
+  "method": "PUT",
+  "headers": {
+    "x-oss-content-sha256": "UNSIGNED-PAYLOAD"
+  },
+  "object_key": "bridge-agent/screenshots/file_123.png",
+  "download_url": "https://download.example.com/file_123",
+  "expires_at": "2026-04-15T20:00:00+08:00"
+}
+```
+
+截图最终通过 relay 返回给上层的结果示例：
+
+```json
+{
+  "result_type": "asset_ref",
+  "asset_id": "file_123",
+  "object_key": "bridge-agent/screenshots/file_123.png",
+  "download_url": "https://download.example.com/file_123",
+  "expires_at": "2026-04-15T20:00:00+08:00",
+  "mime_type": "image/png",
+  "width": 3024,
+  "height": 1964,
+  "display_id": null,
+  "size_bytes": 19905790
+}
+```
+
+如果没有可用上传接口，同时截图又超过阈值，`bridge-agent` 会返回：
+
+- `error.code = "PAYLOAD_TOO_LARGE"`
+
+这样可以避免继续把 relay 的 WebSocket 单消息上限打爆。
 
 ## Connector 私有资源上传
 

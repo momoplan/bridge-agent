@@ -135,9 +135,9 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
                 />
               </Field>
               <Field
-                label="插件资源上传接口"
+                label="上传准备接口"
                 wide
-                hint="仅用于插件资源上传。截图自动存入设备授权账户的个人文件夹，不受此设置影响。"
+                hint="大截图会先调用这个接口申请上传槽位。留空时默认使用 relay 同域的 /api/bridge-agent/uploads/prepare。"
               >
                 <input
                   value={config.upload.prepare_url}
