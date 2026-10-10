@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod runtime;
 mod secret_store;
 pub mod services;
+mod upload_response;
 #[cfg(windows)]
 mod windows_process;
 mod windows_tcp;

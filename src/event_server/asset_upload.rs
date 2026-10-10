@@ -106,12 +106,10 @@ async fn prepare_local_asset_upload(
             size_bytes: asset.size_bytes,
         })
         .send().await.map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, err.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(EventApiError::new(StatusCode::BAD_GATEWAY, format!("prepare upload returned {status}: {}", body.chars().take(240).collect::<String>())));
-    }
-    response.json().await.map_err(internal_error)
+    let status = response.status();
+    let body = response.bytes().await.map_err(internal_error)?;
+    crate::upload_response::decode_upload_slot(status, &body)
+        .map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, format!("{err:#}")))
 }
 
 async fn upload_local_asset_bytes(
