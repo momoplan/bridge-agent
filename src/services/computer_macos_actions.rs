@@ -128,16 +128,9 @@ async fn upload_screenshot(
         .await
         .context("failed to request screenshot upload slot")?;
 
-    if !prepare.status().is_success() {
-        let status = prepare.status();
-        let body = prepare.text().await.unwrap_or_default();
-        bail!("prepare upload failed with status {}: {}", status, body);
-    }
-
-    let slot: PrepareUploadResponse = prepare
-        .json()
-        .await
-        .context("failed to decode prepare upload response")?;
+    let status = prepare.status();
+    let body = prepare.bytes().await.context("failed to read prepare upload response")?;
+    let slot: PrepareUploadResponse = crate::upload_response::decode_upload_slot(status, &body)?;
     let upload_method = slot.method.as_deref().unwrap_or("PUT").parse::<Method>()?;
     let mut upload = method
         .client
