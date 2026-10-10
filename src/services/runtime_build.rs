@@ -164,11 +164,7 @@ fn build_computer_method(
         action: binding.action.clone(),
         display_id: binding.display_id,
         upload: config.upload.clone(),
-        upload_prepare_url: config.upload.prepare_url(&config.relay),
-        agent_id: config.relay.agent_id.clone(),
-        relay_token: config.relay.token.clone(),
-        workspace_id: config.platform.workspace_id,
-        client: Client::new(),
+        personal_files: crate::personal_files::PersonalFileClient::new(config),
     })
 }
 

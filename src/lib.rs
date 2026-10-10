@@ -5,6 +5,7 @@ pub mod event_delivery;
 mod event_server;
 pub mod logging;
 pub mod market_distribution;
+mod personal_files;
 mod power;
 pub mod process_environment;
 mod process_identity;

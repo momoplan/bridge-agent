@@ -100,104 +100,18 @@ async fn upload_screenshot(
     width: u32,
     height: u32,
 ) -> Result<ServiceOutcome> {
-    let Some(prepare_url) = method.upload_prepare_url.as_deref() else {
-        return Ok(screenshot_too_large(method, bytes.len(), width, height));
-    };
-
-    let file_name = format!(
-        "bridge-agent-screenshot-{}.png",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    let prepare = method
-        .client
-        .post(prepare_url)
-        .timeout(Duration::from_secs(method.upload.timeout_secs))
-        .bearer_auth(&method.relay_token)
-        .json(&PrepareUploadRequest {
-            agent_id: method.agent_id.clone(),
-            content_type: "image/png".to_string(),
-            file_name,
-            size_bytes: bytes.len() as u64,
-            workspace_id: method.workspace_id,
-            purpose: "computer_screenshot".to_string(),
-        })
-        .send()
-        .await
-        .context("failed to request screenshot upload slot")?;
-
-    let status = prepare.status();
-    let body = prepare.bytes().await.context("failed to read prepare upload response")?;
-    let slot: PrepareUploadResponse = crate::upload_response::decode_upload_slot(status, &body)?;
-    let upload_method = slot.method.as_deref().unwrap_or("PUT").parse::<Method>()?;
-    let mut upload = method
-        .client
-        .request(upload_method, &slot.upload_url)
-        .timeout(Duration::from_secs(method.upload.timeout_secs))
-        .body(bytes.clone());
-    for (key, value) in &slot.headers {
-        upload = upload.header(key, value);
-    }
-    if !slot
-        .headers
-        .keys()
-        .any(|key| key.eq_ignore_ascii_case("content-type"))
-    {
-        upload = upload.header(reqwest::header::CONTENT_TYPE, "image/png");
-    }
-
-    let upload_response = upload
-        .send()
-        .await
-        .context("failed to upload screenshot asset")?;
-    if !upload_response.status().is_success() {
-        let status = upload_response.status();
-        let body = upload_response.text().await.unwrap_or_default();
-        bail!("screenshot upload failed with status {}: {}", status, body);
-    }
-
+    let file_name = format!("screenshot-{}.png", Uuid::new_v4());
+    let reference = method.personal_files.upload(
+        &file_name, "image/png", "computer_screenshot", bytes,
+    ).await?;
     Ok(success_outcome(json!({
-        "result_type": "asset_ref",
-        "asset_id": slot.file_id,
-        "object_key": slot.object_key,
-        "download_url": slot.download_url,
-        "expires_at": slot.expires_at,
+        "result_type": "personal_file",
+        "file": reference,
         "mime_type": "image/png",
         "width": width,
         "height": height,
         "display_id": method.display_id,
-        "size_bytes": bytes.len(),
     })))
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn screenshot_too_large(
-    method: &ComputerMethod,
-    size_bytes: usize,
-    width: u32,
-    height: u32,
-) -> ServiceOutcome {
-    ServiceOutcome {
-        success: false,
-        data: Some(json!({
-            "result_type": "too_large",
-            "mime_type": "image/png",
-            "width": width,
-            "height": height,
-            "display_id": method.display_id,
-            "size_bytes": size_bytes,
-            "inline_limit_bytes": method.upload.inline_limit_bytes,
-        })),
-        error: Some(InvokeError {
-            code: "PAYLOAD_TOO_LARGE".to_string(),
-            message: format!(
-                "screenshot is {size_bytes} bytes, exceeds inline limit {} bytes, and upload.prepare_url is not configured",
-                method.upload.inline_limit_bytes
-            ),
-        }),
-    }
 }
 
 #[cfg(target_os = "macos")]
