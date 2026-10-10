@@ -5,6 +5,7 @@ pub mod event_delivery;
 mod event_server;
 pub mod logging;
 pub mod market_distribution;
+#[cfg(any(target_os = "macos", windows))]
 mod personal_files;
 mod power;
 pub mod process_environment;
