@@ -5,10 +5,11 @@ use std::os::windows::{
     io::{AsRawHandle, FromRawHandle, OwnedHandle},
 };
 use std::path::Path;
+use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
-        STILL_ACTIVE,
+        ERROR_ACCESS_DENIED, ERROR_GEN_FAILURE, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
+        INVALID_HANDLE_VALUE, STILL_ACTIVE,
     },
     Globalization::{CompareStringOrdinal, CSTR_EQUAL},
     System::{
@@ -17,7 +18,7 @@ use windows_sys::Win32::{
             TH32CS_SNAPPROCESS,
         },
         Threading::{
-            GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW,
+            GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_BASIC_INFORMATION,
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
@@ -57,14 +58,6 @@ pub(super) fn package_processes(package: &Path) -> Result<Vec<u32>> {
 }
 
 fn process_image(pid: u32) -> Result<Option<OsString>> {
-    // Windows reserves 0 for Idle and 4 for the kernel System process. Neither
-    // has a user-mode executable in a connector package. Querying System can
-    // return ERROR_GEN_FAILURE even when opening its handle succeeds.
-    const IDLE_PROCESS_ID: u32 = 0;
-    const SYSTEM_PROCESS_ID: u32 = 4;
-    if matches!(pid, IDLE_PROCESS_ID | SYSTEM_PROCESS_ID) {
-        return Ok(None);
-    }
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         let error = std::io::Error::last_os_error();
@@ -99,9 +92,35 @@ fn process_image(pid: u32) -> Result<Option<OsString>> {
         if exited || error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
             return Ok(None);
         }
+        // System and other kernel processes expose no Win32 executable and
+        // return ERROR_GEN_FAILURE. Confirm the absence of a user-mode PEB
+        // instead of assuming every such error is harmless or naming PIDs.
+        if error.raw_os_error() == Some(ERROR_GEN_FAILURE as i32)
+            && !has_user_mode_environment(&process)
+                .with_context(|| format!("failed to classify Windows process {pid}"))?
+        {
+            return Ok(None);
+        }
         return Err(error).with_context(|| format!("failed to read Windows process {pid} image"));
     }
     Ok(Some(OsString::from_wide(&image[..length as usize])))
+}
+
+fn has_user_mode_environment(process: &OwnedHandle) -> Result<bool> {
+    let mut information = PROCESS_BASIC_INFORMATION::default();
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process.as_raw_handle().cast(),
+            ProcessBasicInformation,
+            (&mut information as *mut PROCESS_BASIC_INFORMATION).cast(),
+            std::mem::size_of_val(&information) as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if status < 0 {
+        anyhow::bail!("failed to query native process information (NTSTATUS 0x{status:08x})");
+    }
+    Ok(!information.PebBaseAddress.is_null())
 }
 
 fn normalized_path(path: &OsStr) -> Vec<u16> {
