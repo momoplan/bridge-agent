@@ -144,7 +144,7 @@ fi
 mkdir -p "${resource_dir}"
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.13}"
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$(node -p 'require(process.argv[1]).macos.x86_64' "${repo_root}/config/client-compatibility.json")}"
   echo "Building bundled Baijimu CLI with MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
 fi
 

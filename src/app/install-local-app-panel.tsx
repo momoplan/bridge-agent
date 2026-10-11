@@ -97,7 +97,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                   disabled={installBusy}
                 >
                   <Wrench size={15} aria-hidden="true" />
-                  注册版本安装
+                  <span>注册版本安装</span>
                 </button>
               ) : (
                 <button
@@ -106,7 +106,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                   disabled={installBusy}
                 >
                   <ArrowLeft size={15} aria-hidden="true" />
-                  返回市场
+                  <span>返回市场</span>
                 </button>
               )}
               <button
@@ -200,7 +200,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                             <h4>{selectedMarket.name}</h4>
                             <span className="market-verified-badge">
                               <CheckCircle2 size={13} aria-hidden="true" />
-                              平台验证
+                              <span>平台验证</span>
                             </span>
                           </div>
                           <p>{selectedMarket.description}</p>

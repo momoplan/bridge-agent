@@ -75,7 +75,7 @@ export function LocalAppListPanel(props: LocalAppListPanelProps) {
                 disabled={busy}
               >
                 <ExternalLink size={15} aria-hidden="true" />
-                打开控制台
+                <span>打开控制台</span>
               </button>
             ) : null}
             <button
@@ -98,7 +98,7 @@ export function LocalAppListPanel(props: LocalAppListPanelProps) {
               }}
             >
               <Plus size={16} strokeWidth={2} aria-hidden="true" />
-              安装应用
+              <span>安装应用</span>
             </button>
           </div>
         </div>

@@ -1,9 +1,10 @@
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 
 import { normalizeReleaseApiBase } from "./release-service-url.mjs";
 
-export function buildManifest(entries) {
+export function buildManifest(entries, minimumSystemVersions) {
   if (entries.length === 0) {
     throw new Error("Release manifest must contain at least one asset");
   }
@@ -20,7 +21,8 @@ export function buildManifest(entries) {
         throw new Error(`Duplicate manifest asset: ${target}/${name}`);
       }
       identities.add(identity);
-      return { target, name, signatureRequired: signatureRequired === "true" };
+      return { target, name, signatureRequired: signatureRequired === "true",
+        ...(target === "macOS Universal" && minimumSystemVersions ? { minimumSystemVersions } : {}) };
     }),
   };
 }
@@ -44,7 +46,8 @@ async function main() {
         "Content-Type": "application/json",
         "X-Bridge-Release-Actor": "github-actions",
       },
-      body: JSON.stringify(buildManifest(entries)),
+      body: JSON.stringify(buildManifest(entries,
+        JSON.parse(readFileSync(new URL("../../config/client-compatibility.json", import.meta.url), "utf8")).macos)),
       signal: AbortSignal.timeout(60_000),
     },
   );

@@ -190,7 +190,8 @@
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .local-app-install-progress.failed p {
@@ -402,7 +403,8 @@
 }
 
 .local-app-update-contract-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -477,7 +479,8 @@
 }
 
 .local-app-update-no-notes {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 9px;
   align-items: flex-start;
   padding: 11px 12px;

@@ -212,7 +212,6 @@ jobs:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-      MACOSX_DEPLOYMENT_TARGET: "10.13"
 
     steps:
       - name: Checkout
@@ -220,6 +219,12 @@ jobs:
         with:
           # Repair releases build the dispatched main commit, not the old tag.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+
+      - name: Configure versioned macOS compatibility baseline
+        shell: bash
+        run: |
+          macos_min="$(node -p 'require("./config/client-compatibility.json").macos.x86_64')"
+          echo "MACOSX_DEPLOYMENT_TARGET=$macos_min" >> "$GITHUB_ENV"
 
       - name: Configure authenticated CModel dependency access
         shell: bash

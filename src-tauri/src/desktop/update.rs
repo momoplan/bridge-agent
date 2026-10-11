@@ -330,8 +330,14 @@ pub(super) async fn install_app_update(
         },
     );
 
-    let updater = app
-        .updater()
+    let mut updater = app.updater_builder();
+    if let Some(os_version) = current_update_os_version()? {
+        updater = updater
+            .header("X-Bridge-OS-Version", os_version)
+            .map_err(|err| format!("设置更新器系统版本失败: {err}"))?;
+    }
+    let updater = updater
+        .build()
         .map_err(|err| format!("初始化官方更新器失败: {err}"))?;
     let Some(update) = updater
         .check()
@@ -401,3 +407,4 @@ pub(super) async fn install_app_update(
 }
 
 include!("update/installation.rs");
+include!("update/os_version.rs");

@@ -53,7 +53,7 @@ export function AppAttentionPanel(props: AppAttentionPanelProps) {
                 onClick={() => setActivePage("diagnostics")}
               >
                 <Terminal size={15} aria-hidden="true" />
-                查看诊断
+                <span>查看诊断</span>
               </button>
             </div>
           </div>

@@ -34,6 +34,16 @@ if [ -z "$tag_commit" ]; then
   exit 1
 fi
 
+if [ "$REPAIR_ASSETS_ONLY" = "true" ] && node --input-type=module -e 'import {releasePlatforms} from "./.github/scripts/release-platforms.mjs"; process.exit(releasePlatforms(process.env.RELEASE_PLATFORMS).some(p => p.id === "macos") ? 0 : 1)'; then
+  original_config="$(git show "${RELEASE_TAG}:src-tauri/tauri.conf.json")"
+  original_min="$(printf '%s' "$original_config" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>console.log(JSON.parse(s).bundle.macOS.minimumSystemVersion))')"
+  current_min="$(node -p 'require("./config/client-compatibility.json").macos.x86_64')"
+  if [ "$original_min" != "$current_min" ]; then
+    echo "Cannot repair an immutable release with a different macOS compatibility baseline" >&2
+    exit 1
+  fi
+fi
+
 git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
 if [ "$REPAIR_ASSETS_ONLY" != "true" ]; then
   if [ "$tag_commit" != "$GITHUB_SHA" ]; then

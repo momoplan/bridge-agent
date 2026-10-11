@@ -52,7 +52,7 @@
 .section-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 0;
   margin-bottom: 18px;
 }
 
@@ -104,7 +104,8 @@
 }
 
 .python-runtime-path {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
   color: var(--text);
   font-size: 12px;
 }
@@ -245,7 +246,8 @@
 }
 
 .permission-banner {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
@@ -294,7 +296,8 @@
 }
 
 .app-version-panel {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   justify-content: space-between;
   gap: 16px;
   align-items: center;
@@ -394,5 +397,6 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }

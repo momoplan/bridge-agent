@@ -19,3 +19,10 @@ test("buildManifest rejects duplicate identities", () => {
     buildManifest(["target::a/client.pkg::true", "target::b/client.pkg::false"]),
   ).toThrow(/Duplicate manifest asset/);
 });
+
+test("macOS manifests carry the versioned per-architecture operating-system requirements", () => {
+  const minimumSystemVersions = { x86_64: "10.15.5", aarch64: "11.0" };
+  const manifest = buildManifest(["macOS Universal::a/client.dmg::false", "Windows x64::a/client.msi::true"], minimumSystemVersions);
+  expect(manifest.assets[0].minimumSystemVersions).toEqual(minimumSystemVersions);
+  expect(manifest.assets[1]).not.toHaveProperty("minimumSystemVersions");
+});

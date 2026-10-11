@@ -31,7 +31,8 @@
 }
 
 .device-authorization-actions button {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: auto auto;
   gap: 7px;
   align-items: center;
   justify-content: center;
@@ -45,7 +46,8 @@
 
 .app-attention-stack .notice-banner,
 .local-app-panel > .notice-banner {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--ds-space-lg);
   align-items: center;
   justify-content: space-between;
@@ -102,8 +104,8 @@
 }
 
 .section-tabs {
-  gap: 2px;
-  padding: 3px;
+  gap: 0;
+  padding: 2px;
   border: 1px solid var(--ds-color-border);
   border-radius: var(--ds-radius-md);
   background: var(--ds-color-muted);
@@ -181,7 +183,7 @@
 }
 
 .alert {
-  display: flex;
+  display: block;
   gap: var(--ds-space-sm);
   align-items: center;
 }
@@ -208,13 +210,15 @@
   }
 
   .desktop-sidebar {
-    padding-inline: 9px;
+    padding-left: 9px;
+    padding-right: 9px;
   }
 
   .desktop-brand {
     grid-template-columns: 34px;
     justify-content: center;
-    padding-inline: 0;
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .desktop-brand-copy,
@@ -288,7 +292,8 @@
   }
 
   .desktop-content {
-    padding-inline: var(--ds-space-lg);
+    padding-left: var(--ds-space-lg);
+    padding-right: var(--ds-space-lg);
   }
 
   .app-detail-dialog {
@@ -299,6 +304,7 @@
   .local-app-panel > .notice-banner {
     align-items: flex-start;
     flex-direction: column;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .modal-backdrop {
@@ -345,6 +351,7 @@
   }
 
   .market-toolbar {
+    grid-template-columns: minmax(0, 1fr);
     padding: 10px 12px;
   }
 
@@ -382,6 +389,7 @@
   }
 
   .install-panel-actions {
+    grid-template-columns: minmax(0, 1fr);
     min-height: 64px;
     padding: 12px 14px;
   }

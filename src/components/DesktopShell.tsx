@@ -154,7 +154,7 @@ export function DesktopSidebar({
                 <span id="desktop-connection-title">连接详情</span>
                 <strong>
                   <i className={`status-dot status-${statusClass}`} aria-hidden="true" />
-                  Agent {statusLabel}
+                  <span>Agent {statusLabel}</span>
                 </strong>
               </div>
               <button
@@ -200,7 +200,7 @@ export function DesktopSidebar({
             <footer className="desktop-connection-actions">
               <button className="secondary button-with-icon" onClick={openDiagnostics}>
                 <Activity size={14} aria-hidden="true" />
-                打开诊断
+                <span>打开诊断</span>
               </button>
             </footer>
           </section>

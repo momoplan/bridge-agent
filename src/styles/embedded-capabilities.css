@@ -162,7 +162,8 @@
 
 .install-panel-head,
 .install-panel-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   justify-content: space-between;
   gap: 18px;
   align-items: center;
@@ -237,7 +238,8 @@
 }
 
 .market-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
   justify-content: space-between;
@@ -463,7 +465,8 @@
 }
 
 .market-verified-badge {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: auto auto;
   gap: 4px;
   align-items: center;
   padding: 3px 7px;
@@ -499,13 +502,15 @@
 }
 
 .market-detail-meta strong {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
   font-size: 13px;
 }
 
 .market-permission-card,
 .install-risk-note {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: flex-start;
   gap: 11px;
   margin-top: 18px;
@@ -521,7 +526,11 @@
   color: var(--accent);
 }
 
-.market-permission-card.incompatible,
+.market-permission-card.incompatible {
+  border-color: rgba(217, 119, 6, 0.22);
+  background: rgba(217, 119, 6, 0.07);
+}
+
 .install-risk-note {
   border-color: rgba(217, 119, 6, 0.22);
   background: rgba(217, 119, 6, 0.07);

@@ -129,7 +129,8 @@
   color: var(--muted);
   font-size: 11px;
   line-height: 1.5;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .log-info strong {
@@ -177,13 +178,17 @@
 
   .page-header,
   .overview-status-row,
-  .registered-service-runtime,
   .registered-service-runtime-main,
   .runtime-config-head,
-  .permission-banner,
-  .app-version-panel,
   .card-head {
     flex-direction: column;
+  }
+
+  .registered-service-runtime,
+  .permission-banner,
+  .app-version-panel {
+    flex-direction: column;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .overview-meta {
