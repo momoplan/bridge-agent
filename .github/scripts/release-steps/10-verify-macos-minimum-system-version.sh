@@ -71,7 +71,7 @@ verify_macho_min() {
     exit 1
   fi
   node .github/scripts/verify-macos-permission-symbols.mjs "$binary"
-  lipo -verify_arch x86_64 arm64 "$binary"
+  lipo "$binary" -verify_arch x86_64 arm64
   for arch in $(lipo -archs "$binary"); do
     local configured_min="$intel_configured_min"
     if [ "$arch" = "arm64" ]; then
