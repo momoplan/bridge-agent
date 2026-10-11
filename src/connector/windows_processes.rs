@@ -57,6 +57,14 @@ pub(super) fn package_processes(package: &Path) -> Result<Vec<u32>> {
 }
 
 fn process_image(pid: u32) -> Result<Option<OsString>> {
+    // Windows reserves 0 for Idle and 4 for the kernel System process. Neither
+    // has a user-mode executable in a connector package. Querying System can
+    // return ERROR_GEN_FAILURE even when opening its handle succeeds.
+    const IDLE_PROCESS_ID: u32 = 0;
+    const SYSTEM_PROCESS_ID: u32 = 4;
+    if matches!(pid, IDLE_PROCESS_ID | SYSTEM_PROCESS_ID) {
+        return Ok(None);
+    }
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         let error = std::io::Error::last_os_error();
@@ -151,6 +159,13 @@ mod tests {
     use super::*;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn kernel_processes_have_no_connector_executable() {
+        assert_eq!(process_image(0).unwrap(), None);
+        assert_eq!(process_image(4).unwrap(), None);
+        assert!(process_image(std::process::id()).unwrap().is_some());
+    }
 
     #[test]
     fn package_paths_preserve_unicode_case_and_directory_boundaries() {
