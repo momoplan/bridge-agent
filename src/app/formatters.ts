@@ -89,6 +89,9 @@ export function formatDesktopPermissionValue(
   const supported =
     permission === "screen_recording" ? status.screenRecordingSupported : status.accessibilitySupported;
   if (!supported) {
+    if (status.platform === "macos") {
+      return "无法自动检测，请在系统隐私设置或实际操作中确认";
+    }
     return `当前平台未接入，${unsupportedLabel}`;
   }
   if (permission === "screen_recording") {

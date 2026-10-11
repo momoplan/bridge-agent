@@ -154,7 +154,7 @@ export function ComputerPermissionPanel(props: ComputerPermissionPanelProps) {
         </div>
         {desktopPermissions?.platform === "macos" ? (
           <div className="permission-actions">
-            {!desktopPermissions.screenRecordingGranted ? (
+            {desktopPermissions.screenRecordingSupported && !desktopPermissions.screenRecordingGranted ? (
               <button
                 className="secondary"
                 onClick={() => void requestDesktopPermission("screen_recording")}

@@ -70,6 +70,7 @@ verify_macho_min() {
     echo "${label} is missing or not executable: ${binary}" >&2
     exit 1
   fi
+  node .github/scripts/verify-macos-permission-symbols.mjs "$binary"
   for arch in $(lipo -archs "$binary"); do
     local configured_min="$intel_configured_min"
     if [ "$arch" = "arm64" ]; then
