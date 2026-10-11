@@ -213,15 +213,21 @@ pub(super) async fn fetch_latest_release() -> Result<UpdateReleaseResponse, Upda
                 format_error_chain(&err)
             ))
         })?;
+    let mut query = vec![
+        ("platform", std::env::consts::OS.to_string()),
+        ("arch", std::env::consts::ARCH.to_string()),
+        ("currentVersion", env!("CARGO_PKG_VERSION").to_string()),
+    ];
+    if let Some(os_version) = current_update_os_version()
+        .map_err(UpdateCheckFailure::configuration)?
+    {
+        query.push(("osVersion", os_version));
+    }
     let response = client
         .get(update_api_url)
         .header(reqwest::header::USER_AGENT, UPDATE_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/json")
-        .query(&[
-            ("platform", std::env::consts::OS),
-            ("arch", std::env::consts::ARCH),
-            ("currentVersion", env!("CARGO_PKG_VERSION")),
-        ])
+        .query(&query)
         .send()
         .await
         .map_err(|err| {

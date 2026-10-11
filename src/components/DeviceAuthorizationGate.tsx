@@ -84,13 +84,13 @@ export function DeviceAuthorizationGate({
           <div className="device-authorization-actions">
             <button className="primary" onClick={onOpenAuthorizationUrl} disabled={busy}>
               <ExternalLink size={15} aria-hidden="true" />
-              默认浏览器打开
+              <span>默认浏览器打开</span>
             </button>
             <button className="secondary" onClick={onOpenAuthorizationUrlInEdge} disabled={busy}>
-              用 Edge 打开
+              <span>用 Edge 打开</span>
             </button>
             <button className="secondary" onClick={onCopyAuthorizationUrl} disabled={busy}>
-              复制链接
+              <span>复制链接</span>
             </button>
           </div>
         </div>
@@ -98,11 +98,11 @@ export function DeviceAuthorizationGate({
         <div className="device-authorization-actions">
           <button className="primary" onClick={onAuthorize} disabled={busy}>
             <ShieldCheck size={15} aria-hidden="true" />
-            {copy.action}
+            <span>{copy.action}</span>
           </button>
           <button className="secondary" onClick={onOpenDiagnostics}>
             <Activity size={15} aria-hidden="true" />
-            查看诊断
+            <span>查看诊断</span>
           </button>
         </div>
       )}

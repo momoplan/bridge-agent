@@ -1,4 +1,5 @@
 @import "./styles/base-shell.css";
+@import "./styles/startup-recovery.css";
 @import "./styles/service-and-detail.css";
 @import "./styles/embedded-capabilities.css";
 @import "./styles/installer-market.css";

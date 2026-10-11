@@ -40,7 +40,7 @@ export function CapabilityMethodConfigPanel(props: CapabilityMethodConfigPanelPr
                   }))
                 }
               />
-              启用
+              <span>启用</span>
             </label>
           </Field>
 

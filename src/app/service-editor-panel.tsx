@@ -61,7 +61,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                   }))
                 }
               />
-              启用
+              <span>启用</span>
             </label>
             <button className="secondary" onClick={() => void saveService(serviceIndex)} disabled={busy}>
               保存配置
@@ -154,7 +154,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                             }))
                           }
                         />
-                        启用
+                        <span>启用</span>
                       </label>
                       <button
                         className={isMethodAdvancedOpen(serviceIndex, methodIndex) ? "secondary" : "ghost"}

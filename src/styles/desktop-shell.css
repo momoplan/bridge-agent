@@ -34,10 +34,10 @@ select {
   font: inherit;
 }
 
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible {
+button:focus,
+input:focus,
+textarea:focus,
+select:focus {
   outline: none;
   box-shadow: var(--ds-shadow-focus);
 }
@@ -127,7 +127,7 @@ select {
 }
 
 .desktop-brand-home:hover .desktop-brand-home-icon,
-.desktop-brand-home:focus-visible .desktop-brand-home-icon {
+.desktop-brand-home:focus .desktop-brand-home-icon {
   opacity: 1;
 }
 
@@ -268,7 +268,8 @@ select {
 .desktop-connection-list dd {
   min-width: 0;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
   color: var(--ds-color-text-secondary);
   font-size: var(--ds-font-caption);
   font-weight: 600;
@@ -292,7 +293,8 @@ select {
 
 .desktop-connection-error p {
   margin: 3px 0 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
   color: #8d2c2c;
   font-size: 11px;
 }

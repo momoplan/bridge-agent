@@ -271,7 +271,7 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
                   checked={config.runtime.log_file_enabled}
                   onChange={(event) => updateRuntime("log_file_enabled", event.target.checked)}
                 />
-                启用
+                <span>启用</span>
               </label>
             </Field>
             <Field label="日志目录" hint="留空使用系统默认目录。">
@@ -308,7 +308,7 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
                   checked={config.runtime.event_server_enabled}
                   onChange={(event) => updateRuntime("event_server_enabled", event.target.checked)}
                 />
-                启用
+                <span>启用</span>
               </label>
             </Field>
             <Field label="事件入口监听地址">

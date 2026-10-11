@@ -1,6 +1,6 @@
 set -euo pipefail
-intel_configured_min="10.13"
-apple_silicon_configured_min="11.0"
+intel_configured_min="$(node -p 'require("./config/client-compatibility.json").macos.x86_64')"
+apple_silicon_configured_min="$(node -p 'require("./config/client-compatibility.json").macos.aarch64')"
 dmg_dir="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
 
 shopt -s nullglob
@@ -71,6 +71,7 @@ verify_macho_min() {
     exit 1
   fi
   node .github/scripts/verify-macos-permission-symbols.mjs "$binary"
+  lipo -verify_arch x86_64 arm64 "$binary"
   for arch in $(lipo -archs "$binary"); do
     local configured_min="$intel_configured_min"
     if [ "$arch" = "arm64" ]; then
@@ -97,14 +98,17 @@ verify_macho_min() {
 }
 
 if plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null)"; then
-  if ! version_lte "$plist_min" "$apple_silicon_configured_min"; then
-    echo "LSMinimumSystemVersion=${plist_min}, expected <= ${apple_silicon_configured_min}" >&2
+  if [ "$plist_min" != "$intel_configured_min" ]; then
+    echo "LSMinimumSystemVersion=${plist_min}, expected ${intel_configured_min}" >&2
     exit 1
   fi
 else
-  echo "LSMinimumSystemVersion not present; relying on Mach-O deployment target checks."
+  echo "LSMinimumSystemVersion is required" >&2
+  exit 1
 fi
 
 verify_macho_min "${app_path}/Contents/MacOS/bridge-agent-desktop" "bridge-agent-desktop"
 verify_macho_min "${app_path}/Contents/Resources/resources/bin/baijimu" "bundled baijimu CLI"
 verify_macho_min "${app_path}/Contents/Resources/resources/bin/bridge-agent-unified-app-id-migration" "unified app ID migration"
+
+verify_macho_min "${app_path}/Contents/Resources/resources/bin/bridge-agent-environment-identity-migration" "environment identity migration"

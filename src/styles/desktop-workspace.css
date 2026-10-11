@@ -250,7 +250,8 @@
 }
 
 .button-with-icon {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: auto auto;
   gap: 7px;
   align-items: center;
   justify-content: center;
@@ -396,4 +397,18 @@
 .device-authorization-copy small {
   display: block;
   margin-top: 8px;
+}
+
+/* Margins keep wrapping gaps inside painted boxes on all supported WebViews. */
+.app-toolbar {
+  gap: 0;
+  padding: calc(var(--ds-space-md) - var(--ds-space-sm) / 2);
+}
+
+.app-toolbar > * {
+  margin: calc(var(--ds-space-sm) / 2);
+}
+
+.section-tabs > * {
+  margin: 1px;
 }

@@ -29,7 +29,7 @@ export function EventStorageSettings({ policy, onChange }: {
   return <div className="form-grid">
     <Field label="自动清理" hint="默认开启。已确认事件立即删除正文；未确认事件保留到所设期限，过期后停止重试。" wide>
       <label className="checkbox-row"><input type="checkbox" checked={policy.automatic_cleanup}
-        onChange={e => update("automatic_cleanup", e.target.checked)} />自动清理过期事件</label>
+        onChange={e => update("automatic_cleanup", e.target.checked)} /><span>自动清理过期事件</span></label>
     </Field>
     <Field label="未确认事件保留天数" hint="从本机接收时间开始计算。关闭自动清理后，未确认事件持续重试，直到队列容量用完。">
       <input type="number" min={1} max={3650} value={policy.retention_days} disabled={!policy.automatic_cleanup}

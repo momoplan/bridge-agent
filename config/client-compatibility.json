@@ -1,0 +1,10 @@
+{
+  "macos": {
+    "x86_64": "10.15.5",
+    "aarch64": "11.0"
+  },
+  "webview": {
+    "javascript": ["safari13.1", "chrome87", "edge88", "firefox78"],
+    "css": "safari13.1"
+  }
+}

@@ -449,7 +449,8 @@
 .runtime-conflict-copy dd {
   margin: 0;
   color: var(--text);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .runtime-conflict-actions {
@@ -496,7 +497,8 @@
   color: var(--text);
   font-size: 14px;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .toast-success {

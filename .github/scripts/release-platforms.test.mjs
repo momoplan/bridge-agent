@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { platformsForAssets, releaseAssets, releasePlatforms } from "./release-platforms.mjs";
 import { publishPlatformAssets } from "./publish-platform-assets.mjs";
-import { assertPlatformSelection, verifyPlatformRelease } from "./verify-platform-release.mjs";
+import { assertPlatformSelection, assertOsSelection, verifyPlatformRelease, verifyMacOsExclusions } from "./verify-platform-release.mjs";
 
 const directories = [];
 afterEach(() => directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true })));
@@ -60,14 +60,14 @@ describe("platform-specific publication", () => {
   });
   test("macOS verification uses both architectures and never requires another platform's version", async () => {
     const platforms = releasePlatforms();
-    const assets = releaseAssets(filesFor(platforms), platforms).map((asset) => ({ ...asset, sha256: "a".repeat(64), downloadUrl: `https://cdn.example.test/${asset.name}`, signature: asset.signatureRequired ? "signature" : undefined }));
+    const assets = releaseAssets(filesFor(platforms), platforms).map((asset) => ({ ...asset, sha256: "a".repeat(64), minimumSystemVersions: { x86_64: "10.15.5", aarch64: "11.0" }, downloadUrl: `https://cdn.example.test/${asset.name}`, signature: asset.signatureRequired ? "signature" : undefined }));
     const requests = [];
     const fakeFetch = async (url) => {
       requests.push(url.toString());
       const payload = url.pathname.endsWith("/tauri")
         ? { version: "1.2.3", url: assets[0].downloadUrl, signature: "signature" }
         : { version: "1.2.3", assets };
-      return new Response(JSON.stringify(payload), { headers: { "x-bridge-release-selection": "platform-v1" } });
+      return new Response(JSON.stringify(payload), { headers: { "x-bridge-release-selection": "platform-v1", "x-bridge-release-os-selection": "os-v1" } });
     };
     await verifyPlatformRelease("https://update.example.test/latest", "1.2.3", platforms, fakeFetch, async () => new Response("b", { status: 206 }));
     expect(requests).toHaveLength(4);
@@ -81,6 +81,21 @@ describe("platform-specific publication", () => {
   });
 });
 
+
+test("raising the macOS floor requires an OS-aware backend", () => {
+  expect(() => assertOsSelection(new Response("{}"))).toThrow(/operating-system compatibility/);
+  expect(() => assertOsSelection(new Response("{}", { headers: { "x-bridge-release-os-selection": "os-v1" } }))).not.toThrow();
+});
+
+test("OS exclusions reject unsafe updates in both APIs for both architectures", async () => {
+  const requests = [];
+  const old = async (url) => { requests.push(url); return new Response(JSON.stringify({ version: "0.10.5", forceUpdate: false })); };
+  await verifyMacOsExclusions("https://update.example.test/latest", "0.11.0", old);
+  expect(requests).toHaveLength(8);
+  expect(requests.some((url) => url.searchParams.get("osVersion") === "10.15.4")).toBe(true);
+  expect(requests.some((url) => !url.searchParams.has("osVersion"))).toBe(true);
+  await expect(verifyMacOsExclusions("https://update.example.test/latest", "0.11.0", async () => new Response(JSON.stringify({ version: "0.11.0" })))).rejects.toThrow(/Incompatible macOS/);
+});
 
 test("publication preserves exact versioned names and registers the complete manifest before any uploads", () => {
   const platforms = releasePlatforms("macos,windows");
