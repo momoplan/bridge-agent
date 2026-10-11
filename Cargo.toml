@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.10.4"
+version = "0.10.5"
 edition = "2021"
 default-run = "bridge-agent"
 
@@ -45,7 +45,9 @@ core-graphics = { version = "0.24", features = ["highsierra"] }
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.61", features = [
+    "Wdk_System_Threading",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
@@ -55,6 +57,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Environment",
     "Win32_System_JobObjects",
+    "Win32_System_Kernel",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",

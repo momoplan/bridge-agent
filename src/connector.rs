@@ -37,6 +37,9 @@ include!("connector/lifecycle.rs");
 include!("connector/manifest_validation.rs");
 include!("connector/service_registration.rs");
 include!("connector/package_swap.rs");
+#[cfg(windows)]
+#[path = "connector/windows_processes.rs"]
+mod windows_processes;
 include!("connector/runtime_commands.rs");
 include!("connector/python_project.rs");
 include!("connector/python_discovery.rs");

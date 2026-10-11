@@ -229,51 +229,12 @@ fn connector_package_processes(package_path: &Path) -> Result<Vec<u32>> {
     let package_path = package_path
         .canonicalize()
         .unwrap_or_else(|_| package_path.to_path_buf());
-    let script = r#"
-$prefix = [System.IO.Path]::GetFullPath(
-  $env:BAIJIMU_LOCAL_APP_PACKAGE_TO_RELEASE
-).TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
-  [System.IO.Path]::DirectorySeparatorChar
-Get-CimInstance Win32_Process -ErrorAction Stop |
-  Where-Object {
-    $_.ExecutablePath -and
-    [System.IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
-      $prefix,
-      [System.StringComparison]::OrdinalIgnoreCase
-    )
-  } |
-  Select-Object -ExpandProperty ProcessId
-"#;
-    let mut inspect = Command::new("powershell");
-    configure_connector_command(&mut inspect);
-    let output = crate::process_tree::output(
-        inspect.args(["-NoProfile", "-Command", script]).env(
-            "BAIJIMU_LOCAL_APP_PACKAGE_TO_RELEASE",
-            package_path.as_os_str(),
-        ),
-        Duration::from_secs(5),
-    )
-    .with_context(|| {
+    windows_processes::package_processes(&package_path).with_context(|| {
         format!(
             "failed to inspect Windows processes using connector package {}",
             package_path.display()
         )
-    })?;
-    if !output.status.success() {
-        bail!(
-            "failed to inspect Windows processes using connector package {}\nstdout:\n{}\nstderr:\n{}",
-            package_path.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let mut pids = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect::<Vec<_>>();
-    pids.sort_unstable();
-    pids.dedup();
-    Ok(pids)
+    })
 }
 
 #[cfg(unix)]
