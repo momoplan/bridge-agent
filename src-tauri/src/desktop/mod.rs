@@ -11,6 +11,8 @@ mod local_app_install;
 mod local_app_management;
 mod local_app_market;
 mod local_app_ui;
+#[cfg(target_os = "macos")]
+mod macos_permissions;
 mod market_consumer;
 #[cfg(debug_assertions)]
 mod native_smoke;
@@ -32,6 +34,8 @@ use local_app_install::*;
 use local_app_management::*;
 use local_app_market::*;
 use local_app_ui::*;
+#[cfg(target_os = "macos")]
+use macos_permissions::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions, PermissionApi};
 use recovery::*;
 use runtime_commands::*;
 use startup::*;

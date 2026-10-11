@@ -21,6 +21,11 @@
       if (!config.config.services.length) throw new Error("smoke requires nonempty config");
       const health = await invoke("get_startup_health");
       if (!health.frontendReady) { busy = false; return; }
+      const permissions = await invoke("desktop_permission_status");
+      for (const field of ["accessibilityGranted", "accessibilitySupported", "screenRecordingGranted", "screenRecordingSupported"]) {
+        if (typeof permissions[field] !== "boolean") throw new Error(`permission IPC omitted ${field}`);
+      }
+      if (!permissions.screenRecordingSupported && permissions.screenRecordingGranted) throw new Error("unknown screen permission was reported as authorized");
       const panel = document.getElementById("desktop-recovery");
       const root = document.getElementById("root");
       if (!panel.hidden || root.hidden || !root.getBoundingClientRect().height) throw new Error("populated desktop is hidden by recovery");

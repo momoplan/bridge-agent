@@ -129,13 +129,14 @@ pub(super) fn request_desktop_permission(
 ) -> Result<DesktopPermissionStatus, String> {
     #[cfg(target_os = "macos")]
     {
+        let api = PermissionApi::load();
         match permission.trim() {
             "screen_recording" => {
-                let _ = unsafe { CGRequestScreenCaptureAccess() };
+                api.request_screen_capture()?;
             }
             "accessibility" => {
                 prompt_accessibility_permission();
-                let _ = unsafe { CGRequestPostEventAccess() };
+                api.request_post_event();
             }
             other => return Err(format!("不支持的权限类型: {other}")),
         }
@@ -187,15 +188,15 @@ pub(super) fn open_desktop_permission_settings(permission: String) -> Result<(),
 pub(super) fn read_desktop_permission_status() -> DesktopPermissionStatus {
     #[cfg(target_os = "macos")]
     {
-        let accessibility_granted = unsafe {
-            AXIsProcessTrusted() || CGPreflightPostEventAccess() || CGPreflightListenEventAccess()
-        };
+        let api = PermissionApi::load();
+        let accessibility_granted = api.accessibility_granted(unsafe { AXIsProcessTrusted() });
+        let screen_recording = api.screen_capture_granted();
         DesktopPermissionStatus {
             platform: "macos".to_string(),
             accessibility_granted,
-            screen_recording_granted: unsafe { CGPreflightScreenCaptureAccess() },
+            screen_recording_granted: screen_recording.unwrap_or(false),
             accessibility_supported: true,
-            screen_recording_supported: true,
+            screen_recording_supported: screen_recording.is_some(),
         }
     }
 

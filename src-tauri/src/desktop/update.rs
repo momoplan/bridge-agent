@@ -144,18 +144,6 @@ pub(super) struct UpdateReleaseAsset {
     pub(super) signature: Option<String>,
 }
 
-#[cfg(target_os = "macos")]
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    pub(super) fn AXIsProcessTrusted() -> bool;
-    pub(super) fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
-    pub(super) fn CGPreflightListenEventAccess() -> bool;
-    pub(super) fn CGPreflightPostEventAccess() -> bool;
-    pub(super) fn CGPreflightScreenCaptureAccess() -> bool;
-    pub(super) fn CGRequestPostEventAccess() -> bool;
-    pub(super) fn CGRequestScreenCaptureAccess() -> bool;
-}
-
 pub(super) async fn restart_agent_from_saved_config(
     state: &tauri::State<'_, DesktopState>,
 ) -> anyhow::Result<RuntimeSnapshot> {
