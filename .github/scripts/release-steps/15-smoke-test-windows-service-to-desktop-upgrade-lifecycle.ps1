@@ -173,6 +173,11 @@ try {
   }
   $legacyServicePid = [int]$service.ProcessId
 
+  # Model a user who has disabled login startup before upgrading.
+  $disabledRunKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
+  try { $disabledRunKey.DeleteValue("BaijimuBridgeAgent", $false) }
+  finally { $disabledRunKey.Dispose() }
+
   $upgrade = Start-Process `
     -FilePath "msiexec.exe" `
     -ArgumentList @("/i", "`"$($msi.FullName)`"", "/qn", "/norestart", "AUTOLAUNCHAPP=True", "/L*v", "`"$upgradeLog`"") `
@@ -254,13 +259,13 @@ try {
       -State Listen `
       -ErrorAction SilentlyContinue |
       Select-Object -First 1
-    if ($userRunValue -and $desktopListener) {
+    if ($desktopListener) {
       break
     }
     Start-Sleep -Milliseconds 500
   } while ((Get-Date) -lt $deadline)
-  if ($userRunValue -notlike "*bridge-agent-desktop.exe*") {
-    throw "The current-user desktop login startup entry was not registered: $userRunValue"
+  if ($null -ne $userRunValue) {
+    throw "Upgrade re-enabled a disabled current-user login startup entry: $userRunValue"
   }
   if (-not $desktopListener) {
     throw "The desktop-owned runtime did not bind 127.0.0.1:18081"
@@ -321,7 +326,37 @@ try {
     throw "The retired service reappeared after the desktop exited"
   }
 
-  Write-Host "Verified 0.2.22 service-to-desktop upgrade, login startup, single runtime ownership, and graceful exit"
+  # Restart with both OS preferences. Startup must preserve the existing registration
+  # verbatim, and must never recreate a removed entry. Leave enabled for uninstall coverage.
+  foreach ($enabled in @($false, $true)) {
+    $expectedLoginEntry = if ($enabled) { "`"$desktopExecutable`" --background-autostart" } else { $null }
+    $preferenceKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($userRunSubKey)
+    try {
+      if ($enabled) { $preferenceKey.SetValue("BaijimuBridgeAgent", $expectedLoginEntry) }
+      else { $preferenceKey.DeleteValue("BaijimuBridgeAgent", $false) }
+    } finally { $preferenceKey.Dispose() }
+    $restarted = Start-Process -FilePath $desktopExecutable -PassThru
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+      $listener = Get-NetTCPConnection -LocalPort 18081 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+      if ($listener -and $listener.OwningProcess -eq $restarted.Id) { break }
+      Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $listener -or $listener.OwningProcess -ne $restarted.Id) {
+      throw "The restarted desktop did not become the runtime owner"
+    }
+    $actualLoginEntry = Get-OptionalRegistryValue -Hive ([Microsoft.Win32.Registry]::CurrentUser) `
+      -SubKey $userRunSubKey -Name "BaijimuBridgeAgent"
+    if ($actualLoginEntry -ne $expectedLoginEntry) {
+      throw "Desktop restart changed the user's login preference (enabled=$enabled)"
+    }
+    $quit = Start-Process -FilePath $desktopExecutable -ArgumentList "--quit-running-instance" -Wait -PassThru
+    if ($quit.ExitCode -ne 0) { throw "Restarted desktop quit failed" }
+    if (-not $restarted.WaitForExit(30000)) { throw "Restarted desktop did not exit" }
+  }
+
+  Write-Host "Verified service-to-desktop upgrade, preserved login preferences, single runtime ownership, and graceful exit"
 } finally {
   Get-Process -Name "bridge-agent-desktop" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
