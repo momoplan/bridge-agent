@@ -4,6 +4,9 @@ description = "Allows the trusted Bridge Agent main webview to invoke desktop co
 commands.allow = [
   "load_config",
   "save_config",
+  "save_settings_section",
+  "get_desktop_autostart",
+  "set_desktop_autostart",
   "python_runtime_status",
   "save_service",
   "delete_service",

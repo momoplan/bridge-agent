@@ -2,17 +2,17 @@ import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { RefreshCw } from "lucide-react";
 import { formatAppUpdateProgressButton, formatRelayRegistration, formatRelaySeen, formatTime } from "./formatters";
 import { Card, InfoRow } from "./ui-primitives";
-import type { AppUpdateCheckState, AppUpdateProgress, AppUpdateStatus, AppVersionInfo, DetailPanel, LogEntry, RuntimeSnapshot, SettingsSection, UiAgentConfig } from "./types";
+import type { AppUpdateCheckState, AppUpdateProgress, AppUpdateStatus, AppVersionInfo, DetailPanel, LogEntry, RuntimeSnapshot, UiAgentConfig } from "./types";
 
 interface DetailPanelContentProps {
-  activeDetailPanel: DetailPanel; activeSettingsSection: SettingsSection; appUpdate: AppUpdateStatus | null; appUpdateCheckState: AppUpdateCheckState; appUpdateProgress: AppUpdateProgress | null; appUpdateStatusLabel: string; appUpdateTone: "normal" | "warning" | "danger"; appVersion: AppVersionInfo | null; appVersionLabel: string; beginBrowserAuth: () => Promise<void>; busy: boolean; checkAppUpdate: (showLatestMessage?: boolean) => Promise<AppUpdateStatus | null>; clearLogs: () => Promise<void>; config: UiAgentConfig | null; configPath: string; filteredLogs: LogEntry[]; installAppUpdate: (update?: AppUpdateStatus | null) => Promise<void>; logServiceFilter: string; logServiceOptions: string[]; manifestPreview: string; needsAuthorization: boolean; openAppUninstaller: () => Promise<void>; openAppUpdateReleasePage: (update: AppUpdateStatus) => Promise<void>; renderAppUpdateProgress: () => ReactNode; renderLogMetadata: (entry: LogEntry) => ReactNode; renderSettingsSection: () => ReactNode; runtime: RuntimeSnapshot | null; saveConfig: () => Promise<void>; setActiveSettingsSection: Dispatch<SetStateAction<SettingsSection>>; setLogServiceFilter: Dispatch<SetStateAction<string>>; statusLabel: string; updateBusy: boolean;
+  activeDetailPanel: DetailPanel; appUpdate: AppUpdateStatus | null; appUpdateCheckState: AppUpdateCheckState; appUpdateProgress: AppUpdateProgress | null; appUpdateStatusLabel: string; appUpdateTone: "normal" | "warning" | "danger"; appVersion: AppVersionInfo | null; appVersionLabel: string; checkAppUpdate: (showLatestMessage?: boolean) => Promise<AppUpdateStatus | null>; clearLogs: () => Promise<void>; config: UiAgentConfig | null; configPath: string; filteredLogs: LogEntry[]; installAppUpdate: (update?: AppUpdateStatus | null) => Promise<void>; logServiceFilter: string; logServiceOptions: string[]; manifestPreview: string; needsAuthorization: boolean; openAppUninstaller: () => Promise<void>; openAppUpdateReleasePage: (update: AppUpdateStatus) => Promise<void>; renderAppUpdateProgress: () => ReactNode; renderLogMetadata: (entry: LogEntry) => ReactNode; runtime: RuntimeSnapshot | null; setLogServiceFilter: Dispatch<SetStateAction<string>>; statusLabel: string; updateBusy: boolean;
 }
 interface DiagnosticsPageProps { activeDetailPanel: DetailPanel; busy: boolean; refreshAll: () => Promise<void>; refreshing: boolean; renderDetailPanel: () => ReactNode; resetExampleConfig: () => Promise<void>; setActiveDetailPanel: Dispatch<SetStateAction<DetailPanel>>; }
-interface SettingsPageProps { activeSettingsSection: SettingsSection; beginBrowserAuth: () => Promise<void>; busy: boolean; config: UiAgentConfig | null; refreshAll: () => Promise<void>; refreshing: boolean; renderSettingsSection: () => ReactNode; runtime: RuntimeSnapshot | null; saveConfig: () => Promise<void>; setActiveSettingsSection: Dispatch<SetStateAction<SettingsSection>>; }
+
 interface ToastStackProps { error: string; message: string; setError: Dispatch<SetStateAction<string>>; setMessage: Dispatch<SetStateAction<string>>; }
 
 export function DetailPanelContent(props: DetailPanelContentProps) {
-  const { activeDetailPanel, activeSettingsSection, appUpdate, appUpdateCheckState, appUpdateProgress, appUpdateStatusLabel, appUpdateTone, appVersion, appVersionLabel, beginBrowserAuth, busy, checkAppUpdate, clearLogs, config, configPath, filteredLogs, installAppUpdate, logServiceFilter, logServiceOptions, manifestPreview, needsAuthorization, openAppUninstaller, openAppUpdateReleasePage, renderAppUpdateProgress, renderLogMetadata, renderSettingsSection, runtime, saveConfig, setActiveSettingsSection, setLogServiceFilter, statusLabel, updateBusy } = props;
+  const { activeDetailPanel, appUpdate, appUpdateCheckState, appUpdateProgress, appUpdateStatusLabel, appUpdateTone, appVersion, appVersionLabel, checkAppUpdate, clearLogs, config, configPath, filteredLogs, installAppUpdate, logServiceFilter, logServiceOptions, manifestPreview, needsAuthorization, openAppUninstaller, openAppUpdateReleasePage, renderAppUpdateProgress, renderLogMetadata, runtime, setLogServiceFilter, statusLabel, updateBusy } = props;
     if (!config) {
       return <div />;
     }
@@ -62,53 +62,6 @@ export function DetailPanelContent(props: DetailPanelContentProps) {
       return (
         <Card title="对外清单" description="联调时查看。">
           <pre className="code-panel">{manifestPreview}</pre>
-        </Card>
-      );
-    }
-
-    if (activeDetailPanel === "settings") {
-      return (
-        <Card
-          title="高级设置"
-          description="设备身份、授权连接和本机运行参数。"
-          action={
-            <div className="service-actions">
-              <button className="secondary" onClick={() => void saveConfig()} disabled={busy}>
-                保存配置
-              </button>
-              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
-                浏览器授权
-              </button>
-            </div>
-          }
-        >
-          <div className="status-detail-grid connection-summary-grid">
-            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-            <InfoRow label="平台" value={config.platform.base_url} />
-            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
-          </div>
-          <div className="section-tabs">
-            <button
-              className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("identity")}
-            >
-              设备
-            </button>
-            <button
-              className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("connection")}
-            >
-              连接
-            </button>
-            <button className={`section-tab ${activeSettingsSection === "events" ? "active" : ""}`} onClick={() => setActiveSettingsSection("events")}>事件与存储</button>
-            <button
-              className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("runtime")}
-            >
-              运行
-            </button>
-          </div>
-          {renderSettingsSection()}
         </Card>
       );
     }
@@ -213,67 +166,6 @@ export function DiagnosticsPage(props: DiagnosticsPageProps) {
           </div>
         </div>
         {renderDetailPanel()}
-      </div>
-    );
-  }
-export function SettingsPage(props: SettingsPageProps) {
-  const { activeSettingsSection, beginBrowserAuth, busy, config, refreshAll, refreshing, renderSettingsSection, runtime, saveConfig, setActiveSettingsSection } = props;
-    if (!config) {
-      return <div />;
-    }
-    return (
-      <div className="settings-page">
-        <Card
-          title="客户端设置"
-          description="管理设备身份、工作区连接和本机运行参数。"
-          action={
-            <div className="service-actions">
-              <button
-                className="icon-button"
-                onClick={() => void refreshAll()}
-                disabled={refreshing}
-                aria-label="刷新设置状态"
-                title="刷新"
-              >
-                <RefreshCw size={17} className={refreshing ? "spin" : undefined} aria-hidden="true" />
-              </button>
-              <button className="secondary" onClick={() => void beginBrowserAuth()} disabled={busy}>
-                浏览器授权
-              </button>
-              <button className="primary" onClick={() => void saveConfig()} disabled={busy}>
-                {busy ? "保存中" : "保存配置"}
-              </button>
-            </div>
-          }
-        >
-          <div className="status-detail-grid connection-summary-grid">
-            <InfoRow label="工作区" value={config.platform.workspace_id || "未授权"} />
-            <InfoRow label="平台" value={config.platform.base_url} />
-            <InfoRow label="Relay" value={runtime?.relay_url ?? config.relay.url} />
-          </div>
-          <div className="section-tabs">
-            <button
-              className={`section-tab ${activeSettingsSection === "identity" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("identity")}
-            >
-              设备
-            </button>
-            <button
-              className={`section-tab ${activeSettingsSection === "connection" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("connection")}
-            >
-              连接
-            </button>
-            <button className={`section-tab ${activeSettingsSection === "events" ? "active" : ""}`} onClick={() => setActiveSettingsSection("events")}>事件与存储</button>
-            <button
-              className={`section-tab ${activeSettingsSection === "runtime" ? "active" : ""}`}
-              onClick={() => setActiveSettingsSection("runtime")}
-            >
-              运行
-            </button>
-          </div>
-          {renderSettingsSection()}
-        </Card>
       </div>
     );
   }

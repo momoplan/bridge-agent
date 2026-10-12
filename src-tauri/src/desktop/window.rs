@@ -71,64 +71,28 @@ pub(super) fn should_restore_main_window_on_macos_reopen(has_visible_windows: bo
     !has_visible_windows
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopAutostartPolicy {
-    SkipDevelopmentBuild,
-    EnableForDesktop,
-}
-
-pub(super) fn desktop_autostart_policy(debug_assertions: bool) -> DesktopAutostartPolicy {
-    if debug_assertions {
-        DesktopAutostartPolicy::SkipDevelopmentBuild
-    } else {
-        DesktopAutostartPolicy::EnableForDesktop
-    }
-}
-
+// The OS registration is the source of truth. Startup and upgrades must never
+// create or re-enable a login item; only an explicit settings action may do so.
 pub(super) fn configure_desktop_autostart(
     app: &tauri::App,
     startup_health: &StartupHealthManager,
     diagnostics: &StartupDiagnostics,
 ) {
-    match desktop_autostart_policy(cfg!(debug_assertions)) {
-        DesktopAutostartPolicy::SkipDevelopmentBuild => startup_health.set_component(
+    match app.autolaunch().is_enabled() {
+        Ok(enabled) => startup_health.set_component(
             "autostart",
             "登录启动",
-            "skipped",
-            Some("开发构建不注册系统登录项".to_string()),
+            "ready",
+            Some(if enabled { "已开启" } else { "已关闭" }.into()),
         ),
-        DesktopAutostartPolicy::EnableForDesktop => {
-            let was_enabled = match app.autolaunch().is_enabled() {
-                Ok(enabled) => Some(enabled),
-                Err(err) => {
-                    diagnostics.warn(format!(
-                        "failed to inspect autostart before refreshing registration: {err:#}"
-                    ));
-                    None
-                }
-            };
-            match app.autolaunch().enable() {
-                Ok(()) => {
-                    diagnostics.info(format!(
-                        "official autostart integration {} with background launch argument",
-                        if was_enabled == Some(true) {
-                            "refreshed"
-                        } else {
-                            "enabled"
-                        }
-                    ));
-                    startup_health.set_component("autostart", "登录启动", "ready", None);
-                }
-                Err(err) => {
-                    diagnostics.error(format!("failed to register autostart: {err:#}"));
-                    startup_health.set_component(
-                        "autostart",
-                        "登录启动",
-                        "degraded",
-                        Some(err.to_string()),
-                    );
-                }
-            }
+        Err(err) => {
+            diagnostics.error(format!("failed to inspect autostart: {err:#}"));
+            startup_health.set_component(
+                "autostart",
+                "登录启动",
+                "degraded",
+                Some(err.to_string()),
+            );
         }
     }
 }
@@ -147,7 +111,8 @@ pub(super) fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> 
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "退出", true, None::<&str>)?;
     let recovery = MenuItem::with_id(app, "recovery", "检查更新与修复", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "startup-logs", "打开启动日志", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &recovery, &logs, &quit])?;
+    let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &settings, &recovery, &logs, &quit])?;
     let icon = app.default_window_icon().cloned();
     let menu_diagnostics = diagnostics.clone();
     let tray_diagnostics = diagnostics.clone();
@@ -157,6 +122,10 @@ pub(super) fn setup_tray(app: &tauri::App, diagnostics: &StartupDiagnostics) -> 
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
+            "settings" => {
+                show_main_window(app, Some(&menu_diagnostics), MainWindowOpenReason::TrayMenu);
+                let _ = app.emit("open-settings", ());
+            }
             TRAY_MENU_SHOW => {
                 show_main_window(app, Some(&menu_diagnostics), MainWindowOpenReason::TrayMenu)
             }

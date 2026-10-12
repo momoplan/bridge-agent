@@ -39,6 +39,6 @@ describe("DesktopSidebar environment metadata", () => {
     expect(markup).toContain("当前设备 测试设备，当前工作区 未授权，客户端版本 未知");
     expect(markup).toContain("desktop-environment-version\">版本未知</span>");
     expect(markup).toContain("授权后开放本地能力");
-    expect(markup).toContain("完成设备授权后开放设置");
+    expect(markup).not.toContain("完成设备授权后开放设置");
   });
 });

@@ -95,10 +95,6 @@ export function DesktopApplicationShell(props: DesktopApplicationShellProps) {
   const currentVersion = appVersion?.currentVersion ?? appUpdate?.currentVersion ?? "-";
 
   function navigateToPage(page: AppPage) {
-    if (needsAuthorization && page === "settings") {
-      setActivePage("apps");
-      return;
-    }
     setActivePage(page);
     if (page === "apps") {
       setSelectedLocalAppId(null);
@@ -153,7 +149,7 @@ export function DesktopApplicationShell(props: DesktopApplicationShellProps) {
                 ) : null}
                 <div className="page-body">
                   {needsAuthorization ? (
-                    activePage === "diagnostics" ? renderDiagnosticsPage() : renderDeviceAuthorizationGate()
+                    activePage === "settings" ? renderSettingsPage() : activePage === "diagnostics" ? renderDiagnosticsPage() : renderDeviceAuthorizationGate()
                   ) : (
                     <>
                       {activePage === "apps" ? renderAppsPage() : null}
