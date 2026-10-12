@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { SettingsWorkspace, type SettingsLeaveGuard } from "./app/settings-workspace";
 
 
 
@@ -20,7 +22,6 @@ import { toUiConfig, fromUiConfig, defaultCapabilityArgumentsText } from "./app/
 import { serviceSignature } from "./app/formatters";
 
 
-import { SettingsSectionPanel } from "./app/settings-section";
 import { ServiceRuntimeConfigPanel } from "./app/service-runtime-config-panel";
 import { ServiceEditorPanel } from "./app/service-editor-panel";
 import { CapabilityMethodConfigPanel } from "./app/capability-method-config-panel";
@@ -28,7 +29,7 @@ import { LocalAppAbilityList } from "./app/local-app-ability-list";
 import { InstallLocalAppPanel } from "./app/install-local-app-panel";
 import { LocalAppDetailDialog } from "./app/local-app-detail-dialog";
 import { ForceUpdateOverlay, RecoveryUpdateStatusCard, StartupRecoveryPanel } from "./app/recovery-panels";
-import { DetailPanelContent, DiagnosticsPage, SettingsPage, ToastStack } from "./app/diagnostics-and-settings";
+import { DetailPanelContent, DiagnosticsPage, ToastStack } from "./app/diagnostics-and-settings";
 import { LocalAppInstallProgress, LocalAppUpdateChanges, LocalAppUpgradeDialog } from "./app/local-app-upgrade-panels";
 import { LocalAppCard, LocalAppListPanel } from "./app/local-app-list-panel";
 import { AppAttentionPanel } from "./app/app-attention-panel";
@@ -41,6 +42,19 @@ import type { BrowserAuthPollResponse, ConnectorSummary, LocalAppItem, LogEntry,
 
 
 export function AppView({ controller }: { controller: ReturnType<typeof useAppController> }) {
+  const settingsLeaveGuard = useRef<SettingsLeaveGuard | null>(null);
+  const navigateToPage: typeof controller.setActivePage = next => {
+    void (async () => {
+      const target = typeof next === "function" ? next(controller.activePage) : next;
+      if (target === controller.activePage) return;
+      if (controller.activePage === "settings" && settingsLeaveGuard.current && !(await settingsLeaveGuard.current())) return;
+      controller.setActivePage(target);
+    })();
+  };
+  useEffect(() => {
+    const unlisten = listen("open-settings", () => controller.setActivePage("settings"));
+    return () => { void unlisten.then(stop => stop()); };
+  }, [controller.setActivePage]);
   // Readiness is acknowledged only after a successful commit with loaded business config.
   useEffect(() => {
     if (controller.config) void invoke("mark_frontend_ready").catch(() => {});
@@ -226,35 +240,12 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
   } = controller;
 
 
-  function renderSettingsSection() {
-    return (
-      <SettingsSectionPanel
-        activeSettingsSection={activeSettingsSection}
-        config={config}
-        configPath={configPath}
-        openExternalUrl={openExternalUrl}
-        pythonCheckBusy={pythonCheckBusy}
-        pythonStatus={pythonStatus}
-        refreshPythonRuntime={refreshPythonRuntime}
-        setPythonStatus={setPythonStatus}
-        setShowAdvancedSettings={setShowAdvancedSettings}
-        showAdvancedSettings={showAdvancedSettings}
-        updateDevice={updateDevice}
-        updatePlatform={updatePlatform}
-        updateRelay={updateRelay}
-        updateRuntime={updateRuntime}
-        updateUpload={updateUpload}
-        useDetectedPython={useDetectedPython}
-      />
-    );
-  }
-
   function renderRuntimeConflictPanel() {
     return <RuntimeConflictPanel busy={busy} runtimeConflict={runtimeConflict} setRuntimeConflict={setRuntimeConflict} stopConflictingRuntimeAndStart={stopConflictingRuntimeAndStart} />;
   }
 
   function renderDeviceAuthorizationGate() {
-    return <AuthorizationGatePanel authorizationState={authorizationState} beginBrowserAuth={beginBrowserAuth} browserAuth={browserAuth} busy={busy} config={config} copyText={copyText} openExternalUrl={openExternalUrl} openExternalUrlInEdge={openExternalUrlInEdge} setActivePage={setActivePage} />;
+    return <AuthorizationGatePanel authorizationState={authorizationState} beginBrowserAuth={beginBrowserAuth} browserAuth={browserAuth} busy={busy} config={config} copyText={copyText} openExternalUrl={openExternalUrl} openExternalUrlInEdge={openExternalUrlInEdge} setActivePage={navigateToPage} />;
   }
 
   function serviceRuntimeView(service: UiServiceConfig) {
@@ -396,7 +387,7 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
   }
 
   function renderAppAttentionPanel() {
-    return <AppAttentionPanel appUpdate={appUpdate} appUpdateProgress={appUpdateProgress} busy={busy} config={config} hasDesktopPermissionGap={hasDesktopPermissionGap} installAppUpdate={installAppUpdate} openAppUpdateReleasePage={openAppUpdateReleasePage} runtime={runtime} runtimeCanStop={runtimeCanStop} setActiveLocalAppDetailTab={setActiveLocalAppDetailTab} setActivePage={setActivePage} setExpandedServiceIndex={setExpandedServiceIndex} setSelectedLocalAppId={setSelectedLocalAppId} startActionLabel={startActionLabel} startActionLocked={startActionLocked} startAgent={startAgent} statusLabel={statusLabel} stopAgent={stopAgent} updateBusy={updateBusy} />;
+    return <AppAttentionPanel appUpdate={appUpdate} appUpdateProgress={appUpdateProgress} busy={busy} config={config} hasDesktopPermissionGap={hasDesktopPermissionGap} installAppUpdate={installAppUpdate} openAppUpdateReleasePage={openAppUpdateReleasePage} runtime={runtime} runtimeCanStop={runtimeCanStop} setActiveLocalAppDetailTab={setActiveLocalAppDetailTab} setActivePage={navigateToPage} setExpandedServiceIndex={setExpandedServiceIndex} setSelectedLocalAppId={setSelectedLocalAppId} startActionLabel={startActionLabel} startActionLocked={startActionLocked} startAgent={startAgent} statusLabel={statusLabel} stopAgent={stopAgent} updateBusy={updateBusy} />;
   }
 
   function renderLocalAppPanel() {
@@ -475,7 +466,7 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
   }
 
   function renderDetailPanel() {
-    return <DetailPanelContent activeDetailPanel={activeDetailPanel} activeSettingsSection={activeSettingsSection} appUpdate={appUpdate} appUpdateCheckState={appUpdateCheckState} appUpdateProgress={appUpdateProgress} appUpdateStatusLabel={appUpdateStatusLabel} appUpdateTone={appUpdateTone} appVersion={appVersion} appVersionLabel={appVersionLabel} beginBrowserAuth={beginBrowserAuth} busy={busy} checkAppUpdate={checkAppUpdate} clearLogs={clearLogs} config={config} configPath={configPath} filteredLogs={filteredLogs} installAppUpdate={installAppUpdate} logServiceFilter={logServiceFilter} logServiceOptions={logServiceOptions} manifestPreview={manifestPreview} needsAuthorization={needsAuthorization} openAppUninstaller={openAppUninstaller} openAppUpdateReleasePage={openAppUpdateReleasePage} renderAppUpdateProgress={renderAppUpdateProgress} renderLogMetadata={renderLogMetadata} renderSettingsSection={renderSettingsSection} runtime={runtime} saveConfig={saveConfig} setActiveSettingsSection={setActiveSettingsSection} setLogServiceFilter={setLogServiceFilter} statusLabel={statusLabel} updateBusy={updateBusy} />;
+    return <DetailPanelContent activeDetailPanel={activeDetailPanel} appUpdate={appUpdate} appUpdateCheckState={appUpdateCheckState} appUpdateProgress={appUpdateProgress} appUpdateStatusLabel={appUpdateStatusLabel} appUpdateTone={appUpdateTone} appVersion={appVersion} appVersionLabel={appVersionLabel} checkAppUpdate={checkAppUpdate} clearLogs={clearLogs} config={config} configPath={configPath} filteredLogs={filteredLogs} installAppUpdate={installAppUpdate} logServiceFilter={logServiceFilter} logServiceOptions={logServiceOptions} manifestPreview={manifestPreview} needsAuthorization={needsAuthorization} openAppUninstaller={openAppUninstaller} openAppUpdateReleasePage={openAppUpdateReleasePage} renderAppUpdateProgress={renderAppUpdateProgress} renderLogMetadata={renderLogMetadata} runtime={runtime} setLogServiceFilter={setLogServiceFilter} statusLabel={statusLabel} updateBusy={updateBusy} />;
   }
 
   function renderDiagnosticsPage() {
@@ -483,7 +474,7 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
   }
 
   function renderSettingsPage() {
-    return <SettingsPage activeSettingsSection={activeSettingsSection} beginBrowserAuth={beginBrowserAuth} busy={busy} config={config} refreshAll={refreshAll} refreshing={refreshing} renderSettingsSection={renderSettingsSection} runtime={runtime} saveConfig={saveConfig} setActiveSettingsSection={setActiveSettingsSection} />;
+    return config ? <SettingsWorkspace config={config} configPath={configPath} leaveGuard={settingsLeaveGuard} onSaved={controller.applyConfigDocument} beginBrowserAuth={beginBrowserAuth} openExternalUrl={openExternalUrl} renderAbout={() => <DetailPanelContent {...{ appUpdate, appUpdateCheckState, appUpdateProgress, appUpdateStatusLabel, appUpdateTone, appVersion, appVersionLabel, checkAppUpdate, clearLogs, config, configPath, filteredLogs, installAppUpdate, logServiceFilter, logServiceOptions, manifestPreview, needsAuthorization, openAppUninstaller, openAppUpdateReleasePage, renderAppUpdateProgress, renderLogMetadata, runtime, setLogServiceFilter, statusLabel, updateBusy }} activeDetailPanel="system" />} /> : null;
   }
 
   function renderToastStack() {
@@ -562,7 +553,7 @@ export function AppView({ controller }: { controller: ReturnType<typeof useAppCo
     return <ForceUpdateOverlay appUpdate={appUpdate} appUpdateCheckState={appUpdateCheckState} appUpdateProgress={appUpdateProgress} checkAppUpdate={checkAppUpdate} installAppUpdate={installAppUpdate} openAppUpdateReleasePage={openAppUpdateReleasePage} renderAppUpdateProgress={renderAppUpdateProgress} updateBusy={updateBusy} />;
   }
 
-  return <DesktopApplicationShell activeDetailPanel={activeDetailPanel} activePage={activePage} appUpdate={appUpdate} appVersion={appVersion} authorizationState={authorizationState} config={config} degradedStartupComponents={degradedStartupComponents} needsAuthorization={needsAuthorization} openStartupLog={openStartupLog} renderAppsPage={renderAppsPage} renderDeviceAuthorizationGate={renderDeviceAuthorizationGate} renderDiagnosticsPage={renderDiagnosticsPage} renderForceUpdateOverlay={renderForceUpdateOverlay} renderInstallLocalAppPanel={renderInstallLocalAppPanel} renderRuntimeConflictPanel={renderRuntimeConflictPanel} renderSettingsPage={renderSettingsPage} renderStartupRecoveryPanel={renderStartupRecoveryPanel} renderToastStack={renderToastStack} runtime={runtime} setActiveDetailPanel={setActiveDetailPanel} setActivePage={setActivePage} setSelectedLocalAppId={setSelectedLocalAppId} startupHealth={startupHealth} statusLabel={statusLabel} />;
+  return <DesktopApplicationShell activeDetailPanel={activeDetailPanel} activePage={activePage} appUpdate={appUpdate} appVersion={appVersion} authorizationState={authorizationState} config={config} degradedStartupComponents={degradedStartupComponents} needsAuthorization={needsAuthorization} openStartupLog={openStartupLog} renderAppsPage={renderAppsPage} renderDeviceAuthorizationGate={renderDeviceAuthorizationGate} renderDiagnosticsPage={renderDiagnosticsPage} renderForceUpdateOverlay={renderForceUpdateOverlay} renderInstallLocalAppPanel={renderInstallLocalAppPanel} renderRuntimeConflictPanel={renderRuntimeConflictPanel} renderSettingsPage={renderSettingsPage} renderStartupRecoveryPanel={renderStartupRecoveryPanel} renderToastStack={renderToastStack} runtime={runtime} setActiveDetailPanel={setActiveDetailPanel} setActivePage={navigateToPage} setSelectedLocalAppId={setSelectedLocalAppId} startupHealth={startupHealth} statusLabel={statusLabel} />;
 }
 
 import { DesktopApplicationShell, StartupLoadingView } from "./app/app-shell";

@@ -237,8 +237,6 @@ export function DesktopSidebar({
           className={`desktop-nav-item ${activePage === "settings" ? "active" : ""}`}
           onClick={() => onNavigate("settings")}
           aria-current={activePage === "settings" ? "page" : undefined}
-          disabled={authorizationLocked}
-          title={authorizationLocked ? "完成设备授权后开放设置" : undefined}
         >
           <Settings size={18} strokeWidth={1.8} aria-hidden="true" />
           <span>

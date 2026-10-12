@@ -31,6 +31,7 @@
       if (!panel.hidden || root.hidden || !root.getBoundingClientRect().height) throw new Error("populated desktop is hidden by recovery");
       window.dispatchEvent(new ErrorEvent("error", { error: new Error("native nonfatal error injection") }));
       if (!panel.hidden || root.hidden) throw new Error("nonfatal error hid the desktop");
+      await verifyNativeSettings(invoke);
       await verifyNativeLocalAppUi(invoke);
       root.replaceChildren();
       await new Promise((resolve) => setTimeout(resolve, 3500));
@@ -83,4 +84,21 @@ async function verifyNativeLocalAppUi(invoke) {
     window.removeEventListener("message", listener);
     frames.forEach((frame) => frame.remove());
   }
+}
+
+async function verifyNativeSettings(invoke) {
+  const before = await invoke("load_config");
+  const saved = await invoke("save_settings_section", { section: "identity", changes: { "device.name": "Native settings smoke" } });
+  if (saved.config.device.name !== "Native settings smoke") throw new Error("settings section did not persist");
+  for (const key of ["platform", "relay", "runtime", "services", "local_apps"]) {
+    if (JSON.stringify(saved.config[key]) !== JSON.stringify(before.config[key])) throw new Error(`settings overwrote ${key}`);
+  }
+  let rejected = false;
+  try { await invoke("save_settings_section", { section: "identity", changes: { "relay.token": "invalid" } }); }
+  catch { rejected = true; }
+  if (!rejected) throw new Error("settings allowed a credential overwrite");
+  const enabled = await invoke("get_desktop_autostart");
+  if (typeof enabled !== "boolean") throw new Error("autostart state missing");
+  // Exercise the command and ACL without changing the user's actual login item.
+  if (await invoke("set_desktop_autostart", { enabled }) !== enabled) throw new Error("autostart state changed unexpectedly");
 }

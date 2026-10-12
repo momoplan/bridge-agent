@@ -109,6 +109,7 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
                   />
                 </Field>
               ) : null}
+              {showAdvancedSettings ? <>
               <Field label="Relay WebSocket URL">
                 <input
                   value={config.relay.url}
@@ -168,6 +169,7 @@ export function SettingsSectionPanel(props: SettingsSectionProps) {
                   }
                 />
               </Field>
+              </> : null}
             </div>
           </>
         );

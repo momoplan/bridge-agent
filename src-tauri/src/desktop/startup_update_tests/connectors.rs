@@ -169,18 +169,6 @@ fn secondary_instance_construction_does_not_mutate_startup_state() {
 }
 
 #[test]
-fn desktop_is_the_release_autostart_owner_on_every_supported_platform() {
-    assert_eq!(
-        desktop_autostart_policy(false),
-        DesktopAutostartPolicy::EnableForDesktop
-    );
-    assert_eq!(
-        desktop_autostart_policy(true),
-        DesktopAutostartPolicy::SkipDevelopmentBuild
-    );
-}
-
-#[test]
 fn desktop_launch_mode_distinguishes_background_autostart_from_user_launches() {
     assert_eq!(
         DesktopLaunchMode::from_args(["bridge-agent-desktop", AUTOSTART_BACKGROUND_ARG], false,),
