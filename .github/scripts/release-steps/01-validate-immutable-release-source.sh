@@ -61,6 +61,8 @@ else
   fi
 fi
 
+node scripts/check-bundled-platform-skill.mjs --upstream
+
 cli_version="$(tr -d '[:space:]' < tools/baijimu-cli/VERSION)"
 cli_app_id="$(tr -d '[:space:]' < tools/baijimu-cli/APP_ID)"
 case "$cli_version" in

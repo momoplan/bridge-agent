@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/momoplan/baijimu-platform-skill",
-  "release": "v1.6.5",
-  "skillSha256": "cf2bed2477a519572b2a39992e02d4e57ca9807b44c9f3525ae6132b6be325bc",
-  "archiveSha256": "d9e8389c0f2a242a0991e5607dcd935b2d72be431dd9f38bbb684276e468eeb9"
+  "release": "v2.0.5",
+  "skillSha256": "9dae8a2d1c31b058a851dab9dd395bf86a11aeb25914f32ec509634c3a48545d",
+  "archiveSha256": "8d2fefcc4aaa1b95427ea55d99ffa4470023f934146abfdb5794cb44e3cb3004"
 }

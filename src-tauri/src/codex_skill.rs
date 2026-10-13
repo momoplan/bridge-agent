@@ -14,7 +14,11 @@ const MAX_SKILL_BYTES: usize = 256 * 1024;
 const BUNDLED_SKILL: &[u8] = include_bytes!("../resources/skills/baijimu-platform/SKILL.md");
 const BUNDLED_PROVENANCE: &str =
     include_str!("../resources/skills/baijimu-platform/PROVENANCE.json");
-const LEGACY_SKILL_NAMES: &[&str] = &["baijimu-docs"];
+const LEGACY_SKILL_NAMES: &[&str] = &[
+    "baijimu-docs",
+    "baijimu-bundle-development",
+    "baijimu-hosted-service-development",
+];
 
 pub fn install_bundled() -> Result<PathBuf> {
     validate_skill(BUNDLED_SKILL)?;
@@ -161,7 +165,7 @@ fn migrate_legacy_skills(skills_root: &Path) -> Result<()> {
             .join("skills")
     };
     if legacy_codex_root != skills_root {
-        for name in [SKILL_NAME, "baijimu-docs"] {
+        for name in std::iter::once(SKILL_NAME).chain(LEGACY_SKILL_NAMES.iter().copied()) {
             move_to_backup(
                 &legacy_codex_root.join(name),
                 &backup_root,
@@ -277,15 +281,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let skills_root = temp.path().join(".agents").join("skills");
         let legacy_codex_root = temp.path().join(".codex").join("skills");
-        fs::create_dir_all(skills_root.join("baijimu-docs")).unwrap();
+        for root in [&skills_root, &legacy_codex_root] {
+            for name in LEGACY_SKILL_NAMES {
+                fs::create_dir_all(root.join(name)).unwrap();
+                fs::write(root.join(name).join("SKILL.md"), name.as_bytes()).unwrap();
+            }
+            fs::create_dir_all(root.join("unrelated-skill")).unwrap();
+            fs::write(root.join("unrelated-skill").join("SKILL.md"), b"keep").unwrap();
+        }
+        fs::create_dir_all(legacy_codex_root.join(SKILL_NAME)).unwrap();
         fs::write(
-            skills_root.join("baijimu-docs").join("SKILL.md"),
-            b"legacy docs",
-        )
-        .unwrap();
-        fs::create_dir_all(legacy_codex_root.join("baijimu-platform")).unwrap();
-        fs::write(
-            legacy_codex_root.join("baijimu-platform").join("SKILL.md"),
+            legacy_codex_root.join(SKILL_NAME).join("SKILL.md"),
             b"legacy platform",
         )
         .unwrap();
@@ -294,12 +300,24 @@ mod tests {
 
         install_bundled().unwrap();
 
-        assert!(!skills_root.join("baijimu-docs").exists());
-        assert!(!legacy_codex_root.join("baijimu-platform").exists());
-        let backup_count = fs::read_dir(temp.path().join(".agents").join("skill-backups"))
-            .unwrap()
-            .count();
-        assert_eq!(backup_count, 2);
+        let backups = temp.path().join(".agents").join("skill-backups");
+        for root in [&skills_root, &legacy_codex_root] {
+            for name in LEGACY_SKILL_NAMES {
+                assert!(!root.join(name).exists());
+                let preserved = fs::read_dir(&backups).unwrap().any(|entry| {
+                    fs::read(entry.unwrap().path().join("SKILL.md")).unwrap() == name.as_bytes()
+                });
+                assert!(preserved);
+            }
+            assert_eq!(
+                fs::read(root.join("unrelated-skill").join("SKILL.md")).unwrap(),
+                b"keep"
+            );
+        }
+        assert!(!legacy_codex_root.join(SKILL_NAME).exists());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 7);
+        install_bundled().unwrap();
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 7);
 
         std::env::remove_var("BAIJIMU_AGENT_SKILLS_DIR");
         std::env::remove_var("BAIJIMU_LEGACY_CODEX_SKILLS_DIR");
@@ -315,6 +333,6 @@ mod tests {
         let contents = std::str::from_utf8(BUNDLED_SKILL).unwrap();
         assert!(!contents.contains("baijimu capabilities"));
         assert!(contents.contains("baijimu --help"));
-        assert!(contents.contains("<command> --help"));
+        assert!(contents.contains("逐级读取 `--help`"));
     }
 }

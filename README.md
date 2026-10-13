@@ -148,7 +148,7 @@ Baijimu CLI 作为“官方托管工具”显示在本地应用页：客户端�
 `~/.agents/skills/baijimu-platform/SKILL.md`。其唯一上游是
 [`momoplan/baijimu-platform-skill`](https://github.com/momoplan/baijimu-platform-skill) 的
 固定发行版本，Bridge 内置文件必须通过版本和 SHA-256 校验，不再维护独立的
-`baijimu-docs` 副本。安装时会把旧 `baijimu-docs` 以及旧 Codex 专属目录里的同名技能
+`baijimu-docs` 副本。技能上游定位为业务包（Bundle）的构建、分发与运行，以企业级 AI Coding 和办公基础设施提供支撑。客户端不得单独修改正文；必须先在上游审查并发布，再通过 `scripts/sync-baijimu-platform-skill.mjs` 同步准确标签和 SHA-256。CI 和发布流程执行 `node scripts/check-bundled-platform-skill.mjs --upstream`，逐字核对固定标签源码，并验证公开 ZIP 和上游校验和，禁止自动跟随 `main` 或 `latest`。安装时会把旧 `baijimu-docs`、已退役的拆分开发技能以及旧 Codex 专属目录里的同名技能
 迁移到 `~/.agents/skill-backups/`，避免重复发现。
 
 Agent 在新任务中遇到百积木、Bundle、模块、运行时、平台应用、Connector 或 Partner

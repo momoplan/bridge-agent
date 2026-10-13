@@ -136,8 +136,8 @@
         )
         .unwrap();
 
-        assert_eq!(result.exit_code, Some(0));
-        assert!(result.stdout.contains("started"));
+        assert_eq!(result.exit_code, Some(0), "elapsed={:?}, result={result:?}", started_at.elapsed());
+        assert!(result.stdout.contains("started"), "{result:?}");
         assert!(
             started_at.elapsed() < Duration::from_secs(8),
             "lifecycle output collection waited for a descendant-owned handle"

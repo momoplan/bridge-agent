@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateBundledSkill } from './check-bundled-platform-skill.mjs';
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -56,6 +57,12 @@ if (actualSkillSha256 !== expectedSkillSha256) {
 }
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
+validateBundledSkill(contents, {
+  repository,
+  release: tag,
+  skillSha256: actualSkillSha256,
+  archiveSha256: actualArchiveSha256,
+});
 const targetDir = resolve(scriptDir, '../src-tauri/resources/skills/baijimu-platform');
 await mkdir(targetDir, { recursive: true });
 await writeFile(resolve(targetDir, 'SKILL.md'), contents);
