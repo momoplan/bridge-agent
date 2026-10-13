@@ -113,6 +113,13 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           npm run quality
 
+      - name: Diagnose lifecycle launcher after a Windows quality failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo test --workspace --lib connector::tests::lifecycle_command_does_not_wait_for_descendant_owned_stdio -- --exact --nocapture
+
       - name: Run Windows Rust quality gates
         shell: pwsh
         run: |
