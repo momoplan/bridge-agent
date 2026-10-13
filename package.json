@@ -1,12 +1,12 @@
 {
   "name": "bridge-agent-desktop",
   "private": true,
-  "version": "0.11.2",
+  "version": "0.11.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420",
     "build": "npm run build:web",
-    "build:web": "node scripts/check-client-compatibility.mjs && tsc && vite build",
+    "build:web": "node scripts/check-bundled-platform-skill.mjs && node scripts/check-client-compatibility.mjs && tsc && vite build",
     "test": "vitest run",
     "test:browser": "playwright test",
     "test:native": "node scripts/test-native-frontend.mjs",

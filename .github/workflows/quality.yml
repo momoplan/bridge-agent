@@ -56,6 +56,9 @@ jobs:
           rustup toolchain install stable --component clippy,rustfmt --no-self-update
           rustup default stable
 
+      - name: Verify bundled platform skill against its upstream release
+        run: node scripts/check-bundled-platform-skill.mjs --upstream
+
       - name: Install Tauri Linux dependencies
         run: .github/scripts/install-linux-release-dependencies.sh
 
