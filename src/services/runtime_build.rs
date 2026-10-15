@@ -17,6 +17,7 @@ impl ComputerMethod {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "UNSUPPORTED_PLATFORM".to_string(),
                     message: "computer_use currently only supports macOS in bridge-agent"
                         .to_string(),

@@ -79,6 +79,7 @@ impl ShellMethod {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "EXECUTION_NOT_FOUND".to_string(),
                     message: format!("execution `{execution_id}` was not found"),
                 }),
@@ -113,6 +114,7 @@ impl ShellMethod {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "EXECUTION_NOT_FOUND".to_string(),
                     message: format!("execution `{execution_id}` was not found"),
                 }),
@@ -149,6 +151,7 @@ impl ShellMethod {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "COMMAND_NOT_ALLOWED".to_string(),
                     message: format!("command `{executable}` is not in allowlist"),
                 }),

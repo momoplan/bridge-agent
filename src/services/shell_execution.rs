@@ -44,6 +44,7 @@ async fn run_shell_command(
                 timed_out: false,
                 success: false,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "COMMAND_SPAWN_FAILED".to_string(),
                     message,
                 }),
@@ -225,6 +226,7 @@ fn complete_shell_wait(
             timed_out: true,
             success: false,
             error: Some(InvokeError {
+                public_details: None,
                 code: "TIMEOUT".to_string(),
                 message: format!("timed out after {timeout_secs}s"),
             }),
@@ -239,6 +241,7 @@ fn complete_shell_wait(
             timed_out: false,
             success: false,
             error: Some(InvokeError {
+                public_details: None,
                 code: "CANCELED".to_string(),
                 message: "execution was canceled".to_string(),
             }),
@@ -253,6 +256,7 @@ fn complete_shell_wait(
             timed_out: false,
             success: false,
             error: Some(InvokeError {
+                public_details: None,
                 code: "COMMAND_WAIT_FAILED".to_string(),
                 message: err.to_string(),
             }),

@@ -390,3 +390,27 @@
         assert!(!result.success);
         assert_eq!(result.error.unwrap().code, "INVOKE_FAILED");
     }
+
+    #[tokio::test]
+    async fn http_binding_preserves_public_cmodel_failure_in_device_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let details = json!({"message":"第3步：微信已失去前台焦点", "retryable":false});
+        let endpoint_details = details.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/invoke", post(move || {
+                let details = endpoint_details.clone();
+                async move { Json(json!({"contractVersion":"1.0.0", "errorCode":"SEARCH_WINDOW_CHANGED", "data":details})) }
+            }))).await.unwrap();
+        });
+        let mut config = AgentConfig::example();
+        config.services.push(http_test_service(&format!("http://{addr}/invoke")));
+        let registry = ServiceRegistry::from_config(&config, &std::env::current_dir().unwrap()).unwrap();
+        let result = registry.invoke("synthetic-query".into(), "localTool", "fetch", json!({}), None).await;
+        assert!(!result.success);
+        assert!(result.data.is_none());
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "SEARCH_WINDOW_CHANGED");
+        assert_eq!(error.public_details, Some(details));
+        server.abort();
+    }
