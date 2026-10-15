@@ -15,6 +15,7 @@ impl<'a> RelayConnection<'a> {
                 success: false,
                 data: None,
                 error: Some(crate::protocol::InvokeError {
+                    public_details: None,
                     code: "AGENT_BUSY".into(),
                     message: "Agent concurrent invocation limit reached; request was not executed"
                         .into(),

@@ -200,6 +200,7 @@ impl ServiceRegistry {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "INVOKE_FAILED".to_string(),
                     message: err.to_string(),
                 }),
@@ -243,6 +244,7 @@ impl ServiceRegistry {
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: None,
                     code: "LOCAL_APP_INVOKE_FAILED".to_string(),
                     message: err.to_string(),
                 }),

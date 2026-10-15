@@ -127,6 +127,9 @@ pub struct InvokeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeError {
+    /// Validated CModel public details only; internal diagnostics stay in message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_details: Option<Value>,
     pub code: String,
     pub message: String,
 }

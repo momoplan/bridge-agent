@@ -191,6 +191,7 @@ fn screenshot_too_large(
             "inline_limit_bytes": method.upload.inline_limit_bytes,
         })),
         error: Some(InvokeError {
+            public_details: None,
             code: "PAYLOAD_TOO_LARGE".to_string(),
             message: format!(
                 "screenshot is {size_bytes} bytes, exceeds inline limit {} bytes, and upload.prepare_url is not configured",

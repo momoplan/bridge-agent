@@ -28,6 +28,17 @@ pub(crate) fn normalize_cmodel_http_response(
                 success: false,
                 data: None,
                 error: Some(InvokeError {
+                    public_details: error.message().zip(error.retryable()).map(
+                        |(message, retryable)| {
+                            serde_json::to_value(
+                                baijimu_cmodel_core::CModelFailureData::new(message, retryable)
+                                    .expect(
+                                    "shared CModel decoder validated the public failure details",
+                                ),
+                            )
+                            .expect("public CModel details are JSON serializable")
+                        },
+                    ),
                     code: error_code.as_str().to_string(),
                     message: error.message().map(str::to_owned).unwrap_or_else(|| {
                         format!("local endpoint returned CModel failure {error_code}")
@@ -39,6 +50,7 @@ pub(crate) fn normalize_cmodel_http_response(
             success: false,
             data: None,
             error: Some(InvokeError {
+                public_details: None,
                 code: "HTTP_RESPONSE_INVALID".to_string(),
                 message: error.to_string(),
             }),
@@ -89,6 +101,7 @@ mod tests {
         let error = outcome.error.unwrap();
         assert_eq!(error.code, "HTTP_RESPONSE_INVALID");
         assert!(error.message.contains("must use HTTP 200"));
+        assert!(error.public_details.is_none());
     }
 
     #[test]
@@ -109,6 +122,48 @@ mod tests {
         let error = outcome.error.unwrap();
         assert_eq!(error.code, "CUSTOM_CONNECTOR_FAILURE");
         assert_eq!(error.message, "资源不存在");
+        assert_eq!(
+            error.public_details,
+            Some(json!({"message": "资源不存在", "retryable": false}))
+        );
+    }
+
+    #[test]
+    fn public_details_survive_device_wire_without_internal_diagnostics() {
+        let body = json!({"contractVersion":"1.0.0", "errorCode":"SEARCH_WINDOW_CHANGED",
+                         "data":{"message":"第3步：当前焦点窗口与截图窗口不是同一窗口", "retryable":false}});
+        let outcome = normalize_cmodel_http_response(
+            StatusCode::OK,
+            &serde_json::to_vec(&body).unwrap(),
+            "test",
+        );
+        let result = crate::protocol::InvokeResult {
+            request_id: "synthetic-query".into(),
+            success: false,
+            data: outcome.data,
+            error: outcome.error,
+            duration_ms: 1,
+        };
+        let encoded = serde_json::to_vec(&result).unwrap();
+        let decoded: crate::protocol::InvokeResult = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            decoded.error.unwrap().public_details,
+            Some(body["data"].clone())
+        );
+    }
+
+    #[test]
+    fn malformed_public_details_are_not_exposed_as_internal_messages() {
+        let body = json!({"contractVersion":"1.0.0", "errorCode":"PRIVATE_FAILURE",
+                         "data":{"message":"private endpoint path"}});
+        let outcome = normalize_cmodel_http_response(
+            StatusCode::OK,
+            &serde_json::to_vec(&body).unwrap(),
+            "test",
+        );
+        let error = outcome.error.unwrap();
+        assert_eq!(error.code, "HTTP_RESPONSE_INVALID");
+        assert!(error.public_details.is_none());
     }
 
     #[test]
@@ -125,6 +180,7 @@ mod tests {
 
         let error = outcome.error.unwrap();
         assert_eq!(error.code, "RESOURCE_NOT_FOUND");
+        assert!(error.public_details.is_none());
         assert_eq!(
             error.message,
             "local endpoint returned CModel failure RESOURCE_NOT_FOUND"

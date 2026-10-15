@@ -99,6 +99,7 @@ fn normalize_connector_http_outcome(
                 None
             } else {
                 Some(extract_invoke_error(body).unwrap_or_else(|| InvokeError {
+                    public_details: None,
                     code: if http_success {
                         "INVOKE_FAILED".to_string()
                     } else {
@@ -145,11 +146,13 @@ fn extract_invoke_error(body: &Value) -> Option<InvokeError> {
     }
     if let Some(message) = error.as_str() {
         return Some(InvokeError {
+            public_details: None,
             code: "INVOKE_FAILED".to_string(),
             message: message.to_string(),
         });
     }
     Some(InvokeError {
+        public_details: None,
         code: error
             .get("code")
             .and_then(Value::as_str)
