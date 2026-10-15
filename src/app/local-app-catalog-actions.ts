@@ -4,7 +4,7 @@ import { clientInfo, clientWarn } from "../client-logger";
 import type { BaijimuDeepLinkIntent, LocalAppInstallDeepLinkIntent } from "../deep-link";
 import { legacyEventContracts, legacyMethodContracts } from "./legacy-contracts";
 import { readError } from "./formatters";
-import type { LocalAppInstallTask } from "../local-app-install-tasks";
+import { mergeLocalAppInstallTasks, type LocalAppInstallTask } from "../local-app-install-tasks";
 import type { ConnectorSummary, LocalAppRuntimeStatus, ManagedToolStatus, MarketConnector, RuntimeSnapshot, StartConnectorAppInstallRequest, StartRegisteredServiceResult } from "./types";
 import type { AppControllerState } from "./use-app-state";
 
@@ -30,10 +30,9 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
     let tasks = localAppInstallTasksRef.current;
     try {
       tasks = await invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks");
+      tasks = mergeLocalAppInstallTasks(localAppInstallTasksRef.current, tasks);
       localAppInstallTasksRef.current = tasks;
-      setLocalAppInstallTasks(
-        [...tasks].sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs)
-      );
+      setLocalAppInstallTasks((current) => mergeLocalAppInstallTasks(current, tasks));
     } catch (err) {
       clientWarn("读取本地应用安装进度失败", err);
     }
@@ -224,11 +223,7 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
   }
 
   function applyLocalAppInstallTask(task: LocalAppInstallTask) {
-    setLocalAppInstallTasks((current) => {
-      const next = current.filter((candidate) => candidate.taskId !== task.taskId);
-      next.push(task);
-      return next.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs);
-    });
+    setLocalAppInstallTasks((current) => mergeLocalAppInstallTasks(current, [task]));
   }
 
   async function startLocalAppInstallTask(

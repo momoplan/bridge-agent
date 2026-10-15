@@ -13,6 +13,7 @@ export type LocalAppInstallTaskOperation = "install" | "upgrade" | "sync";
 
 export interface LocalAppInstallTask {
   taskId: string;
+  revision: number;
   operation: LocalAppInstallTaskOperation;
   appId?: string | null;
   name: string;
@@ -25,6 +26,24 @@ export interface LocalAppInstallTask {
   error?: string | null;
   createdAtEpochMs: number;
   updatedAtEpochMs: number;
+}
+
+// The command response and progress channel are independent deliveries of the
+// same task. Only the owner revision orders them; wall-clock milliseconds can tie.
+export function mergeLocalAppInstallTasks(
+  current: LocalAppInstallTask[],
+  incoming: LocalAppInstallTask[]
+): LocalAppInstallTask[] {
+  const tasks = new Map(current.map((task) => [task.taskId, task]));
+  for (const task of incoming) {
+    const previous = tasks.get(task.taskId);
+    if (previous && (
+      previous.phase === "succeeded" || previous.phase === "failed" ||
+      task.revision <= previous.revision
+    )) continue;
+    tasks.set(task.taskId, task);
+  }
+  return Array.from(tasks.values()).sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs);
 }
 
 export function formatLocalAppInstallTaskPhase(task: LocalAppInstallTask): string {
@@ -76,7 +95,7 @@ export function latestLocalAppInstallTasks(
     tasks.reduce((latest, task) => {
       const key = task.appId || task.taskId;
       const current = latest.get(key);
-      if (!current || current.updatedAtEpochMs < task.updatedAtEpochMs) {
+      if (!current || current.createdAtEpochMs < task.createdAtEpochMs) {
         latest.set(key, task);
       }
       return latest;

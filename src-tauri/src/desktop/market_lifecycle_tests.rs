@@ -97,6 +97,7 @@ fn local_app_install_tasks_track_progress_and_reject_duplicate_active_installs()
         )
         .unwrap();
     assert_eq!(task.phase, LocalAppInstallTaskPhase::Queued);
+    assert_eq!(task.revision, 1);
     assert_eq!(task.operation, LocalAppInstallTaskOperation::Upgrade);
     assert_eq!(task.message, "等待开始升级");
     assert!(manager
@@ -120,9 +121,11 @@ fn local_app_install_tasks_track_progress_and_reject_duplicate_active_installs()
         "fallback message",
     );
     let resolving = manager.list().pop().unwrap();
+    assert_eq!(resolving.revision, 2);
     assert_eq!(resolving.message, "正在解析升级来源");
     reporter.download(50, Some(100));
     let downloading = manager.list().pop().unwrap();
+    assert_eq!(downloading.revision, 3);
     assert_eq!(downloading.phase, LocalAppInstallTaskPhase::Downloading);
     assert_eq!(downloading.progress_percent, Some(32));
     assert_eq!(downloading.downloaded_bytes, Some(50));
@@ -132,6 +135,17 @@ fn local_app_install_tasks_track_progress_and_reject_duplicate_active_installs()
         task.phase = LocalAppInstallTaskPhase::Succeeded;
         task.progress_percent = Some(100);
     });
+    let finished = manager.list().pop().unwrap();
+    assert_eq!(finished.revision, 4);
+    assert!(manager
+        .update(&task.task_id, |task| {
+            task.phase = LocalAppInstallTaskPhase::Resolving;
+        })
+        .is_none());
+    assert_eq!(
+        manager.list().pop().unwrap().phase,
+        LocalAppInstallTaskPhase::Succeeded
+    );
     assert!(manager
         .create(
             LocalAppInstallTaskOperation::Upgrade,
@@ -140,6 +154,27 @@ fn local_app_install_tasks_track_progress_and_reject_duplicate_active_installs()
             Some("1.2.1".to_string()),
         )
         .is_ok());
+}
+
+#[test]
+fn private_install_source_must_match_the_requested_app_and_exact_version() {
+    let source: local_app_contract::SourceVersion = serde_json::from_value(serde_json::json!({
+        "application": {"environmentKey": "author-source", "appId": "fixture-app"},
+        "version": "1.2.4+signed"
+    }))
+    .unwrap();
+    for (app, version, accepted) in [
+        ("fixture-app", "1.2.4+signed", true),
+        ("another-app", "1.2.4+signed", false),
+        ("fixture-app", "1.2.3", false),
+        ("fixture-app", "1.2.4+different", false),
+    ] {
+        let identity = RegisteredAppVersionIdentity::parse(app.into(), version.into()).unwrap();
+        assert_eq!(
+            local_app_install::validate_environment_install_identity(&identity, &source).is_ok(),
+            accepted
+        );
+    }
 }
 
 #[test]

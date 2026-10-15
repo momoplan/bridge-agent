@@ -1,4 +1,5 @@
-import type { Dispatch, ReactNode, SetStateAction } from "react";
+import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { PrivateSourceSyncPanel } from "./private-source-sync-panel";
 import { embeddedLocalAppView } from "../local-app-runtime";
 import { isComputerService, isShellService } from "./config-conversion";
 import { LocalAppEmbeddedUi } from "./embedded-local-app";
@@ -39,12 +40,13 @@ interface LocalAppDetailDialogProps {
   showAdvancedSettings: boolean;
   startLocalApp: (app: LocalAppItem) => Promise<void>;
   stopLocalApp: (app: LocalAppItem) => Promise<void>;
-  syncLocalApp: (app: LocalAppItem) => Promise<void>;
+  syncLocalApp: (app: LocalAppItem, targetVersion: string) => Promise<void>;
   uninstallLocalApp: (app: LocalAppItem) => Promise<void>;
   upgradeManagedTool: (app: LocalAppItem) => Promise<void>;
 }
 
 export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
+  const [privateSyncOpen, setPrivateSyncOpen] = useState(false);
   const { activeLocalAppDetailTab, app, checkLocalAppVersion, config, connectorBusy, connectorSourceKind, connectorSyncSource, connectorUninstalling, connectorUpdateBusy, countLocalAppCapabilities, formatLocalAppKind, hasLocalAppStartCommand, hasLocalAppStopCommand, localAppLifecycle, localAppUpdateStatus, managedToolBusy, marketAppForLocalApp, renderComputerPermissionPanel, renderConnectorPermissionPanel, renderLocalAppAbilityList, renderLocalAppInstallProgress, renderLocalAppRuntime, renderLocalAppUpdateChanges, renderServiceEditor, rollbackManagedTool, setActiveLocalAppDetailTab, setPendingUpgradeAppId, setSelectedLocalAppId, showAdvancedSettings, startLocalApp, stopLocalApp, syncLocalApp, uninstallLocalApp, upgradeManagedTool } = props;
     if (!config) {
       return null;
@@ -193,10 +195,10 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
               ) : app.connector && app.connector.reviewStatus !== "PUBLISHED" ? (
                 <button
                   className="secondary"
-                  onClick={() => void syncLocalApp(app)}
+                  onClick={() => { setActiveLocalAppDetailTab("overview"); setPrivateSyncOpen(true); }}
                   disabled={connectorBusy != null || connectorUpdateBusy != null}
                 >
-                  {updateBusy ? "同步中" : "拉取最新"}
+                  {updateBusy ? "同步中" : "选择同步版本"}
                 </button>
               ) : null}
               {app.managedTool?.canRollback ? (
@@ -277,6 +279,9 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
 
           {activeLocalAppDetailTab === "overview" ? (
             <div id="local-app-detail-overview-panel" className="app-detail-tab-panel" role="tabpanel" aria-labelledby="local-app-detail-overview-tab">
+              {privateSyncOpen && app.connector && app.connector.reviewStatus !== "PUBLISHED" ? (
+                <PrivateSourceSyncPanel key={app.id} app={app} busy={connectorBusy != null || connectorUpdateBusy != null || Boolean(app.installTask && !["succeeded", "failed"].includes(app.installTask.phase))} syncLocalApp={syncLocalApp} />
+              ) : null}
               {marketApp && updateStatus?.updateAvailable
                 ? renderLocalAppUpdateChanges(app, marketApp)
                 : null}

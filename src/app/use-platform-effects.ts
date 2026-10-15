@@ -8,7 +8,7 @@ import { resolveStartupUpdateGate } from "../startup-update-gate";
 import type { createDesktopActions } from "./desktop-actions";
 import type { createLocalAppCatalogActions } from "./local-app-catalog-actions";
 import type { ConnectorLifecycleSnapshot, LocalAppRuntimeStatus, LocalAppsChangedEvent, RegisteredServiceStatus, RuntimeSnapshot, StartupHealthSnapshot } from "./types";
-import type { LocalAppInstallTask } from "../local-app-install-tasks";
+import { mergeLocalAppInstallTasks, type LocalAppInstallTask } from "../local-app-install-tasks";
 import type { AppControllerState } from "./use-app-state";
 
 type ActionDependencies = ReturnType<typeof createDesktopActions> & ReturnType<typeof createLocalAppCatalogActions>;
@@ -113,7 +113,7 @@ useEffect(() => {
     void invoke<LocalAppInstallTask[]>("list_connector_app_install_tasks")
       .then((tasks) => {
         if (active) {
-          setLocalAppInstallTasks(tasks.sort((left, right) => left.createdAtEpochMs - right.createdAtEpochMs));
+          setLocalAppInstallTasks((current) => mergeLocalAppInstallTasks(current, tasks));
         }
       })
       .catch((err) => clientWarn("读取本地应用安装任务失败", err));

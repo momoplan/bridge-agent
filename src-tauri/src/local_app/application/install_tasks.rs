@@ -99,6 +99,7 @@ impl LocalAppInstallTaskOperation {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LocalAppInstallTask {
     pub(crate) task_id: String,
+    pub(crate) revision: u64,
     pub(crate) operation: LocalAppInstallTaskOperation,
     pub(crate) app_id: Option<String>,
     pub(crate) name: String,
@@ -143,6 +144,7 @@ impl LocalAppInstallTaskManager {
         let timestamp = now_ms();
         let task = LocalAppInstallTask {
             task_id: uuid::Uuid::new_v4().to_string(),
+            revision: 1,
             operation,
             app_id,
             name,
@@ -167,7 +169,12 @@ impl LocalAppInstallTaskManager {
     ) -> Option<LocalAppInstallTask> {
         let mut tasks = self.tasks.write().ok()?;
         let task = tasks.get_mut(task_id)?;
+        if !task.phase.is_active() {
+            return None;
+        }
+        let next_revision = task.revision.checked_add(1)?;
         update(task);
+        task.revision = next_revision;
         task.updated_at_epoch_ms = now_ms();
         Some(task.clone())
     }
