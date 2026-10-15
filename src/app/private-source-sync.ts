@@ -15,7 +15,7 @@ export function privateSourceSyncRequest(
   if (selected.source.application.appId !== connector.appId) {
     throw new Error("安装记录中的来源应用身份不一致，无法同步。");
   }
-  if (!versionPattern.test(targetVersion)) {
+  if (targetVersion.trim() !== targetVersion || !versionPattern.test(targetVersion)) {
     throw new Error("目标版本必须是严格 SemVer 2.0.0，例如 1.2.3。");
   }
   return {

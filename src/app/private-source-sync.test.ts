@@ -38,7 +38,7 @@ describe("private source version selection", () => {
     expect(() => privateSourceSyncRequest({ ...connector(), installSource: { kind: "market", listingId: "listing", version: "1.2.3", source: connector().installSource!.source } }, "1.2.4")).toThrow("来源环境身份");
   });
 
-  it.each(["latest", "1.2", "01.2.3", "1.2.3-01", " 1.2.4", "1.2.4 "])("rejects noncanonical version %s", (version) => {
+  it.each(["latest", "1.2", "01.2.3", "1.2.3-01", " 1.2.4", "1.2.4 ", "1.2.4\n"])("rejects noncanonical version %s", (version) => {
     expect(() => privateSourceSyncRequest(connector(), version)).toThrow("SemVer");
   });
 });
