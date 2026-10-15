@@ -373,6 +373,7 @@ async fn resolve_install_package(
             if !options.accept_unreviewed {
                 return Err("来源环境安装需要显式接受环境授权版本".into());
             }
+            validate_environment_install_identity(&options.identity, source)?;
             environment_install::resolve(
                 config_path,
                 source,
@@ -383,4 +384,16 @@ async fn resolve_install_package(
         }
         None => return Err("安装必须显式提供来源环境与应用身份，请重新选择安装来源".into()),
     })
+}
+
+pub(super) fn validate_environment_install_identity(
+    identity: &RegisteredAppVersionIdentity,
+    source: &local_app_contract::SourceVersion,
+) -> Result<(), String> {
+    if source.application.app_id.as_str() != identity.app_id.as_str()
+        || source.version.to_string() != identity.version.to_string()
+    {
+        return Err("所选来源应用及版本必须与安装请求一致".into());
+    }
+    Ok(())
 }

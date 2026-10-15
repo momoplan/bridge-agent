@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatLocalAppInstallTaskPhase,
   latestLocalAppInstallTasks,
+  mergeLocalAppInstallTasks,
   reconcileLocalAppInstallSelection,
   shouldShowLocalAppInstallTask,
   type LocalAppInstallTask
@@ -14,6 +15,7 @@ function task(
 ): LocalAppInstallTask {
   return {
     taskId,
+    revision: 1,
     operation: "install",
     appId: "com.baijimu.connector.codex",
     name: "Codex",
@@ -25,6 +27,28 @@ function task(
 }
 
 describe("local app install task selection", () => {
+  it("preserves failure when the initial command response arrives after progress", () => {
+    const queued = task("same", "queued", 10);
+    const resolving = { ...queued, phase: "resolving" as const, revision: 2 };
+    const failed = { ...queued, phase: "failed" as const, revision: 3, error: "来源版本不可用" };
+    const progress = mergeLocalAppInstallTasks([], [resolving, failed]);
+    expect(mergeLocalAppInstallTasks(progress, [queued])).toEqual([failed]);
+    expect(mergeLocalAppInstallTasks([queued], [resolving, failed])).toEqual([failed]);
+  });
+
+  it("orders equal-millisecond snapshots and progress by owner revision", () => {
+    const queued = task("same", "queued", 10);
+    const downloading = { ...queued, phase: "downloading" as const, revision: 4 };
+    expect(mergeLocalAppInstallTasks([downloading], [queued, { ...queued, revision: 3 }])).toEqual([downloading]);
+    expect(mergeLocalAppInstallTasks([queued], [downloading])).toEqual([downloading]);
+  });
+
+  it("keeps terminal states and lets a distinct retry task progress", () => {
+    const failed = { ...task("old", "failed", 10), revision: 4 };
+    const retry = { ...task("new", "downloading", 20), revision: 2 };
+    expect(mergeLocalAppInstallTasks([failed], [{ ...failed, revision: 5, phase: "resolving" }, retry])).toEqual([failed, retry]);
+    expect(latestLocalAppInstallTasks([{ ...failed, updatedAtEpochMs: 30 }, retry])).toEqual([retry]);
+  });
   it("uses operation-specific progress labels", () => {
     expect(formatLocalAppInstallTaskPhase(task("install", "downloading", 10))).toBe("下载安装包");
     expect(

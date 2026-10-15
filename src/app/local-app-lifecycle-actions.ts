@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { flushSync } from "react-dom";
 import { createLocalAppUpdateSelectors } from "./local-app-update-selectors";
+import { privateSourceSyncRequest } from "./private-source-sync";
 import { isConnectorUninstallStopError } from "../local-app-uninstall";
 import { defaultCapabilityArgumentsText, fromUiConfig, toUiMethod } from "./config-conversion";
 import { formatConnectorServiceFailures, parseJson, readError } from "./formatters";
@@ -94,7 +95,10 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
     if (!connector) {
       return "";
     }
-    return (connector.sourceReference ?? connector.sourcePath ?? "").trim();
+    const source = connector.installSource;
+    return source
+      ? `${source.source.application.environmentKey} / ${source.source.application.appId} / ${source.source.version}`
+      : "来源身份缺失，请重新选择安装来源";
   }
 
   function connectorSourceKind(app: LocalAppItem, marketApp?: MarketConnector): string {
@@ -183,7 +187,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
     }
   }
 
-  async function syncLocalApp(app: LocalAppItem) {
+  async function syncLocalApp(app: LocalAppItem, targetVersion: string) {
     if (!app.connector) {
       setError(`应用 ${app.name} 不是可同步安装应用`);
       return;
@@ -192,9 +196,16 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setError(`应用 ${app.name} 已公开上架，请通过市场检查更新`);
       return;
     }
+    let request;
+    try {
+      request = privateSourceSyncRequest(app.connector, targetVersion);
+    } catch (error) {
+      handleCommandError(error);
+      return;
+    }
     if (
       !window.confirm(
-        `“${app.name}”来自已注册但未公开审核的来源。继续会向平台注册中心重新校验版本并覆盖当前安装内容，是否继续？`
+        `将从 ${request.installSource!.source.application.environmentKey} 同步“${app.name}” ${targetVersion}（当前 ${app.connector.version}）。此来源未公开审核，将校验所选版本并覆盖当前安装，是否继续？`
       )
     ) {
       return;
@@ -204,15 +215,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       setMessage("");
       setError("");
       setRuntimeConflict(null);
-      const task = await startLocalAppInstallTask({
-        sourceIdentityMigration: false,
-        operation: "sync",
-        replace: true,
-        appId: app.connector.appId,
-        name: app.name,
-        version: app.connector.version,
-        acceptUnreviewed: true
-      });
+      const task = await startLocalAppInstallTask(request);
       setConnectorUpdateStatuses((current) => {
         const next = { ...current };
         delete next[app.connector!.appId];
