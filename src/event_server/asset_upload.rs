@@ -2,10 +2,11 @@ async fn upload_local_app_asset(
     State(state): State<EventServerState>,
     headers: HeaderMap,
     Json(request): Json<UploadLocalAppAssetRequest>,
-) -> Result<Json<UploadLocalAppAssetResponse>, EventApiError> {
+) -> Result<Json<UploadLocalAppAssetResponse>, asset_protocol::AssetUploadError> {
     let asset = validate_local_asset_request(&state, &headers, request)?;
     let slot = prepare_local_asset_upload(&state, &asset).await?;
     upload_local_asset_bytes(&state, &slot, &asset).await?;
+    let completed = asset_protocol::complete(&state, &slot, &asset).await?;
     let sha256 = format!("{:x}", Sha256::digest(&asset.bytes));
     emit_audit_log(
         &state,
@@ -15,10 +16,10 @@ async fn upload_local_app_asset(
     );
     Ok(Json(UploadLocalAppAssetResponse {
         result_type: "asset_ref",
-        asset_id: slot.file_id,
-        object_key: slot.object_key,
-        download_url: slot.download_url,
-        expires_at: slot.expires_at,
+        asset_id: completed.file_id,
+        object_key: Some(completed.path),
+        download_url: Some(completed.download_url),
+        expires_at: Some(completed.expires_at),
         mime_type: asset.content_type,
         size_bytes: asset.size_bytes,
         sha256,
@@ -91,44 +92,36 @@ fn safe_asset_file_name(requested: Option<&str>, canonical_path: &std::path::Pat
 async fn prepare_local_asset_upload(
     state: &EventServerState,
     asset: &ValidatedLocalAsset,
-) -> Result<PrepareAssetUploadResponse, EventApiError> {
-    let prepare_url = state.upload_prepare_url.as_deref().ok_or_else(|| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, "Bridge Agent upload prepare URL is not configured"))?;
-    let app_scope = asset.app_id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect::<String>();
-    let response = state.http_client.post(prepare_url)
-        .timeout(Duration::from_secs(state.upload_timeout_secs))
-        .bearer_auth(&state.relay_token)
-        .json(&PrepareAssetUploadRequest {
-            agent_id: state.agent_id.clone(),
-            workspace_id: state.workspace_id,
-            purpose: format!("connector_{app_scope}_{}", asset.purpose),
-            content_type: asset.content_type.clone(),
-            file_name: asset.file_name.clone(),
-            size_bytes: asset.size_bytes,
-        })
-        .send().await.map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, err.to_string()))?;
-    let status = response.status();
-    let body = response.bytes().await.map_err(internal_error)?;
-    crate::upload_response::decode_upload_slot(status, &body)
-        .map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, format!("{err:#}")))
+) -> Result<PrepareAssetUploadResponse, asset_protocol::AssetUploadError> {
+    let slot: PrepareAssetUploadResponse = asset_protocol::post(state, "prepare", &PrepareAssetUploadRequest {
+        contract_version: asset_protocol::ContractVersion::Current,
+        agent_id: state.agent_id.clone(), workspace_id: state.workspace_id,
+        app_id: asset.app_id.clone(), purpose: asset.purpose.clone(),
+        content_type: asset.content_type.clone(), file_name: asset.file_name.clone(), size_bytes: asset.size_bytes,
+    }).await?;
+    let _version = &slot.contract_version;
+    if uuid::Uuid::parse_str(&slot.file_id).is_err() || slot.object_key.is_empty() || slot.method != "PUT" {
+        return Err(asset_protocol::AssetUploadError::new(StatusCode::BAD_GATEWAY, "UPLOAD_RESPONSE_INVALID", "文件服务返回的上传票据无效", false, "prepare"));
+    }
+    Ok(slot)
 }
 
 async fn upload_local_asset_bytes(
     state: &EventServerState,
     slot: &PrepareAssetUploadResponse,
     asset: &ValidatedLocalAsset,
-) -> Result<(), EventApiError> {
-    let method = slot.method.as_deref().unwrap_or("PUT").parse::<Method>().map_err(internal_error)?;
-    let mut upload = state.http_client.request(method, &slot.upload_url)
+) -> Result<(), asset_protocol::AssetUploadError> {
+    use asset_protocol::AssetUploadError;
+    let mut upload = state.http_client.put(&slot.upload_url)
         .timeout(Duration::from_secs(state.upload_timeout_secs)).body(asset.bytes.clone());
-    for (name, value) in &slot.headers {
-        upload = upload.header(name, value);
-    }
+    for (name, value) in &slot.headers { upload = upload.header(name, value); }
     if !slot.headers.keys().any(|name| name.eq_ignore_ascii_case("content-type")) {
         upload = upload.header(reqwest::header::CONTENT_TYPE, &asset.content_type);
     }
-    let response = upload.send().await.map_err(|err| EventApiError::new(StatusCode::BAD_GATEWAY, err.to_string()))?;
-    if !response.status().is_success() {
-        return Err(EventApiError::new(StatusCode::BAD_GATEWAY, format!("asset upload returned {}", response.status())));
+    let response = upload.send().await.map_err(|error| AssetUploadError::transport(error, "transfer"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AssetUploadError::new(StatusCode::BAD_GATEWAY, "OBJECT_STORAGE_UPLOAD_FAILED", format!("对象存储拒绝截图上传（HTTP {}）", status.as_u16()), status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS, "transfer"));
     }
     Ok(())
 }

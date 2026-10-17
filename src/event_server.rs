@@ -25,7 +25,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use relay::contracts::{channel::AppPayload, device_events::LocalEventAccepted};
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,7 +58,7 @@ struct EventServerState {
     event_enabled: bool,
     service_registration_enabled: bool,
     service_registration_token: Option<String>,
-    upload_prepare_url: Option<String>,
+    asset_base_url: Option<String>,
     upload_timeout_secs: u64,
     relay_token: String,
     agent_id: String,
@@ -94,25 +93,25 @@ struct UploadLocalAppAssetResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PrepareAssetUploadRequest {
+    contract_version: asset_protocol::ContractVersion,
     agent_id: String,
     workspace_id: Option<u64>,
     purpose: String,
+    app_id: String,
     content_type: String,
     file_name: String,
     size_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PrepareAssetUploadResponse {
+    contract_version: asset_protocol::ContractVersion,
     file_id: String,
     upload_url: String,
-    method: Option<String>,
-    #[serde(default)]
+    method: String,
     headers: std::collections::BTreeMap<String, String>,
-    object_key: Option<String>,
-    download_url: Option<String>,
-    expires_at: Option<String>,
+    object_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +228,7 @@ impl LocalEventServer {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned),
-                upload_prepare_url: config.upload.prepare_url(&config.relay),
+                asset_base_url: asset_protocol::base_url(&config.relay.url),
                 upload_timeout_secs: config.upload.timeout_secs,
                 relay_token: config.relay.token.clone(),
                 agent_id: config.relay.agent_id.clone(),
@@ -273,6 +272,7 @@ impl LocalEventServer {
 include!("event_server/port_management.rs");
 include!("event_server/event_emission.rs");
 include!("event_server/asset_upload.rs");
+mod asset_protocol;
 include!("event_server/service_management.rs");
 include!("event_server/auth_and_audit.rs");
 

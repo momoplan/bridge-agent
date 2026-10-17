@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod runtime;
 mod secret_store;
 pub mod services;
+#[cfg(any(target_os = "macos", windows, test))]
 mod upload_response;
 #[cfg(windows)]
 mod windows_process;
