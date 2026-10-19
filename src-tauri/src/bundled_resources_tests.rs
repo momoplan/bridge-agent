@@ -11,7 +11,10 @@ fn linux_cli_packaged_resources_acceptance() {
         verify_installed_resources();
         return;
     }
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::Builder::new()
+        .prefix(".mount_cli-resource-")
+        .tempdir()
+        .unwrap();
     let context = tauri::generate_context!();
     let bin = fixture.path().join("usr/bin");
     let resources = fixture
@@ -20,8 +23,6 @@ fn linux_cli_packaged_resources_acceptance() {
         .join(&context.package_info().name);
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(resources.join("resources/bin")).unwrap();
-    let executable = bin.join("desktop-resource-acceptance");
-    fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let zip = PathBuf::from(std::env::var_os("BAIJIMU_CLI_UPGRADE_FIXTURE_DIR").unwrap())
         .join("current.zip");
     let mut archive = zip::ZipArchive::new(Cursor::new(fs::read(zip).unwrap())).unwrap();
@@ -42,29 +43,35 @@ fn linux_cli_packaged_resources_acceptance() {
     .unwrap();
     let cwd = fixture.path().join("unrelated-working-directory");
     fs::create_dir_all(&cwd).unwrap();
-    let result = Command::new(&executable)
-        .args([
+    for (layout, executable, appimage) in [
+        ("deb", bin.join("desktop-resource-acceptance"), false),
+        ("appimage", fixture.path().join("AppRun"), true),
+    ] {
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let mut command = Command::new(&executable);
+        command.args([
             "--exact",
             "desktop::startup::packaged_resource_tests::linux_cli_packaged_resources_acceptance",
-            "--ignored",
-            "--nocapture",
+            "--ignored", "--nocapture",
         ])
-        .current_dir(cwd)
+        .current_dir(&cwd)
         .env("BAIJIMU_RESOURCE_LAYOUT_CHILD", &resources)
-        .env("BAIJIMU_MANAGED_TOOL_ROOT", fixture.path().join("managed"))
-        .env(
-            "BAIJIMU_MANAGED_BIN_DIR",
-            fixture.path().join("managed-bin"),
-        )
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    println!("Linux installed package resource lookup and CLI bootstrap passed from an unrelated working directory");
+        .env("BAIJIMU_MANAGED_TOOL_ROOT", fixture.path().join(format!("managed-{layout}")))
+        .env("BAIJIMU_MANAGED_BIN_DIR", fixture.path().join(format!("managed-bin-{layout}")))
+        .env_remove("APPDIR")
+        .env_remove("APPIMAGE");
+        if appimage {
+            command.env("APPDIR", fixture.path());
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{layout}: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    println!("Linux DEB and AppImage resource lookup and CLI bootstrap passed from an unrelated working directory");
 }
 
 fn verify_installed_resources() {
