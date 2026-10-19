@@ -419,6 +419,11 @@ function run(command, args, options = {}) {
   });
   if (result.status !== 0) {
     if (!options.suppressStdoutOnFailure) process.stderr.write(result.stdout ?? "");
+    else {
+      const errors = (result.stdout ?? "").split("\n")
+        .filter((line) => /"level"\s*:\s*"error"/.test(line));
+      if (errors.length) process.stderr.write(`${errors.join("\n")}\n`);
+    }
     process.stderr.write(result.stderr ?? "");
     throw new Error(`${command} ${args.join(" ")} 执行失败（退出码 ${result.status}）`);
   }
