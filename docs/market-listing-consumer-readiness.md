@@ -41,4 +41,4 @@
 
 ## 0.7.0 发布校验调整
 
-客户端发布只读取 `BAIJIMU_CLI_MARKET_SOURCE`，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。发布不依赖环境在线或工作区 PAT。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用。环境消费链路已验证 CLI 0.54.0 的来源与三平台制品。
+客户端发布只读取版本化 `tools/baijimu-cli/SOURCE.json`，与同目录 VERSION、SHA256SUMS 一起审查，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。发布不依赖环境在线或工作区 PAT。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用。环境消费链路已验证 CLI 0.54.0 的来源与三平台制品。

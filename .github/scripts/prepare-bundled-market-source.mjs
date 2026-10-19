@@ -12,7 +12,7 @@ export function prepareBundledMarketSource(selection, appId, version) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const source = prepareBundledMarketSource(JSON.parse(process.env.BAIJIMU_CLI_MARKET_SOURCE || "null"),
+  const source = prepareBundledMarketSource(JSON.parse(readFileSync("tools/baijimu-cli/SOURCE.json", "utf8")),
     readFileSync("tools/baijimu-cli/APP_ID", "utf8").trim(),
     readFileSync("tools/baijimu-cli/VERSION", "utf8").trim());
   writeFileSync("tools/baijimu-cli/INSTALL_SOURCE.json", JSON.stringify(source, null, 2) + "\n");

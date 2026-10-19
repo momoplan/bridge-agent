@@ -20,10 +20,8 @@ on:
 env:
   RELEASE_PLATFORMS: ${{ inputs.release_platforms || '' }}
   REPAIR_ASSETS_ONLY: ${{ inputs.repair_assets_only || false }}
-
 permissions:
   contents: write
-
 concurrency:
   group: bridge-agent-release
   cancel-in-progress: false
@@ -84,7 +82,6 @@ jobs:
       - name: Validate immutable release source
         shell: bash
         env:
-          BAIJIMU_CLI_MARKET_SOURCE: ${{ vars.BAIJIMU_CLI_MARKET_SOURCE }}
           REPAIR_ASSETS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_assets_only || false }}
         run: bash .github/scripts/release-steps/01-validate-immutable-release-source.sh
       - name: Preserve pinned bundled CLI source
@@ -149,6 +146,10 @@ jobs:
             TAURI_ENV_PLATFORM=windows npm run prepare:windows-uninstaller:quality
           fi
           npm run quality
+
+      - name: Verify released Linux CLI upgrade, restart and rollback
+        if: runner.os == 'Linux'
+        run: node scripts/test-linux-cli-upgrade.mjs
 
   windows-quality-gate:
     name: Windows release quality gate

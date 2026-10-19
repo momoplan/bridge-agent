@@ -29,7 +29,13 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
   }
 
   async function checkLocalAppVersion(app: LocalAppItem) {
-    await refreshLocalAppUpdateData();
+    setMessage("");
+    setError("");
+    const failure = await refreshLocalAppUpdateData();
+    if (failure) {
+      setError(`检查更新失败：${failure}`);
+      return;
+    }
     if (app.connector) {
       await checkLocalAppUpdate(app);
       return;

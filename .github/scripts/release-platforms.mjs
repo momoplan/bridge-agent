@@ -48,6 +48,6 @@ export function platformsForAssets(directory, input = "", repair = false) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const platforms = releasePlatforms(process.env.RELEASE_PLATFORMS);
   const matrix = { include: platforms.map(({ id, name, runner, tauri_args, rust_targets }) => ({ id, name, runner, tauri_args, rust_targets })) };
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\nquality_runner=${platforms[0].qualityRunner}\nplatforms=${platforms.map(({ id }) => id).join(",")}\n`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\nquality_runner=${(platforms.find(({ id }) => id === "linux") ?? platforms[0]).qualityRunner}\nplatforms=${platforms.map(({ id }) => id).join(",")}\n`);
   console.log(JSON.stringify(matrix));
 }

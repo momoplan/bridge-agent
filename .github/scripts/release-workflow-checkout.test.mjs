@@ -118,7 +118,9 @@ describe("release workflow repository script availability", () => {
     expect(body).toContain("prepare-bundled-market-source.mjs");
     expect(body).not.toContain("verify-consumer-market.mjs");
     expect(body).not.toContain("LOCAL_APP_CONSUMER_");
-    expect(body).toContain("BAIJIMU_CLI_MARKET_SOURCE");
+    expect(body).not.toContain("BAIJIMU_CLI_MARKET_SOURCE");
+    expect(readFileSync(".github/scripts/prepare-bundled-market-source.mjs", "utf8"))
+      .toContain("tools/baijimu-cli/SOURCE.json");
     expect(body).not.toContain(".latestVersion.repo ==");
   });
 

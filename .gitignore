@@ -8,3 +8,5 @@
 .bridge-agent-development/
 /test-results
 /playwright-report
+
+/tools/baijimu-cli/INSTALL_SOURCE.json

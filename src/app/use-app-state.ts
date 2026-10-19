@@ -33,7 +33,7 @@ export function useAppState() {
   const connectorAppsRef = useRef<ConnectorSummary[]>([]);
   const localAppInstallTasksRef = useRef<LocalAppInstallTask[]>([]);
   const localAppsChangeRevisionRef = useRef(0);
-  const localAppUpdateRefreshRef = useRef<Promise<void> | null>(null);
+  const localAppUpdateRefreshRef = useRef<Promise<string | null> | null>(null);
   const previousActivePageRef = useRef<AppPage>("apps");
   const authorizationStateRef = useRef<ReturnType<typeof deriveDeviceAuthorizationState> | null>(null);
   const queuedDeepLinkIntentsRef = useRef<BaijimuDeepLinkIntent[]>([]);

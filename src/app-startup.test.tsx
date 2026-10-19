@@ -54,6 +54,23 @@ describe("complete desktop startup and independent recovery", () => {
     expect(root.textContent).not.toContain("应用更新检查失败，无法确认最新版本");
     expect(root.textContent).toContain("测试应用");
   });
+  it("keeps CLI checks available after market failure and reports manual check failure", async () => {
+    const fixture = await start({ marketError: true });
+    const root = document.getElementById("root")!;
+    const card = Array.from(root.querySelectorAll<HTMLButtonElement>("button.local-app-card"))
+      .find((button) => button.textContent?.includes("测试 CLI"));
+    await act(async () => { card!.click(); });
+    const check = () => Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === "检查更新");
+    expect(check()).toBeDefined();
+    await act(async () => { check()!.click(); });
+    expect(root.textContent).toContain("检查更新失败：");
+    expect(root.textContent).not.toContain("的市场版本信息已刷新");
+    fixture.options.marketError = false;
+    await act(async () => { check()!.click(); });
+    expect(root.textContent).toContain("测试 CLI 的市场版本信息已刷新");
+    expect(fixture.calls).not.toContain("install_baijimu_cli_update");
+  });
   it("keeps an unregistered device usable for authorization", async () => {
     await start({ authorized: false });
     expect(document.getElementById("root")!.textContent).toContain("设备尚未授权");

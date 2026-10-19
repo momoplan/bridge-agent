@@ -69,6 +69,9 @@ jobs:
           npm ci
           npm run quality
 
+      - name: Verify released Linux CLI upgrade, restart and rollback
+        run: node scripts/test-linux-cli-upgrade.mjs
+
   windows-quality:
     name: Windows architecture and quality
     runs-on: windows-latest

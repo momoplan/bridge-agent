@@ -110,13 +110,19 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
   async function refreshBaijimuCli() {
     try {
       setBaijimuCli(await invoke<ManagedToolStatus>("baijimu_cli_status"));
+      return null;
     } catch (err) {
       clientWarn("读取 Baijimu CLI 托管状态失败", err);
       setBaijimuCli(null);
+      return readError(err);
     }
   }
 
   async function refreshMarketConnectorApps(): Promise<MarketConnector[]> {
+    return (await refreshMarketConnectorAppsResult()).apps;
+  }
+
+  async function refreshMarketConnectorAppsResult() {
     try {
       setMarketLoading(true);
       setMarketLoadError("");
@@ -136,23 +142,23 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
         permissions: app.permissions ?? []
       }));
       setMarketConnectors(normalizedApps);
-      return normalizedApps;
+      return { apps: normalizedApps, error: null };
     } catch (err) {
       clientWarn("读取本地应用市场失败", err);
       setMarketConnectors([]);
       setMarketLoadError(readError(err));
-      return [];
+      return { apps: [], error: readError(err) };
     } finally {
       setMarketLoading(false);
     }
   }
 
-  function refreshLocalAppUpdateData(): Promise<void> {
+  function refreshLocalAppUpdateData(): Promise<string | null> {
     if (localAppUpdateRefreshRef.current) {
       return localAppUpdateRefreshRef.current;
     }
-    const refresh = Promise.all([refreshMarketConnectorApps(), refreshBaijimuCli()])
-      .then(() => undefined)
+    const refresh = Promise.all([refreshMarketConnectorAppsResult(), refreshBaijimuCli()])
+      .then(([market, cliError]) => market.error ?? cliError)
       .finally(() => {
         if (localAppUpdateRefreshRef.current === refresh) {
           localAppUpdateRefreshRef.current = null;

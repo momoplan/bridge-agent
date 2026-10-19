@@ -1,0 +1,12 @@
+{
+  "kind": "market",
+  "listingId": "0e92a06d-50f3-479f-b10e-d747ed17a84b",
+  "version": "0.121.0",
+  "source": {
+    "application": {
+      "appId": "baijimu-cli",
+      "environmentKey": "baijimu"
+    },
+    "version": "0.121.0"
+  }
+}

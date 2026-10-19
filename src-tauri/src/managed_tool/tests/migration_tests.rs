@@ -169,3 +169,7 @@ fn mismatched_bundled_source_fails_without_changing_installed_state() {
     assert_eq!(fs::read(state_path()).unwrap(), persisted);
     assert_eq!(validate_cli(&launcher_path(), None).unwrap(), "0.2.0");
 }
+
+#[cfg(target_os = "linux")]
+#[path = "linux_upgrade.rs"]
+mod linux_upgrade;

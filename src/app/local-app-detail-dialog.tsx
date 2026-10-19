@@ -174,7 +174,7 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
                     安装应用
                   </button>
                 </>
-              ) : marketApp ? (
+              ) : marketApp || isManagedTool ? (
                 updateStatus?.updateAvailable ? (
                   <button
                     className="primary accent"
