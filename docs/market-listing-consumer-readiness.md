@@ -39,6 +39,6 @@
 - 发布工作流使用 BAIJIMU_CLI_MARKET_SOURCE 固定来源配置，离线校验后生成 INSTALL_SOURCE.json；环境消费检查独立进行。
 - 不新建内网负载均衡。统一Token基础服务链路按已讨论的现有市场网关方案另行完成；客户端版本尚未生成标签或触发发行。
 
-## 0.14.0 发布校验调整（2026-10-19）
+## 0.14.1 发布校验调整（2026-10-19）
 
 客户端发布只读取版本化 `tools/baijimu-cli/SOURCE.json`，与同目录 VERSION、SHA256SUMS 一起审查，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。发布不依赖环境在线或工作区 PAT。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用。本次消费环境已读取 CLI 0.121.0 的同来源市场记录与三平台制品；Linux 升级验收由官方流水线单独执行。准确范围见 [本次 ADR](adr/2026-10-19-linux-cli-updates.md)。

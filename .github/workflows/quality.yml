@@ -76,6 +76,8 @@ jobs:
     name: Windows architecture and quality
     runs-on: windows-latest
     env:
+      # Match the release gate: lifecycle tests own real processes and stdio.
+      RUST_TEST_THREADS: "1"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
 
