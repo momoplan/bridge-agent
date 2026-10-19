@@ -318,6 +318,7 @@ fn setup_desktop(
     setup
         .startup_health
         .begin_primary(setup.forced_safe_mode, setup.config_path_failure);
+    initialize_bundled_resources(app, &setup.startup_health, &setup.diagnostics);
     record_crypto_provider_health(&setup.startup_health, setup.crypto_provider_failure);
     setup.startup_health.attach_event_app(app.handle().clone());
     #[cfg(debug_assertions)]
@@ -358,6 +359,26 @@ fn setup_desktop(
     });
     setup.diagnostics.info("tauri setup completed");
     Ok(())
+}
+
+fn initialize_bundled_resources(
+    app: &tauri::App,
+    health: &StartupHealthManager,
+    diagnostics: &StartupDiagnostics,
+) {
+    match app
+        .path()
+        .resource_dir()
+        .map_err(anyhow::Error::from)
+        .and_then(crate::bundled_resources::initialize)
+    {
+        Ok(()) => health.set_component("bundled_resources", "内置资源", "ready", None),
+        Err(error) => {
+            let detail = format!("无法解析客户端内置资源：{error:#}");
+            diagnostics.warn(&detail);
+            health.set_component("bundled_resources", "内置资源", "degraded", Some(detail));
+        }
+    }
 }
 
 fn record_crypto_provider_health(health: &StartupHealthManager, failure: Option<String>) {

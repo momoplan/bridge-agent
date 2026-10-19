@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bundled_resources;
 mod codex_skill;
 mod desktop;
 mod local_app;

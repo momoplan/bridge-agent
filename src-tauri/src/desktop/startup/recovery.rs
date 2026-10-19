@@ -305,36 +305,7 @@ pub(super) fn bundled_baijimu_cli_path() -> Option<PathBuf> {
 }
 
 pub(super) fn bundled_resource_binary_path(binary_name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok();
-    let mut candidates = Vec::new();
-    if let Some(exe) = exe.as_ref() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("resources").join("bin").join(binary_name));
-            candidates.push(
-                dir.join("..")
-                    .join("Resources")
-                    .join("resources")
-                    .join("bin")
-                    .join(binary_name),
-            );
-            candidates.push(
-                dir.join("..")
-                    .join("resources")
-                    .join("bin")
-                    .join(binary_name),
-            );
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(
-            cwd.join("src-tauri")
-                .join("resources")
-                .join("bin")
-                .join(binary_name),
-        );
-        candidates.push(cwd.join("resources").join("bin").join(binary_name));
-    }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    crate::bundled_resources::binary_path(binary_name)
 }
 
 pub(super) fn baijimu_cli_binary_name() -> &'static str {

@@ -27,7 +27,7 @@ try {
     writeFileSync(join(directory, `${name}.zip`), bytes);
   }
   const result = spawnSync("cargo", ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml",
-    "linux_cli_upgrade_acceptance", "--", "--ignored", "--nocapture"], {
+    "linux_cli_", "--", "--ignored", "--nocapture"], {
     cwd: root, stdio: "inherit", timeout: 20 * 60 * 1000,
     env: { ...process.env, BAIJIMU_CLI_UPGRADE_FIXTURE_DIR: directory }
   });

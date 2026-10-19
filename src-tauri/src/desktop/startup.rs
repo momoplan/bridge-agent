@@ -380,3 +380,11 @@ where
 include!("startup/recovery.rs");
 
 include!("startup/identity_migration.rs");
+
+#[cfg(all(test, target_os = "linux"))]
+mod packaged_resource_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bundled_resources_tests.rs"
+    ));
+}
