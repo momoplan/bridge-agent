@@ -15,7 +15,7 @@ fn linux_cli_packaged_resources_acceptance() {
         .prefix(".mount_cli-resource-")
         .tempdir()
         .unwrap();
-    let context = tauri::generate_context!();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let bin = fixture.path().join("usr/bin");
     let resources = fixture
         .path()
@@ -75,7 +75,7 @@ fn linux_cli_packaged_resources_acceptance() {
 }
 
 fn verify_installed_resources() {
-    let context = tauri::generate_context!();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let root =
         tauri::utils::platform::resource_dir(context.package_info(), &Default::default()).unwrap();
     let expected = PathBuf::from(std::env::var_os("BAIJIMU_RESOURCE_LAYOUT_CHILD").unwrap());
