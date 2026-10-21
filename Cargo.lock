@@ -293,7 +293,8 @@ dependencies = [
 [[package]]
 name = "baijimu-cmodel-core"
 version = "5.0.0"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=213e7efbcc06984820690e87a2cd27f6d552254b#213e7efbcc06984820690e87a2cd27f6d552254b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22013243e71b32bc2a7e8ee8e13b7dd62d24d00b708078ce24235a426a051867"
 dependencies = [
  "semver",
  "serde",
@@ -304,7 +305,8 @@ dependencies = [
 [[package]]
 name = "baijimu-cmodel-http"
 version = "5.0.0"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=213e7efbcc06984820690e87a2cd27f6d552254b#213e7efbcc06984820690e87a2cd27f6d552254b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f93caaccfb254da61fa1f318a923b8ac9054cf6f6b204c8713b2f2b182198893"
 dependencies = [
  "baijimu-cmodel-core",
  "bytes",
