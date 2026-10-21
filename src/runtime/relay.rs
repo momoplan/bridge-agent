@@ -6,7 +6,6 @@ async fn push_log_entry(
     metadata: LogMetadata,
 ) {
     emit_tracing(level, message);
-    let mut logs = inner.logs.lock().await;
     let entry = LogEntry {
         sequence: inner.next_log_sequence.fetch_add(1, Ordering::Relaxed) + 1,
         timestamp_ms: now_ms(),
@@ -14,9 +13,12 @@ async fn push_log_entry(
         message: message.to_string(),
         metadata,
     };
-    logs.push_back(entry.clone());
-    while logs.len() > limit {
-        logs.pop_front();
+    {
+        let mut logs = inner.logs.lock().await;
+        logs.push_back(entry.clone());
+        while logs.len() > limit {
+            logs.pop_front();
+        }
     }
     let file_log = inner.file_log.lock().await.clone();
     if let Some(file_log) = file_log {
@@ -24,7 +26,6 @@ async fn push_log_entry(
             warn!("failed to append file log: {err:#}");
         }
     }
-    drop(logs);
     publish_runtime_event(inner, RuntimeEvent::LogAppended(entry));
 }
 
