@@ -140,8 +140,12 @@ pub(super) async fn poll_browser_auth(
     apply_authorized_device_credentials(&mut updated, &authorized);
     log_shared_cli_auth_result(&state.runtime, write_shared_cli_auth(&updated, &authorized))
         .await?;
-    save_agent_config(&state.config_path, &updated)
-        .map_err(|err| command_error_message(err.to_string()))?;
+    let saved = updated.clone();
+    update_agent_config(&state.config_path, |current| {
+        overlay_submitted_config(current, saved);
+        Ok(())
+    })
+    .map_err(|err| command_error_message(err.to_string()))?;
     let runtime = restart_agent_from_saved_config(&state)
         .await
         .map_err(CommandError::from)?;

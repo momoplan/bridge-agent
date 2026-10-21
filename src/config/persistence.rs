@@ -76,11 +76,153 @@ fn remove_legacy_codex_binary_overrides(config: &mut AgentConfig) -> bool {
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
+    let _lock = ConfigFileLock::exclusive(path)?;
+    save_config_unlocked(path, config)
+}
+
+fn save_config_unlocked(path: &Path, config: &AgentConfig) -> Result<()> {
     config.validate()?;
     if !config.relay.token.trim().is_empty() {
         store_relay_token(path, &config.relay.token)?;
     }
     write_public_config(path, config)
+}
+
+/// Read, modify, and write `agent-config.json` while holding an exclusive lock.
+///
+/// The closure must not call `update_config` on the same path. `save_config` is
+/// safe to call reentrantly from this thread, but a nested full snapshot write
+/// can still replace the update in progress.
+pub fn update_config<T>(
+    path: &Path,
+    update: impl FnOnce(&mut AgentConfig) -> Result<T>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::exclusive(path)?;
+    let mut config = load_config(path)?;
+    let value = update(&mut config)?;
+    save_config_unlocked(path, &config)?;
+    Ok(value)
+}
+
+/// Apply a UI snapshot without dropping services or local apps added after it was loaded.
+pub fn overlay_submitted_config(current: &mut AgentConfig, mut submitted: AgentConfig) {
+    if submitted.relay.token.trim().is_empty() {
+        submitted.relay.token = current.relay.token.clone();
+    }
+    if submitted
+        .runtime
+        .service_registration_token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        submitted.runtime.service_registration_token =
+            current.runtime.service_registration_token.clone();
+    }
+    submitted.services = union_by_key(submitted.services, &current.services, |service| {
+        service.name.clone()
+    });
+    submitted.local_apps = union_by_key(submitted.local_apps, &current.local_apps, |app| {
+        app.app_id.clone()
+    });
+    *current = submitted;
+}
+
+fn union_by_key<T, K>(submitted: Vec<T>, disk: &[T], key: impl Fn(&T) -> K) -> Vec<T>
+where
+    T: Clone,
+    K: PartialEq,
+{
+    let mut merged = submitted;
+    for item in disk {
+        let item_key = key(item);
+        if merged.iter().any(|existing| key(existing) == item_key) {
+            continue;
+        }
+        merged.push(item.clone());
+    }
+    merged
+}
+
+std::thread_local! {
+    static CONFIG_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ConfigFileLock {
+    file: Option<std::fs::File>,
+}
+
+impl ConfigFileLock {
+    fn exclusive(path: &Path) -> Result<Self> {
+        if CONFIG_LOCK_HELD.with(std::cell::Cell::get) {
+            return Ok(Self { file: None });
+        }
+        let file = open_config_lock(path)?;
+        CONFIG_LOCK_HELD.with(|held| held.set(true));
+        Ok(Self { file: Some(file) })
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let Some(file) = self.file.take() else {
+            return;
+        };
+        let _ = fs2::FileExt::unlock(&file);
+        CONFIG_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
+fn config_lock_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_CONFIG_FILE_NAME.to_string());
+    path.with_file_name(format!("{file_name}.lock"))
+}
+
+fn open_config_lock(path: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+            set_private_directory_permissions(parent)?;
+        }
+    }
+    let lock_path = config_lock_path(path);
+    let file = create_lock_file(&lock_path)?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock config {}", path.display()))?;
+    set_private_file_permissions(&lock_path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn create_lock_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to open config lock {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn create_lock_file(path: &Path) -> Result<std::fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open config lock {}", path.display()))
 }
 
 fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {

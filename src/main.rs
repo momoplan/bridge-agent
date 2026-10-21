@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bridge_agent::{
     clear_relay_credentials, default_config_path, install_rustls_crypto_provider, list_connectors,
     load_config, save_config, show_connector, start_connector, uninstall_connector_with_options,
-    AgentConfig, AgentRuntimeManager, ConnectorUninstallOptions, ServiceConfig,
+    update_config, AgentConfig, AgentRuntimeManager, ConnectorUninstallOptions, ServiceConfig,
     ServiceRegistration,
 };
 use clap::{Parser, Subcommand};
@@ -182,20 +182,21 @@ async fn register_service_command(
         anyhow::bail!("service name cannot be empty");
     }
 
-    let mut config = load_config(&config_path)?;
-    match config
-        .services
-        .iter()
-        .position(|candidate| candidate.name == service.name)
-    {
-        Some(index) if replace => config.services[index] = service.clone(),
-        Some(_) => anyhow::bail!(
-            "service `{}` already exists; pass --replace to overwrite",
-            service.name
-        ),
-        None => config.services.push(service.clone()),
-    }
-    save_config(&config_path, &config)?;
+    update_config(&config_path, |config| {
+        match config
+            .services
+            .iter()
+            .position(|candidate| candidate.name == service.name)
+        {
+            Some(index) if replace => config.services[index] = service.clone(),
+            Some(_) => anyhow::bail!(
+                "service `{}` already exists; pass --replace to overwrite",
+                service.name
+            ),
+            None => config.services.push(service.clone()),
+        }
+        Ok(())
+    })?;
     println!("{}", service.name);
     Ok(())
 }
@@ -203,14 +204,15 @@ async fn register_service_command(
 async fn unregister_service_command(name: String, config: Option<PathBuf>) -> Result<()> {
     let config_path = config.unwrap_or(default_config_path()?);
     bridge_agent::initialize_config(&config_path)?;
-    let mut config = load_config(&config_path)?;
     let normalized = name.trim();
-    let initial_len = config.services.len();
-    config.services.retain(|service| service.name != normalized);
-    if config.services.len() == initial_len {
-        anyhow::bail!("service `{normalized}` is not registered");
-    }
-    save_config(&config_path, &config)?;
+    update_config(&config_path, |config| {
+        let initial_len = config.services.len();
+        config.services.retain(|service| service.name != normalized);
+        if config.services.len() == initial_len {
+            anyhow::bail!("service `{normalized}` is not registered");
+        }
+        Ok(())
+    })?;
     println!("{normalized}");
     Ok(())
 }

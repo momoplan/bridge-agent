@@ -25,11 +25,12 @@ pub use cmodel_response::describe_cmodel_http_outcome;
 pub use config::{
     browser_auth_manifest_json, clear_relay_credentials, default_config_path,
     ensure_browser_auth_agent_id, ensure_config_exists, initialize_config, load_config,
-    manifest_preview_json, migrate_config, reset_invalid_config, save_config,
-    windows_shared_config_path, AgentConfig, ComputerUseAction, ComputerUseBinding, DeviceConfig,
-    EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig, PlatformConfig,
-    RegistrationHealthCheck, RegistrationMethod, RegistrationTransport, RelayConfig, RuntimeConfig,
-    ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand, UploadConfig,
+    manifest_preview_json, migrate_config, overlay_submitted_config, reset_invalid_config,
+    save_config, update_config, windows_shared_config_path, AgentConfig, ComputerUseAction,
+    ComputerUseBinding, DeviceConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding,
+    MethodConfig, PlatformConfig, RegistrationHealthCheck, RegistrationMethod,
+    RegistrationTransport, RelayConfig, RuntimeConfig, ServiceConfig, ServiceHealthCheck,
+    ServiceRegistration, ServiceStartCommand, UploadConfig,
 };
 pub use connector::inspect_python_runtime;
 pub use connector::{

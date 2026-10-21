@@ -1,5 +1,5 @@
 use crate::config::{
-    load_config, resolve_config_base_dir, save_config, AgentConfig, ServiceConfig,
+    load_config, resolve_config_base_dir, save_config, update_config, AgentConfig, ServiceConfig,
     ServiceRegistration,
 };
 use crate::connector::{

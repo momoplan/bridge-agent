@@ -1,5 +1,5 @@
 use crate::config::{
-    load_config, save_config, AgentConfig, LocalAppConfig, RegistrationHealthCheck,
+    load_config, save_config, update_config, AgentConfig, LocalAppConfig, RegistrationHealthCheck,
     RegistrationMethod, RegistrationTransport, RuntimeConfig, ServiceConfig, ServiceRegistration,
     ServiceStartCommand,
 };

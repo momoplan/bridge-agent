@@ -68,9 +68,12 @@ pub(super) async fn save_settings_section(
 ) -> Result<ConfigDocument, String> {
     // Read the latest document and patch only explicitly editable fields. In particular,
     // credentials, workspace identity, installed apps and other sections never come from the UI.
-    let current = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    let next = apply_settings_patch(&current, &section, changes)?;
-    save_agent_config(&state.config_path, &next).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |current| {
+        let next = apply_settings_patch(current, &section, changes).map_err(anyhow::Error::msg)?;
+        *current = next;
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     load_config(state).await
 }
 

@@ -172,16 +172,19 @@ pub(super) async fn save_config(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
 ) -> Result<ConfigDocument, String> {
-    let previous = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if !previous.relay.token.is_empty()
-        && (bridge_agent::config::environment::api_base(&previous.platform.base_url)
-            != bridge_agent::config::environment::api_base(&config.platform.base_url)
-            || previous.platform.workspace_id != config.platform.workspace_id
-            || previous.platform.environment_key != config.platform.environment_key)
-    {
-        return Err("切换环境或工作区请先完成浏览器授权，原连接尚未修改".into());
-    }
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |current| {
+        if !current.relay.token.is_empty()
+            && (bridge_agent::config::environment::api_base(&current.platform.base_url)
+                != bridge_agent::config::environment::api_base(&config.platform.base_url)
+                || current.platform.workspace_id != config.platform.workspace_id
+                || current.platform.environment_key != config.platform.environment_key)
+        {
+            anyhow::bail!("切换环境或工作区请先完成浏览器授权，原连接尚未修改");
+        }
+        overlay_submitted_config(current, config);
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let runtime = state.runtime.snapshot().await;
@@ -201,16 +204,18 @@ pub(super) async fn save_service(
     apply_to_runtime: bool,
 ) -> Result<ConfigDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if service_index > config.services.len() {
-        return Err(format!("服务索引 {service_index} 已超出当前配置范围"));
-    }
-    if service_index == config.services.len() {
-        config.services.push(service);
-    } else {
-        config.services[service_index] = service;
-    }
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |config| {
+        if service_index > config.services.len() {
+            anyhow::bail!("服务索引 {service_index} 已超出当前配置范围");
+        }
+        if service_index == config.services.len() {
+            config.services.push(service);
+        } else {
+            config.services[service_index] = service;
+        }
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let runtime = if apply_to_runtime {
         state
             .runtime
@@ -237,12 +242,14 @@ pub(super) async fn delete_service(
     apply_to_runtime: bool,
 ) -> Result<ConfigDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if service_index >= config.services.len() {
-        return Err(format!("服务索引 {service_index} 已超出当前配置范围"));
-    }
-    config.services.remove(service_index);
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |config| {
+        if service_index >= config.services.len() {
+            anyhow::bail!("服务索引 {service_index} 已超出当前配置范围");
+        }
+        config.services.remove(service_index);
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let runtime = if apply_to_runtime {
         state
             .runtime
@@ -271,9 +278,19 @@ pub(super) async fn start_agent(
         .startup_health
         .diagnostics
         .info("manual agent start requested from desktop UI");
-    save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
-        message: err.to_string(),
-    })?;
+    if state.config_path.is_file() {
+        update_agent_config(&state.config_path, |current| {
+            overlay_submitted_config(current, config);
+            Ok(())
+        })
+        .map_err(|err| CommandError::Message {
+            message: err.to_string(),
+        })?;
+    } else {
+        save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
+            message: err.to_string(),
+        })?;
+    }
     state
         .runtime
         .start_from_path(&state.config_path)

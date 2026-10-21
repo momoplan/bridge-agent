@@ -87,15 +87,15 @@ use bridge_agent::{
     ensure_config_exists, format_connector_sync_failures, inspect_python_runtime,
     install_connector_from_path_with_provenance, install_rustls_crypto_provider,
     is_connector_package_stop_error, list_connectors, load_config as load_agent_config,
-    load_connector_manifest, manifest_preview_json,
+    load_connector_manifest, manifest_preview_json, overlay_submitted_config,
     process_environment::enrich_user_command_environment, reset_invalid_config,
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
-    uninstall_connector_with_options, AgentConfig, AgentRuntimeManager, ConnectorIcon,
-    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest,
-    ConnectorStartResult, ConnectorSummary, ConnectorSyncReport, ConnectorUninstallOptions,
-    RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig,
-    ServiceStartCommand,
+    uninstall_connector_with_options, update_config as update_agent_config, AgentConfig,
+    AgentRuntimeManager, ConnectorIcon, ConnectorInstallProvenance, ConnectorInstallRecord,
+    ConnectorInstallResult, ConnectorManifest, ConnectorStartResult, ConnectorSummary,
+    ConnectorSyncReport, ConnectorUninstallOptions, RuntimeEvent, RuntimeLockConflict,
+    RuntimeSnapshot, RuntimeStatus, ServiceConfig, ServiceStartCommand,
 };
 #[cfg(test)]
 use bridge_agent::{LocalAppConfig, ServiceHealthCheck};

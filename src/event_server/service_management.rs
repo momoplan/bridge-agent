@@ -64,24 +64,25 @@ async fn delete_service(
         ));
     }
 
-    let mut config = load_config(&state.config_path).map_err(internal_error)?;
-    let initial_len = config.services.len();
-    config
-        .services
-        .retain(|service| service.name != service_name);
-    let deleted = config.services.len() != initial_len;
-    if !deleted {
-        return Err(EventApiError::new(
-            StatusCode::NOT_FOUND,
-            format!("service `{service_name}` is not registered"),
-        ));
-    }
-    save_config(&state.config_path, &config).map_err(internal_error)?;
-    apply_config_update(&state, &config).await?;
-    emit_service_audit_log(&state, "deleted", service_name, deleted);
+    let config = update_config(&state.config_path, |config| {
+        let initial_len = config.services.len();
+        config
+            .services
+            .retain(|service| service.name != service_name);
+        if config.services.len() == initial_len {
+            return Err(service_update_error(
+                StatusCode::NOT_FOUND,
+                format!("service `{service_name}` is not registered"),
+            ));
+        }
+        Ok(config.clone())
+    })
+    .map_err(map_service_update)?;
+    apply_config_update(state, &config).await?;
+    emit_service_audit_log(&state, "deleted", service_name, true);
     Ok(Json(DeleteServiceResponse {
         service: service_name.to_string(),
-        deleted,
+        deleted: true,
         runtime_applied: true,
     }))
 }
@@ -134,24 +135,27 @@ async fn upsert_service(
         ));
     }
 
-    let mut config = load_config(&state.config_path).map_err(internal_error)?;
-    let existing_index = config
-        .services
-        .iter()
-        .position(|candidate| candidate.name == service_name);
-    let replaced = existing_index.is_some();
-    match existing_index {
-        Some(index) if replace => config.services[index] = service.clone(),
-        Some(_) => {
-            return Err(EventApiError::new(
-                StatusCode::CONFLICT,
-                format!("service `{service_name}` already exists; set replace=true to overwrite"),
-            ))
+    let (config, replaced) = update_config(&state.config_path, |config| {
+        let existing_index = config
+            .services
+            .iter()
+            .position(|candidate| candidate.name == service_name);
+        let replaced = existing_index.is_some();
+        match existing_index {
+            Some(index) if replace => config.services[index] = service.clone(),
+            Some(_) => {
+                return Err(service_update_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "service `{service_name}` already exists; set replace=true to overwrite"
+                    ),
+                ));
+            }
+            None => config.services.push(service.clone()),
         }
-        None => config.services.push(service.clone()),
-    }
-
-    save_config(&state.config_path, &config).map_err(bad_request)?;
+        Ok((config.clone(), replaced))
+    })
+    .map_err(|err| map_service_update_status(err, StatusCode::BAD_REQUEST))?;
     apply_config_update(state, &config).await?;
     Ok(ServiceManagementResponse {
         service,
@@ -189,6 +193,39 @@ async fn apply_config_update(
             )
         })?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ServiceUpdateError {
+    status: StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for ServiceUpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ServiceUpdateError {}
+
+fn service_update_error(status: StatusCode, message: impl Into<String>) -> anyhow::Error {
+    ServiceUpdateError {
+        status,
+        message: message.into(),
+    }
+    .into()
+}
+
+fn map_service_update(err: anyhow::Error) -> EventApiError {
+    map_service_update_status(err, StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn map_service_update_status(err: anyhow::Error, fallback: StatusCode) -> EventApiError {
+    match err.downcast::<ServiceUpdateError>() {
+        Ok(rejected) => EventApiError::new(rejected.status, rejected.message),
+        Err(err) => EventApiError::new(fallback, err.to_string()),
+    }
 }
 
 fn authorize_service_registration(
