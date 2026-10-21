@@ -369,6 +369,7 @@ fn spawn_runtime_task(
         ws_url,
         registry,
         event_queue: event_queue.clone(),
+        reconnect_backoff: ReconnectBackoff::new(),
     };
     let task = tokio::spawn(
         RuntimeTask {

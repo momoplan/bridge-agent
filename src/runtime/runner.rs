@@ -6,6 +6,7 @@ struct RuntimeRunner {
     config_path: String,
     ws_url: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
+    reconnect_backoff: ReconnectBackoff,
 }
 
 impl RuntimeRunner {
@@ -163,17 +164,32 @@ impl RuntimeRunner {
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> bool {
-        tokio::select! {
-            _ = shutdown_rx.changed() => true,
-            Some(update) = apply_rx.recv() => {
-                self.apply_registry_update(update).await;
-                false
+        if *shutdown_rx.borrow() {
+            return true;
+        }
+        let delay = self
+            .reconnect_backoff
+            .next_delay(self.config.relay.reconnect_secs);
+        let deadline = tokio::time::Instant::now() + delay;
+        self.push_log(
+            "info",
+            &format!("waiting {}ms before reconnect", delay.as_millis()),
+        )
+        .await;
+        loop {
+            if *shutdown_rx.borrow() {
+                return true;
             }
-            Some(audit) = audit_rx.recv() => {
-                self.push_audit_log(audit).await;
-                false
+            tokio::select! {
+                _ = shutdown_rx.changed() => return true,
+                Some(update) = apply_rx.recv() => {
+                    self.apply_registry_update(update).await;
+                }
+                Some(audit) = audit_rx.recv() => {
+                    self.push_audit_log(audit).await;
+                }
+                _ = tokio::time::sleep_until(deadline) => return false,
             }
-            _ = sleep(Duration::from_secs(self.config.relay.reconnect_secs)) => false,
         }
     }
 
@@ -473,6 +489,7 @@ impl RuntimeRunner {
             state.snapshot.last_relay_seen_at = Some(now);
             state.snapshot.last_error = None;
             state.snapshot.last_event_at = now;
+            self.reconnect_backoff.reset();
             state.last_relay_seen_event_at = Some(now);
             state.snapshot.clone()
         };
