@@ -64,7 +64,7 @@ fn installed_connector_package_path(manifest: &ConnectorManifest) -> Result<Path
         .join("package"))
 }
 
-fn install_record_path(app_id: &str) -> Result<PathBuf> {
+pub(crate) fn install_record_path(app_id: &str) -> Result<PathBuf> {
     Ok(connectors_dir()?
         .join(sanitize_path_component(app_id))
         .join(CONNECTOR_INSTALL_RECORD_FILE))

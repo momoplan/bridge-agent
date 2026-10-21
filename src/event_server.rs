@@ -2,9 +2,7 @@ use crate::config::{
     load_config, resolve_config_base_dir, save_config, update_config, AgentConfig, ServiceConfig,
     ServiceRegistration,
 };
-use crate::connector::{
-    authorize_connector_asset_upload, authorize_connector_event, connector_declares_asset_upload,
-};
+use crate::connector::{authorize_connector_asset_upload, connector_declares_asset_upload};
 use crate::event_delivery::EventQueue;
 use crate::logging::LogMetadata;
 use crate::process_identity::is_bridge_agent_process_name;
@@ -64,6 +62,7 @@ struct EventServerState {
     agent_id: String,
     workspace_id: Option<u64>,
     http_client: reqwest::Client,
+    event_auth_cache: Arc<EventAuthCache>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +233,7 @@ impl LocalEventServer {
                 agent_id: config.relay.agent_id.clone(),
                 workspace_id: config.platform.workspace_id,
                 http_client: reqwest::Client::new(),
+                event_auth_cache: Arc::new(EventAuthCache::new()),
             },
         }))
     }
@@ -269,6 +269,7 @@ impl LocalEventServer {
     }
 }
 
+include!("event_server/event_auth_cache.rs");
 include!("event_server/port_management.rs");
 include!("event_server/event_emission.rs");
 include!("event_server/asset_upload.rs");
@@ -293,4 +294,5 @@ mod tests {
     include!("event_server/tests/content_and_ports.rs");
     include!("event_server/tests/service_management.rs");
     include!("event_server/tests/registration_auth.rs");
+    include!("event_server/tests/event_auth_cache.rs");
 }

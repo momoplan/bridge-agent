@@ -168,6 +168,7 @@ async fn apply_config_update(
     state: &EventServerState,
     config: &crate::config::AgentConfig,
 ) -> Result<(), EventApiError> {
+    state.event_auth_cache.invalidate();
     let config_base_dir = resolve_config_base_dir(&state.config_path);
     let registry = ServiceRegistry::from_config(config, &config_base_dir).map_err(bad_request)?;
     let relay_registry = ServiceRegistry::from_config_checked(config, &config_base_dir)

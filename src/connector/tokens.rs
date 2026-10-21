@@ -80,7 +80,7 @@ fn ensure_connector_asset_upload_token(app_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn constant_time_text_eq(left: &str, right: &str) -> bool {
+pub(crate) fn constant_time_text_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
     }
