@@ -190,6 +190,11 @@ pub(super) async fn resolve_market_install(
     .ok_or("该版本未提供当前平台的安装包")?;
     let kind =
         connector_archive_kind(artifact.file_name.as_str()).ok_or("当前应用安装包格式不受支持")?;
+    let metadata = frozen_artifact_metadata(
+        listing.frozen_version.content.manifest.as_json(),
+        artifact.platform.as_str(),
+        artifact.architecture.as_str(),
+    )?;
     let response = consumer
         .reader
         .artifact(&consumer.credential, selection, artifact.artifact_id)
@@ -203,6 +208,7 @@ pub(super) async fn resolve_market_install(
         "应用制品",
         artifact.size_bytes,
         progress,
+        &metadata.sha256,
     )
     .await?;
     let extract_dir = temp_dir.path().join("package");

@@ -45,6 +45,11 @@ pub(super) async fn resolve(
         .map_err(|error| error.to_string())?
         .ok_or("该来源版本不支持当前平台")?;
     let kind = connector_archive_kind(artifact.file_name.as_str()).ok_or("安装包格式不受支持")?;
+    let metadata = frozen_artifact_metadata(
+        frozen.content.manifest.as_json(),
+        artifact.platform.as_str(),
+        artifact.architecture.as_str(),
+    )?;
     let response = reader
         .artifact(&credential, &frozen, artifact.artifact_id)
         .await
@@ -57,6 +62,7 @@ pub(super) async fn resolve(
         "环境应用制品",
         artifact.size_bytes,
         progress,
+        &metadata.sha256,
     )
     .await?;
     let extract_dir = temp_dir.path().join("package");

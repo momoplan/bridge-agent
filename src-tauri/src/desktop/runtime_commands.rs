@@ -85,6 +85,11 @@ pub(super) async fn install_baijimu_cli_update(
     )
     .map_err(|error| error.to_string())?
     .ok_or("当前平台没有可用的工具制品")?;
+    let metadata = frozen_artifact_metadata(
+        listing.frozen_version.content.manifest.as_json(),
+        artifact.platform.as_str(),
+        artifact.architecture.as_str(),
+    )?;
     let response = consumer
         .reader
         .artifact(&consumer.credential, &install_source, artifact.artifact_id)
@@ -98,30 +103,18 @@ pub(super) async fn install_baijimu_cli_update(
         "工具制品",
         artifact.size_bytes,
         None,
+        &metadata.sha256,
     )
     .await?;
     let bytes = fs::read(&package_path).map_err(|error| error.to_string())?;
-    let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
-        .map_err(|error| error.to_string())?;
-    let manifest_artifact = manifest
-        .get("artifacts")
-        .and_then(Value::as_array)
-        .and_then(|artifacts| {
-            artifacts.iter().find(|entry| {
-                entry.get("platform").and_then(Value::as_str) == Some(artifact.platform.as_str())
-                    && entry
-                        .get("arch")
-                        .and_then(Value::as_str)
-                        .unwrap_or("universal")
-                        == artifact.architecture
-            })
-        });
-    let archive_path = manifest_artifact
-        .as_ref()
-        .and_then(|value| value.get("archivePath"))
-        .and_then(Value::as_str);
-    managed_tool::install_market_package(&bytes, artifact, install_source, &listing, archive_path)
-        .map_err(|error| error.to_string())?;
+    managed_tool::install_market_package(
+        &bytes,
+        artifact,
+        install_source,
+        &listing,
+        metadata.archive_path.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     codex_skill::install_bundled().map_err(|err| err.to_string())?;
     let bundled = bundled_baijimu_cli_path();
     managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
