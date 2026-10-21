@@ -62,7 +62,7 @@ pub(super) async fn resolve(
         "环境应用制品",
         artifact.size_bytes,
         progress,
-        &metadata.sha256,
+        metadata.sha256.as_deref(),
     )
     .await?;
     let extract_dir = temp_dir.path().join("package");

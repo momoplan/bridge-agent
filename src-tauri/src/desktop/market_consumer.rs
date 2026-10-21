@@ -208,7 +208,7 @@ pub(super) async fn resolve_market_install(
         "应用制品",
         artifact.size_bytes,
         progress,
-        &metadata.sha256,
+        metadata.sha256.as_deref(),
     )
     .await?;
     let extract_dir = temp_dir.path().join("package");

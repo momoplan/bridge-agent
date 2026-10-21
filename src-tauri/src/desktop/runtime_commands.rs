@@ -103,7 +103,7 @@ pub(super) async fn install_baijimu_cli_update(
         "工具制品",
         artifact.size_bytes,
         None,
-        &metadata.sha256,
+        metadata.sha256.as_deref(),
     )
     .await?;
     let bytes = fs::read(&package_path).map_err(|error| error.to_string())?;

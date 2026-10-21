@@ -2,13 +2,16 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 pub(super) const MAX_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
-const MISSING_ARTIFACT_CHECKSUM: &str = "冻结版本没有提供当前平台制品的 SHA-256 校验和";
 
 pub(super) struct FrozenArtifactMetadata {
-    pub sha256: String,
+    pub sha256: Option<String>,
     pub archive_path: Option<String>,
 }
 
+/// Read an optional SHA-256 from the frozen manifest. The market `Artifact`
+/// type has no digest, and a manifest `checksum` string is not guaranteed to
+/// be SHA-256. Anything else is ignored so the download can continue with a
+/// size check.
 pub(super) fn frozen_artifact_metadata(
     manifest_json: &str,
     platform: &str,
@@ -16,7 +19,7 @@ pub(super) fn frozen_artifact_metadata(
 ) -> Result<FrozenArtifactMetadata, String> {
     let manifest: Value =
         serde_json::from_str(manifest_json).map_err(|err| format!("冻结清单无效: {err}"))?;
-    let entry = manifest
+    let Some(entry) = manifest
         .get("artifacts")
         .and_then(Value::as_array)
         .and_then(|artifacts| {
@@ -29,13 +32,17 @@ pub(super) fn frozen_artifact_metadata(
                         == architecture
             })
         })
-        .ok_or(MISSING_ARTIFACT_CHECKSUM)?;
-    let checksum = entry
-        .get("checksum")
-        .and_then(Value::as_str)
-        .ok_or(MISSING_ARTIFACT_CHECKSUM)?;
+    else {
+        return Ok(FrozenArtifactMetadata {
+            sha256: None,
+            archive_path: None,
+        });
+    };
     Ok(FrozenArtifactMetadata {
-        sha256: normalize_sha256(checksum)?,
+        sha256: entry
+            .get("checksum")
+            .and_then(Value::as_str)
+            .and_then(recognized_sha256),
         archive_path: entry
             .get("archivePath")
             .and_then(Value::as_str)
@@ -49,9 +56,12 @@ pub(super) async fn download_bounded_artifact(
     label: &str,
     expected_size: u64,
     progress: Option<&LocalAppInstallProgressReporter>,
-    expected_sha256: &str,
+    checksum: Option<&str>,
 ) -> Result<(), String> {
-    let expected_sha256 = normalize_sha256(expected_sha256)?;
+    let expected_sha256 = checksum.and_then(recognized_sha256);
+    if expected_sha256.is_none() {
+        log::info!("{label} digest verification skipped; checksum is absent or not a SHA-256");
+    }
     if expected_size > MAX_ARTIFACT_BYTES {
         return Err(format!("{label}超过 128 MiB"));
     }
@@ -60,7 +70,7 @@ pub(super) async fn download_bounded_artifact(
     }
     let mut file =
         fs::File::create(destination).map_err(|err| format!("写入{label}失败: {err}"))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = expected_sha256.as_ref().map(|_| Sha256::new());
     let mut downloaded = 0u64;
     while let Some(chunk) = response
         .chunk()
@@ -71,7 +81,9 @@ pub(super) async fn download_bounded_artifact(
             .checked_add(chunk.len() as u64)
             .filter(|size| *size <= expected_size)
             .ok_or_else(|| format!("{label}超过冻结版本声明的大小"))?;
-        hasher.update(&chunk);
+        if let Some(hasher) = hasher.as_mut() {
+            hasher.update(&chunk);
+        }
         file.write_all(&chunk)
             .map_err(|err| format!("写入{label}失败: {err}"))?;
         if let Some(progress) = progress {
@@ -83,19 +95,37 @@ pub(super) async fn download_bounded_artifact(
     if downloaded != expected_size {
         return Err(format!("{label}下载不完整"));
     }
+    reject_digest_mismatch(hasher, expected_sha256.as_deref(), label)
+}
+
+fn reject_digest_mismatch(
+    hasher: Option<Sha256>,
+    expected: Option<&str>,
+    label: &str,
+) -> Result<(), String> {
+    let (Some(hasher), Some(expected)) = (hasher, expected) else {
+        return Ok(());
+    };
     let actual = format!("{:x}", hasher.finalize());
-    if actual != expected_sha256 {
+    if actual != expected {
         return Err(format!("{label} SHA-256 校验失败"));
     }
     Ok(())
 }
 
-fn normalize_sha256(value: &str) -> Result<String, String> {
-    let hex = value.trim().strip_prefix("sha256:").unwrap_or(value.trim());
-    if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err("制品校验和不是 SHA-256".to_string());
+fn recognized_sha256(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let hex = trimmed
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("sha256:"))
+        .map(|_| &trimmed[7..])
+        .unwrap_or(trimmed)
+        .trim();
+    if hex.len() == 64 && hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
     }
-    Ok(hex.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -131,80 +161,59 @@ mod tests {
 
     const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
-    #[tokio::test]
-    async fn download_enforces_size_and_sha256() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn download_hello(checksum: Option<&str>, expected_size: u64) -> Result<Vec<u8>, String> {
+        let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let destination = dir.path().join("artifact.bin");
         download_bounded_artifact(
             artifact_response(b"hello".to_vec()).await,
             &destination,
             "应用制品",
+            expected_size,
+            None,
+            checksum,
+        )
+        .await?;
+        fs::read(&destination).map_err(|err| err.to_string())
+    }
+
+    #[tokio::test]
+    async fn sha256_checksum_matches() {
+        let bytes = download_hello(Some(HELLO_SHA256), 5).await.unwrap();
+        assert_eq!(bytes, b"hello");
+        let prefixed_checksum = format!("sha256:{HELLO_SHA256}");
+        let prefixed = download_hello(Some(&prefixed_checksum), 5).await.unwrap();
+        assert_eq!(prefixed, b"hello");
+    }
+
+    #[tokio::test]
+    async fn sha256_checksum_mismatch_fails() {
+        let error = download_hello(
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             5,
-            None,
-            HELLO_SHA256,
-        )
-        .await
-        .unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"hello");
-
-        let mismatch = download_bounded_artifact(
-            artifact_response(b"hello".to_vec()).await,
-            &destination,
-            "应用制品",
-            5,
-            None,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .await
         .unwrap_err();
-        assert!(mismatch.contains("应用制品 SHA-256 校验失败"), "{mismatch}");
+        assert!(error.contains("SHA-256 校验失败"), "{error}");
+    }
 
-        let incomplete = download_bounded_artifact(
-            artifact_response(b"hello".to_vec()).await,
-            &destination,
-            "环境应用制品",
-            8,
-            None,
-            HELLO_SHA256,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            incomplete.contains("环境应用制品下载不完整"),
-            "{incomplete}"
-        );
+    #[tokio::test]
+    async fn absent_or_unrecognized_checksum_keeps_the_size_check() {
+        let absent = download_hello(None, 5).await.unwrap();
+        assert_eq!(absent, b"hello");
+        let opaque = download_hello(Some("opaque-market-checksum"), 5)
+            .await
+            .unwrap();
+        assert_eq!(opaque, b"hello");
 
-        let oversized = download_bounded_artifact(
-            artifact_response(b"hello".to_vec()).await,
-            &destination,
-            "工具制品",
-            4,
-            None,
-            HELLO_SHA256,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            oversized.contains("工具制品超过冻结版本声明的大小"),
-            "{oversized}"
-        );
-
-        let capped = download_bounded_artifact(
-            artifact_response(Vec::new()).await,
-            &destination,
-            "应用制品",
-            MAX_ARTIFACT_BYTES + 1,
-            None,
-            HELLO_SHA256,
-        )
-        .await
-        .unwrap_err();
-        assert!(capped.contains("应用制品超过 128 MiB"), "{capped}");
+        let mismatch = download_hello(None, 4).await.unwrap_err();
+        assert!(mismatch.contains("超过冻结版本声明的大小"), "{mismatch}");
+        let incomplete = download_hello(None, 8).await.unwrap_err();
+        assert!(incomplete.contains("下载不完整"), "{incomplete}");
     }
 
     #[test]
-    fn frozen_manifest_requires_sha256_for_the_selected_artifact() {
-        let manifest = r#"{
+    fn frozen_manifest_uses_sha256_only_when_recognizable() {
+        let with_digest = r#"{
             "artifacts": [{
                 "platform": "linux",
                 "arch": "x86_64",
@@ -212,15 +221,19 @@ mod tests {
                 "archivePath": "bin/example"
             }]
         }"#;
-        let metadata = frozen_artifact_metadata(manifest, "linux", "x86_64").unwrap();
-        assert_eq!(
-            metadata.sha256,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
+        let metadata = frozen_artifact_metadata(with_digest, "linux", "x86_64").unwrap();
+        let expected = "a".repeat(64);
+        assert_eq!(metadata.sha256.as_deref(), Some(expected.as_str()));
         assert_eq!(metadata.archive_path.as_deref(), Some("bin/example"));
 
-        let missing = r#"{"artifacts":[{"platform":"linux","arch":"x86_64"}]}"#;
-        let error = frozen_artifact_metadata(missing, "linux", "x86_64").unwrap_err();
-        assert!(error.contains("SHA-256"));
+        let missing =
+            r#"{"artifacts":[{"platform":"linux","arch":"x86_64","archivePath":"bin/example"}]}"#;
+        let metadata = frozen_artifact_metadata(missing, "linux", "x86_64").unwrap();
+        assert!(metadata.sha256.is_none());
+        assert_eq!(metadata.archive_path.as_deref(), Some("bin/example"));
+
+        let opaque = r#"{"artifacts":[{"platform":"linux","arch":"x86_64","checksum":"opaque-market-checksum"}]}"#;
+        let metadata = frozen_artifact_metadata(opaque, "linux", "x86_64").unwrap();
+        assert!(metadata.sha256.is_none());
     }
 }
