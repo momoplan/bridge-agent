@@ -292,4 +292,5 @@ mod tests {
 
     include!("event_server/tests/content_and_ports.rs");
     include!("event_server/tests/service_management.rs");
+    include!("event_server/tests/registration_auth.rs");
 }

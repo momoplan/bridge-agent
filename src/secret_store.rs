@@ -21,6 +21,12 @@ use std::path::PathBuf;
     any(target_os = "macos", target_os = "linux")
 ))]
 const KEYRING_SERVICE: &str = "com.baijimu.bridge-agent.relay";
+#[cfg(all(
+    not(test),
+    not(debug_assertions),
+    any(target_os = "macos", target_os = "linux")
+))]
+const KEYRING_SERVICE_REGISTRATION: &str = "com.baijimu.bridge-agent.service-registration";
 #[cfg(any(
     test,
     all(debug_assertions, any(target_os = "macos", target_os = "linux"))
@@ -29,8 +35,29 @@ const DEVELOPMENT_SECRET_DIRECTORY: &str = ".bridge-agent-development";
 #[cfg(all(not(test), windows))]
 const WINDOWS_SECRET_SUFFIX: &str = "credentials";
 
+#[derive(Clone, Copy)]
+enum SecretSlot {
+    Relay,
+    ServiceRegistration,
+}
+
+fn secret_suffix(slot: SecretSlot) -> &'static str {
+    match slot {
+        SecretSlot::Relay => "credentials",
+        SecretSlot::ServiceRegistration => "service-registration",
+    }
+}
+
 pub fn load_relay_token(config_path: &Path) -> Result<Option<String>> {
-    load_secret(config_path).map(|value| {
+    load_named_secret(config_path, SecretSlot::Relay)
+}
+
+pub fn load_service_registration_token(config_path: &Path) -> Result<Option<String>> {
+    load_named_secret(config_path, SecretSlot::ServiceRegistration)
+}
+
+fn load_named_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
+    load_secret(config_path, slot).map(|value| {
         value.and_then(|value| {
             let value = value.trim().to_string();
             (!value.is_empty()).then_some(value)
@@ -50,14 +77,16 @@ pub(crate) fn prepare_relay_credentials(config_path: &Path) -> Result<()> {
     ))]
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = development_secret_path(config_path);
-        match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.permissions().mode() & 0o077 != 0 => {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?
+        for slot in [SecretSlot::Relay, SecretSlot::ServiceRegistration] {
+            let path = development_secret_path(config_path, slot);
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.permissions().mode() & 0o077 != 0 => {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
         }
     }
     let _ = config_path;
@@ -65,15 +94,27 @@ pub(crate) fn prepare_relay_credentials(config_path: &Path) -> Result<()> {
 }
 
 pub fn store_relay_token(config_path: &Path, token: &str) -> Result<()> {
+    store_named_secret(config_path, SecretSlot::Relay, token)
+}
+
+pub fn store_service_registration_token(config_path: &Path, token: &str) -> Result<()> {
+    store_named_secret(config_path, SecretSlot::ServiceRegistration, token)
+}
+
+fn store_named_secret(config_path: &Path, slot: SecretSlot, token: &str) -> Result<()> {
     let token = token.trim();
     if token.is_empty() {
-        return delete_relay_token(config_path);
+        return delete_secret(config_path, slot);
     }
-    store_secret(config_path, token)
+    store_secret(config_path, slot, token)
 }
 
 pub fn delete_relay_token(config_path: &Path) -> Result<()> {
-    delete_secret(config_path)
+    delete_secret(config_path, SecretSlot::Relay)
+}
+
+pub fn delete_service_registration_token(config_path: &Path) -> Result<()> {
+    delete_secret(config_path, SecretSlot::ServiceRegistration)
 }
 
 #[cfg(all(
@@ -94,7 +135,7 @@ fn credential_id(config_path: &Path) -> String {
     test,
     all(debug_assertions, any(target_os = "macos", target_os = "linux"))
 ))]
-fn development_secret_path(config_path: &Path) -> PathBuf {
+fn development_secret_path(config_path: &Path, slot: SecretSlot) -> PathBuf {
     let file_name = config_path
         .file_name()
         .map(|name| name.to_string_lossy())
@@ -103,7 +144,7 @@ fn development_secret_path(config_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(DEVELOPMENT_SECRET_DIRECTORY)
-        .join(format!("{file_name}.credentials"))
+        .join(format!("{file_name}.{}", secret_suffix(slot)))
 }
 
 #[cfg(all(
@@ -111,8 +152,8 @@ fn development_secret_path(config_path: &Path) -> PathBuf {
     debug_assertions,
     any(target_os = "macos", target_os = "linux")
 ))]
-fn load_secret(config_path: &Path) -> Result<Option<String>> {
-    load_development_secret(config_path)
+fn load_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
+    load_development_secret(config_path, slot)
 }
 
 #[cfg(all(
@@ -120,8 +161,8 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
     debug_assertions,
     any(target_os = "macos", target_os = "linux")
 ))]
-fn store_secret(config_path: &Path, value: &str) -> Result<()> {
-    store_development_secret(config_path, value)
+fn store_secret(config_path: &Path, slot: SecretSlot, value: &str) -> Result<()> {
+    store_development_secret(config_path, slot, value)
 }
 
 #[cfg(all(
@@ -129,8 +170,8 @@ fn store_secret(config_path: &Path, value: &str) -> Result<()> {
     debug_assertions,
     any(target_os = "macos", target_os = "linux")
 ))]
-fn delete_secret(config_path: &Path) -> Result<()> {
-    delete_development_secret(config_path)
+fn delete_secret(config_path: &Path, slot: SecretSlot) -> Result<()> {
+    delete_development_secret(config_path, slot)
 }
 
 #[cfg(any(
@@ -141,10 +182,10 @@ fn delete_secret(config_path: &Path) -> Result<()> {
         any(target_os = "macos", target_os = "linux")
     )
 ))]
-fn load_development_secret(config_path: &Path) -> Result<Option<String>> {
+fn load_development_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = development_secret_path(config_path);
+    let path = development_secret_path(config_path, slot);
     match std::fs::read_to_string(&path) {
         Ok(value) => {
             anyhow::ensure!(
@@ -166,11 +207,11 @@ fn load_development_secret(config_path: &Path) -> Result<Option<String>> {
         any(target_os = "macos", target_os = "linux")
     )
 ))]
-fn store_development_secret(config_path: &Path, value: &str) -> Result<()> {
+fn store_development_secret(config_path: &Path, slot: SecretSlot, value: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let path = development_secret_path(config_path);
+    let path = development_secret_path(config_path, slot);
     let parent = path
         .parent()
         .context("development credential path has no parent directory")?;
@@ -222,8 +263,8 @@ fn store_development_secret(config_path: &Path, value: &str) -> Result<()> {
         any(target_os = "macos", target_os = "linux")
     )
 ))]
-fn delete_development_secret(config_path: &Path) -> Result<()> {
-    let path = development_secret_path(config_path);
+fn delete_development_secret(config_path: &Path, slot: SecretSlot) -> Result<()> {
+    let path = development_secret_path(config_path, slot);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -232,13 +273,13 @@ fn delete_development_secret(config_path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-fn test_secret_path(config_path: &Path) -> PathBuf {
-    config_path.with_extension("test-credentials")
+fn test_secret_path(config_path: &Path, slot: SecretSlot) -> PathBuf {
+    config_path.with_extension(format!("test-{}", secret_suffix(slot)))
 }
 
 #[cfg(test)]
-fn load_secret(config_path: &Path) -> Result<Option<String>> {
-    let path = test_secret_path(config_path);
+fn load_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
+    let path = test_secret_path(config_path, slot);
     match fs::read_to_string(&path) {
         Ok(value) => Ok(Some(value)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -247,8 +288,8 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
-fn store_secret(config_path: &Path, value: &str) -> Result<()> {
-    let path = test_secret_path(config_path);
+fn store_secret(config_path: &Path, slot: SecretSlot, value: &str) -> Result<()> {
+    let path = test_secret_path(config_path, slot);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -257,8 +298,8 @@ fn store_secret(config_path: &Path, value: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-fn delete_secret(config_path: &Path) -> Result<()> {
-    let path = test_secret_path(config_path);
+fn delete_secret(config_path: &Path, slot: SecretSlot) -> Result<()> {
+    let path = test_secret_path(config_path, slot);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -271,8 +312,12 @@ fn delete_secret(config_path: &Path) -> Result<()> {
     not(debug_assertions),
     any(target_os = "macos", target_os = "linux")
 ))]
-fn keyring_entry(config_path: &Path) -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, &credential_id(config_path))
+fn keyring_entry(config_path: &Path, slot: SecretSlot) -> Result<keyring::Entry> {
+    let service = match slot {
+        SecretSlot::Relay => KEYRING_SERVICE,
+        SecretSlot::ServiceRegistration => KEYRING_SERVICE_REGISTRATION,
+    };
+    keyring::Entry::new(service, &credential_id(config_path))
         .context("failed to open the operating system credential store")
 }
 
@@ -281,8 +326,8 @@ fn keyring_entry(config_path: &Path) -> Result<keyring::Entry> {
     not(debug_assertions),
     any(target_os = "macos", target_os = "linux")
 ))]
-fn load_secret(config_path: &Path) -> Result<Option<String>> {
-    let entry = keyring_entry(config_path)?;
+fn load_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
+    let entry = keyring_entry(config_path, slot)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -296,8 +341,8 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
     not(debug_assertions),
     any(target_os = "macos", target_os = "linux")
 ))]
-fn store_secret(config_path: &Path, value: &str) -> Result<()> {
-    let entry = keyring_entry(config_path)?;
+fn store_secret(config_path: &Path, slot: SecretSlot, value: &str) -> Result<()> {
+    let entry = keyring_entry(config_path, slot)?;
     if entry
         .get_password()
         .is_ok_and(|current_value| current_value == value)
@@ -314,8 +359,8 @@ fn store_secret(config_path: &Path, value: &str) -> Result<()> {
     not(debug_assertions),
     any(target_os = "macos", target_os = "linux")
 ))]
-fn delete_secret(config_path: &Path) -> Result<()> {
-    let entry = keyring_entry(config_path)?;
+fn delete_secret(config_path: &Path, slot: SecretSlot) -> Result<()> {
+    let entry = keyring_entry(config_path, slot)?;
     match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(err) => Err(err)
@@ -324,13 +369,17 @@ fn delete_secret(config_path: &Path) -> Result<()> {
 }
 
 #[cfg(all(not(test), windows))]
-fn windows_secret_path(config_path: &Path) -> PathBuf {
-    config_path.with_extension(WINDOWS_SECRET_SUFFIX)
+fn windows_secret_path(config_path: &Path, slot: SecretSlot) -> PathBuf {
+    let suffix = match slot {
+        SecretSlot::Relay => WINDOWS_SECRET_SUFFIX,
+        SecretSlot::ServiceRegistration => "service-registration",
+    };
+    config_path.with_extension(suffix)
 }
 
 #[cfg(all(not(test), windows))]
-fn load_secret(config_path: &Path) -> Result<Option<String>> {
-    let path = windows_secret_path(config_path);
+fn load_secret(config_path: &Path, slot: SecretSlot) -> Result<Option<String>> {
+    let path = windows_secret_path(config_path, slot);
     let encrypted = match fs::read(&path) {
         Ok(value) => value,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -340,13 +389,17 @@ fn load_secret(config_path: &Path) -> Result<Option<String>> {
 }
 
 #[cfg(all(not(test), windows))]
-fn store_secret(config_path: &Path, value: &str) -> Result<()> {
-    let path = windows_secret_path(config_path);
+fn store_secret(config_path: &Path, slot: SecretSlot, value: &str) -> Result<()> {
+    let path = windows_secret_path(config_path, slot);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let protected = encrypt_windows_secret(value.as_bytes())?;
-    let temporary = path.with_extension(format!("{WINDOWS_SECRET_SUFFIX}.tmp"));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "secret".to_string());
+    let temporary = path.with_file_name(format!(".{file_name}.tmp"));
     fs::write(&temporary, protected)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
     if path.exists() {
@@ -358,8 +411,8 @@ fn store_secret(config_path: &Path, value: &str) -> Result<()> {
 }
 
 #[cfg(all(not(test), windows))]
-fn delete_secret(config_path: &Path) -> Result<()> {
-    let path = windows_secret_path(config_path);
+fn delete_secret(config_path: &Path, slot: SecretSlot) -> Result<()> {
+    let path = windows_secret_path(config_path, slot);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -455,91 +508,12 @@ compile_error!("bridge-agent secure credential storage is unsupported on this pl
 mod tests {
     #[cfg(unix)]
     use super::{delete_development_secret, load_development_secret, store_development_secret};
-    use super::{delete_relay_token, development_secret_path, load_relay_token, store_relay_token};
+    use super::{
+        delete_relay_token, delete_service_registration_token, development_secret_path,
+        load_relay_token, load_service_registration_token, store_relay_token,
+        store_service_registration_token, SecretSlot,
+    };
     use std::path::PathBuf;
 
-    #[test]
-    fn test_store_round_trip_and_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("agent-config.json");
-        assert!(load_relay_token(&config_path).unwrap().is_none());
-        store_relay_token(&config_path, "secret-token").unwrap();
-        assert_eq!(
-            load_relay_token(&config_path).unwrap().as_deref(),
-            Some("secret-token")
-        );
-        delete_relay_token(&config_path).unwrap();
-        assert!(load_relay_token(&config_path).unwrap().is_none());
-    }
-
-    #[test]
-    fn development_credentials_use_a_distinct_sibling_file() {
-        let config_path = PathBuf::from("config").join("agent-config.json");
-        assert_eq!(
-            development_secret_path(&config_path),
-            PathBuf::from("config")
-                .join(".bridge-agent-development")
-                .join("agent-config.json.credentials")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn development_credentials_are_private_and_atomic() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("bridge-agent");
-        let config_path = config_dir.join("agent-config.development.json");
-
-        store_development_secret(&config_path, "first-token").unwrap();
-        store_development_secret(&config_path, "second-token").unwrap();
-
-        let secret_path = development_secret_path(&config_path);
-        let secret_dir = secret_path.parent().unwrap();
-        assert_eq!(
-            load_development_secret(&config_path).unwrap().as_deref(),
-            Some("second-token")
-        );
-        assert_eq!(
-            std::fs::metadata(secret_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&secret_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        assert_eq!(std::fs::read_dir(secret_dir).unwrap().count(), 1);
-
-        delete_development_secret(&config_path).unwrap();
-        assert!(load_development_secret(&config_path).unwrap().is_none());
-    }
-    #[cfg(unix)]
-    #[test]
-    fn credential_read_does_not_repair_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let scratch = tempfile::tempdir().unwrap();
-        let config = scratch.path().join("config.json");
-        store_development_secret(&config, "test-value").unwrap();
-        let secret = development_secret_path(&config);
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(load_development_secret(&config).is_err());
-        assert_eq!(
-            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-        super::prepare_relay_credentials(&config).unwrap();
-        assert_eq!(
-            load_development_secret(&config).unwrap().as_deref(),
-            Some("test-value")
-        );
-        assert_eq!(
-            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
+    include!("secret_store_tests.rs");
 }

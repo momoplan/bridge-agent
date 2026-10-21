@@ -36,12 +36,23 @@ fn market_host_compatibility_checks_version_and_capabilities() {
 fn config_for_ui_redacts_relay_credentials_and_reports_status() {
     let mut config = AgentConfig::example();
     config.relay.token = "relay-secret".to_string();
+    config.runtime.service_registration_token = Some("registration-secret".to_string());
 
     let value = config_for_ui(&config).unwrap();
 
     assert_eq!(value["relay"]["token"], "");
+    assert_eq!(
+        value["runtime"]["service_registration_token"],
+        serde_json::Value::Null
+    );
     assert_eq!(value["credential_status"]["relay_token_configured"], true);
-    assert!(!value.to_string().contains("relay-secret"));
+    assert_eq!(
+        value["credential_status"]["service_registration_token_configured"],
+        true
+    );
+    let rendered = value.to_string();
+    assert!(!rendered.contains("relay-secret"));
+    assert!(!rendered.contains("registration-secret"));
 }
 
 fn registered_status(

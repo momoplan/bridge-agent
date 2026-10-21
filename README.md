@@ -360,7 +360,7 @@ payload；存在匹配订阅时，Event Center 已在一个事务中保存事件
 
 bridge-agent 支持本机程序把自己注册成 bridge-agent 服务。这个入口只给 bridge-agent 所在机器上的本地程序、脚本或 AI 生成工具使用，不给 relay 反向调用。
 
-新生成的默认配置会开启本机服务注册，并写入 `runtime.service_registration_token`。已有配置如果要开启，需要手动增加：
+新生成的默认配置会开启本机服务注册。注册令牌保存在操作系统凭据库（macOS/Linux 钥匙串服务 `com.baijimu.bridge-agent.service-registration`，Windows 为配置文件旁的 DPAPI 文件），调试构建则写入仅所有者可读的 `.bridge-agent-development/*.service-registration`。公开的 `agent-config.json` 只保留 `runtime.service_registration_token: null`。已有配置如果把令牌明文写在 JSON 里，下次迁移会把它移入凭据库，并在公开文件和备份里清空该字段。已有配置如果要开启，可以先写入一次令牌：
 
 ```json
 {

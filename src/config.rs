@@ -1,7 +1,10 @@
 use crate::protocol::{
     EventDefinition, LocalAppDefinition, MethodDefinition, ResponseMode, ServiceDefinition,
 };
-use crate::secret_store::{delete_relay_token, load_relay_token, store_relay_token};
+use crate::secret_store::{
+    delete_relay_token, delete_service_registration_token, load_relay_token,
+    load_service_registration_token, store_relay_token, store_service_registration_token,
+};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};

@@ -4,12 +4,8 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
+    hydrate_config_secrets(path, &mut config, false)?;
     config.validate()?;
-    if config.relay.token.trim().is_empty() {
-        if let Some(token) = load_relay_token(path)? {
-            config.relay.token = token;
-        }
-    }
     Ok(config)
 }
 
@@ -30,21 +26,58 @@ pub fn migrate_config(path: &Path) -> Result<AgentConfig> {
     let mut changed = has_legacy_codex_binary_path;
     changed |= config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
+    changed |= hydrate_config_secrets(path, &mut config, true)?;
     config.validate()?;
-    let legacy_token = config.relay.token.trim().to_string();
-    if legacy_token.is_empty() {
-        if let Some(token) = load_relay_token(path)? {
-            config.relay.token = token;
-        }
-    } else {
-        store_relay_token(path, &legacy_token)?;
-        config.relay.token = legacy_token;
-        changed = true;
-    }
     if changed {
         write_public_config(path, &config)?;
     }
     Ok(config)
+}
+
+fn registration_token_text(config: &AgentConfig) -> String {
+    config
+        .runtime
+        .service_registration_token
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Fill empty credential fields from the secret store. When `persist_plaintext`
+/// is set, a token still present in the JSON is moved into the secret store.
+fn hydrate_config_secrets(
+    path: &Path,
+    config: &mut AgentConfig,
+    persist_plaintext: bool,
+) -> Result<bool> {
+    let mut changed = false;
+    let relay_token = config.relay.token.trim().to_string();
+    if relay_token.is_empty() {
+        if let Some(token) = load_relay_token(path)? {
+            config.relay.token = token;
+        }
+    } else if persist_plaintext {
+        store_relay_token(path, &relay_token)?;
+        config.relay.token = relay_token;
+        changed = true;
+    } else {
+        config.relay.token = relay_token;
+    }
+
+    let registration_token = registration_token_text(config);
+    if registration_token.is_empty() {
+        if let Some(token) = load_service_registration_token(path)? {
+            config.runtime.service_registration_token = Some(token);
+        }
+    } else if persist_plaintext {
+        store_service_registration_token(path, &registration_token)?;
+        config.runtime.service_registration_token = Some(registration_token);
+        changed = true;
+    } else {
+        config.runtime.service_registration_token = Some(registration_token);
+    }
+    Ok(changed)
 }
 
 fn config_has_legacy_codex_binary_path(content: &str) -> bool {
@@ -84,6 +117,10 @@ fn save_config_unlocked(path: &Path, config: &AgentConfig) -> Result<()> {
     config.validate()?;
     if !config.relay.token.trim().is_empty() {
         store_relay_token(path, &config.relay.token)?;
+    }
+    let registration_token = registration_token_text(config);
+    if !registration_token.is_empty() {
+        store_service_registration_token(path, &registration_token)?;
     }
     write_public_config(path, config)
 }
@@ -233,6 +270,7 @@ fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
     }
     let mut public_config = config.clone();
     public_config.relay.token.clear();
+    public_config.runtime.service_registration_token = None;
     let content = serde_json::to_string_pretty(&public_config)?;
     write_config_atomically(path, format!("{content}\n").as_bytes())?;
     set_private_file_permissions(path)?;
@@ -242,6 +280,7 @@ fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
 pub fn ensure_config_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         delete_relay_token(path)?;
+        delete_service_registration_token(path)?;
         save_config(path, &AgentConfig::example())?;
     }
     Ok(())
@@ -254,6 +293,7 @@ pub fn reset_invalid_config(path: &Path) -> Result<ConfigRecovery> {
         None
     };
     delete_relay_token(path)?;
+    delete_service_registration_token(path)?;
     let config = AgentConfig::example();
     save_config(path, &config)?;
     Ok(ConfigRecovery {
@@ -339,6 +379,9 @@ fn write_sanitized_config_backup(source: &Path, destination: &Path) -> Result<()
                 .get_mut("relay")?
                 .as_object_mut()?
                 .insert("token".to_string(), Value::String(String::new()));
+            if let Some(runtime) = value.get_mut("runtime").and_then(Value::as_object_mut) {
+                runtime.insert("service_registration_token".to_string(), Value::Null);
+            }
             serde_json::to_vec_pretty(&value).ok()
         })
         .unwrap_or(content);

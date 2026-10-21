@@ -245,22 +245,39 @@ fn authorize_service_registration(
     )
 }
 
+fn constant_time_text_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
 fn authorize_token(
     token: &Option<String>,
     headers: &HeaderMap,
     label: &str,
 ) -> Result<(), EventApiError> {
-    let Some(token) = token.as_deref() else {
-        return Ok(());
-    };
+    let configured = token.as_deref().map(str::trim).unwrap_or("");
+    if configured.is_empty() {
+        return Err(EventApiError::new(
+            StatusCode::UNAUTHORIZED,
+            format!("invalid {label} token"),
+        ));
+    }
 
-    if bearer_token(headers).as_deref() == Some(token)
-        || headers
-            .get("x-bridge-agent-event-token")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            == Some(token)
-    {
+    let bearer = bearer_token(headers).unwrap_or_default();
+    let header_token = headers
+        .get("x-bridge-agent-event-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let accepted = constant_time_text_eq(&bearer, configured)
+        | constant_time_text_eq(header_token, configured);
+    if accepted {
         return Ok(());
     }
 

@@ -28,8 +28,16 @@ pub(super) struct BrowserAuthPollResponse {
 pub(super) fn config_for_ui(config: &AgentConfig) -> Result<Value, String> {
     let mut value = serde_json::to_value(config).map_err(|err| err.to_string())?;
     value["relay"]["token"] = Value::String(String::new());
+    if let Some(runtime) = value.get_mut("runtime") {
+        runtime["service_registration_token"] = Value::Null;
+    }
     value["credential_status"] = serde_json::json!({
-        "relay_token_configured": !config.relay.token.trim().is_empty()
+        "relay_token_configured": !config.relay.token.trim().is_empty(),
+        "service_registration_token_configured": config
+            .runtime
+            .service_registration_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
     });
     Ok(value)
 }

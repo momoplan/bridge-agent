@@ -21,7 +21,7 @@ export function toUiConfig(config: AgentConfig): UiAgentConfig {
       description: config.device.description,
       tags_text: config.device.tags.join(", ")
     },
-    runtime: config.runtime,
+    runtime: { ...config.runtime, service_registration_token: null },
     services: config.services.map(toUiService),
     local_apps: config.local_apps ?? [],
     credential_status: {
@@ -49,7 +49,7 @@ export function fromUiConfig(config: UiAgentConfig): AgentConfig {
       description: config.device.description.trim(),
       tags: splitCommaList(config.device.tags_text)
     },
-    runtime: config.runtime,
+    runtime: { ...config.runtime, service_registration_token: null },
     services: config.services.map(fromUiService),
     local_apps: config.local_apps
   };

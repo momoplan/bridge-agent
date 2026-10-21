@@ -18,7 +18,7 @@ function agentConfig(token = "relay-secret") {
       reconnect_secs: 5
     },
     device: { name: "workstation", description: "", tags: [] },
-    runtime: {},
+    runtime: { service_registration_token: "registration-secret" },
     services: [],
     credential_status: { relay_token_configured: true }
   };
@@ -29,7 +29,9 @@ describe("desktop credential boundary", () => {
     const uiConfig = toUiConfig(agentConfig() as never);
 
     expect(uiConfig.relay.token).toBe("");
+    expect(uiConfig.runtime.service_registration_token).toBeNull();
     expect(uiConfig.credential_status.relay_token_configured).toBe(true);
+    expect(JSON.stringify(uiConfig)).not.toContain("registration-secret");
   });
 
   it("never sends a relay token back through the frontend save command", () => {
