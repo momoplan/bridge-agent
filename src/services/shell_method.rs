@@ -144,9 +144,9 @@ impl ShellMethod {
             );
         }
 
-        let command_args = args.command.into_args();
-        let executable = &command_args[0];
-        if !is_command_allowed(executable, &self.allow_commands) {
+        let mut command_args = args.command.into_args();
+        let executable = command_args[0].clone();
+        if !is_command_allowed(&executable, &self.allow_commands) {
             return Ok(Err(ServiceOutcome {
                 success: false,
                 data: None,
@@ -170,6 +170,11 @@ impl ShellMethod {
             .or_else(|| use_default_timeout.then_some(self.default_timeout_secs));
         let env = sanitize_env(args.env);
         let path_for_diagnostics = env.get("PATH").cloned().unwrap_or_default();
+        if is_bare_command_name(&command_args[0]) {
+            if let Some(resolved) = resolve_executable(&command_args[0], &path_for_diagnostics) {
+                command_args[0] = resolved.to_string_lossy().into_owned();
+            }
+        }
 
         Ok(Ok(PreparedShellExec {
             command_args,

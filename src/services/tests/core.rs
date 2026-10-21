@@ -1,12 +1,23 @@
     #[test]
-    fn allowlist_accepts_basename() {
-        assert!(is_command_allowed("/usr/bin/git", &[String::from("git")]));
-        assert!(!is_command_allowed("bash", &[String::from("git")]));
+    fn allowlist_matches_command_string_not_basename() {
+        let allowlist = [String::from("git")];
+        assert!(is_command_allowed("git", &allowlist));
+        assert!(!is_command_allowed("/usr/bin/git", &allowlist));
+        assert!(!is_command_allowed("/tmp/x/git", &allowlist));
+        assert!(!is_command_allowed("./git", &allowlist));
+        assert!(!is_command_allowed("../git", &allowlist));
+        assert!(!is_command_allowed(r"C:\temp\git.exe", &allowlist));
+        assert!(!is_command_allowed("bash", &allowlist));
+        assert!(is_command_allowed(
+            "/usr/bin/git",
+            &[String::from("/usr/bin/git")]
+        ));
     }
 
     #[test]
     fn allowlist_accepts_wildcard() {
         assert!(is_command_allowed("bash", &[String::from("*")]));
+        assert!(is_command_allowed("/tmp/x/git", &[String::from("*")]));
     }
 
     #[test]
@@ -22,10 +33,90 @@
     fn sanitize_env_keeps_safe_keys_only() {
         let mut env = BTreeMap::new();
         env.insert("FOO_BAR".to_string(), "1".to_string());
+        env.insert("NODE_ENV".to_string(), "production".to_string());
         env.insert("bad-key".to_string(), "2".to_string());
         let sanitized = sanitize_env(env);
         assert_eq!(sanitized.get("FOO_BAR"), Some(&"1".to_string()));
+        assert_eq!(sanitized.get("NODE_ENV"), Some(&"production".to_string()));
         assert!(!sanitized.contains_key("bad-key"));
+    }
+
+    #[test]
+    fn sanitize_env_drops_path_and_loader_overrides() {
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "/tmp/attacker-bin".to_string());
+        env.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+        env.insert(
+            "DYLD_INSERT_LIBRARIES".to_string(),
+            "/tmp/evil.dylib".to_string(),
+        );
+        env.insert(
+            "NODE_OPTIONS".to_string(),
+            "--require /tmp/evil.js".to_string(),
+        );
+        env.insert("PYTHONPATH".to_string(), "/tmp/evil".to_string());
+        env.insert("GIT_SSH_COMMAND".to_string(), "evil".to_string());
+        env.insert("BASH_ENV".to_string(), "/tmp/evil.sh".to_string());
+        env.insert("ENV".to_string(), "/tmp/evil.sh".to_string());
+        env.insert("HOME".to_string(), "/tmp/attacker-home".to_string());
+        env.insert("FOO_BAR".to_string(), "1".to_string());
+
+        let sanitized = sanitize_env(env);
+        let path = sanitized.get("PATH").cloned().unwrap_or_default();
+
+        assert_eq!(sanitized.get("FOO_BAR"), Some(&"1".to_string()));
+        assert!(!path.contains("/tmp/attacker-bin"));
+        assert!(!path.split(':').any(|entry| Path::new(entry) == Path::new(".")));
+        for key in [
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "GIT_SSH_COMMAND",
+            "BASH_ENV",
+            "ENV",
+        ] {
+            assert!(!sanitized.contains_key(key), "{key} was forwarded");
+        }
+        assert_ne!(
+            sanitized.get("HOME").map(String::as_str),
+            Some("/tmp/attacker-home")
+        );
+    }
+
+    #[test]
+    fn resolve_executable_uses_only_absolute_directories() {
+        let dir = tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let file_name = if cfg!(windows) {
+            "bridge-tool.exe"
+        } else {
+            "bridge-tool"
+        };
+        let tool = bin.join(file_name);
+        fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&tool).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&tool, permissions).unwrap();
+        }
+
+        let path = std::env::join_paths([&bin]).unwrap();
+        let resolved = resolve_executable("bridge-tool", &path.to_string_lossy()).unwrap();
+        assert_eq!(resolved, tool);
+        assert!(resolve_executable("bridge-tool", ".").is_none());
+        assert!(resolve_executable("/tmp/x/bridge-tool", &path.to_string_lossy()).is_none());
+    }
+
+    #[test]
+    fn shell_exec_path_drops_relative_entries() {
+        let path = shell_exec_path(Some("."), None);
+        if let Some(path) = path {
+            assert!(std::env::split_paths(&path).all(|entry| entry.is_absolute()));
+        }
     }
 
     #[test]

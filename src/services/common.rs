@@ -46,24 +46,17 @@ pub fn sanitize_env(env: BTreeMap<String, String>) -> BTreeMap<String, String> {
             base.insert(key.to_string(), value);
         }
     }
+    // PATH and HOME come from the host before any caller overlay. Callers cannot
+    // point command lookup at a directory they control.
+    let trusted_path = trusted_shell_path(&base);
 
-    for (key, value) in env.into_iter().filter(|(key, _)| {
-        key.chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-    }) {
+    for (key, value) in env
+        .into_iter()
+        .filter(|(key, _)| caller_env_key_allowed(key))
+    {
         base.insert(key, value);
     }
-
-    let home = shell_home_dir(&base);
-    let path = base
-        .get("PATH")
-        .cloned()
-        .or_else(|| std::env::var("PATH").ok());
-    base.insert(
-        "PATH".to_string(),
-        shell_exec_path(path.as_deref(), home.as_deref()).unwrap_or_else(default_system_path),
-    );
-
+    base.insert("PATH".to_string(), trusted_path);
     base
 }
 
@@ -271,7 +264,8 @@ fn node_version_key(raw: &str) -> (u64, u64, u64, String) {
 }
 
 fn push_path_if_present(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !candidate.is_dir() {
+    // Relative entries (including `.`) would resolve against the command cwd.
+    if !candidate.is_absolute() || !candidate.is_dir() {
         return;
     }
 
@@ -380,17 +374,18 @@ fn default_system_path() -> String {
     }
 }
 
+/// Allowlist entries match the command string exactly. `/tmp/x/git` does not
+/// match `git`. `*` opts into every command string, including paths.
+/// Listing an interpreter (`sh`, `bash`, `python`, `node`) still allows that
+/// interpreter to run caller-controlled code.
 pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
+    if command.is_empty() || command.contains('\0') {
+        return false;
+    }
     if allowlist.iter().any(|allowed| allowed.trim() == "*") {
         return true;
     }
-    let name = Path::new(command)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(command);
-    allowlist
-        .iter()
-        .any(|allowed| allowed == command || allowed == name)
+    allowlist.iter().any(|allowed| allowed == command)
 }
 
 pub fn resolve_cwd(root_dir: &Path, requested: Option<&str>) -> Result<PathBuf> {
