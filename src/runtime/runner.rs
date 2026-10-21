@@ -335,18 +335,7 @@ impl RelayConnection<'_> {
 
     async fn handle_frame(&mut self, message: Message) -> Result<()> {
         match message {
-            Message::Text(text) => {
-                self.mark_relay_seen().await;
-                let Some(incoming) = decode_relay_message(&text)
-                    .with_context(|| format!("invalid relay message: {text}"))?
-                else {
-                    self.runner
-                        .push_log("warn", "ignored unsupported relay message type")
-                        .await;
-                    return Ok(());
-                };
-                self.handle_agent_message(incoming).await?;
-            }
+            Message::Text(text) => self.handle_text_frame(&text).await?,
             Message::Ping(payload) => {
                 self.mark_relay_seen().await;
                 self.write.send(Message::Pong(payload)).await?;

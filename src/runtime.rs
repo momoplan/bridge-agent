@@ -5,7 +5,7 @@ use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted,
+    AgentCapabilities, AgentMessage, EventAck, InvokeError, InvokeResult, LocalAppEventEmitted,
     AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
@@ -252,8 +252,9 @@ include!("runtime/event_delivery_worker.rs");
 mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
-        is_relay_authorization_error, process_looks_like_bridge_agent, prune_closed_event_waiters,
-        read_runtime_lock, reconnect_delay_ms, register_event_waiter, remove_retired_event_storage,
+        invalid_request_reply, is_relay_authorization_error, process_looks_like_bridge_agent,
+        prune_closed_event_waiters, read_runtime_lock, reconnect_delay_ms,
+        redact_relay_message_preview, register_event_waiter, remove_retired_event_storage,
         runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
         terminate_runtime_lock_owner, AgentRuntimeManager, PendingEventWaiters, ReconnectBackoff,
         RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
@@ -283,5 +284,6 @@ mod tests {
     include!("runtime/tests/unauthorized_control.rs");
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/reconnect.rs");
+    include!("runtime/tests/relay_frames.rs");
     include!("runtime/tests/process.rs");
 }
