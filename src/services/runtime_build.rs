@@ -150,6 +150,7 @@ fn build_http_method(
         timeout_secs: binding
             .timeout_secs
             .unwrap_or(config.runtime.default_timeout_secs),
+        max_timeout_secs: config.runtime.max_timeout_secs,
         response_mode: method.response_mode,
     })
 }

@@ -114,6 +114,7 @@ struct HttpMethod {
     http_method: Method,
     headers: BTreeMap<String, String>,
     timeout_secs: u64,
+    max_timeout_secs: u64,
     response_mode: ResponseMode,
 }
 
