@@ -54,19 +54,20 @@ fn default_archive_limits() -> ArchiveLimits {
     }
 }
 
-pub(super) fn extract_connector_archive(
-    bytes: &[u8],
+pub(super) fn extract_connector_archive_from_path(
+    source: &Path,
     kind: ConnectorArchiveKind,
     destination: &Path,
 ) -> Result<(), String> {
+    let file = fs::File::open(source).map_err(|err| format!("读取安装包失败: {err}"))?;
     match kind {
-        ConnectorArchiveKind::Zip => extract_connector_zip(bytes, destination),
-        ConnectorArchiveKind::TarGz => extract_connector_tar_gz(bytes, destination),
+        ConnectorArchiveKind::Zip => {
+            extract_zip_reader(file, destination, default_archive_limits())
+        }
+        ConnectorArchiveKind::TarGz => {
+            extract_tar_reader(file, destination, default_archive_limits())
+        }
     }
-}
-
-pub(super) fn extract_connector_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
-    extract_zip_reader(Cursor::new(bytes), destination, default_archive_limits())
 }
 
 fn extract_zip_reader<R: Read + std::io::Seek>(
@@ -116,10 +117,6 @@ fn extract_zip_entry<R: Read + std::io::Seek>(
         limits.max_uncompressed_bytes,
     )?;
     apply_archive_mode(&target, mode)
-}
-
-pub(super) fn extract_connector_tar_gz(bytes: &[u8], destination: &Path) -> Result<(), String> {
-    extract_tar_reader(Cursor::new(bytes), destination, default_archive_limits())
 }
 
 fn extract_tar_reader<R: Read>(

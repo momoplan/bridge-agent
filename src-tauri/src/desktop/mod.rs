@@ -1,6 +1,7 @@
 use crate::{codex_skill, local_app, macos_installation, managed_tool, managed_tool_dependency};
 
 mod app;
+mod artifact_download;
 mod auth;
 mod constants;
 mod environment_install;
@@ -26,6 +27,7 @@ mod update;
 mod window;
 
 pub(crate) use app::run;
+use artifact_download::*;
 use auth::*;
 use constants::*;
 use local_app_archive::*;

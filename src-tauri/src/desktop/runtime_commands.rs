@@ -85,21 +85,22 @@ pub(super) async fn install_baijimu_cli_update(
     )
     .map_err(|error| error.to_string())?
     .ok_or("当前平台没有可用的工具制品")?;
-    if artifact.size_bytes > 128 * 1024 * 1024 {
-        return Err("工具制品超过 128 MiB".into());
-    }
-    let mut response = consumer
+    let response = consumer
         .reader
         .artifact(&consumer.credential, &install_source, artifact.artifact_id)
         .await
         .map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "读取工具制品失败")? {
-        if bytes.len() as u64 + chunk.len() as u64 > artifact.size_bytes {
-            return Err("工具制品大小不符".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let package_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let package_path = package_dir.path().join("tool.bin");
+    download_bounded_artifact(
+        response,
+        &package_path,
+        "工具制品",
+        artifact.size_bytes,
+        None,
+    )
+    .await?;
+    let bytes = fs::read(&package_path).map_err(|error| error.to_string())?;
     let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
         .map_err(|error| error.to_string())?;
     let manifest_artifact = manifest

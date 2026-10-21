@@ -45,30 +45,23 @@ pub(super) async fn resolve(
         .map_err(|error| error.to_string())?
         .ok_or("该来源版本不支持当前平台")?;
     let kind = connector_archive_kind(artifact.file_name.as_str()).ok_or("安装包格式不受支持")?;
-    let mut response = reader
+    let response = reader
         .artifact(&credential, &frozen, artifact.artifact_id)
         .await
         .map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "读取环境应用制品失败")? {
-        if (bytes.len() as u64)
-            .checked_add(chunk.len() as u64)
-            .is_none_or(|size| size > artifact.size_bytes)
-        {
-            return Err("环境应用制品超过冻结版本声明的大小".into());
-        }
-        bytes.extend_from_slice(&chunk);
-        if let Some(progress) = progress {
-            progress.download(bytes.len() as u64, Some(artifact.size_bytes));
-        }
-    }
-    if bytes.len() as u64 != artifact.size_bytes {
-        return Err("环境应用制品下载不完整".into());
-    }
     let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let package_path = temp_dir.path().join("package.bin");
+    download_bounded_artifact(
+        response,
+        &package_path,
+        "环境应用制品",
+        artifact.size_bytes,
+        progress,
+    )
+    .await?;
     let extract_dir = temp_dir.path().join("package");
     fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
-    extract_connector_archive(&bytes, kind, &extract_dir)?;
+    extract_connector_archive_from_path(&package_path, kind, &extract_dir)?;
     let path = find_extracted_connector_root(&extract_dir)?;
     let provenance = ConnectorInstallProvenance::frozen_environment(&frozen, migrate)
         .map_err(|error| error.to_string())?;
