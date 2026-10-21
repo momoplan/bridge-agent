@@ -66,7 +66,7 @@
 
         assert_eq!(sanitized.get("FOO_BAR"), Some(&"1".to_string()));
         assert!(!path.contains("/tmp/attacker-bin"));
-        assert!(!path.split(':').any(|entry| Path::new(entry) == Path::new(".")));
+        assert!(std::env::split_paths(&path).all(|entry| entry.is_absolute()));
         for key in [
             "LD_PRELOAD",
             "DYLD_INSERT_LIBRARIES",
