@@ -74,9 +74,9 @@ fn redact_relay_message_preview(text: &str) -> String {
     let redacted = match serde_json::from_str::<serde_json::Value>(text) {
         Ok(mut value) => {
             redact_json_value(&mut value);
-            serde_json::to_string(&value).unwrap_or_else(|_| truncate_for_log(text))
+            serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
         }
-        Err(_) => truncate_for_log(&redact_query_token(text)),
+        Err(_) => redact_query_token(text),
     };
     truncate_for_log(&redacted)
 }
