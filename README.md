@@ -170,7 +170,7 @@ Bridge Agent 只按固定版本和 SHA-256 消费 OSS 制品，不再构建、�
 
 本地应用、官方托管工具和 Connector 的正式规范见 [BRIDGE_LOCAL_CONNECTOR_SPEC.md](BRIDGE_LOCAL_CONNECTOR_SPEC.md)。标准安装机制成熟后，skill 不再承担常规 Connector 安装职责，只保留诊断、权限异常处理和 legacy fallback。
 
-Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；尚未公开审核的登记版本也只通过精确 `appId + version` 安装，并要求用户显式确认。Git 地址、revision 和制品位置由平台注册表解析，不能作为用户安装输入。未登记、已撤销、本地目录和身份不一致的包全部拒绝安装。安装身份以登记来源、appId 和精确 SemVer 版本为准；同一来源的更新仅按 SemVer 优先级判断。客户端验证包内 appId、版本与所选登记身份一致并校验清单合法性，不比较包内清单与市场清单的完整内容，也不生成安装目录摘要。同一版本的冻结与不可变性由发布方保证，内容变更应发布新版本。制品下载校验属于传输完整性验证，不参与版本身份或升级判断。
+Bridge Agent 只安装服务器已登记且状态为 `ACTIVE` 的精确 appId/版本。市场入口只展示已审核发布版本；尚未公开审核的登记版本也只通过精确 `appId + version` 安装，并要求用户显式确认。Git 地址、revision 和制品位置由平台注册表解析，不能作为用户安装输入。未登记、已撤销、本地目录和身份不一致的包全部拒绝安装。安装身份以登记来源、appId 和精确 SemVer 版本为准；同一来源的更新仅按 SemVer 优先级判断。客户端验证包内 appId、版本与所选登记身份一致并校验清单合法性，不比较包内清单与市场清单的完整内容，也不生成安装目录摘要。同一版本的冻结与不可变性由发布方保证，内容变更应发布新版本。制品下载只走 HTTPS 且不跟随重定向，并按冻结版本声明的大小核对，同时限制单次下载大小。来源若另外提供可识别的 SHA-256（64 位十六进制，可带 `sha256:` 前缀）则再校验摘要；没有校验和，或校验和不是 SHA-256 时，只记录日志并继续。市场契约里的制品本身不携带摘要。这属于传输完整性验证，不参与版本身份或升级判断。
 
 Bridge Agent 还会按 appId 在应用私有数据目录生成权限为 `0600` 的调用 token，通过
 `BAIJIMU_LOCAL_APP_TOKEN_FILE` 注入应用，并为健康检查及全部本地 HTTP 能力自动添加 Bearer
@@ -360,7 +360,7 @@ payload；存在匹配订阅时，Event Center 已在一个事务中保存事件
 
 bridge-agent 支持本机程序把自己注册成 bridge-agent 服务。这个入口只给 bridge-agent 所在机器上的本地程序、脚本或 AI 生成工具使用，不给 relay 反向调用。
 
-新生成的默认配置会开启本机服务注册，并写入 `runtime.service_registration_token`。已有配置如果要开启，需要手动增加：
+新生成的默认配置会开启本机服务注册。注册令牌保存在操作系统凭据库（macOS/Linux 钥匙串服务 `com.baijimu.bridge-agent.service-registration`，Windows 为配置文件旁的 DPAPI 文件），调试构建则写入仅所有者可读的 `.bridge-agent-development/*.service-registration`。公开的 `agent-config.json` 只保留 `runtime.service_registration_token: null`。已有配置如果把令牌明文写在 JSON 里，下次迁移会把它移入凭据库，并在公开文件和备份里清空该字段。已有配置如果要开启，可以先写入一次令牌：
 
 ```json
 {

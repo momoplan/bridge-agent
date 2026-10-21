@@ -10,7 +10,7 @@ impl HttpMethod {
         timeout_secs: Option<u64>,
         workspace_id: Option<u64>,
     ) -> Result<ServiceOutcome> {
-        let timeout_secs = timeout_secs.unwrap_or(self.timeout_secs);
+        let timeout_secs = self.capped_timeout_secs(timeout_secs);
         let mut request = self
             .client
             .request(self.http_method.clone(), &self.url)
@@ -45,7 +45,7 @@ impl HttpMethod {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let bytes = response.bytes().await?;
+        let bytes = read_limited_http_body(response).await?;
         if self.response_mode == ResponseMode::Passthrough {
             return Ok(passthrough_http_outcome(
                 status.as_u16(),
@@ -80,6 +80,26 @@ impl HttpMethod {
             error: outcome.error,
         })
     }
+
+    fn capped_timeout_secs(&self, requested: Option<u64>) -> u64 {
+        requested
+            .filter(|value| *value > 0)
+            .unwrap_or(self.timeout_secs)
+            .min(self.max_timeout_secs)
+    }
+}
+
+const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+async fn read_limited_http_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > MAX_HTTP_RESPONSE_BYTES {
+            bail!("local HTTP response exceeds 16 MiB");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn normalize_connector_http_outcome(

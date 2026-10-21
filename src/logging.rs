@@ -2,8 +2,20 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
+use std::thread;
+
+const LOG_QUEUE_CAPACITY: usize = 256;
+
+enum LogCommand {
+    Append(String),
+    Flush(mpsc::Sender<()>),
+    Clear(mpsc::Sender<std::result::Result<(), String>>),
+}
 
 #[derive(Debug, Clone)]
 pub struct FileLogConfig {
@@ -16,8 +28,8 @@ pub struct FileLogConfig {
 #[derive(Debug, Clone)]
 pub struct FileLogSink {
     path: PathBuf,
-    max_bytes: u64,
-    max_files: usize,
+    tx: SyncSender<LogCommand>,
+    dropped: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -122,10 +134,19 @@ impl FileLogSink {
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create log directory {}", dir.display()))?;
 
+        let path = dir.join("bridge-agent.log");
+        let max_bytes = config.max_bytes.max(1024);
+        let max_files = config.max_files.max(1);
+        let (tx, rx) = mpsc::sync_channel(LOG_QUEUE_CAPACITY);
+        let writer_path = path.clone();
+        thread::Builder::new()
+            .name("bridge-agent-log".to_string())
+            .spawn(move || log_writer(writer_path, max_bytes, max_files, rx))
+            .context("failed to start log writer")?;
         Ok(Some(Self {
-            path: dir.join("bridge-agent.log"),
-            max_bytes: config.max_bytes.max(1024),
-            max_files: config.max_files.max(1),
+            path,
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
         }))
     }
 
@@ -134,19 +155,103 @@ impl FileLogSink {
     }
 
     pub fn append(&self, entry: &LogEntry) -> Result<()> {
-        self.rotate_if_needed()?;
         let line = serde_json::to_string(entry)?;
-        let mut file = OpenOptions::new()
+        match self.tx.try_send(LogCommand::Append(line)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("log writer stopped")
+            }
+        }
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.tx
+            .send(LogCommand::Flush(ack_tx))
+            .context("log writer stopped")?;
+        ack_rx.recv().context("log writer stopped while flushing")
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.tx
+            .send(LogCommand::Clear(ack_tx))
+            .context("log writer stopped")?;
+        ack_rx
+            .recv()
+            .context("log writer stopped while clearing")?
+            .map_err(|err| anyhow::anyhow!(err))
+    }
+
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+struct LogWriter {
+    path: PathBuf,
+    max_bytes: u64,
+    max_files: usize,
+    file: Option<BufWriter<std::fs::File>>,
+    written: u64,
+}
+
+impl LogWriter {
+    fn append_line(&mut self, line: &str) -> Result<()> {
+        let next = self
+            .written
+            .saturating_add(line.len() as u64)
+            .saturating_add(1);
+        if self.file.is_some() && self.written > 0 && next > self.max_bytes {
+            self.rotate()?;
+        }
+        self.ensure_open()?;
+        let file = self
+            .file
+            .as_mut()
+            .context("log file is not open after rotation")?;
+        writeln!(file, "{line}")
+            .with_context(|| format!("failed to write log file {}", self.path.display()))?;
+        self.written = self
+            .written
+            .saturating_add(line.len() as u64)
+            .saturating_add(1);
+        Ok(())
+    }
+
+    fn ensure_open(&mut self) -> Result<()> {
+        if self.file.is_some() {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+        }
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("failed to open log file {}", self.path.display()))?;
-        writeln!(file, "{line}")
-            .with_context(|| format!("failed to write log file {}", self.path.display()))?;
+        self.written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        self.file = Some(BufWriter::new(file));
         Ok(())
     }
 
-    pub fn clear(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()
+                .with_context(|| format!("failed to flush log file {}", self.path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        self.flush()?;
+        self.file = None;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create log directory {}", parent.display()))?;
@@ -157,17 +262,13 @@ impl FileLogSink {
             .truncate(true)
             .open(&self.path)
             .with_context(|| format!("failed to clear log file {}", self.path.display()))?;
+        self.written = 0;
         Ok(())
     }
 
-    fn rotate_if_needed(&self) -> Result<()> {
-        let Ok(metadata) = fs::metadata(&self.path) else {
-            return Ok(());
-        };
-        if metadata.len() < self.max_bytes {
-            return Ok(());
-        }
-
+    fn rotate(&mut self) -> Result<()> {
+        self.flush()?;
+        self.file = None;
         for index in (1..=self.max_files).rev() {
             let from = rotated_path(&self.path, index);
             let to = rotated_path(&self.path, index + 1);
@@ -178,9 +279,38 @@ impl FileLogSink {
             }
         }
         let first = rotated_path(&self.path, 1);
-        let _ = fs::rename(&self.path, first);
+        let _ = fs::rename(&self.path, &first);
+        self.written = 0;
         Ok(())
     }
+}
+
+fn log_writer(path: PathBuf, max_bytes: u64, max_files: usize, rx: Receiver<LogCommand>) {
+    let mut writer = LogWriter {
+        path,
+        max_bytes,
+        max_files,
+        file: None,
+        written: 0,
+    };
+    while let Ok(command) = rx.recv() {
+        match command {
+            LogCommand::Append(line) => {
+                if let Err(err) = writer.append_line(&line) {
+                    eprintln!("failed to append file log: {err:#}");
+                }
+            }
+            LogCommand::Flush(ack) => {
+                let _ = writer.flush();
+                let _ = ack.send(());
+            }
+            LogCommand::Clear(ack) => {
+                let result = writer.clear().map_err(|err| err.to_string());
+                let _ = ack.send(result);
+            }
+        }
+    }
+    let _ = writer.flush();
 }
 
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
@@ -232,9 +362,47 @@ mod tests {
             metadata: super::LogMetadata::default(),
         })
         .unwrap();
+        sink.flush().unwrap();
         let content = std::fs::read_to_string(sink.path()).unwrap();
         assert!(content.contains("\"timestamp_ms\":123"));
         assert!(content.contains("\"level\":\"info\""));
         assert!(content.contains("\"message\":\"hello\""));
+    }
+
+    #[test]
+    fn file_log_sink_rotates_and_clears_off_the_caller() {
+        let dir = tempdir().unwrap();
+        let sink = FileLogSink::from_config(
+            &FileLogConfig {
+                enabled: true,
+                dir: Some(dir.path().join("logs")),
+                max_bytes: 1024,
+                max_files: 1,
+            },
+            dir.path(),
+        )
+        .unwrap()
+        .unwrap();
+        let line = "x".repeat(900);
+        for sequence in 1..=3 {
+            sink.append(&super::LogEntry {
+                sequence,
+                timestamp_ms: sequence,
+                level: "info".to_string(),
+                message: line.clone(),
+                metadata: super::LogMetadata::default(),
+            })
+            .unwrap();
+        }
+        sink.flush().unwrap();
+        let rotated = std::path::PathBuf::from(format!("{}.1", sink.path().display()));
+        assert!(
+            rotated.is_file(),
+            "expected rotated log {}",
+            rotated.display()
+        );
+        sink.clear().unwrap();
+        sink.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(sink.path()).unwrap(), "");
     }
 }

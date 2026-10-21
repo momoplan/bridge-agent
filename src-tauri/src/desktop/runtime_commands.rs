@@ -85,42 +85,36 @@ pub(super) async fn install_baijimu_cli_update(
     )
     .map_err(|error| error.to_string())?
     .ok_or("当前平台没有可用的工具制品")?;
-    if artifact.size_bytes > 128 * 1024 * 1024 {
-        return Err("工具制品超过 128 MiB".into());
-    }
-    let mut response = consumer
+    let metadata = frozen_artifact_metadata(
+        listing.frozen_version.content.manifest.as_json(),
+        artifact.platform.as_str(),
+        artifact.architecture.as_str(),
+    )?;
+    let response = consumer
         .reader
         .artifact(&consumer.credential, &install_source, artifact.artifact_id)
         .await
         .map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "读取工具制品失败")? {
-        if bytes.len() as u64 + chunk.len() as u64 > artifact.size_bytes {
-            return Err("工具制品大小不符".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let manifest: Value = serde_json::from_str(listing.frozen_version.content.manifest.as_json())
-        .map_err(|error| error.to_string())?;
-    let manifest_artifact = manifest
-        .get("artifacts")
-        .and_then(Value::as_array)
-        .and_then(|artifacts| {
-            artifacts.iter().find(|entry| {
-                entry.get("platform").and_then(Value::as_str) == Some(artifact.platform.as_str())
-                    && entry
-                        .get("arch")
-                        .and_then(Value::as_str)
-                        .unwrap_or("universal")
-                        == artifact.architecture
-            })
-        });
-    let archive_path = manifest_artifact
-        .as_ref()
-        .and_then(|value| value.get("archivePath"))
-        .and_then(Value::as_str);
-    managed_tool::install_market_package(&bytes, artifact, install_source, &listing, archive_path)
-        .map_err(|error| error.to_string())?;
+    let package_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let package_path = package_dir.path().join("tool.bin");
+    download_bounded_artifact(
+        response,
+        &package_path,
+        "工具制品",
+        artifact.size_bytes,
+        None,
+        metadata.sha256.as_deref(),
+    )
+    .await?;
+    let bytes = fs::read(&package_path).map_err(|error| error.to_string())?;
+    managed_tool::install_market_package(
+        &bytes,
+        artifact,
+        install_source,
+        &listing,
+        metadata.archive_path.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     codex_skill::install_bundled().map_err(|err| err.to_string())?;
     let bundled = bundled_baijimu_cli_path();
     managed_tool::inspect(bundled.as_deref()).map_err(|err| err.to_string())
@@ -172,16 +166,19 @@ pub(super) async fn save_config(
     state: tauri::State<'_, DesktopState>,
     config: AgentConfig,
 ) -> Result<ConfigDocument, String> {
-    let previous = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if !previous.relay.token.is_empty()
-        && (bridge_agent::config::environment::api_base(&previous.platform.base_url)
-            != bridge_agent::config::environment::api_base(&config.platform.base_url)
-            || previous.platform.workspace_id != config.platform.workspace_id
-            || previous.platform.environment_key != config.platform.environment_key)
-    {
-        return Err("切换环境或工作区请先完成浏览器授权，原连接尚未修改".into());
-    }
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |current| {
+        if !current.relay.token.is_empty()
+            && (bridge_agent::config::environment::api_base(&current.platform.base_url)
+                != bridge_agent::config::environment::api_base(&config.platform.base_url)
+                || current.platform.workspace_id != config.platform.workspace_id
+                || current.platform.environment_key != config.platform.environment_key)
+        {
+            anyhow::bail!("切换环境或工作区请先完成浏览器授权，原连接尚未修改");
+        }
+        overlay_submitted_config(current, config);
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     let runtime = state.runtime.snapshot().await;
@@ -201,16 +198,18 @@ pub(super) async fn save_service(
     apply_to_runtime: bool,
 ) -> Result<ConfigDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if service_index > config.services.len() {
-        return Err(format!("服务索引 {service_index} 已超出当前配置范围"));
-    }
-    if service_index == config.services.len() {
-        config.services.push(service);
-    } else {
-        config.services[service_index] = service;
-    }
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |config| {
+        if service_index > config.services.len() {
+            anyhow::bail!("服务索引 {service_index} 已超出当前配置范围");
+        }
+        if service_index == config.services.len() {
+            config.services.push(service);
+        } else {
+            config.services[service_index] = service;
+        }
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let runtime = if apply_to_runtime {
         state
             .runtime
@@ -237,12 +236,14 @@ pub(super) async fn delete_service(
     apply_to_runtime: bool,
 ) -> Result<ConfigDocument, String> {
     ensure_config_exists(&state.config_path).map_err(|err| err.to_string())?;
-    let mut config = load_agent_config(&state.config_path).map_err(|err| err.to_string())?;
-    if service_index >= config.services.len() {
-        return Err(format!("服务索引 {service_index} 已超出当前配置范围"));
-    }
-    config.services.remove(service_index);
-    save_agent_config(&state.config_path, &config).map_err(|err| err.to_string())?;
+    update_agent_config(&state.config_path, |config| {
+        if service_index >= config.services.len() {
+            anyhow::bail!("服务索引 {service_index} 已超出当前配置范围");
+        }
+        config.services.remove(service_index);
+        Ok(())
+    })
+    .map_err(|err| err.to_string())?;
     let runtime = if apply_to_runtime {
         state
             .runtime
@@ -271,9 +272,19 @@ pub(super) async fn start_agent(
         .startup_health
         .diagnostics
         .info("manual agent start requested from desktop UI");
-    save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
-        message: err.to_string(),
-    })?;
+    if state.config_path.is_file() {
+        update_agent_config(&state.config_path, |current| {
+            overlay_submitted_config(current, config);
+            Ok(())
+        })
+        .map_err(|err| CommandError::Message {
+            message: err.to_string(),
+        })?;
+    } else {
+        save_agent_config(&state.config_path, &config).map_err(|err| CommandError::Message {
+            message: err.to_string(),
+        })?;
+    }
     state
         .runtime
         .start_from_path(&state.config_path)

@@ -28,8 +28,16 @@ pub(super) struct BrowserAuthPollResponse {
 pub(super) fn config_for_ui(config: &AgentConfig) -> Result<Value, String> {
     let mut value = serde_json::to_value(config).map_err(|err| err.to_string())?;
     value["relay"]["token"] = Value::String(String::new());
+    if let Some(runtime) = value.get_mut("runtime") {
+        runtime["service_registration_token"] = Value::Null;
+    }
     value["credential_status"] = serde_json::json!({
-        "relay_token_configured": !config.relay.token.trim().is_empty()
+        "relay_token_configured": !config.relay.token.trim().is_empty(),
+        "service_registration_token_configured": config
+            .runtime
+            .service_registration_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
     });
     Ok(value)
 }
@@ -140,8 +148,12 @@ pub(super) async fn poll_browser_auth(
     apply_authorized_device_credentials(&mut updated, &authorized);
     log_shared_cli_auth_result(&state.runtime, write_shared_cli_auth(&updated, &authorized))
         .await?;
-    save_agent_config(&state.config_path, &updated)
-        .map_err(|err| command_error_message(err.to_string()))?;
+    let saved = updated.clone();
+    update_agent_config(&state.config_path, |current| {
+        overlay_submitted_config(current, saved);
+        Ok(())
+    })
+    .map_err(|err| command_error_message(err.to_string()))?;
     let runtime = restart_agent_from_saved_config(&state)
         .await
         .map_err(CommandError::from)?;

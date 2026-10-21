@@ -1,7 +1,10 @@
 use crate::protocol::{
     EventDefinition, LocalAppDefinition, MethodDefinition, ResponseMode, ServiceDefinition,
 };
-use crate::secret_store::{delete_relay_token, load_relay_token, store_relay_token};
+use crate::secret_store::{
+    delete_relay_token, delete_service_registration_token, load_relay_token,
+    load_service_registration_token, store_relay_token, store_service_registration_token,
+};
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -329,9 +332,9 @@ mod tests {
     use super::{
         browser_auth_manifest_json, config_file_name_for_build, default_shell_exec_allow_commands,
         ensure_browser_auth_agent_id, format_default_device_name, load_config,
-        manifest_preview_json, migrate_config, reset_invalid_config, save_config, AgentConfig,
-        HttpBinding, MethodBinding, MethodConfig, ServiceConfig, ServiceHealthCheck,
-        ServiceRegistration, ServiceStartCommand,
+        manifest_preview_json, migrate_config, overlay_submitted_config, reset_invalid_config,
+        save_config, update_config, AgentConfig, HttpBinding, LocalAppConfig, MethodBinding,
+        MethodConfig, ServiceConfig, ServiceHealthCheck, ServiceRegistration, ServiceStartCommand,
     };
     use crate::protocol::ResponseMode;
     use serde_json::json;
@@ -346,6 +349,7 @@ mod tests {
     include!("config/tests/migrations.rs");
     include!("config/tests/identity.rs");
     include!("config/tests/platform_upgrade.rs");
+    include!("config/tests/locking.rs");
 }
 
 pub mod environment;

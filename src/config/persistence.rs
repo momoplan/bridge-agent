@@ -4,12 +4,8 @@ pub fn load_config(path: &Path) -> Result<AgentConfig> {
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let mut config: AgentConfig = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
+    hydrate_config_secrets(path, &mut config, false)?;
     config.validate()?;
-    if config.relay.token.trim().is_empty() {
-        if let Some(token) = load_relay_token(path)? {
-            config.relay.token = token;
-        }
-    }
     Ok(config)
 }
 
@@ -30,21 +26,58 @@ pub fn migrate_config(path: &Path) -> Result<AgentConfig> {
     let mut changed = has_legacy_codex_binary_path;
     changed |= config.normalize();
     changed |= migrate_legacy_defaults(&mut config);
+    changed |= hydrate_config_secrets(path, &mut config, true)?;
     config.validate()?;
-    let legacy_token = config.relay.token.trim().to_string();
-    if legacy_token.is_empty() {
-        if let Some(token) = load_relay_token(path)? {
-            config.relay.token = token;
-        }
-    } else {
-        store_relay_token(path, &legacy_token)?;
-        config.relay.token = legacy_token;
-        changed = true;
-    }
     if changed {
         write_public_config(path, &config)?;
     }
     Ok(config)
+}
+
+fn registration_token_text(config: &AgentConfig) -> String {
+    config
+        .runtime
+        .service_registration_token
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Fill empty credential fields from the secret store. When `persist_plaintext`
+/// is set, a token still present in the JSON is moved into the secret store.
+fn hydrate_config_secrets(
+    path: &Path,
+    config: &mut AgentConfig,
+    persist_plaintext: bool,
+) -> Result<bool> {
+    let mut changed = false;
+    let relay_token = config.relay.token.trim().to_string();
+    if relay_token.is_empty() {
+        if let Some(token) = load_relay_token(path)? {
+            config.relay.token = token;
+        }
+    } else if persist_plaintext {
+        store_relay_token(path, &relay_token)?;
+        config.relay.token = relay_token;
+        changed = true;
+    } else {
+        config.relay.token = relay_token;
+    }
+
+    let registration_token = registration_token_text(config);
+    if registration_token.is_empty() {
+        if let Some(token) = load_service_registration_token(path)? {
+            config.runtime.service_registration_token = Some(token);
+        }
+    } else if persist_plaintext {
+        store_service_registration_token(path, &registration_token)?;
+        config.runtime.service_registration_token = Some(registration_token);
+        changed = true;
+    } else {
+        config.runtime.service_registration_token = Some(registration_token);
+    }
+    Ok(changed)
 }
 
 fn config_has_legacy_codex_binary_path(content: &str) -> bool {
@@ -76,11 +109,157 @@ fn remove_legacy_codex_binary_overrides(config: &mut AgentConfig) -> bool {
 }
 
 pub fn save_config(path: &Path, config: &AgentConfig) -> Result<()> {
+    let _lock = ConfigFileLock::exclusive(path)?;
+    save_config_unlocked(path, config)
+}
+
+fn save_config_unlocked(path: &Path, config: &AgentConfig) -> Result<()> {
     config.validate()?;
     if !config.relay.token.trim().is_empty() {
         store_relay_token(path, &config.relay.token)?;
     }
+    let registration_token = registration_token_text(config);
+    if !registration_token.is_empty() {
+        store_service_registration_token(path, &registration_token)?;
+    }
     write_public_config(path, config)
+}
+
+/// Read, modify, and write `agent-config.json` while holding an exclusive lock.
+///
+/// The closure must not call `update_config` on the same path. `save_config` is
+/// safe to call reentrantly from this thread, but a nested full snapshot write
+/// can still replace the update in progress.
+pub fn update_config<T>(
+    path: &Path,
+    update: impl FnOnce(&mut AgentConfig) -> Result<T>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::exclusive(path)?;
+    let mut config = load_config(path)?;
+    let value = update(&mut config)?;
+    save_config_unlocked(path, &config)?;
+    Ok(value)
+}
+
+/// Apply a UI snapshot without dropping services or local apps added after it was loaded.
+pub fn overlay_submitted_config(current: &mut AgentConfig, mut submitted: AgentConfig) {
+    if submitted.relay.token.trim().is_empty() {
+        submitted.relay.token = current.relay.token.clone();
+    }
+    if submitted
+        .runtime
+        .service_registration_token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        submitted.runtime.service_registration_token =
+            current.runtime.service_registration_token.clone();
+    }
+    submitted.services = union_by_key(submitted.services, &current.services, |service| {
+        service.name.clone()
+    });
+    submitted.local_apps = union_by_key(submitted.local_apps, &current.local_apps, |app| {
+        app.app_id.clone()
+    });
+    *current = submitted;
+}
+
+fn union_by_key<T, K>(submitted: Vec<T>, disk: &[T], key: impl Fn(&T) -> K) -> Vec<T>
+where
+    T: Clone,
+    K: PartialEq,
+{
+    let mut merged = submitted;
+    for item in disk {
+        let item_key = key(item);
+        if merged.iter().any(|existing| key(existing) == item_key) {
+            continue;
+        }
+        merged.push(item.clone());
+    }
+    merged
+}
+
+std::thread_local! {
+    static CONFIG_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ConfigFileLock {
+    file: Option<std::fs::File>,
+}
+
+impl ConfigFileLock {
+    fn exclusive(path: &Path) -> Result<Self> {
+        if CONFIG_LOCK_HELD.with(std::cell::Cell::get) {
+            return Ok(Self { file: None });
+        }
+        let file = open_config_lock(path)?;
+        CONFIG_LOCK_HELD.with(|held| held.set(true));
+        Ok(Self { file: Some(file) })
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let Some(file) = self.file.take() else {
+            return;
+        };
+        let _ = fs2::FileExt::unlock(&file);
+        CONFIG_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
+fn config_lock_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_CONFIG_FILE_NAME.to_string());
+    path.with_file_name(format!("{file_name}.lock"))
+}
+
+fn open_config_lock(path: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+            set_private_directory_permissions(parent)?;
+        }
+    }
+    let lock_path = config_lock_path(path);
+    let file = create_lock_file(&lock_path)?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock config {}", path.display()))?;
+    set_private_file_permissions(&lock_path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn create_lock_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to open config lock {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn create_lock_file(path: &Path) -> Result<std::fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open config lock {}", path.display()))
 }
 
 fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
@@ -91,6 +270,7 @@ fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
     }
     let mut public_config = config.clone();
     public_config.relay.token.clear();
+    public_config.runtime.service_registration_token = None;
     let content = serde_json::to_string_pretty(&public_config)?;
     write_config_atomically(path, format!("{content}\n").as_bytes())?;
     set_private_file_permissions(path)?;
@@ -100,6 +280,7 @@ fn write_public_config(path: &Path, config: &AgentConfig) -> Result<()> {
 pub fn ensure_config_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         delete_relay_token(path)?;
+        delete_service_registration_token(path)?;
         save_config(path, &AgentConfig::example())?;
     }
     Ok(())
@@ -112,6 +293,7 @@ pub fn reset_invalid_config(path: &Path) -> Result<ConfigRecovery> {
         None
     };
     delete_relay_token(path)?;
+    delete_service_registration_token(path)?;
     let config = AgentConfig::example();
     save_config(path, &config)?;
     Ok(ConfigRecovery {
@@ -197,6 +379,9 @@ fn write_sanitized_config_backup(source: &Path, destination: &Path) -> Result<()
                 .get_mut("relay")?
                 .as_object_mut()?
                 .insert("token".to_string(), Value::String(String::new()));
+            if let Some(runtime) = value.get_mut("runtime").and_then(Value::as_object_mut) {
+                runtime.insert("service_registration_token".to_string(), Value::Null);
+            }
             serde_json::to_vec_pretty(&value).ok()
         })
         .unwrap_or(content);

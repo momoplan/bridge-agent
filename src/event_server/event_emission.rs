@@ -9,10 +9,12 @@ async fn emit_local_app_event(
             "local event API is disabled",
         ));
     }
-    let queue = state.event_queue.as_ref().ok_or_else(|| EventApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "device authorization required before event handoff",
-    ))?;
+    let queue = state.event_queue.as_ref().ok_or_else(|| {
+        EventApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device authorization required before event handoff",
+        )
+    })?;
     let app_id = request.app_id.trim();
     let event_name = request.event.trim();
     if app_id.is_empty() || event_name.is_empty() {
@@ -27,8 +29,22 @@ async fn emit_local_app_event(
             "connector event credential is required",
         )
     })?;
-    authorize_connector_event(&state.config_path, app_id, event_name, &token)
-        .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    let policy = match state
+        .event_auth_cache
+        .authorize(&state.config_path, app_id, event_name, &token)
+        .await
+    {
+        Ok(policy) => policy,
+        Err(EventAuthFailure::Forbidden(err)) => {
+            return Err(EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))
+        }
+        Err(EventAuthFailure::Unavailable(err)) => {
+            return Err(EventApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                err.to_string(),
+            ))
+        }
+    };
     let event_id = request
         .event_id
         .as_deref()
@@ -49,9 +65,9 @@ async fn emit_local_app_event(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     };
-    let policy = crate::event_delivery::read_policy(&state.config_path).await
-        .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
-    let receipt = queue.admit(event, policy).await
+    let receipt = queue
+        .admit(event, policy)
+        .await
         .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }

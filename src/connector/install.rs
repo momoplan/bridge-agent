@@ -41,8 +41,7 @@ pub fn install_connector_from_path_with_provenance(
     provenance: ConnectorInstallProvenance,
 ) -> Result<ConnectorInstallResult> {
     crate::config::initialize_config(config_path)?;
-    let mut config = load_config(config_path)?;
-    let original_config = config.clone();
+    let config = load_config(config_path)?;
     let source = source
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
@@ -91,6 +90,7 @@ pub fn install_connector_from_path_with_provenance(
         None
     };
     let mut config_saved = false;
+    let mut previous_local_app = None;
     let install_result = complete_connector_install(
         &source,
         &package_path,
@@ -99,16 +99,17 @@ pub fn install_connector_from_path_with_provenance(
         &manifest,
         &registrations,
         &mut services,
-        &mut config,
+        &config,
         previous_record.as_ref(),
         &provenance,
         &mut config_saved,
+        &mut previous_local_app,
     );
 
     finalize_connector_install(
         install_result,
         config_path,
-        &original_config,
+        previous_local_app,
         &package_path,
         replaced_package,
         config_saved,
@@ -120,7 +121,7 @@ pub fn install_connector_from_path_with_provenance(
 fn finalize_connector_install(
     install_result: Result<ConnectorInstallResult>,
     config_path: &Path,
-    original_config: &AgentConfig,
+    previous_local_app: Option<LocalAppConfig>,
     package_path: &Path,
     replaced_package: Option<PathBuf>,
     config_saved: bool,
@@ -142,7 +143,9 @@ fn finalize_connector_install(
         Err(install_err) => {
             let mut rollback_failures = Vec::new();
             if config_saved {
-                if let Err(err) = save_config(config_path, original_config) {
+                if let Err(err) =
+                    restore_connector_local_app(config_path, app_id, previous_local_app.as_ref())
+                {
                     rollback_failures.push(format!("restore connector config: {err:#}"));
                 }
             }
@@ -172,10 +175,11 @@ fn complete_connector_install(
     manifest: &ConnectorManifest,
     registrations: &[ServiceRegistration],
     services: &mut [ServiceConfig],
-    config: &mut AgentConfig,
+    config: &AgentConfig,
     previous_record: Option<&ConnectorInstallRecord>,
     provenance: &ConnectorInstallProvenance,
     config_saved: &mut bool,
+    previous_local_app: &mut Option<LocalAppConfig>,
 ) -> Result<ConnectorInstallResult> {
     copy_connector_package(source, package_path)?;
     resolve_installed_start_commands(
@@ -198,8 +202,16 @@ fn complete_connector_install(
         .iter()
         .map(|event| event.name.clone())
         .collect();
-    upsert_local_app(&mut config.local_apps, local_app, replace)?;
-    save_config(config_path, config)?;
+    let previous = update_config(config_path, |fresh| {
+        let previous = fresh
+            .local_apps
+            .iter()
+            .find(|app| app.app_id == local_app.app_id)
+            .cloned();
+        upsert_local_app(&mut fresh.local_apps, local_app.clone(), replace)?;
+        Ok(previous)
+    })?;
+    *previous_local_app = previous;
     *config_saved = true;
 
     let now = now_ms();
@@ -240,6 +252,20 @@ fn complete_connector_install(
         package_path: package_path.display().to_string(),
         method_names,
         event_names,
+    })
+}
+
+fn restore_connector_local_app(
+    config_path: &Path,
+    app_id: &str,
+    previous: Option<&LocalAppConfig>,
+) -> Result<()> {
+    update_config(config_path, |config| {
+        config.local_apps.retain(|app| app.app_id != app_id);
+        if let Some(previous) = previous {
+            config.local_apps.push(previous.clone());
+        }
+        Ok(())
     })
 }
 
@@ -294,7 +320,7 @@ pub fn uninstall_connector_with_options(
     crate::config::initialize_config(config_path)?;
     let record = load_install_record(app_id)?;
     let summary = summary_from_record(record.clone());
-    let mut config = load_config(config_path)?;
+    let config = load_config(config_path)?;
     match stop_connector_for_package_change(app_id, &config) {
         Ok(()) => release_connector_package_processes(Path::new(&record.package_path))?,
         Err(stop_error) if options.force => {
@@ -310,10 +336,7 @@ pub fn uninstall_connector_with_options(
     }
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
 
-    config
-        .local_apps
-        .retain(|app| app.app_id != record.manifest.app_id);
-
+    let removed_app_id = record.manifest.app_id.clone();
     let install_root = install_record_path(app_id)?
         .parent()
         .with_context(|| format!("connector `{app_id}` install root is missing"))?
@@ -323,7 +346,10 @@ pub fn uninstall_connector_with_options(
     } else {
         None
     };
-    if let Err(config_err) = save_config(config_path, &config) {
+    if let Err(config_err) = update_config(config_path, |config| {
+        config.local_apps.retain(|app| app.app_id != removed_app_id);
+        Ok(())
+    }) {
         if let Some(uninstalling_root) = uninstalling_root.as_deref() {
             if let Err(restore_err) = fs::rename(uninstalling_root, &install_root) {
                 bail!(
@@ -369,15 +395,15 @@ pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSumm
 
 pub fn sync_installed_connector(config_path: &Path, app_id: &str) -> Result<ConnectorSummary> {
     crate::config::initialize_config(config_path)?;
-    let mut config = load_config(config_path)?;
     let record = load_install_record(app_id)?;
-    let summary = sync_installed_connector_record(
-        &mut config,
-        record,
-        now_ms(),
-        ConnectorRuntimePreparation::Deferred,
-    )?;
-    save_config(config_path, &config)?;
+    let summary = update_config(config_path, |config| {
+        sync_installed_connector_record(
+            config,
+            record,
+            now_ms(),
+            ConnectorRuntimePreparation::Deferred,
+        )
+    })?;
     Ok(summary)
 }
 
@@ -386,15 +412,15 @@ pub fn prepare_installed_connector_runtime(
     app_id: &str,
 ) -> Result<ConnectorSummary> {
     crate::config::initialize_config(config_path)?;
-    let mut config = load_config(config_path)?;
     let record = load_install_record(app_id)?;
-    let summary = sync_installed_connector_record(
-        &mut config,
-        record,
-        now_ms(),
-        ConnectorRuntimePreparation::Prepare,
-    )?;
-    save_config(config_path, &config)?;
+    let summary = update_config(config_path, |config| {
+        sync_installed_connector_record(
+            config,
+            record,
+            now_ms(),
+            ConnectorRuntimePreparation::Prepare,
+        )
+    })?;
     Ok(summary)
 }
 
@@ -408,39 +434,38 @@ pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorS
         });
     }
 
-    let mut config = load_config(config_path)?;
     let now = now_ms();
     let mut summaries = Vec::new();
     let mut failures = Vec::new();
-
-    for record in records {
-        let app_id = record.manifest.app_id.clone();
-        let name = record.manifest.name.clone();
-        match sync_installed_connector_record(
-            &mut config,
-            record,
-            now,
-            ConnectorRuntimePreparation::Deferred,
-        ) {
-            Ok(summary) => summaries.push(summary),
-            Err(err) => {
-                let error = format!("{err:#}");
-                tracing::warn!(
-                    app_id = %app_id,
-                    name = %name,
-                    error = %error,
-                    "failed to sync installed connector"
-                );
-                failures.push(ConnectorSyncFailure {
-                    app_id,
-                    name,
-                    error,
-                });
+    update_config(config_path, |config| {
+        for record in records {
+            let app_id = record.manifest.app_id.clone();
+            let name = record.manifest.name.clone();
+            match sync_installed_connector_record(
+                config,
+                record,
+                now,
+                ConnectorRuntimePreparation::Deferred,
+            ) {
+                Ok(summary) => summaries.push(summary),
+                Err(err) => {
+                    let error = format!("{err:#}");
+                    tracing::warn!(
+                        app_id = %app_id,
+                        name = %name,
+                        error = %error,
+                        "failed to sync installed connector"
+                    );
+                    failures.push(ConnectorSyncFailure {
+                        app_id,
+                        name,
+                        error,
+                    });
+                }
             }
         }
-    }
-
-    save_config(config_path, &config)?;
+        Ok(())
+    })?;
     Ok(ConnectorSyncReport {
         summaries,
         failures,
