@@ -93,9 +93,17 @@ impl RuntimeRunner {
         if let Some(queue) = &self.event_queue {
             queue.subscriptions(None).await.ok();
         }
+        let request = match relay_websocket_request(&self.ws_url, &self.config.relay.token) {
+            Ok(request) => request,
+            Err(err) => {
+                self.enter_backoff(err.to_string(), &format!("connect failed: {err:#}"))
+                    .await;
+                return true;
+            }
+        };
         match timeout(
             Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS),
-            connect_async(self.ws_url.as_str()),
+            connect_async(request),
         )
         .await
         {
@@ -122,7 +130,10 @@ impl RuntimeRunner {
                 .await;
                 self.push_log(
                     "warn",
-                    &format!("relay rejected the saved device credential; reconnect paused until reauthorization: {err}"),
+                    &format!(
+                        "relay rejected the saved device credential; reconnect paused until reauthorization: {}",
+                        redact_query_token(&err.to_string())
+                    ),
                 )
                 .await;
                 wait_until_shutdown(shutdown_rx).await;
@@ -142,6 +153,8 @@ impl RuntimeRunner {
     }
 
     async fn enter_backoff(&self, error: String, log_message: &str) {
+        let error = redact_query_token(&error);
+        let log_message = redact_query_token(log_message);
         if let Some(queue) = &self.event_queue {
             if let Err(error) = queue.subscriptions(None).await {
                 tracing::error!(%error, "cannot invalidate device subscriptions");
@@ -155,7 +168,7 @@ impl RuntimeRunner {
             self.config_path.clone(),
         )
         .await;
-        self.push_log("warn", log_message).await;
+        self.push_log("warn", &log_message).await;
     }
 
     async fn wait_for_reconnect(

@@ -253,12 +253,13 @@ mod tests {
     use super::{
         build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
         invalid_request_reply, is_relay_authorization_error, process_looks_like_bridge_agent,
-        prune_closed_event_waiters, read_runtime_lock, reconnect_delay_ms,
-        redact_relay_message_preview, register_event_waiter, remove_retired_event_storage,
-        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, AgentRuntimeManager, PendingEventWaiters, ReconnectBackoff,
-        RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus,
-        StatusCode, WebSocketError, RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
+        prune_closed_event_waiters, read_runtime_lock, reconnect_delay_ms, redact_query_token,
+        redact_relay_message_preview, register_event_waiter, relay_websocket_request,
+        remove_retired_event_storage, runtime_lock_owner_is_active, runtime_lock_path,
+        runtime_start_is_active, terminate_runtime_lock_owner, AgentRuntimeManager,
+        PendingEventWaiters, ReconnectBackoff, RuntimeEvent, RuntimeInstanceLock,
+        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode, WebSocketError,
+        RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
     };
     use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
     use crate::logging::LogMetadata;
@@ -285,5 +286,6 @@ mod tests {
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/reconnect.rs");
     include!("runtime/tests/relay_frames.rs");
+    include!("runtime/tests/relay_auth.rs");
     include!("runtime/tests/process.rs");
 }

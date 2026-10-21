@@ -76,7 +76,7 @@ fn redact_relay_message_preview(text: &str) -> String {
             redact_json_value(&mut value);
             serde_json::to_string(&value).unwrap_or_else(|_| truncate_for_log(text))
         }
-        Err(_) => truncate_for_log(text),
+        Err(_) => truncate_for_log(&redact_query_token(text)),
     };
     truncate_for_log(&redacted)
 }
@@ -187,11 +187,62 @@ fn relay_message_type_is_supported(message_type: &str) -> bool {
     )
 }
 
-fn build_agent_url(base: &str, agent_id: &str, token: &str) -> Result<Url> {
-    let base = base.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/{agent_id}"))?;
-    url.query_pairs_mut().append_pair("token", token);
+fn build_agent_url(
+    base: &str,
+    agent_id: &str,
+    token: &str,
+    include_legacy_query_token: bool,
+) -> Result<Url> {
+    crate::config::parse_relay_websocket_base(base)?;
+    let base = base.trim().trim_end_matches('/');
+    let mut url = Url::parse(&format!("{base}/{agent_id}"))
+        .with_context(|| format!("invalid relay url {base}"))?;
+    crate::config::ensure_relay_websocket_scheme(&url)?;
+    if include_legacy_query_token && !token.is_empty() {
+        url.query_pairs_mut().append_pair("token", token);
+    }
     Ok(url)
+}
+
+fn relay_websocket_request(
+    url: &Url,
+    token: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("invalid relay websocket url")?;
+    if token.is_empty() {
+        return Ok(request);
+    }
+    let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
+        "Bearer {token}"
+    ))
+    .context("relay token cannot be sent in an Authorization header")?;
+    value.set_sensitive(true);
+    request.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+        value,
+    );
+    Ok(request)
+}
+
+fn redact_query_token(message: &str) -> String {
+    let mut output = String::with_capacity(message.len());
+    let mut rest = message;
+    const MARKER: &str = "token=";
+    while let Some(index) = rest.find(MARKER) {
+        output.push_str(&rest[..index]);
+        output.push_str("token=<redacted>");
+        rest = &rest[index + MARKER.len()..];
+        let end = rest
+            .find(|character: char| matches!(character, '&' | ' ' | '"' | '\'' | '\n' | '\r' | '#'))
+            .unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    output
 }
 
 fn now_ms() -> u64 {

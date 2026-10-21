@@ -293,6 +293,8 @@ cargo run -- init-config
 - `relay.url`
 - `relay.agent_id`
 - `relay.token`（兼容字段；持久化时始终留空，实际凭证由系统安全存储管理）
+- `relay.include_legacy_query_token`（默认 `true`）：握手始终发送 `Authorization: Bearer`。为 `true` 时仍把 token 附加到 WebSocket URL 的 `token` 查询参数。本仓库不包含私有 relay 服务端，现有 relay 仍从查询参数读取设备凭证；确认服务端改为读取 Authorization 头之后，把此项设为 `false`，避免 token 进入代理和访问日志
+- `relay.url` 必须使用 `wss://`。`ws://` 只允许 `localhost`、`127.0.0.1` 和 `::1`，供本机开发；其它明文地址会在配置校验和发起连接前被拒绝
 - `relay.token_issued_at_epoch_seconds`、`relay.token_expires_at_epoch_seconds`（授权服务返回的凭证生命周期元数据；不含秘密）
 - `runtime.default_timeout_secs`
 - `runtime.log_file_enabled`
@@ -998,6 +1000,7 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 - 所有调用都通过本地 agent 主动外连 relay
 - `computer_use` 不等于任意 shell，它只执行受控的桌面动作
 - shell 方法必须显式 allowlist
+- relay 设备 token 通过 `Authorization: Bearer` 发送；非本机 relay 地址不允许明文 `ws://`
 - cwd 不能逃逸 root_dir
 - 每个方法调用都有超时
 

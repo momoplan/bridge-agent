@@ -21,6 +21,10 @@ fn default_reconnect_secs() -> u64 {
     3
 }
 
+fn default_include_legacy_query_token() -> bool {
+    true
+}
+
 fn default_log_limit() -> usize {
     500
 }

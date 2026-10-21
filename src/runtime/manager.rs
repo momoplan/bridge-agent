@@ -34,6 +34,7 @@ impl AgentRuntimeManager {
             &config.relay.url,
             &config.relay.agent_id,
             &config.relay.token,
+            config.relay.include_legacy_query_token,
         )?;
         let snapshot = RuntimeSnapshot {
             revision: 0,

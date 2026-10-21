@@ -73,6 +73,7 @@ export interface RelayConfig {
   token_issued_at_epoch_seconds?: string | null;
   token_expires_at_epoch_seconds?: string | null;
   reconnect_secs: number;
+  include_legacy_query_token?: boolean;
 }
 
 export interface PlatformConfig {
