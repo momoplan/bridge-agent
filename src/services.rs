@@ -420,6 +420,7 @@ include!("services/computer_macos_actions.rs");
 include!("services/computer_macos_native.rs");
 include!("services/computer_windows_native.rs");
 include!("services/computer_macos_keys.rs");
+include!("services/shell_policy.rs");
 include!("services/common.rs");
 
 #[cfg(test)]
@@ -429,9 +430,9 @@ mod cmodel_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env,
-        shell_exec_path, PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
-        LOCAL_APP_START_POLICY_ENV,
+        bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd,
+        resolve_executable, sanitize_env, shell_exec_path, PrepareUploadRequest, ServiceRegistry,
+        ShellCommand, ShellExecArgs, LOCAL_APP_START_POLICY_ENV,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
@@ -446,6 +447,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
     use tokio::time::{sleep, Duration, Instant};

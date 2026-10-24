@@ -74,6 +74,11 @@ pub struct RelayConfig {
     pub token_expires_at_epoch_seconds: Option<String>,
     #[serde(default = "default_reconnect_secs")]
     pub reconnect_secs: u64,
+    /// Also append `?token=` for relays that still read the query string.
+    /// The `Authorization: Bearer` header is always sent. Turn this off after
+    /// the relay accepts the header, so the token stays out of access logs.
+    #[serde(default = "default_include_legacy_query_token")]
+    pub include_legacy_query_token: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,6 +328,7 @@ include!("config/legacy_migrations.rs");
 include!("config/manifest_and_defaults.rs");
 include!("config/service_reconciliation.rs");
 include!("config/default_values.rs");
+include!("config/relay_url.rs");
 
 #[cfg(test)]
 mod tests {

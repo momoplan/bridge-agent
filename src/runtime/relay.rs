@@ -41,6 +41,121 @@ where
     Ok(())
 }
 
+const RELAY_MESSAGE_LOG_LIMIT: usize = 400;
+
+impl RelayConnection<'_> {
+    async fn handle_text_frame(&mut self, text: &str) -> Result<()> {
+        self.mark_relay_seen().await;
+        match decode_relay_message(text) {
+            Ok(Some(incoming)) => self.handle_agent_message(incoming).await?,
+            Ok(None) => {
+                self.runner
+                    .push_log("warn", "ignored unsupported relay message type")
+                    .await;
+            }
+            Err(_) => {
+                let preview = redact_relay_message_preview(text);
+                self.runner
+                    .push_log(
+                        "warn",
+                        &format!("ignored malformed relay message: {preview}"),
+                    )
+                    .await;
+                if let Some(reply) = invalid_request_reply(text) {
+                    write_json(&mut self.write, &reply).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn redact_relay_message_preview(text: &str) -> String {
+    let redacted = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(mut value) => {
+            redact_json_value(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
+        }
+        Err(_) => redact_query_token(text),
+    };
+    truncate_for_log(&redacted)
+}
+
+fn truncate_for_log(text: &str) -> String {
+    if text.len() <= RELAY_MESSAGE_LOG_LIMIT {
+        return text.to_string();
+    }
+    let mut end = RELAY_MESSAGE_LOG_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if json_field_is_sensitive(key) {
+                    *child = serde_json::Value::String("<redacted>".to_string());
+                } else {
+                    redact_json_value(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_field_is_sensitive(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "arguments"
+            | "argument"
+            | "args"
+            | "stdin"
+            | "command"
+            | "token"
+            | "password"
+            | "secret"
+            | "authorization"
+    ) || key.contains("token")
+        || key.contains("secret")
+        || key.contains("password")
+        || key.contains("authorization")
+}
+
+fn invalid_request_reply(text: &str) -> Option<AgentMessage> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let request_id = value
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("requestId").and_then(serde_json::Value::as_str))
+        .filter(|request_id| !request_id.is_empty())?;
+    let result = InvokeResult {
+        request_id: request_id.to_string(),
+        success: false,
+        data: None,
+        error: Some(InvokeError {
+            public_details: None,
+            code: "INVALID_REQUEST".to_string(),
+            message: "relay message could not be parsed".to_string(),
+        }),
+        duration_ms: 0,
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("local_app_invoke_request") {
+        Some(AgentMessage::LocalAppInvokeResult(result))
+    } else {
+        Some(AgentMessage::InvokeResult(result))
+    }
+}
+
 fn decode_relay_message(text: &str) -> Result<Option<AgentMessage>> {
     let value: serde_json::Value = serde_json::from_str(text)?;
     let Some(message_type) = value.get("type").and_then(serde_json::Value::as_str) else {
@@ -72,11 +187,62 @@ fn relay_message_type_is_supported(message_type: &str) -> bool {
     )
 }
 
-fn build_agent_url(base: &str, agent_id: &str, token: &str) -> Result<Url> {
-    let base = base.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/{agent_id}"))?;
-    url.query_pairs_mut().append_pair("token", token);
+fn build_agent_url(
+    base: &str,
+    agent_id: &str,
+    token: &str,
+    include_legacy_query_token: bool,
+) -> Result<Url> {
+    crate::config::parse_relay_websocket_base(base)?;
+    let base = base.trim().trim_end_matches('/');
+    let mut url = Url::parse(&format!("{base}/{agent_id}"))
+        .with_context(|| format!("invalid relay url {base}"))?;
+    crate::config::ensure_relay_websocket_scheme(&url)?;
+    if include_legacy_query_token && !token.is_empty() {
+        url.query_pairs_mut().append_pair("token", token);
+    }
     Ok(url)
+}
+
+fn relay_websocket_request(
+    url: &Url,
+    token: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("invalid relay websocket url")?;
+    if token.is_empty() {
+        return Ok(request);
+    }
+    let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
+        "Bearer {token}"
+    ))
+    .context("relay token cannot be sent in an Authorization header")?;
+    value.set_sensitive(true);
+    request.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+        value,
+    );
+    Ok(request)
+}
+
+fn redact_query_token(message: &str) -> String {
+    let mut output = String::with_capacity(message.len());
+    let mut rest = message;
+    const MARKER: &str = "token=";
+    while let Some(index) = rest.find(MARKER) {
+        output.push_str(&rest[..index]);
+        output.push_str("token=<redacted>");
+        rest = &rest[index + MARKER.len()..];
+        let end = rest
+            .find(|character: char| matches!(character, '&' | ' ' | '"' | '\'' | '\n' | '\r' | '#'))
+            .unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    output
 }
 
 fn now_ms() -> u64 {

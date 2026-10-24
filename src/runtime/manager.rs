@@ -34,6 +34,7 @@ impl AgentRuntimeManager {
             &config.relay.url,
             &config.relay.agent_id,
             &config.relay.token,
+            config.relay.include_legacy_query_token,
         )?;
         let snapshot = RuntimeSnapshot {
             revision: 0,
@@ -369,6 +370,7 @@ fn spawn_runtime_task(
         ws_url,
         registry,
         event_queue: event_queue.clone(),
+        reconnect_backoff: ReconnectBackoff::new(),
     };
     let task = tokio::spawn(
         RuntimeTask {

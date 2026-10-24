@@ -429,3 +429,90 @@ async fn shell_descendants_cannot_hold_completion_open_after_exit_cancel_or_time
         assert!(!marker.exists(), "descendant survived {mode}");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_allowlist_ignores_path_lookalikes_and_caller_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current_dir = std::env::current_dir().unwrap();
+    let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
+    let denied = registry
+        .invoke(
+            "req-deny-path".into(),
+            "shell",
+            "exec",
+            json!({"command": ["/tmp/x/echo", "nope"]}),
+            Some(5),
+        )
+        .await;
+    assert!(!denied.success);
+    assert_eq!(denied.error.unwrap().code, "COMMAND_NOT_ALLOWED");
+
+    let scratch = tempdir().unwrap();
+    let fake_bin = scratch.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let marker = scratch.path().join("pwned");
+    let fake_echo = fake_bin.join("echo");
+    fs::write(
+        &fake_echo,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_echo).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_echo, permissions).unwrap();
+
+    let start = registry
+        .invoke(
+            "req-start-real-echo".into(),
+            "shell",
+            "startExecution",
+            json!({
+                "command": ["echo", "bridge-agent-real-echo"],
+                "env": {
+                    "PATH": fake_bin.display().to_string(),
+                    "LD_PRELOAD": "/tmp/bridge-agent-missing-preload.so",
+                    "DYLD_INSERT_LIBRARIES": "/tmp/bridge-agent-missing.dylib"
+                }
+            }),
+            Some(5),
+        )
+        .await;
+    assert!(start.success, "{:?}", start.error);
+    let data = start.data.unwrap();
+    let command = data["command"][0].as_str().unwrap();
+    assert!(Path::new(command).is_absolute(), "{command}");
+    assert!(
+        !command.starts_with(fake_bin.to_str().unwrap()),
+        "{command}"
+    );
+    let execution_id = data["executionId"].as_str().unwrap().to_string();
+
+    let mut status = String::new();
+    let mut stdout = String::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let result = registry
+            .invoke(
+                "req-query-real-echo".into(),
+                "shell",
+                "queryExecution",
+                json!({"executionId": execution_id}),
+                None,
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        let data = result.data.unwrap();
+        status = data["status"].as_str().unwrap().to_string();
+        stdout = data["stdout"].as_str().unwrap_or_default().to_string();
+        if status != "RUNNING" {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(status, "SUCCEEDED");
+    assert!(stdout.contains("bridge-agent-real-echo"));
+    assert!(!marker.exists(), "caller PATH selected a planted echo");
+}

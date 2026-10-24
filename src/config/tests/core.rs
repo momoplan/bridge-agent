@@ -9,6 +9,23 @@
     }
 
     #[test]
+    fn relay_url_rejects_plaintext_except_localhost() {
+        let mut config = AgentConfig::example();
+        config.relay.url = "ws://relay.baijimu.com/ws/agent".into();
+        assert!(config.validate().unwrap_err().to_string().contains("wss://"));
+        config.relay.url = "http://127.0.0.1:8080/ws/agent".into();
+        assert!(config.validate().is_err());
+        config.relay.url = "ws://127.0.0.1:8080/ws/agent".into();
+        assert!(config.validate().is_ok());
+        config.relay.url = "ws://localhost:8080/ws/agent".into();
+        assert!(config.validate().is_ok());
+        config.relay.url = "ws://[::1]:8080/ws/agent".into();
+        assert!(config.validate().is_ok());
+        config.relay.url = "wss://relay.baijimu.com/ws/agent".into();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn development_and_production_use_distinct_default_config_files() {
         assert_eq!(
             config_file_name_for_build(true),

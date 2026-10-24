@@ -1,9 +1,56 @@
     #[test]
-    fn build_url_injects_token() {
-        let url = build_agent_url("wss://relay.baijimu.com/ws/agent", "devbox", "secret").unwrap();
+    fn build_url_puts_token_in_query_only_for_legacy_mode() {
+        let legacy = build_agent_url(
+            "wss://relay.baijimu.com/ws/agent",
+            "devbox",
+            "secret",
+            true,
+        )
+        .unwrap();
         assert_eq!(
-            url.as_str(),
+            legacy.as_str(),
             "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
+        );
+        let header_only = build_agent_url(
+            "wss://relay.baijimu.com/ws/agent",
+            "devbox",
+            "secret",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            header_only.as_str(),
+            "wss://relay.baijimu.com/ws/agent/devbox"
+        );
+        assert!(build_agent_url("ws://relay.example/ws/agent", "devbox", "secret", false).is_err());
+        assert!(
+            build_agent_url("ws://127.0.0.1:8080/ws/agent", "devbox", "secret", false).is_ok()
+        );
+        assert!(build_agent_url("ws://localhost:8080/ws/agent", "devbox", "secret", false).is_ok());
+        assert!(build_agent_url("ws://[::1]:8080/ws/agent", "devbox", "secret", false).is_ok());
+    }
+
+    #[test]
+    fn relay_request_sends_authorization_header_without_requiring_query_token() {
+        let url = build_agent_url(
+            "wss://relay.baijimu.com/ws/agent",
+            "devbox",
+            "secret",
+            false,
+        )
+        .unwrap();
+        let request = relay_websocket_request(&url, "secret").unwrap();
+        assert!(request.uri().query().is_none());
+        assert_eq!(
+            request
+                .headers()
+                .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            redact_query_token("failed wss://relay.example/ws?token=secret&x=1"),
+            "failed wss://relay.example/ws?token=<redacted>&x=1"
         );
     }
 

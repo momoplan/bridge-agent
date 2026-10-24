@@ -293,6 +293,8 @@ cargo run -- init-config
 - `relay.url`
 - `relay.agent_id`
 - `relay.token`（兼容字段；持久化时始终留空，实际凭证由系统安全存储管理）
+- `relay.include_legacy_query_token`（默认 `true`）：握手始终发送 `Authorization: Bearer`。为 `true` 时仍把 token 附加到 WebSocket URL 的 `token` 查询参数。本仓库不包含私有 relay 服务端，现有 relay 仍从查询参数读取设备凭证；确认服务端改为读取 Authorization 头之后，把此项设为 `false`，避免 token 进入代理和访问日志
+- `relay.url` 必须使用 `wss://`。`ws://` 只允许 `localhost`、`127.0.0.1` 和 `::1`，供本机开发；其它明文地址会在配置校验和发起连接前被拒绝
 - `relay.token_issued_at_epoch_seconds`、`relay.token_expires_at_epoch_seconds`（授权服务返回的凭证生命周期元数据；不含秘密）
 - `runtime.default_timeout_secs`
 - `runtime.log_file_enabled`
@@ -969,9 +971,9 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 本地策略包括：
 
 - `root_dir`
-- `allow_commands`
+- `allow_commands`：只按命令字符串精确匹配。allowlist 里有 `git` 时，`git` 可以通过，`/tmp/x/git`、`./git` 不能通过。裸命令名会在宿主自己的 `PATH`（加上受支持的工具链目录）里解析成绝对路径后再执行。`*` 表示允许任意命令字符串。把 `sh`、`bash`、`cmd`、`powershell`、`python`、`node` 放进 allowlist，等于允许这些解释器执行调用方给出的代码
 - 超时限制
-- 环境变量白名单
+- 环境变量：宿主身份变量会带上，调用方可以追加普通变量（例如 `FOO_BAR`、`NODE_ENV`），但不能覆盖 `PATH`、`HOME`、`LD_*`、`DYLD_*`、`*_OPTIONS`、`PYTHON*`、`GIT_*`、`BASH_ENV`、`ENV` 这类会改掉实际执行文件或往进程里注入代码的变量
 
 桌面应用从 Finder / 启动器启动时，系统给它的 `PATH` 往往比终端登录 shell 更短。Connector 和自定义服务的生命周期命令统一使用宿主在执行边界动态解析的当前用户命令环境；`shell` 方法仍在保留安全环境白名单的同时补入其受支持的本机工具链目录。Connector 列表和客户端初始化只读取安装记录，不探测或准备本机运行环境；只有用户明确启动 Connector 时，宿主才按该 Connector 的声明发现命令、校验 Python 版本并准备隔离环境。macOS 自动发现会排除 Apple 的 `/usr/bin/python3` 开发者工具 shim，避免在普通用户设备上触发 Command Line Tools 安装提示；需要 Python 的 Connector 应使用独立解释器。
 
@@ -998,6 +1000,7 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 - 所有调用都通过本地 agent 主动外连 relay
 - `computer_use` 不等于任意 shell，它只执行受控的桌面动作
 - shell 方法必须显式 allowlist
+- relay 设备 token 通过 `Authorization: Bearer` 发送；非本机 relay 地址不允许明文 `ws://`
 - cwd 不能逃逸 root_dir
 - 每个方法调用都有超时
 

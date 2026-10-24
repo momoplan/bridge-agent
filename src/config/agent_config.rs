@@ -13,6 +13,7 @@ impl AgentConfig {
                 token_issued_at_epoch_seconds: None,
                 token_expires_at_epoch_seconds: None,
                 reconnect_secs: default_reconnect_secs(),
+                include_legacy_query_token: default_include_legacy_query_token(),
             },
             device: DeviceConfig {
                 name: default_device_name(),
@@ -68,6 +69,7 @@ impl AgentConfig {
         if self.relay.url.trim().is_empty() {
             bail!("relay.url cannot be empty");
         }
+        parse_relay_websocket_base(&self.relay.url)?;
         if self.relay.agent_id.trim().is_empty() {
             bail!("relay.agent_id cannot be empty");
         }

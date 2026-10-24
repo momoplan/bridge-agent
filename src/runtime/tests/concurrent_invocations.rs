@@ -1,5 +1,7 @@
 use crate::event_delivery::{EventQueue, QueueIdentity};
-use super::{LocalAppEventSubmission, RuntimeInner, RuntimeRegistryUpdate, RuntimeRunner};
+use super::{
+    LocalAppEventSubmission, ReconnectBackoff, RuntimeInner, RuntimeRegistryUpdate, RuntimeRunner,
+};
 use crate::services::ServiceRegistry;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 
@@ -83,6 +85,7 @@ impl InvocationHarness {
             config_path: dir.path().join("config.json").display().to_string(),
             ws_url: ws_url.clone(),
             registry: Arc::new(RwLock::new(registry.clone())),
+            reconnect_backoff: ReconnectBackoff::new(),
         };
         let task = tokio::spawn(async move {
             let _keep_audit = audit_tx;
