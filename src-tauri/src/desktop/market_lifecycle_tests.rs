@@ -81,6 +81,31 @@ fn boxed_command_error_payloads_preserve_the_ipc_contract() {
 }
 
 #[test]
+fn consumer_command_error_keeps_structured_failure_through_anyhow_context() {
+    let failure = bridge_agent::market_distribution::ConsumerFailure {
+        message: "权限服务暂时不可用".into(),
+        error_code: Some("TEST_DEPENDENCY_UNAVAILABLE".into()),
+        retryable: Some(true),
+        request_id: Some("request-1".into()),
+        trace_id: Some("trace-1".into()),
+        status: Some(200),
+        details: Some(r#"{"errorPath":["test-owner"]}"#.into()),
+    };
+    let error = anyhow::Error::new(failure).context("install selected tool");
+    let value = serde_json::to_value(CommandError::from(error)).unwrap();
+    assert_eq!(value["code"], "consumer_request_failed");
+    assert_eq!(value["failure"]["errorCode"], "TEST_DEPENDENCY_UNAVAILABLE");
+    assert_eq!(value["failure"]["retryable"], true);
+    assert_eq!(value["failure"]["requestId"], "request-1");
+    assert_eq!(value["failure"]["traceId"], "trace-1");
+    assert_eq!(value["failure"]["status"], 200);
+    assert!(value["failure"]["details"]
+        .as_str()
+        .unwrap()
+        .contains("test-owner"));
+}
+
+#[test]
 fn normalized_platform_uses_the_rust_target_os_contract() {
     assert_eq!(normalized_platform(), std::env::consts::OS);
 }

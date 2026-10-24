@@ -1,3 +1,4 @@
+import { ErrorDetails } from "./error-details";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { RefreshCw } from "lucide-react";
 import { formatAppUpdateProgressButton, formatRelayRegistration, formatRelaySeen, formatTime } from "./formatters";
@@ -192,7 +193,7 @@ export function ToastStack(props: ToastStackProps) {
           <div className="toast toast-error" role="alert">
             <div>
               <strong>操作失败</strong>
-              <p>{error}</p>
+              <ErrorDetails key={error} error={error} />
             </div>
             <button className="toast-close" onClick={() => setError("")} aria-label="关闭错误提示">
               ×

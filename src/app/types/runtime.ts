@@ -40,7 +40,18 @@ export interface RuntimeLockConflict {
   process: RuntimeProcessInfo;
 }
 
+export interface ConsumerFailure {
+  message: string;
+  errorCode: string | null;
+  retryable: boolean | null;
+  requestId: string | null;
+  traceId: string | null;
+  status: number | null;
+  details: string | null;
+}
+
 export type CommandError =
+  | { code: "consumer_request_failed"; failure: ConsumerFailure }
   | { code: "runtime_already_running"; conflict: RuntimeLockConflict }
   | { code: "connector_uninstall_stop_failed"; message: string }
   | { code: "connector_uninstall_failed"; message: string }

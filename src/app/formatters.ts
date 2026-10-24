@@ -414,6 +414,16 @@ export function readError(error: unknown): string {
     if (error.code === "runtime_already_running") {
       return `百积木已经在运行，PID ${error.conflict.pid} 正在占用当前配置。`;
     }
+    if (error.code === "consumer_request_failed") {
+      const failure = error.failure;
+      return [failure.message,
+        failure.errorCode && `错误码：${failure.errorCode}`,
+        failure.retryable === true ? "可稍后重试" : failure.retryable === false ? "请处理原因后再重试" : null,
+        failure.requestId && `请求 ID：${failure.requestId}`,
+        failure.traceId && `追踪 ID：${failure.traceId}`,
+        failure.status != null && `HTTP：${failure.status}`,
+        failure.details].filter(Boolean).join("\n");
+    }
     return error.message;
   }
   return String(error);
@@ -430,7 +440,14 @@ export function isCommandError(error: unknown): error is CommandError {
   if (!error || typeof error !== "object" || !("code" in error)) {
     return false;
   }
-  const candidate = error as { code?: unknown; conflict?: unknown; message?: unknown };
+  const candidate = error as { code?: unknown; conflict?: unknown; message?: unknown; failure?: unknown };
+  if (candidate.code === "consumer_request_failed") {
+    const failure = candidate.failure as Record<string, unknown> | null;
+    return !!failure && typeof failure === "object" && typeof failure.message === "string"
+      && ["errorCode", "requestId", "traceId", "details"].every(key => failure[key] === null || typeof failure[key] === "string")
+      && (failure.retryable === null || typeof failure.retryable === "boolean")
+      && (failure.status === null || typeof failure.status === "number");
+  }
   if (candidate.code === "message") {
     return typeof candidate.message === "string";
   }

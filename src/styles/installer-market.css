@@ -532,3 +532,7 @@
   color: var(--text);
   background: #FFFFFF;
 }
+
+.error-details { margin-top: 8px; }
+.error-details summary { cursor: pointer; }
+.error-details pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; font-size: 12px; user-select: text; }

@@ -1,7 +1,8 @@
 //! Authenticated consumer access. User credentials never target the central market.
+use super::ConsumerFailure;
 use super::{resolve_exact, MarketDistribution};
 use anyhow::{bail, Context, Result};
-use baijimu_cmodel_core::CModelResponse;
+use baijimu_cmodel_http::{decode_response, REQUEST_ID_HEADER, TRACE_ID_HEADER};
 use local_app_contract::{InstallSource, MarketListing, MarketPage};
 use reqwest::{header::HeaderValue, Client, Response, Url};
 use serde::de::DeserializeOwned;
@@ -84,7 +85,7 @@ impl MarketReader {
             .iter()
             .find(|entry| entry.artifact_id == artifact)
             .context("artifact missing from selected version")?;
-        let response = self.get(url, credential).await?;
+        let response = artifact_response(self.get(url, credential).await?).await?;
         if response.content_length() != Some(expected.size_bytes)
             || response
                 .headers()
@@ -92,24 +93,87 @@ impl MarketReader {
                 .and_then(|value| value.to_str().ok())
                 != Some("application/octet-stream")
         {
-            bail!("consumer artifact does not match selected frozen version");
+            let failure = ConsumerFailure::response("安装包响应与所选版本的清单不符。", &response);
+            tracing::error!(
+                request_id = failure.request_id,
+                trace_id = failure.trace_id,
+                expected_size = expected.size_bytes,
+                actual_size = response.content_length(),
+                "consumer artifact metadata does not match selected version"
+            );
+            return Err(failure.into());
         }
         Ok(response)
     }
 }
 
-pub(super) async fn decode<T: DeserializeOwned>(response: Response) -> Result<T> {
-    let bytes = response
-        .bytes()
-        .await
-        .context("cannot read consumer response")?;
-    let envelope: CModelResponse<T> = local_app_contract::decode(&bytes)?;
-    if !envelope.is_success() {
-        bail!("consumer local-app service rejected the market request");
+pub(super) async fn decode<T: DeserializeOwned>(mut response: Response) -> Result<T> {
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get(&REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let trace_id = response
+        .headers()
+        .get(&TRACE_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    // Pages contain bounded manifests. Never buffer an unbounded error page.
+    const MAX_BYTES: usize = 128 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        tracing::error!(request_id, trace_id, error = ?error.without_url(), "consumer response read failed");
+        ConsumerFailure::local("读取应用服务响应失败，请稍后重试。", request_id.clone(), trace_id.clone(), Some(status.as_u16()))
+    })? {
+        if chunk.len() > MAX_BYTES - bytes.len() {
+            return Err(ConsumerFailure::local("应用服务响应超过大小限制。", request_id, trace_id, Some(status.as_u16())).into());
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    envelope
-        .into_data()
-        .context("consumer response has no data")
+    let envelope = decode_response::<T>(status, &bytes, "local-app-consumer").map_err(|error| {
+        ConsumerFailure::decode(error, request_id.clone(), trace_id.clone(), status.as_u16())
+    })?;
+    if !envelope.is_success() {
+        return Err(ConsumerFailure::downstream(
+            envelope.error_code().as_str(),
+            envelope.failure_data(),
+            status.as_u16(),
+            request_id,
+            trace_id,
+        )
+        .into());
+    }
+    envelope.into_data().ok_or_else(|| {
+        ConsumerFailure::local(
+            "应用服务响应缺少数据。",
+            request_id,
+            trace_id,
+            Some(status.as_u16()),
+        )
+        .into()
+    })
+}
+
+pub(super) async fn artifact_response(response: Response) -> Result<Response> {
+    if response.status() != reqwest::StatusCode::OK
+        || response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            != Some("application/octet-stream")
+    {
+        let failure = ConsumerFailure::response("应用服务未返回所选版本的安装包。", &response);
+        decode::<serde_json::Value>(response).await?;
+        tracing::error!(
+            request_id = failure.request_id,
+            trace_id = failure.trace_id,
+            status = failure.status,
+            "consumer artifact response contained JSON success instead of an artifact"
+        );
+        return Err(failure.into());
+    }
+    Ok(response)
 }
 
 pub(super) async fn send(client: &Client, url: Url, credential: &str) -> Result<Response> {
@@ -119,17 +183,32 @@ pub(super) async fn send(client: &Client, url: Url, credential: &str) -> Result<
     let mut authorization = HeaderValue::from_str(&format!("Bearer {credential}"))
         .map_err(|_| anyhow::anyhow!("invalid consumer credential"))?;
     authorization.set_sensitive(true);
-    let response = client
+    let request_id = Uuid::new_v4().to_string();
+    let mut response = client
         .get(url)
         .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(&REQUEST_ID_HEADER, &request_id)
+        .header(&TRACE_ID_HEADER, &request_id)
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("consumer local-app service unavailable"))?;
-    if response.status() != reqwest::StatusCode::OK {
-        bail!(
-            "consumer local-app service returned HTTP {}",
-            response.status()
-        );
+        .map_err(|error| {
+            tracing::error!(request_id, error = ?error.without_url(), "consumer transport failed");
+            ConsumerFailure::local(
+                "无法连接应用服务，请检查网络或稍后重试。",
+                Some(request_id.clone()),
+                Some(request_id.clone()),
+                None,
+            )
+        })?;
+    if !response.headers().contains_key(&REQUEST_ID_HEADER) {
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, request_id.parse().expect("UUID header"));
+    }
+    if !response.headers().contains_key(&TRACE_ID_HEADER) {
+        response
+            .headers_mut()
+            .insert(TRACE_ID_HEADER, request_id.parse().expect("UUID header"));
     }
     Ok(response)
 }

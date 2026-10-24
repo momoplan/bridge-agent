@@ -6,9 +6,11 @@ use url::Url;
 use uuid::Uuid;
 
 mod environment;
+mod failure;
 mod identity;
 mod reader;
 pub use environment::EnvironmentReader;
+pub use failure::{artifact_read_error, ConsumerFailure};
 pub use identity::{resolve_exact, resolve_source, select_artifact, select_upgrade};
 pub use reader::MarketReader;
 
@@ -172,3 +174,6 @@ pub(super) fn validate_endpoint(base_url: &str) -> Result<Url, ContractError> {
     }
     Ok(url)
 }
+
+#[cfg(test)]
+mod failure_tests;

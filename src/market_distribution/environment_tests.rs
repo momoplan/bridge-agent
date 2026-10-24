@@ -39,7 +39,7 @@ async fn private_metadata_and_artifact_requests_bind_the_recipient_workspace() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/local-apps", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
-        for body in [metadata, b"zip".to_vec()] {
+        for (index, body) in [metadata, b"zip".to_vec()].into_iter().enumerate() {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
@@ -48,8 +48,15 @@ async fn private_metadata_and_artifact_requests_bind_the_recipient_workspace() {
             let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
             assert!(request.contains("\r\nx-workspace-id: 42\r\n"));
             assert!(request.contains("\r\nauthorization: bearer test-pat\r\n"));
+            assert!(request.contains("\r\nx-request-id:"));
+            assert!(request.contains("\r\nx-trace-id:"));
+            let content_type = if index == 0 {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
             let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             stream.write_all(headers.as_bytes()).await.unwrap();

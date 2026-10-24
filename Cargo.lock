@@ -292,8 +292,9 @@ dependencies = [
 
 [[package]]
 name = "baijimu-cmodel-core"
-version = "5.0.0"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=213e7efbcc06984820690e87a2cd27f6d552254b#213e7efbcc06984820690e87a2cd27f6d552254b"
+version = "11.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f628ab4d29d9040ee0b87bc6e8066293e3ce8e9c60373ddd83188f03578214ad"
 dependencies = [
  "semver",
  "serde",
@@ -303,8 +304,9 @@ dependencies = [
 
 [[package]]
 name = "baijimu-cmodel-http"
-version = "5.0.0"
-source = "git+https://gitee.com/zxflimit_admin/baijimu-contracts.git?rev=213e7efbcc06984820690e87a2cd27f6d552254b#213e7efbcc06984820690e87a2cd27f6d552254b"
+version = "11.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dafa61ea4f1952606a172cd0834735233837227852759e6d147b4b8cba13fc72"
 dependencies = [
  "baijimu-cmodel-core",
  "bytes",
@@ -363,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "axum",

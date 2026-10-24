@@ -196,7 +196,9 @@ pub(super) async fn resolve_market_install(
         .await
         .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "读取环境应用制品失败")? {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        bridge_agent::market_distribution::artifact_read_error(error, &response).to_string()
+    })? {
         if (bytes.len() as u64)
             .checked_add(chunk.len() as u64)
             .is_none_or(|size| size > artifact.size_bytes)

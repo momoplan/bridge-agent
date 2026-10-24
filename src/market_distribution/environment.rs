@@ -1,6 +1,6 @@
 //! Private versions are read only from the explicitly authorized source environment.
 use super::{
-    reader::{decode, send},
+    reader::{artifact_response, decode, send},
     validate_endpoint,
 };
 use anyhow::{ensure, Result};
@@ -78,7 +78,7 @@ impl EnvironmentReader {
         url.path_segments_mut()
             .expect("validated HTTPS base")
             .extend(["artifacts", &artifact.to_string()]);
-        send(&self.client, url, credential).await
+        artifact_response(send(&self.client, url, credential).await?).await
     }
 }
 
