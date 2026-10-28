@@ -1,3 +1,4 @@
+import { marketCapabilitySummary } from "./app/market-app-summary";
 import { invoke } from "@tauri-apps/api/core";
 
 
@@ -71,7 +72,7 @@ export function useAppController() {
       return installableMarketConnectors;
     }
     return installableMarketConnectors.filter((app) =>
-      [app.name, app.description, app.capability, app.version].some((value) =>
+      [app.name, app.description, marketCapabilitySummary(app), app.version].some((value) =>
         value.toLocaleLowerCase().includes(query)
       )
     );

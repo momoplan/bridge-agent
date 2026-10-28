@@ -35,9 +35,6 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
         presentation: local_app_contract::ApplicationPresentation {
             name: "Example tool".into(),
             description: "Description".into(),
-            publisher: None,
-            capability: None,
-            risk: None,
             icon: None,
         },
         listing_id: Uuid::from_u128(id),

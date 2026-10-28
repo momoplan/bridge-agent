@@ -1,3 +1,4 @@
+import { marketCapabilitySummary } from "./market-app-summary";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { AlertTriangle, ShieldCheck, X } from "lucide-react";
 import { formatLocalAppInstallTaskPhase, type LocalAppInstallTask } from "../local-app-install-tasks";
@@ -177,7 +178,7 @@ export function LocalAppUpgradeDialog(props: LocalAppUpgradeDialogProps) {
               {marketApp.compatible ? <ShieldCheck size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
               <div>
                 <strong>{marketApp.compatible ? "升级包已通过平台校验" : "当前版本不可升级"}</strong>
-                <p>{marketApp.compatible ? marketApp.risk : marketApp.compatibilityMessage}</p>
+                <p>{marketApp.compatible ? marketCapabilitySummary(marketApp) : marketApp.compatibilityMessage}</p>
               </div>
             </div>
           </div>

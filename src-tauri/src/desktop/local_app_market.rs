@@ -13,9 +13,6 @@ pub(super) struct MarketConnectorApp {
     pub(super) revision: String,
     pub(super) checksum: Option<String>,
     pub(super) archive_path: Option<String>,
-    pub(super) risk: String,
-    pub(super) risk_level: String,
-    pub(super) capability: String,
     pub(super) version: String,
     pub(super) published_at: Option<String>,
     pub(super) icon_data_url: Option<String>,
@@ -43,9 +40,6 @@ pub(super) struct RawMarketConnectorApp {
     pub(super) app_id: String,
     pub(super) name: String,
     pub(super) description: String,
-    pub(super) risk: String,
-    pub(super) risk_level: Option<String>,
-    pub(super) capability: String,
     pub(super) latest_version: RawMarketConnectorVersion,
 }
 
@@ -136,16 +130,6 @@ pub(super) fn market_listing_presentation(
         app_id: source.application.app_id.as_str().to_owned(),
         name: display.name.clone(),
         description: display.description.clone(),
-        risk: display
-            .risk
-            .as_ref()
-            .map(|risk| risk.description.clone())
-            .unwrap_or_default(),
-        risk_level: display
-            .risk
-            .as_ref()
-            .map(|risk| risk.level.as_str().to_owned()),
-        capability: display.capability.clone().unwrap_or_default(),
         latest_version: RawMarketConnectorVersion {
             version: source.version.to_string(),
             source: String::new(),
@@ -271,9 +255,6 @@ impl From<RawMarketConnectorApp> for MarketConnectorApp {
             revision: value.latest_version.revision.clone().unwrap_or_default(),
             checksum,
             archive_path,
-            risk: value.risk,
-            risk_level: value.risk_level.unwrap_or_else(|| "medium".to_string()),
-            capability: value.capability,
             version: value.latest_version.version,
             published_at: value.latest_version.published_at,
             icon_data_url,
