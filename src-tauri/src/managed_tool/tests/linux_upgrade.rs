@@ -10,7 +10,7 @@ fn linux_cli_upgrade_acceptance() {
     ))
     .unwrap();
     let listing: local_app_contract::MarketListing = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/cli-upgrade/market-listing.json"
+        "../../../../tests/fixtures/cli-upgrade/market-listing-v4.json"
     ))
     .unwrap();
     let previous_version = baseline["version"].as_str().unwrap();

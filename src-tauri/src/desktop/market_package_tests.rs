@@ -8,7 +8,7 @@ fn fixture() -> (MarketListing, InstallSource, Value) {
     ))
     .unwrap();
     let listing: MarketListing = serde_json::from_value(json!({
-        "contractVersion": "3.0.0",
+        "contractVersion": "4.0.0",
         "presentation": { "name": "Reviewed connector", "description": "Description" },
 
         "listingId": "00000000-0000-0000-0000-000000000001",

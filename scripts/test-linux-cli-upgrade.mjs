@@ -5,12 +5,12 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // Exercise released Linux bytes through the client's real managed installer.
-// Only public immutable downloads and captured Owner contracts are used; no user PAT.
+// Only public immutable downloads and a current-contract projection of captured Owner release content are used; no user PAT.
 if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Linux x64 runner required");
 const root = resolve(import.meta.dirname, "..");
 const fixture = join(root, "tests/fixtures/cli-upgrade");
 const baseline = JSON.parse(readFileSync(join(fixture, "baseline.json"), "utf8"));
-const listing = JSON.parse(readFileSync(join(fixture, "market-listing.json"), "utf8"));
+const listing = JSON.parse(readFileSync(join(fixture, "market-listing-v4.json"), "utf8"));
 const current = JSON.parse(readFileSync(join(root, "tools/baijimu-cli/SOURCE.json"), "utf8"));
 if (JSON.stringify(current.source) !== JSON.stringify(listing.frozenVersion.source)
     || current.listingId !== listing.listingId) throw new Error("Upgrade fixture differs from bundled release");

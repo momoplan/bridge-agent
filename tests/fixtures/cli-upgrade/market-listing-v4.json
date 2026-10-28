@@ -1,0 +1,75 @@
+{
+  "contractVersion": "4.0.0",
+  "frozenVersion": {
+    "content": {
+      "applicationType": "managed_tool",
+      "artifacts": [
+        {
+          "architecture": "universal",
+          "artifactId": "274a5d8e-3e22-49d0-b3e7-d99d73dec2f1",
+          "fileName": "baijimu-cli-0.121.0-macos-universal.zip",
+          "platform": "macos",
+          "sizeBytes": 10061583
+        },
+        {
+          "architecture": "x86_64",
+          "artifactId": "9909478c-4ff9-4cae-b413-7d83aefd0b99",
+          "fileName": "baijimu-cli-0.121.0-windows-x64.zip",
+          "platform": "windows",
+          "sizeBytes": 4933105
+        },
+        {
+          "architecture": "x86_64",
+          "artifactId": "3714c607-f272-4b98-b28a-9e5b795a2ee7",
+          "fileName": "baijimu-cli-0.121.0-linux-x64.zip",
+          "platform": "linux",
+          "sizeBytes": 5378317
+        }
+      ],
+      "manifest": {
+        "appId": "baijimu-cli",
+        "applicationType": "managed_tool",
+        "artifacts": [
+          {
+            "arch": "universal",
+            "archivePath": "bin/baijimu",
+            "checksum": "sha256:4c17ddc9fe24d18454ed5e520d1b3853a5c401e89d4ff99147700014bb4c90d1",
+            "platform": "macos",
+            "source": "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/v0.121.0/4c17ddc9fe24d18454ed5e520d1b3853a5c401e89d4ff99147700014bb4c90d1/baijimu-cli-0.121.0-macos-universal.zip"
+          },
+          {
+            "arch": "x86_64",
+            "archivePath": "bin/baijimu.exe",
+            "checksum": "sha256:79be953509022743cce612fb8488801310791bf3612f0439ed83de76e4f19fb2",
+            "platform": "windows",
+            "source": "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/v0.121.0/79be953509022743cce612fb8488801310791bf3612f0439ed83de76e4f19fb2/baijimu-cli-0.121.0-windows-x64.zip"
+          },
+          {
+            "arch": "x86_64",
+            "archivePath": "bin/baijimu",
+            "checksum": "sha256:00aebc33c96d40297d9d146021ce9ee344869475d67de77c88f59135bf674268",
+            "platform": "linux",
+            "source": "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/v0.121.0/00aebc33c96d40297d9d146021ce9ee344869475d67de77c88f59135bf674268/baijimu-cli-0.121.0-linux-x64.zip"
+          }
+        ],
+        "schemaVersion": "3.0.0",
+        "version": "0.121.0"
+      },
+      "sourceRevision": "v0.121.0"
+    },
+    "contractVersion": "1.0.0",
+    "source": {
+      "application": {
+        "appId": "baijimu-cli",
+        "environmentKey": "baijimu"
+      },
+      "version": "0.121.0"
+    }
+  },
+  "listingId": "0e92a06d-50f3-479f-b10e-d747ed17a84b",
+  "presentation": {
+    "description": "Native Baijimu CLI shared by Baijimu Local and npm wrappers.",
+    "icon": null,
+    "name": "Baijimu CLI"
+  }
+}

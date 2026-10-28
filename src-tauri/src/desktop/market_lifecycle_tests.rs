@@ -273,7 +273,7 @@ fn market_presentation_preserves_source_without_using_manifest_download_urls() {
     ))
     .unwrap();
     let listing: local_app_contract::MarketListing = serde_json::from_value(serde_json::json!({
-        "contractVersion":"3.0.0", "presentation":{"name":"Reviewed CLI title","description":"Reviewed description","publisher":null,"capability":"Run platform commands","risk":{"level":"medium","description":"Runs local commands"},"icon":null},
+        "contractVersion":"4.0.0", "presentation":{"name":"Reviewed CLI title","description":"Reviewed description","icon":null},
          "listingId":"00000000-0000-0000-0000-000000000001",
         "frozenVersion": {"contractVersion":"1.0.0", "source": {
             "application":{"environmentKey":"author-a", "appId":"test-app"}, "version":"1.0.0"
@@ -284,8 +284,10 @@ fn market_presentation_preserves_source_without_using_manifest_download_urls() {
     let app = market_listing_presentation(listing).unwrap();
     assert_eq!(app.name, "Reviewed CLI title");
     assert_eq!(app.description, "Reviewed description");
-    assert_eq!(app.capability, "Run platform commands");
-    assert_eq!(app.risk, "Runs local commands");
+    let display = serde_json::to_value(&app).unwrap();
+    for field in ["publisher", "capability", "risk", "riskLevel"] {
+        assert!(display.get(field).is_none());
+    }
     assert!(app.source.is_empty());
     assert!(app.checksum.is_none());
     let local_app_contract::InstallSource::Market { source, .. } = app.install_source.unwrap()

@@ -4,8 +4,7 @@
 contractVersion 和 presentation。0.8.4 将核心与桌面依赖一起锁定到已发布的
 local-app-contract 2.0.0、不可变提交 53d8520c09b567e8b611beb2c125d6fee41086a1。
 
-市场卡片的名称、描述、能力、风险和图标来自审核后的 presentation。冻结 manifest
-继续用于安装、制品选择和宿主兼容性，不能代替独立展示信息。没有可选能力或风险说明时不显示空行。
+当前展示所有权已收缩：名称、描述和图标来自审核后的基本 presentation；能力从准确冻结版本的 methods、events、permissions 展示。来源使用已认证的 environmentKey 和 appId，不显示作者填写的发布者名或自评风险。没有权威评级时不生成默认风险。该修正使用 local-app-contract 4.0.0，后续客户端发行号由正式发布操作单独决定。
 
 目录顺序由中心市场决定；UUID 只作为条目身份和分页游标，不比较 UUID 大小推断目录顺序。
 客户端仍拒绝重复条目、重复来源应用、当前游标再次出现在页面中，以及不指向最后条目的后继游标。

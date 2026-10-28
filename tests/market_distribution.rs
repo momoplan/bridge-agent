@@ -35,9 +35,6 @@ fn listing(environment: &str, version: &str, id: u128) -> MarketListing {
         presentation: local_app_contract::ApplicationPresentation {
             name: "Example tool".into(),
             description: "Description".into(),
-            publisher: None,
-            capability: None,
-            risk: None,
             icon: None,
         },
         listing_id: Uuid::from_u128(id),
@@ -438,4 +435,28 @@ fn private_install_does_not_send_credentials_to_a_foreign_source() {
         "https://author.example.test/partner/v1/local-app-service/api/local-apps/test-app/versions/1.0.0");
     let foreign = listing("author-b", "1.0.0", 1).frozen_version.source;
     assert!(reader.version_url(&foreign).is_err());
+}
+
+#[test]
+fn linux_upgrade_projection_preserves_captured_frozen_content_exactly() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CapturedContent {
+        frozen_version: FrozenVersion,
+    }
+    let original = include_bytes!("fixtures/cli-upgrade/market-listing.json");
+    let captured: CapturedContent = local_app_contract::decode(original).unwrap();
+    let current: MarketListing = local_app_contract::decode(include_bytes!(
+        "fixtures/cli-upgrade/market-listing-v4.json"
+    ))
+    .unwrap();
+    current.validate().unwrap();
+    assert_eq!(current.frozen_version, captured.frozen_version);
+    assert_eq!(
+        current.frozen_version.content.manifest.as_json(),
+        captured.frozen_version.content.manifest.as_json()
+    );
+    assert!(local_app_contract::decode::<MarketListing>(original).is_err());
+    let display = serde_json::to_value(&current.presentation).unwrap();
+    assert_eq!(display.as_object().unwrap().len(), 3);
 }

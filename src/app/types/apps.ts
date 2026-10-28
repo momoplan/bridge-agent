@@ -94,9 +94,6 @@ export interface MarketConnector {
   source: string;
   checksum?: string | null;
   archivePath?: string | null;
-  risk: string;
-  riskLevel: string;
-  capability: string;
   version: string;
   publishedAt?: string | null;
   iconDataUrl?: string | null;

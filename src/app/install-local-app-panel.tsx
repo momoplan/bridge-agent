@@ -1,6 +1,7 @@
+import { marketCapabilitySummary } from "./market-app-summary";
 import { marketSelectionKey } from "./market-identity";
 import type { Dispatch, SetStateAction } from "react";
-import { ArrowLeft, AlertTriangle, CheckCircle2, Package, RefreshCw, Search, ShieldCheck, Wrench, X } from "lucide-react";
+import { ArrowLeft, AlertTriangle, CheckCircle2, Package, RefreshCw, Search, Wrench, X } from "lucide-react";
 import { resolveMarketHostUpgradeAction } from "../local-app-host-upgrade";
 import { formatAppUpdateProgressButton } from "./formatters";
 import { ApplicationIcon, Field } from "./ui-primitives";
@@ -172,7 +173,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                           {!app.compatible ? <em>不兼容</em> : null}
                         </span>
                         <span>{app.description}</span>
-                        <small>{app.capability} · {app.version}</small>
+                        <small>{marketCapabilitySummary(app)} · {app.version}</small>
                         <small>来源：{app.installSource?.source.application.environmentKey} / {app.appId}</small>
                       </span>
                     </button>
@@ -208,24 +209,25 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                       </div>
                       <div className="market-detail-meta">
                         <div><span>版本</span><strong>{selectedMarket.version}</strong></div>
-                        {selectedMarket.capability && <div><span>主要能力</span><strong>{selectedMarket.capability}</strong></div>}
+                        <div><span>来源环境</span><strong>{selectedMarket.installSource?.source.application.environmentKey}</strong></div>
+                        <div><span>应用标识</span><strong>{selectedMarket.appId}</strong></div>
+                        <div><span>声明能力</span><strong>{marketCapabilitySummary(selectedMarket)}</strong></div>
                       </div>
-                      {(selectedMarketIncompatible || selectedMarket.risk) && <div className={`market-permission-card ${selectedMarketIncompatible ? "incompatible" : ""}`}>
-                        {selectedMarketIncompatible ? (
-                          <AlertTriangle size={18} aria-hidden="true" />
-                        ) : (
-                          <ShieldCheck size={18} aria-hidden="true" />
-                        )}
+                      {selectedMarketIncompatible && <div className="market-permission-card incompatible">
+                        <AlertTriangle size={18} aria-hidden="true" />
                         <div>
-                          <strong>{selectedMarketIncompatible ? "当前版本不可安装" : "安装前须知"}</strong>
-                          <p>
-                            {selectedMarketIncompatible
-                              ? selectedMarket.compatibilityMessage ||
-                                `需要百积木 ${selectedMarket.minimumHostVersion ?? "更高版本"}`
-                              : selectedMarket.risk}
-                          </p>
+                          <strong>当前版本不可安装</strong>
+                          <p>{selectedMarket.compatibilityMessage || `需要百积木 ${selectedMarket.minimumHostVersion ?? "更高版本"}`}</p>
                         </div>
                       </div>}
+                      <div className="market-declarations">
+                        <strong>版本声明的能力与权限</strong>
+                        {selectedMarket.methodNames.length > 0 && <div>方法：{selectedMarket.methodNames.join("、")}</div>}
+                        {selectedMarket.eventNames.length > 0 && <div>事件：{selectedMarket.eventNames.join("、")}</div>}
+                        {selectedMarket.permissions.map((permission) => (
+                          <div className="market-declaration" key={permission.id}><strong>{permission.title}</strong>{permission.description && <p>{permission.description}</p>}</div>
+                        ))}
+                      </div>
                       {selectedMarket.requiredHostCapabilities.length > 0 ? (
                         <div className="market-requirements">
                           <strong>所需主机能力</strong>
@@ -299,7 +301,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                 selectedMarket ? (
                   <>
                     <strong>{selectedMarket.name}</strong>
-                    <span>{selectedMarket.version} · {selectedMarket.capability}</span>
+                    <span>{selectedMarket.version} · {marketCapabilitySummary(selectedMarket)}</span>
                   </>
                 ) : (
                   <span>请选择一个应用后安装</span>
