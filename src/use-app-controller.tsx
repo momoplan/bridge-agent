@@ -1,4 +1,4 @@
-import { marketCapabilitySummary } from "./app/market-app-summary";
+import { matchesMarketAppQuery } from "./app/market-app-summary";
 import { invoke } from "@tauri-apps/api/core";
 
 
@@ -71,11 +71,7 @@ export function useAppController() {
     if (!query) {
       return installableMarketConnectors;
     }
-    return installableMarketConnectors.filter((app) =>
-      [app.name, app.description, marketCapabilitySummary(app), app.version].some((value) =>
-        value.toLocaleLowerCase().includes(query)
-      )
-    );
+    return installableMarketConnectors.filter((app) => matchesMarketAppQuery(app, query));
   }, [installableMarketConnectors, marketAppQuery]);
 
   const authorizationState = useMemo(() => deriveDeviceAuthorizationState({

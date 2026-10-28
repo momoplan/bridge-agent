@@ -220,12 +220,12 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                           <p>{selectedMarket.compatibilityMessage || `需要百积木 ${selectedMarket.minimumHostVersion ?? "更高版本"}`}</p>
                         </div>
                       </div>}
-                      <div className="market-requirements">
+                      <div className="market-declarations">
                         <strong>版本声明的能力与权限</strong>
                         {selectedMarket.methodNames.length > 0 && <div>方法：{selectedMarket.methodNames.join("、")}</div>}
                         {selectedMarket.eventNames.length > 0 && <div>事件：{selectedMarket.eventNames.join("、")}</div>}
                         {selectedMarket.permissions.map((permission) => (
-                          <div key={permission.id}><strong>{permission.title}</strong>{permission.description && <p>{permission.description}</p>}</div>
+                          <div className="market-declaration" key={permission.id}><strong>{permission.title}</strong>{permission.description && <p>{permission.description}</p>}</div>
                         ))}
                       </div>
                       {selectedMarket.requiredHostCapabilities.length > 0 ? (
