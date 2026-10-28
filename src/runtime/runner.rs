@@ -4,7 +4,7 @@ struct RuntimeRunner {
     log_limit: usize,
     config: AgentConfig,
     config_path: String,
-    ws_url: Url,
+    relay_endpoint: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
 }
 
@@ -32,7 +32,7 @@ impl RuntimeRunner {
                 self.config_path.clone(),
             )
             .await;
-            self.push_log("info", &format!("connecting to {}", self.config.relay.url))
+            self.push_log("info", &format!("connecting to {}", self.relay_endpoint))
                 .await;
 
             if !self
@@ -92,17 +92,23 @@ impl RuntimeRunner {
         if let Some(queue) = &self.event_queue {
             queue.subscriptions(None).await.ok();
         }
+        let capabilities = self.current_capabilities().await;
         match timeout(
             Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS),
-            connect_async(self.ws_url.as_str()),
+            open_relay_channel(
+                &self.relay_endpoint,
+                &self.config.relay.agent_id,
+                &self.config.relay.token,
+                capabilities,
+            ),
         )
         .await
         {
-            Ok(Ok((stream, _))) => {
+            Ok(Ok(channel)) => {
                 self.push_log("info", "connected to relay, waiting for registration")
                     .await;
                 if let Err(err) = self
-                    .handle_connection(stream, shutdown_rx, apply_rx, event_rx, audit_rx)
+                    .handle_connection(channel, shutdown_rx, apply_rx, event_rx, audit_rx)
                     .await
                 {
                     self.enter_backoff(err.to_string(), &format!("connection ended: {err:#}"))
@@ -110,7 +116,11 @@ impl RuntimeRunner {
                 }
                 true
             }
-            Ok(Err(err)) if is_relay_authorization_error(&err) => {
+            Ok(Err(err))
+                if err
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(is_relay_authorization_error) =>
+            {
                 self.update_snapshot(
                     RuntimeStatus::AuthorizationRequired,
                     Some(RELAY_AUTHORIZATION_REQUIRED_MESSAGE.to_string()),
@@ -128,7 +138,7 @@ impl RuntimeRunner {
                 false
             }
             Ok(Err(err)) => {
-                self.enter_backoff(err.to_string(), &format!("connect failed: {err}"))
+                self.enter_backoff(err.to_string(), &format!("connect failed: {err:#}"))
                     .await;
                 true
             }
@@ -179,20 +189,17 @@ impl RuntimeRunner {
 
     async fn handle_connection(
         &self,
-        stream: RelayWebSocket,
+        channel: RelayChannel,
         shutdown_rx: &mut watch::Receiver<bool>,
         apply_rx: &mut mpsc::UnboundedReceiver<RuntimeRegistryUpdate>,
         event_rx: &mut mpsc::Receiver<LocalAppEventSubmission>,
         audit_rx: &mut mpsc::UnboundedReceiver<RuntimeAuditLog>,
     ) -> Result<()> {
-        let (mut write, read) = stream.split();
-        let capabilities = self.current_capabilities().await;
-        write_json(&mut write, &capabilities).await?;
         let keepalive_interval = Duration::from_secs(RELAY_KEEPALIVE_INTERVAL_SECS);
         RelayConnection {
             runner: self,
-            write,
-            read,
+            outbound: channel.outbound,
+            inbound: channel.inbound,
             keepalive: interval_at(
                 tokio::time::Instant::now() + keepalive_interval,
                 keepalive_interval,
@@ -275,7 +282,7 @@ impl RuntimeRunner {
 impl RelayConnection<'_> {
     async fn send_registry_update(&mut self, update: RuntimeRegistryUpdate) -> Result<()> {
         let capabilities = self.runner.apply_registry_update(update).await;
-        write_json(&mut self.write, &capabilities).await?;
+        self.send(capabilities).await?;
         self.runner
             .push_log("info", "runtime capabilities updated and sent to relay")
             .await;
@@ -294,7 +301,7 @@ impl RelayConnection<'_> {
         if !register_event_waiter(&mut self.pending_events, event_key, submission.response) {
             return Ok(());
         }
-        write_json(&mut self.write, &AgentMessage::LocalAppEventEmitted(event)).await?;
+        self.send(AgentMessage::LocalAppEventEmitted(event)).await?;
         self.runner
             .push_log_with_metadata(
                 "info",
@@ -316,31 +323,30 @@ impl RelayConnection<'_> {
                 RELAY_HEARTBEAT_TIMEOUT_SECS
             );
         }
-        self.write.send(Message::Ping(Vec::new().into())).await?;
-        Ok(())
+        self.send_frame(heartbeat_frame()).await
     }
 
-    async fn handle_frame(&mut self, message: Message) -> Result<()> {
-        match message {
-            Message::Text(text) => {
-                self.mark_relay_seen().await;
-                let Some(incoming) = decode_relay_message(&text)
-                    .with_context(|| format!("invalid relay message: {text}"))?
-                else {
-                    self.runner
-                        .push_log("warn", "ignored unsupported relay message type")
-                        .await;
-                    return Ok(());
-                };
-                self.handle_agent_message(incoming).await?;
+    async fn send(&mut self, message: AgentMessage) -> Result<()> {
+        self.send_frame(encode_device_frame(message)?).await
+    }
+
+    async fn send_frame(&mut self, frame: DeviceFrame) -> Result<()> {
+        self.outbound
+            .send(frame)
+            .await
+            .map_err(|_| anyhow::anyhow!("relay device stream closed"))
+    }
+
+    async fn handle_frame(&mut self, frame: RelayFrame) -> Result<()> {
+        self.mark_relay_seen().await;
+        match decode_relay_frame(frame).context("invalid relay frame")? {
+            RelayInbound::Message(message) => self.handle_agent_message(message).await?,
+            RelayInbound::Heartbeat => {}
+            RelayInbound::Unsupported => {
+                self.runner
+                    .push_log("warn", "ignored unsupported relay frame")
+                    .await;
             }
-            Message::Ping(payload) => {
-                self.mark_relay_seen().await;
-                self.write.send(Message::Pong(payload)).await?;
-            }
-            Message::Close(_) => bail!("relay closed websocket"),
-            Message::Pong(_) => self.mark_relay_seen().await,
-            Message::Binary(_) | Message::Frame(_) => {}
         }
         Ok(())
     }
@@ -366,7 +372,7 @@ impl RelayConnection<'_> {
             AgentMessage::StreamAttach(attach) => {
                 let target = self.runner.registry.read().await.local_app_stream(&attach.app_id);
                 if let Some(closed) = self.streams.attach(attach, target) {
-                    write_json(&mut self.write, &closed).await?;
+                    self.send(closed).await?;
                 }
             }
             AgentMessage::StreamDetach(detach) => self.streams.detach(&detach.attach_id),
@@ -415,20 +421,14 @@ impl RelayConnection<'_> {
 
 }
 
-type RelayWebSocket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
-type RelayWrite = futures_util::stream::SplitSink<RelayWebSocket, Message>;
-type RelayRead = futures_util::stream::SplitStream<RelayWebSocket>;
-
 async fn wait_until_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
     while !*shutdown_rx.borrow() && shutdown_rx.changed().await.is_ok() {}
 }
 
 struct RelayConnection<'a> {
     runner: &'a RuntimeRunner,
-    write: RelayWrite,
-    read: RelayRead,
+    outbound: mpsc::Sender<DeviceFrame>,
+    inbound: tonic::Streaming<RelayFrame>,
     keepalive: tokio::time::Interval,
     last_relay_seen: tokio::time::Instant,
     pending_events: PendingEventWaiters,
@@ -448,10 +448,8 @@ impl RelayConnection<'_> {
     ) -> Result<()> {
         loop {
             tokio::select! {
-                _ = shutdown_rx.changed() => {
-                    self.write.send(Message::Close(None)).await.ok();
-                    break;
-                }
+                // Returning drops the sender, which ends the request stream.
+                _ = shutdown_rx.changed() => break,
                 Some(update) = apply_rx.recv() => {
                     self.send_registry_update(update).await?;
                 }
@@ -465,14 +463,17 @@ impl RelayConnection<'_> {
                     self.send_keepalive().await?;
                 }
                 Some(result) = self.invocations.next(), if !self.invocations.is_empty() => {
-                    write_json(&mut self.write, &result).await?;
+                    self.send(result).await?;
                 }
                 Some(frame) = self.streams.frames.recv() => {
                     self.streams.forwarded(&frame);
-                    write_json(&mut self.write, &frame).await?;
+                    self.send(frame).await?;
                 }
-                message = self.read.next() => {
-                    self.handle_frame(message.context("relay websocket ended")??).await?;
+                frame = self.inbound.next() => {
+                    let frame = frame
+                        .context("relay closed the device stream")?
+                        .context("relay device stream failed")?;
+                    self.handle_frame(frame).await?;
                 }
             }
         }

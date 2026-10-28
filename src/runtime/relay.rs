@@ -32,55 +32,6 @@ fn publish_runtime_event(inner: &RuntimeInner, event: RuntimeEvent) {
     let _ = inner.events.send(event);
 }
 
-async fn write_json<S>(sink: &mut S, message: &AgentMessage) -> Result<()>
-where
-    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    let payload = serde_json::to_string(message)?;
-    sink.send(Message::Text(payload.into())).await?;
-    Ok(())
-}
-
-fn decode_relay_message(text: &str) -> Result<Option<AgentMessage>> {
-    let value: serde_json::Value = serde_json::from_str(text)?;
-    let Some(message_type) = value.get("type").and_then(serde_json::Value::as_str) else {
-        let message = serde_json::from_value(value)?;
-        return Ok(Some(message));
-    };
-
-    if !relay_message_type_is_supported(message_type) {
-        return Ok(None);
-    }
-
-    let message = serde_json::from_value(value)?;
-    Ok(Some(message))
-}
-
-fn relay_message_type_is_supported(message_type: &str) -> bool {
-    matches!(
-        message_type,
-        "capabilities"
-            | "registered_ack"
-            | "invoke_request"
-            | "invoke_result"
-            | "local_app_invoke_request"
-            | "local_app_invoke_result"
-            | "local_app_event_emitted"
-            | "event_ack"
-            | "device_subscriptions"
-            | "stream_attach"
-            | "stream_detach"
-            | "error"
-    )
-}
-
-fn build_agent_url(base: &str, agent_id: &str, token: &str) -> Result<Url> {
-    let base = base.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/{agent_id}"))?;
-    url.query_pairs_mut().append_pair("token", token);
-    Ok(url)
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

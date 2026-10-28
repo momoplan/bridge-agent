@@ -5,10 +5,12 @@ use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted, StreamAttach, StreamCloseCode,
-    StreamClosed, StreamOutput, StreamResync, AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3,
-    AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS,
-    AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
+    AgentCapabilities, AgentMessage, EventAck, InvokeRequest, InvokeResult, LocalAppDefinition,
+    LocalAppEventEmitted, LocalAppInvokeRequest, MethodDefinition, ProtocolError, RegisteredAck,
+    ResponseMode, StreamAttach, StreamCloseCode, StreamClosed, StreamOutput, StreamResync,
+    AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2,
+    AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS, AGENT_PROTOCOL_FEATURE_REGISTERED_ACK,
+    AGENT_PROTOCOL_VERSION,
 };
 use crate::services::{LocalAppStreamTarget, ServiceRegistry};
 #[cfg(windows)]
@@ -16,8 +18,17 @@ use crate::windows_process::{
     inspect_windows_process, terminate_windows_process, windows_process_is_running,
 };
 use anyhow::{bail, Context, Result};
-use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
+use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use relay::device_channel::{
+    decode_json_or_null, encode_json,
+    v1::{
+        self, device_channel_client::DeviceChannelClient, device_frame::Frame as DeviceFrameKind,
+        relay_frame::Frame as RelayFrameKind, DeviceFrame, RelayFrame,
+    },
+    DEVICE_ID_METADATA, MAX_FRAME_BYTES,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 use std::fs;
@@ -31,10 +42,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, sleep, timeout, Duration};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::{
-    http::StatusCode, protocol::Message, Error as WebSocketError,
-};
+use tonic::transport::{ClientTlsConfig, Endpoint};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -244,6 +252,7 @@ include!("runtime/event_server_runtime.rs");
 include!("runtime/runner.rs");
 include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
+include!("runtime/channel.rs");
 include!("runtime/streams.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
@@ -252,19 +261,19 @@ include!("runtime/event_delivery_worker.rs");
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_url, command_line_starts_with_bridge_agent, decode_relay_message,
-        is_relay_authorization_error, process_looks_like_bridge_agent, prune_closed_event_waiters,
-        read_runtime_lock, register_event_waiter, remove_retired_event_storage,
-        runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, AgentRuntimeManager, LocalAppStreamTarget,
-        PendingEventWaiters, RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument,
-        RuntimeProcessInfo, RuntimeStatus, SseEvent, SseParser, StatusCode, StreamPumps,
-        WebSocketError, RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
+        command_line_starts_with_bridge_agent, decode_relay_frame, encode_device_frame,
+        is_relay_authorization_error, open_relay_channel, process_looks_like_bridge_agent,
+        prune_closed_event_waiters, read_runtime_lock, register_event_waiter, relay_endpoint,
+        remove_retired_event_storage, runtime_lock_owner_is_active, runtime_lock_path,
+        runtime_start_is_active, terminate_runtime_lock_owner, AgentRuntimeManager,
+        LocalAppStreamTarget, PendingEventWaiters, RelayInbound, RuntimeEvent, RuntimeInstanceLock,
+        RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, SseEvent, SseParser, StreamPumps,
+        RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
     };
     use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
     use crate::logging::LogMetadata;
-    use crate::protocol::AgentMessage;
-    use futures_util::{SinkExt, StreamExt};
+    use crate::protocol::{AgentCapabilities, AgentMessage};
+    use reqwest::StatusCode;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::fs;
@@ -276,8 +285,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    include!("runtime/tests/relay_harness.rs");
     include!("runtime/tests/core.rs");
     include!("runtime/tests/concurrent_invocations.rs");
     include!("runtime/tests/locks.rs");

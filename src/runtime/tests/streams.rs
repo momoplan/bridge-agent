@@ -28,9 +28,14 @@ mod streams {
     }
 
     #[test]
-    fn decode_relay_message_accepts_stream_control_frames() {
-        let message = r#"{"type":"stream_attach","attachId":"a","workspaceId":7,"appId":"app","after":"s:3"}"#;
-        match decode_relay_message(message).unwrap().unwrap() {
+    fn decode_relay_frame_accepts_stream_control_frames() {
+        let decode = |message: Value| {
+            match decode_relay_frame(relay_frame(serde_json::from_value(message).unwrap())).unwrap() {
+                RelayInbound::Message(message) => message,
+                _ => panic!("expected a relay message"),
+            }
+        };
+        match decode(json!({"type":"stream_attach","attachId":"a","workspaceId":7,"appId":"app","after":"s:3"})) {
             AgentMessage::StreamAttach(attach) => {
                 assert_eq!(attach.after.as_deref(), Some("s:3"));
                 assert_eq!(attach.workspace_id, 7);
@@ -38,7 +43,7 @@ mod streams {
             other => panic!("unexpected {other:?}"),
         }
         assert!(matches!(
-            decode_relay_message(r#"{"type":"stream_detach","attachId":"a"}"#).unwrap().unwrap(),
+            decode(json!({"type":"stream_detach","attachId":"a"})),
             AgentMessage::StreamDetach(_)
         ));
     }

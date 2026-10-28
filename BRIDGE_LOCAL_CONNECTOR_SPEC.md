@@ -666,7 +666,7 @@ GET {distribution.marketApiBaseUrl}/apps/{appId}/versions/{version}
 4. Bridge 读取 `connector.json`，严格校验 schema `3.0.0`、`appId`、版本、来源和宿主能力。
 5. Bridge 安装到本机 `local-apps/{appId}/{version}`，私有数据始终位于 `app-data/{appId}`。
 6. Bridge 把本地应用定义写入 `agent-config.json.localApps[]`，生成私有 token，准备运行环境。
-7. Bridge 刷新 runtime registry，并通过已有 WebSocket 重新上报 capabilities。
+7. Bridge 刷新 runtime registry，并通过已有 relay 连接重新上报 capabilities。
 
 更新规则：
 
@@ -724,7 +724,7 @@ Connector 不直接连接 relay，也不自己向外部订阅方投递事件。
 3. Connector 读取独立事件凭证，调用
    `POST /v1/local-app-events`，传入 `appId`、`event`、`payload`，可选
    `eventId` 和 `occurredAt`。
-4. Bridge Agent 校验凭证、安装实例和事件声明，通过 WebSocket 同步转发
+4. Bridge Agent 校验凭证、安装实例和事件声明，通过 relay 连接同步转发
    `local_app_event_emitted`；它不保存事件。
 5. Relay 校验设备和 capability 后同步转发给 Event Center，也不保存事件。
 6. Event Center 先匹配订阅：没有匹配项时确认忽略且不保存 payload；存在匹配项时，

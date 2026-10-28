@@ -107,11 +107,3 @@ fn runtime_start_is_active(status: RuntimeStatus) -> bool {
             | RuntimeStatus::AuthorizationRequired
     )
 }
-
-fn is_relay_authorization_error(error: &WebSocketError) -> bool {
-    matches!(
-        error,
-        WebSocketError::Http(response)
-            if matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-    )
-}

@@ -10,7 +10,7 @@ toml = "0.8"
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
-relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "c7c909772123c91b856c3eac26aefc12a34f1e9c", default-features = false }
+relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "8831f35902bb34538e488afe9aaacbac0b131eac", default-features = false, features = ["device-channel"] }
 anyhow = "1.0"
 axum = "0.8"
 baijimu-cmodel-core = { version = "=11.0.0" }
@@ -32,6 +32,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.10"
 tempfile = "3.20"
 tokio = { version = "1.45", features = ["full"] }
+tonic = { version = "0.14.8", default-features = false, features = ["channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 toml = "0.8"
 tracing = "0.1"
@@ -72,6 +73,7 @@ keyring = "4.1.5"
 libc = "0.2"
 
 [dev-dependencies]
+tonic = { version = "0.14.8", default-features = false, features = ["server"] }
 
 [[bin]]
 name = "bridge-agent-environment-identity-migration"

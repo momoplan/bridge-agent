@@ -98,13 +98,13 @@ Windows 完全卸载只删除百积木管理的默认目录。用户在高级设
 
 它包含三层：
 
-- Rust core library：负责系统服务、本地应用目录、WebSocket 长连、调用与事件转发、日志和本地安全策略
+- Rust core library：负责系统服务、本地应用目录、Relay gRPC 长连、调用与事件转发、日志和本地安全策略
 - CLI：适合服务器、脚本或纯命令行场景
 - Tauri desktop app：适合最终用户安装、管理本地应用并打包分发
 
 ## 当前能力
 
-- 通过 WebSocket 主动连接 relay
+- 通过 gRPC 双向流（HTTP/2）主动连接 relay
 - 上报 `agent_id + services[] + local_apps[]`
 - 系统服务按 `service + method + arguments` 调用；本地应用按
   `appId + method + arguments` 调用
@@ -214,7 +214,7 @@ runtime `businessId`。
 
 当前桌面端把 `computer` 和 `shell` 归到内置应用：它们由应用默认配置维护，不能删除或改名；用户可以启停应用，其中 `shell` 还允许在开发者配置里调整命令权限、根目录和超时。其他由用户新增的 HTTP / Shell 服务会显示为自定义应用。
 
-开发者配置仍按内部服务独立保存。点击“保存配置”只把当前运行项合并回本地配置文件，不会覆盖其他运行项的未保存草稿；点击“保存并应用”会在保存后刷新正在运行的 runtime registry，并通过当前 WebSocket 连接重新上报 capabilities。Agent 未运行时，保存仍会落盘，下一次启动后生效。
+开发者配置仍按内部服务独立保存。点击“保存配置”只把当前运行项合并回本地配置文件，不会覆盖其他运行项的未保存草稿；点击“保存并应用”会在保存后刷新正在运行的 runtime registry，并通过当前 relay 连接重新上报 capabilities。Agent 未运行时，保存仍会落盘，下一次启动后生效。
 
 例如：
 
@@ -241,7 +241,7 @@ runtime `businessId`。
 - relay 同时看到 `services[]` 和 `local_apps[]`；本地应用定义包含稳定
   `appId + methods[] + events[]`。同一设备上一个 `appId` 只允许一个实例，
   平台用 `deviceId + appId` 唯一识别本地应用
-- `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 WebSocket 消息里，而应走“prepare upload -> direct upload -> asset ref”
+- `computer.screenshot` 超过阈值后不应继续把整张图 base64 内联到 relay 消息里，而应走“prepare upload -> direct upload -> asset ref”
 - Connector 发送事件时不直接连 relay；它使用安装时生成的独立事件凭证请求
   Bridge Agent 本机入口。Bridge Agent 不保存事件，请求会同步等待 Relay/Event Center
   的确认；失败或超时返回非 2xx，Connector 必须保留源游标并用同一个 `eventId` 重试。
@@ -320,10 +320,10 @@ relay token。
 
 旧版本配置中的明文 token 会在首次加载时自动迁移到系统安全存储并从 JSON 中删除。Unix 配置目录和配置文件同时收紧为 `0700`、`0600`。Windows 的加密凭证文件与共享配置放在同一 ProgramData 目录，但文件内容不能作为明文读取。
 
-Relay 在 WebSocket 握手阶段返回 `401` 或 `403` 时，客户端会把当前凭证标记为需要
-重新授权并暂停自动重连，避免持续产生无效连接。用户完成浏览器授权后，服务端轮换
-设备 token，客户端保存新凭证并重新启动 Agent。网络故障和 Relay `5xx` 仍按普通
-退避策略自动重连。
+Relay 打开设备流时返回 `UNAUTHENTICATED` 或 `PERMISSION_DENIED` 时，客户端会把当前凭证
+标记为需要重新授权并暂停自动重连，避免持续产生无效连接。用户完成浏览器授权后，服务端
+轮换设备 token，客户端保存新凭证并重新启动 Agent。网络故障和 `UNAVAILABLE`（包括 Relay
+token 存储故障）仍按普通退避策略自动重连。
 
 ## Connector 设备事件
 
@@ -419,7 +419,7 @@ curl -X POST http://127.0.0.1:18081/v1/services \
   }'
 ```
 
-注册成功后，bridge-agent 会把服务写入 `agent-config.json`，刷新正在运行的 runtime registry，并通过现有 WebSocket 重新上报 capabilities。外部 agent 看到的是普通的 `reportTool.generate`，不会看到本机 HTTP binding 细节。
+注册成功后，bridge-agent 会把服务写入 `agent-config.json`，刷新正在运行的 runtime registry，并通过现有 relay 连接重新上报 capabilities。外部 agent 看到的是普通的 `reportTool.generate`，不会看到本机 HTTP binding 细节。
 
 `methods[].responseMode` 是方法响应契约，支持 `cmodel`、`plain`、`passthrough`，缺失时为 `cmodel`。Bridge Agent 会把该字段随 capabilities 上报；调用请求不携带也不能覆盖它。`plain` 返回本机 HTTP JSON，`passthrough` 保留本机 HTTP 状态、响应头和原始响应字节，由 Relay 恢复为最终 HTTP 响应。
 
@@ -494,7 +494,7 @@ cargo run -- run
 
 ## 大截图上传协议
 
-当 `computer.screenshot` 结果超过 `upload.inline_limit_bytes` 时，`bridge-agent` 不再把整张图内联到 WebSocket 消息里，而是改走上传。默认阈值是 262144 字节，常规桌面截图通常会返回文件引用而不是完整 base64：
+当 `computer.screenshot` 结果超过 `upload.inline_limit_bytes` 时，`bridge-agent` 不再把整张图内联到 relay 消息里，而是改走上传。默认阈值是 262144 字节，常规桌面截图通常会返回文件引用而不是完整 base64：
 
 1. `bridge-agent -> prepare upload`
 2. `bridge-agent -> 直传对象存储 / 文件服务`
@@ -565,7 +565,7 @@ cargo run -- run
 
 - `error.code = "PAYLOAD_TOO_LARGE"`
 
-这样可以避免继续把 relay 的 WebSocket 单消息上限打爆。
+这样可以避免继续把 relay 的单消息上限（64 MiB）打爆。
 
 ## Connector 私有资源上传
 

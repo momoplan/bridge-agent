@@ -3,10 +3,9 @@ use super::{LocalAppEventSubmission, RuntimeInner, RuntimeRegistryUpdate, Runtim
 use crate::services::ServiceRegistry;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 
-type TestSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
-
 struct InvocationHarness {
-    socket: TestSocket,
+    socket: RelaySession,
+    _relay: FakeRelay,
     apply: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
     events: mpsc::Sender<LocalAppEventSubmission>,
     shutdown: watch::Sender<bool>,
@@ -66,9 +65,8 @@ impl InvocationHarness {
         }))
         .unwrap()];
         let registry = ServiceRegistry::from_config(&config, dir.path()).unwrap();
-        let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_url =
-            url::Url::parse(&format!("ws://{}/relay", relay.local_addr().unwrap())).unwrap();
+        let mut relay = FakeRelay::start();
+        let relay_endpoint = relay_endpoint(&relay.url).unwrap();
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let (apply, mut apply_rx) = mpsc::unbounded_channel();
         let (events, mut event_rx) = mpsc::channel(8);
@@ -81,17 +79,19 @@ impl InvocationHarness {
             log_limit: 100,
             config,
             config_path: dir.path().join("config.json").display().to_string(),
-            ws_url: ws_url.clone(),
+            relay_endpoint: relay_endpoint.clone(),
             registry: Arc::new(RwLock::new(registry.clone())),
         };
         let task = tokio::spawn(async move {
             let _keep_audit = audit_tx;
-            let (stream, _) = tokio_tungstenite::connect_async(ws_url.as_str())
-                .await
-                .unwrap();
+            let capabilities = runner.current_capabilities().await;
+            let channel =
+                open_relay_channel(&relay_endpoint, "dev_test", "test-token", capabilities)
+                    .await
+                    .unwrap();
             runner
                 .handle_connection(
-                    stream,
+                    channel,
                     &mut shutdown_rx,
                     &mut apply_rx,
                     &mut event_rx,
@@ -99,14 +99,11 @@ impl InvocationHarness {
                 )
                 .await
         });
-        let (stream, _) = relay.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        assert!(matches!(
-            socket.next().await.unwrap().unwrap(),
-            Message::Text(_)
-        ));
+        let mut socket = relay.accept().await;
+        assert_eq!(socket.receive().await["type"], "capabilities");
         Self {
             socket,
+            _relay: relay,
             apply,
             events,
             shutdown,
@@ -128,18 +125,13 @@ impl InvocationHarness {
             json!({"type":"invoke_request","request_id":id,"service":"test-service",
             "method":"call","arguments":{"slow":slow,"echo":id},"timeout_secs":60})
         };
-        self.socket
-            .send(Message::Text(value.to_string().into()))
-            .await
-            .unwrap();
+        self.socket.send(value).await;
     }
 
-    async fn receive(&mut self) -> Message {
-        tokio::time::timeout(std::time::Duration::from_secs(2), self.socket.next())
+    async fn receive(&mut self) -> Value {
+        tokio::time::timeout(std::time::Duration::from_secs(2), self.socket.receive())
             .await
             .expect("relay control/result blocked behind slow invocation")
-            .unwrap()
-            .unwrap()
     }
 
     async fn entered(&self, count: usize) {
@@ -161,15 +153,12 @@ impl Drop for InvocationHarness {
 }
 
 #[tokio::test]
-async fn slow_local_call_does_not_block_results_ping_events_or_registry_refresh() {
+async fn slow_local_call_does_not_block_results_heartbeats_events_or_registry_refresh() {
     let mut h = InvocationHarness::new().await;
     h.call("slow", true, true).await;
     h.entered(1).await;
     h.call("fast", false, false).await;
-    h.socket
-        .send(Message::Ping(vec![1, 2, 3].into()))
-        .await
-        .unwrap();
+    h.socket.heartbeat().await;
     h.apply
         .send(RuntimeRegistryUpdate {
             services: h.registry.definitions(),
@@ -188,40 +177,26 @@ async fn slow_local_call_does_not_block_results_ping_events_or_registry_refresh(
         .await
         .unwrap();
     let mut fast = false;
-    let mut pong = false;
     let mut registry = false;
     let mut event = false;
-    while !(fast && pong && registry && event) {
-        match h.receive().await {
-            Message::Pong(data) => {
-                assert_eq!(data.as_ref(), &[1, 2, 3]);
-                pong = true;
+    while !(fast && registry && event) {
+        let v = h.receive().await;
+        match v["type"].as_str().unwrap() {
+            "invoke_result" => {
+                assert_eq!(v["request_id"], "fast");
+                assert_eq!(v["success"], true);
+                fast = true;
             }
-            Message::Text(text) => {
-                let v: Value = serde_json::from_str(&text).unwrap();
-                match v["type"].as_str().unwrap() {
-                    "invoke_result" => {
-                        assert_eq!(v["request_id"], "fast");
-                        assert_eq!(v["success"], true);
-                        fast = true;
-                    }
-                    "capabilities" => registry = true,
-                    "local_app_event_emitted" => {
-                        event = true;
-                        h.socket
-                            .send(Message::Text(
-                                json!({"type":"event_ack","eventId":"evt-concurrent",
-                            "appId":"test-app","receipts":[{"consumerId":"worker","receipt":{"status":"processed","duplicate":false}}]})
-                                .to_string()
-                                .into(),
-                            ))
-                            .await
-                            .unwrap();
-                    }
-                    kind => panic!("unexpected response {kind}"),
-                }
+            "capabilities" => registry = true,
+            "local_app_event_emitted" => {
+                event = true;
+                h.socket
+                    .send(json!({"type":"event_ack","eventId":"evt-concurrent",
+                        "appId":"test-app","receipts":[{"consumerId":"worker",
+                        "receipt":{"status":"processed","duplicate":false}}]}))
+                    .await;
             }
-            other => panic!("unexpected frame {other:?}"),
+            kind => panic!("unexpected response {kind}"),
         }
     }
     let ack = tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx)
@@ -231,10 +206,7 @@ async fn slow_local_call_does_not_block_results_ping_events_or_registry_refresh(
         .unwrap();
     assert_eq!(ack.event_id, "evt-concurrent");
     h.release.notify_one();
-    let Message::Text(text) = h.receive().await else {
-        panic!("missing slow result")
-    };
-    let result: Value = serde_json::from_str(&text).unwrap();
+    let result = h.receive().await;
     assert_eq!(result["type"], "local_app_invoke_result");
     assert_eq!(result["request_id"], "slow");
     assert_eq!(result["success"], true);
@@ -249,10 +221,7 @@ async fn invocation_capacity_rejects_before_execution_and_shutdown_does_not_wait
     h.entered(super::MAX_RELAY_INVOCATIONS).await;
     for local in [true, false] {
         h.call("over-capacity", local, false).await;
-        let Message::Text(text) = h.receive().await else {
-            panic!("missing rejection")
-        };
-        let v: Value = serde_json::from_str(&text).unwrap();
+        let v = h.receive().await;
         assert_eq!(v["error"]["code"], "AGENT_BUSY");
         assert_eq!(v["request_id"], "over-capacity");
         assert_eq!(
@@ -264,8 +233,10 @@ async fn invocation_capacity_rejects_before_execution_and_shutdown_does_not_wait
             }
         );
     }
-    h.socket.send(Message::Ping(vec![9].into())).await.unwrap();
-    assert!(matches!(h.receive().await, Message::Pong(_)));
+    // A full invocation set still leaves the stream reading relay frames.
+    h.socket.heartbeat().await;
+    h.call("still-busy", false, false).await;
+    assert_eq!(h.receive().await["error"]["code"], "AGENT_BUSY");
     h.shutdown.send(true).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), &mut h.task)
         .await
@@ -283,7 +254,7 @@ async fn relay_disconnect_drops_active_invocations_without_waiting_or_replay() {
     let mut h = InvocationHarness::new().await;
     h.call("slow-before-disconnect", true, true).await;
     h.entered(1).await;
-    h.socket.send(Message::Close(None)).await.unwrap();
+    h.socket.close();
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut h.task)
         .await
         .expect("disconnect waited for active calls")
