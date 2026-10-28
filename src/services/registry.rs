@@ -23,13 +23,15 @@ impl ServiceRegistry {
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
-            if !runtime.methods.is_empty() || !events.is_empty() {
+            let stream = local_app_stream_target(app)?;
+            if !runtime.methods.is_empty() || !events.is_empty() || stream.is_some() {
                 local_apps.insert(
                     app.app_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
                         events,
+                        stream,
                     },
                 );
             }
@@ -68,13 +70,15 @@ impl ServiceRegistry {
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
-            if !runtime.methods.is_empty() || !events.is_empty() {
+            let stream = local_app_stream_target(app)?;
+            if !runtime.methods.is_empty() || !events.is_empty() || stream.is_some() {
                 local_apps.insert(
                     app.app_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
                         events,
+                        stream,
                     },
                 );
             }
@@ -131,13 +135,15 @@ impl ServiceRegistry {
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);
-            if !runtime.methods.is_empty() || !events.is_empty() {
+            let stream = local_app_stream_target(app)?;
+            if !runtime.methods.is_empty() || !events.is_empty() || stream.is_some() {
                 local_apps.insert(
                     app.app_id.clone(),
                     RuntimeLocalApp {
                         definition: local_app_definition(app),
                         runtime,
                         events,
+                        stream,
                     },
                 );
             }
@@ -161,6 +167,10 @@ impl ServiceRegistry {
             .values()
             .map(|app| app.definition.clone())
             .collect()
+    }
+
+    pub fn local_app_stream(&self, app_id: &str) -> Option<LocalAppStreamTarget> {
+        self.local_apps.get(app_id)?.stream.clone()
     }
 
     pub fn has_local_app_event(&self, app_id: &str, event: &str) -> bool {

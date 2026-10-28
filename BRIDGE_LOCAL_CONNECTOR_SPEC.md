@@ -753,6 +753,32 @@ curl -X POST "$BAIJIMU_LOCAL_APP_EVENT_ENDPOINT" \
 
 事件 payload 应保持结构化，并避免发送无边界的大对象。需要传大文件时，应走文件引用或上传协议。
 
+## 实时输出流
+
+事件用于需要可靠投递的业务事实。逐条的实时输出（例如 Codex 的 delta 通知）不应作为事件上传，而应通过输出流提供：只在平台有消费者挂接时才被拉取，不经过 Bridge 的持久化与重试。
+
+清单声明：
+
+```json
+{
+  "hostRequirements": {
+    "minimumVersion": "<首个支持输出流的 Bridge 版本>",
+    "capabilities": ["connector.notification-stream.v1"]
+  },
+  "notificationStream": { "path": "/streams/notifications" }
+}
+```
+
+- `notificationStream` 与能力 `connector.notification-stream.v1` 必须同时声明。`path` 为以 `/` 开头的绝对路径，不含查询串和片段，相对 `transport.baseUrl` 解析。
+- Bridge 发起 `GET {transport.baseUrl}{path}`，携带 `Authorization: Bearer <管理令牌>`、`x-baijimu-workspace-id`、`Accept: text/event-stream`，续传时带 `Last-Event-ID`。`transport.headers` 同样附带。
+- 响应为 `text/event-stream`：
+  - `event: notification`：`id` 为 Connector 自己的不透明游标，`data` 为单行 JSON。
+  - `event: resync`：无法从 `Last-Event-ID` 续传（进程已重启或超出保留窗口）时发送，`id` 为新的续传位置，`data` 非空即可。之后继续推送实时条目。
+  - 以 `:` 开头的注释行用于保活，建议每 15 秒一次。
+  - 其他事件类型会被忽略。
+- 错误：`401` 未认证；`400` 且错误码为 `INVALID_STREAM_CURSOR` 表示 `Last-Event-ID` 格式错误；其他非 2xx 视为应用不可用。
+- 连接随时可能被 Bridge 断开（平台消费者离开或 Bridge 与 Relay 断线）。Connector 不需要为断开的订阅者保留状态，下次请求会带回游标。
+
 ## 兼容性
 
 稳定接口：

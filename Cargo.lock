@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-agent"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1930,8 +1930,8 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "relay"
-version = "0.10.0"
-source = "git+https://gitee.com/zxflimit/relay.git?rev=ca7cfc8c291cf438d046688521c43b5c3ed0733a#ca7cfc8c291cf438d046688521c43b5c3ed0733a"
+version = "0.33.2"
+source = "git+https://gitee.com/zxflimit/relay.git?rev=c7c909772123c91b856c3eac26aefc12a34f1e9c#c7c909772123c91b856c3eac26aefc12a34f1e9c"
 dependencies = [
  "semver",
  "serde",

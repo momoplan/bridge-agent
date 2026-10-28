@@ -58,6 +58,7 @@ async fn saved_local_app_test_forwards_authorized_workspace_and_unchanged_argume
             }),
         }],
         events: Vec::new(),
+        notification_stream: None,
     });
     save_agent_config(&config_path, &config).unwrap();
     // Business fields resembling identity must not become trusted request context.

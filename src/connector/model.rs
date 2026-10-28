@@ -20,6 +20,7 @@ const HOST_MANAGED_PROCESS_MINIMUM_VERSION: &str = "0.2.40";
 const HOST_MANAGED_PROCESS_CAPABILITY: &str = "connector.process.host-managed.v1";
 const MANAGED_TOOL_DEPENDENCIES_CAPABILITY: &str = "connector.managed-tool-dependencies.v1";
 const CONNECTOR_ICON_CAPABILITY: &str = "connector.presentation.icon.v1";
+const CONNECTOR_NOTIFICATION_STREAM_CAPABILITY: &str = "connector.notification-stream.v1";
 const CONNECTOR_ICON_MEDIA_TYPE: &str = "image/png";
 const CONNECTOR_ICON_EDGE_PX: u32 = 256;
 const CONNECTOR_ICON_MAX_BYTES: usize = 128 * 1024;
@@ -30,6 +31,7 @@ const CONNECTOR_HOST_CAPABILITIES: &[&str] = &[
     HOST_MANAGED_PROCESS_CAPABILITY,
     MANAGED_TOOL_DEPENDENCIES_CAPABILITY,
     CONNECTOR_ICON_CAPABILITY,
+    CONNECTOR_NOTIFICATION_STREAM_CAPABILITY,
 ];
 const LIFECYCLE_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
 #[cfg(windows)]
@@ -98,7 +100,16 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub events: Vec<crate::config::EventConfig>,
     #[serde(default)]
+    pub notification_stream: Option<ConnectorNotificationStream>,
+    #[serde(default)]
     pub hooks: BTreeMap<String, String>,
+}
+
+/// Live output stream served by the connector's own HTTP transport.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorNotificationStream {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -61,6 +61,7 @@
                 }),
             }],
             events: Vec::new(),
+            notification_stream: None,
         });
         assert!(!serde_json::to_string(&config).unwrap().contains(token));
         let registry = ServiceRegistry::from_config(&config, &current_dir).unwrap();

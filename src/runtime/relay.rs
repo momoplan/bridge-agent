@@ -68,6 +68,8 @@ fn relay_message_type_is_supported(message_type: &str) -> bool {
             | "local_app_event_emitted"
             | "event_ack"
             | "device_subscriptions"
+            | "stream_attach"
+            | "stream_detach"
             | "error"
     )
 }

@@ -5,11 +5,12 @@ use crate::logging::{FileLogConfig, FileLogSink, LogEntry, LogMetadata};
 use crate::power::SystemSleepPrevention;
 use crate::process_identity::is_bridge_agent_process_name;
 use crate::protocol::{
-    AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted,
-    AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3, AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2,
+    AgentCapabilities, AgentMessage, EventAck, LocalAppEventEmitted, StreamAttach, StreamCloseCode,
+    StreamClosed, StreamOutput, StreamResync, AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3,
+    AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2, AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS,
     AGENT_PROTOCOL_FEATURE_REGISTERED_ACK, AGENT_PROTOCOL_VERSION,
 };
-use crate::services::ServiceRegistry;
+use crate::services::{LocalAppStreamTarget, ServiceRegistry};
 #[cfg(windows)]
 use crate::windows_process::{
     inspect_windows_process, terminate_windows_process, windows_process_is_running,
@@ -243,6 +244,7 @@ include!("runtime/event_server_runtime.rs");
 include!("runtime/runner.rs");
 include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
+include!("runtime/streams.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
 include!("runtime/event_delivery_worker.rs");
@@ -254,8 +256,9 @@ mod tests {
         is_relay_authorization_error, process_looks_like_bridge_agent, prune_closed_event_waiters,
         read_runtime_lock, register_event_waiter, remove_retired_event_storage,
         runtime_lock_owner_is_active, runtime_lock_path, runtime_start_is_active,
-        terminate_runtime_lock_owner, AgentRuntimeManager, PendingEventWaiters, RuntimeEvent,
-        RuntimeInstanceLock, RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, StatusCode,
+        terminate_runtime_lock_owner, AgentRuntimeManager, LocalAppStreamTarget,
+        PendingEventWaiters, RuntimeEvent, RuntimeInstanceLock, RuntimeLockDocument,
+        RuntimeProcessInfo, RuntimeStatus, SseEvent, SseParser, StatusCode, StreamPumps,
         WebSocketError, RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
     };
     use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
@@ -282,4 +285,5 @@ mod tests {
     include!("runtime/tests/unauthorized_control.rs");
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");
+    include!("runtime/tests/streams.rs");
 }

@@ -235,6 +235,12 @@ export interface LocalAppConfig {
   stopCommand?: ServiceStartCommand | null;
   methods: MethodConfig[];
   events: EventConfig[];
+  notificationStream?: LocalAppNotificationStream | null;
+}
+
+export interface LocalAppNotificationStream {
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface BrowserAuthStartResponse {

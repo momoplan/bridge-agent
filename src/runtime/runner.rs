@@ -200,6 +200,7 @@ impl RuntimeRunner {
             last_relay_seen: tokio::time::Instant::now(),
             pending_events: PendingEventWaiters::new(),
             invocations: FuturesUnordered::new(),
+            streams: StreamPumps::new(),
         }
         .run(shutdown_rx, apply_rx, event_rx, audit_rx)
         .await
@@ -214,6 +215,7 @@ impl RuntimeRunner {
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS.to_string(),
             ],
             services: registry.definitions(),
             local_apps: registry.local_app_definitions(),
@@ -232,6 +234,7 @@ impl RuntimeRunner {
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
+                AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS.to_string(),
             ],
             services: update.services,
             local_apps: update.local_apps,
@@ -360,12 +363,22 @@ impl RelayConnection<'_> {
             AgentMessage::LocalAppInvokeRequest(request) => {
                 self.queue_invocation(AgentMessage::LocalAppInvokeRequest(request)).await?
             }
+            AgentMessage::StreamAttach(attach) => {
+                let target = self.runner.registry.read().await.local_app_stream(&attach.app_id);
+                if let Some(closed) = self.streams.attach(attach, target) {
+                    write_json(&mut self.write, &closed).await?;
+                }
+            }
+            AgentMessage::StreamDetach(detach) => self.streams.detach(&detach.attach_id),
             AgentMessage::Error(err) => {
                 self.runner
                     .push_log("warn", &format!("relay error: {}", err.message))
                     .await;
             }
-            AgentMessage::Capabilities(_)
+            AgentMessage::StreamOutput(_)
+            | AgentMessage::StreamResync(_)
+            | AgentMessage::StreamClosed(_)
+            | AgentMessage::Capabilities(_)
             | AgentMessage::InvokeResult(_)
             | AgentMessage::LocalAppInvokeResult(_)
             | AgentMessage::LocalAppEventEmitted(_) => {}
@@ -421,6 +434,8 @@ struct RelayConnection<'a> {
     pending_events: PendingEventWaiters,
     // Owned by this connection: dropping it cancels pending futures, never replays them.
     invocations: FuturesUnordered<BoxFuture<'a, AgentMessage>>,
+    // Owned by this connection: dropping it aborts every local app stream pump.
+    streams: StreamPumps,
 }
 
 impl RelayConnection<'_> {
@@ -451,6 +466,10 @@ impl RelayConnection<'_> {
                 }
                 Some(result) = self.invocations.next(), if !self.invocations.is_empty() => {
                     write_json(&mut self.write, &result).await?;
+                }
+                Some(frame) = self.streams.frames.recv() => {
+                    self.streams.forwarded(&frame);
+                    write_json(&mut self.write, &frame).await?;
                 }
                 message = self.read.next() => {
                     self.handle_frame(message.context("relay websocket ended")??).await?;

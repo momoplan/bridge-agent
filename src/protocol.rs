@@ -5,6 +5,7 @@ pub const AGENT_PROTOCOL_VERSION: &str = "4.0.0";
 pub const AGENT_PROTOCOL_FEATURE_REGISTERED_ACK: &str = "registered_ack";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2: &str = "local_app_events_v2";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3: &str = "local_app_capabilities_v3";
+pub use relay::contracts::device_streams::LOCAL_APP_STREAMS_FEATURE as AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -18,6 +19,11 @@ pub enum AgentMessage {
     LocalAppEventEmitted(LocalAppEventEmitted),
     EventAck(EventAck),
     DeviceSubscriptions(DeviceSubscriptions),
+    StreamAttach(StreamAttach),
+    StreamDetach(StreamDetach),
+    StreamOutput(StreamOutput),
+    StreamResync(StreamResync),
+    StreamClosed(StreamClosed),
     Error(ProtocolError),
 }
 
@@ -88,6 +94,9 @@ pub struct LocalAppDefinition {
 }
 
 pub use relay::contracts::device_events::{DeviceSubscriptions, EventAck, LocalAppEventEmitted};
+pub use relay::contracts::device_streams::{
+    StreamAttach, StreamCloseCode, StreamClosed, StreamDetach, StreamOutput, StreamResync,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {

@@ -56,6 +56,7 @@ fn validate_manifest(manifest: &ConnectorManifest) -> Result<()> {
         validate_setup(setup, management)?;
     }
     validate_host_requirements(manifest.host_requirements.as_ref())?;
+    validate_notification_stream(manifest)?;
     validate_managed_tool_dependencies(manifest)?;
     if let Some(ui) = manifest.ui.as_ref() {
         validate_connector_ui(ui)?;
@@ -528,4 +529,33 @@ fn validate_setup(setup: &ConnectorSetup, management: &ConnectorManagement) -> R
         bail!("connector setup.statusOperation must use GET");
     }
     Ok(())
+}
+
+fn validate_notification_stream(manifest: &ConnectorManifest) -> Result<()> {
+    let declared = manifest.host_requirements.as_ref().is_some_and(|requirements| {
+        requirements
+            .capabilities
+            .iter()
+            .any(|capability| capability == CONNECTOR_NOTIFICATION_STREAM_CAPABILITY)
+    });
+    match (manifest.notification_stream.as_ref(), declared) {
+        (None, false) => Ok(()),
+        (Some(_), false) => bail!(
+            "connector notificationStream requires hostRequirements capability {CONNECTOR_NOTIFICATION_STREAM_CAPABILITY}"
+        ),
+        (None, true) => bail!(
+            "connector capability {CONNECTOR_NOTIFICATION_STREAM_CAPABILITY} requires notificationStream"
+        ),
+        (Some(stream), true) => {
+            let path = stream.path.as_str();
+            if !path.starts_with('/')
+                || path.starts_with("//")
+                || path.contains(['?', '#'])
+                || path.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            {
+                bail!("connector notificationStream.path must be an absolute path without query or fragment");
+            }
+            Ok(())
+        }
+    }
 }
