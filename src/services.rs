@@ -38,7 +38,7 @@ use uuid::Uuid;
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 const LOCAL_APP_START_POLICY_ENV: &str = "BAIJIMU_LOCAL_APP_START_POLICY";
-const BAIJIMU_WORKSPACE_ID_HEADER: &str = "x-baijimu-workspace-id";
+pub(crate) const BAIJIMU_WORKSPACE_ID_HEADER: &str = "x-baijimu-workspace-id";
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{
@@ -87,6 +87,7 @@ struct RuntimeService {
 struct RuntimeLocalApp {
     definition: LocalAppDefinition,
     runtime: RuntimeService,
+    stream: Option<LocalAppStreamTarget>,
     events: BTreeSet<String>,
 }
 

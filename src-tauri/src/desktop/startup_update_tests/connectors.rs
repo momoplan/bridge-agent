@@ -314,6 +314,7 @@ fn auto_start_rebuilds_installed_connectors_before_loading_runtime_config() {
                     "additionalProperties": true
                 }),
             }],
+            notification_stream: None,
         });
         save_agent_config(path, &synchronized)?;
         Ok(ConnectorSyncReport {

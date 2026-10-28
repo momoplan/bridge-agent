@@ -187,7 +187,7 @@ impl RegistrationMethod {
     }
 }
 
-fn normalize_registration_base_url(base_url: &str) -> Result<Url> {
+pub(crate) fn normalize_registration_base_url(base_url: &str) -> Result<Url> {
     let base_url = base_url.trim();
     if base_url.is_empty() {
         bail!("transport.baseUrl cannot be empty");
@@ -200,7 +200,7 @@ fn normalize_registration_base_url(base_url: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn join_registration_url(base_url: &Url, path: &str) -> Result<String> {
+pub(crate) fn join_registration_url(base_url: &Url, path: &str) -> Result<String> {
     let path = path.trim();
     if path.is_empty() {
         return Ok(base_url.as_str().trim_end_matches('/').to_string());

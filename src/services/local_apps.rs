@@ -13,6 +13,34 @@ pub fn local_app_runtime_service(app: &LocalAppConfig) -> Result<ServiceConfig> 
         stop_command: app.stop_command.clone(),
         methods: app.methods.clone(),
     };
+    let token = read_local_app_token(app)?;
+    inject_local_app_bearer_token(&mut service, &token);
+    Ok(service)
+}
+
+/// Live output stream of a local app, authorized with the same private credential.
+#[derive(Debug, Clone)]
+pub struct LocalAppStreamTarget {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+}
+
+pub fn local_app_stream_target(app: &LocalAppConfig) -> Result<Option<LocalAppStreamTarget>> {
+    let Some(stream) = app.notification_stream.as_ref() else {
+        return Ok(None);
+    };
+    let mut headers = stream.headers.clone();
+    headers.insert(
+        "Authorization".to_string(),
+        format!("Bearer {}", read_local_app_token(app)?),
+    );
+    Ok(Some(LocalAppStreamTarget {
+        url: stream.url.clone(),
+        headers,
+    }))
+}
+
+fn read_local_app_token(app: &LocalAppConfig) -> Result<String> {
     let token_path = local_app_token_path(app)?;
     let token = fs::read_to_string(&token_path).with_context(|| {
         format!(
@@ -29,8 +57,7 @@ pub fn local_app_runtime_service(app: &LocalAppConfig) -> Result<ServiceConfig> 
             token_path.display()
         );
     }
-    inject_local_app_bearer_token(&mut service, token);
-    Ok(service)
+    Ok(token.to_string())
 }
 
 fn local_app_token_path(app: &LocalAppConfig) -> Result<PathBuf> {

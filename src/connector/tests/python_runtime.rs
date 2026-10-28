@@ -450,6 +450,7 @@ bad-python-connector = "bad_python_connector.app:main"
             transport: None,
             methods: Vec::new(),
             events: Vec::new(),
+            notification_stream: None,
             hooks: BTreeMap::from([(
                 "installAutostart".to_string(),
                 "wechat-bridge-collector install-autostart".to_string(),

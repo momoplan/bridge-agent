@@ -63,6 +63,7 @@
             stop_command: None,
             methods: Vec::new(),
             events: Vec::new(),
+            notification_stream: None,
         };
 
         assert!(local_app_starts_automatically(&app));

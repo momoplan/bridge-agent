@@ -106,6 +106,7 @@ fn inactive_connector_status_is_derived_without_a_health_probe() {
         stop_command: None,
         methods: Vec::new(),
         events: Vec::new(),
+        notification_stream: None,
     };
 
     let status = inactive_local_app_status(app, None);
@@ -181,6 +182,7 @@ async fn local_app_health_probe_uses_the_app_scoped_bearer_token() {
         stop_command: None,
         methods: Vec::new(),
         events: Vec::new(),
+        notification_stream: None,
     };
 
     let client = Client::builder().build().unwrap();
@@ -222,6 +224,7 @@ async fn local_app_health_probe_reports_an_invalid_private_token_without_sending
         stop_command: None,
         methods: Vec::new(),
         events: Vec::new(),
+        notification_stream: None,
     };
 
     let client = Client::builder().build().unwrap();

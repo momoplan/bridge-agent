@@ -69,6 +69,26 @@ fn local_app_from_services(
         )?,
         methods,
         events,
+        notification_stream: manifest
+            .notification_stream
+            .as_ref()
+            .map(|stream| local_app_notification_stream(manifest, stream))
+            .transpose()?,
+    })
+}
+
+fn local_app_notification_stream(
+    manifest: &ConnectorManifest,
+    stream: &ConnectorNotificationStream,
+) -> Result<crate::config::LocalAppNotificationStream> {
+    let RegistrationTransport::Http { base_url, headers } = manifest
+        .transport
+        .as_ref()
+        .context("connector notificationStream requires transport")?;
+    let base_url = crate::config::normalize_registration_base_url(base_url)?;
+    Ok(crate::config::LocalAppNotificationStream {
+        url: crate::config::join_registration_url(&base_url, &stream.path)?,
+        headers: headers.clone(),
     })
 }
 

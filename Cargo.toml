@@ -10,7 +10,7 @@ toml = "0.8"
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
-relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "ca7cfc8c291cf438d046688521c43b5c3ed0733a", default-features = false }
+relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "c7c909772123c91b856c3eac26aefc12a34f1e9c", default-features = false }
 anyhow = "1.0"
 axum = "0.8"
 baijimu-cmodel-core = { version = "=11.0.0" }

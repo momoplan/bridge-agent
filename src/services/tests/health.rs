@@ -128,6 +128,7 @@
                 enabled: true,
                 payload_schema: json!({"type": "object"}),
             }],
+            notification_stream: None,
         });
 
         let registry = ServiceRegistry::from_config_checked(&config, &current_dir)
@@ -164,6 +165,7 @@
                 enabled: true,
                 payload_schema: json!({"type": "object"}),
             }],
+            notification_stream: None,
         });
 
         let registry = ServiceRegistry::from_config_initial(&config, &current_dir).unwrap();

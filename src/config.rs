@@ -153,6 +153,19 @@ pub struct LocalAppConfig {
     pub methods: Vec<MethodConfig>,
     #[serde(default)]
     pub events: Vec<EventConfig>,
+    /// Live output stream declared by the connector manifest's `notificationStream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_stream: Option<LocalAppNotificationStream>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppNotificationStream {
+    /// Absolute SSE URL resolved from the manifest transport and stream path.
+    pub url: String,
+    /// Static transport headers; the private bearer credential is never stored here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

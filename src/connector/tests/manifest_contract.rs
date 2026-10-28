@@ -150,6 +150,49 @@
     }
 
     #[test]
+    fn connector_manifest_pairs_notification_stream_with_host_capability() {
+        let manifest = |stream: Option<Value>, capabilities: Value| {
+            let mut value = json!({
+                "schemaVersion": "3.0.0",
+                "appId": "com.baijimu.connector.stream",
+                "name": "Stream Connector",
+                "version": "1.0.0",
+                "runtime": { "type": "process", "command": "example" },
+                "transport": {
+                    "type": "http",
+                    "baseUrl": "http://127.0.0.1:18112",
+                    "headers": { "x-static": "1" }
+                },
+                "methods": [{ "name": "ping", "description": "Ping.", "path": "/invoke/ping" }],
+                "hostRequirements": { "capabilities": capabilities }
+            });
+            if let Some(stream) = stream {
+                value["notificationStream"] = stream;
+            }
+            serde_json::from_value::<ConnectorManifest>(value).unwrap()
+        };
+        let capability = json!(["connector.notification-stream.v1"]);
+
+        let declared = manifest(Some(json!({ "path": "/streams/notifications" })), capability.clone());
+        validate_manifest(&declared).unwrap();
+        let stream = local_app_notification_stream(&declared, declared.notification_stream.as_ref().unwrap()).unwrap();
+        assert_eq!(stream.url, "http://127.0.0.1:18112/streams/notifications");
+        assert_eq!(stream.headers.get("x-static").map(String::as_str), Some("1"));
+
+        let undeclared = manifest(Some(json!({ "path": "/streams/notifications" })), json!(["connector.setup.v1"]));
+        let error = validate_manifest(&undeclared).unwrap_err().to_string();
+        assert!(error.contains("requires hostRequirements capability"), "{error}");
+
+        let missing = manifest(None, capability.clone());
+        assert!(validate_manifest(&missing).unwrap_err().to_string().contains("requires notificationStream"));
+
+        for path in ["streams", "//other/streams", "/streams?x=1", "/streams#a", "/str eams"] {
+            let invalid = manifest(Some(json!({ "path": path })), capability.clone());
+            assert!(validate_manifest(&invalid).is_err(), "{path}");
+        }
+    }
+
+    #[test]
     fn connector_manifest_validates_managed_tool_dependencies() {
         let manifest = |dependency: Value, capabilities: Value, runtime_env: Value| {
             serde_json::from_value::<ConnectorManifest>(json!({
