@@ -24,4 +24,6 @@ GitHub Secret `BRIDGE_AGENT_MARKET_ACCESS_JSON` 提供验收身份，格式为 `
 
 0.16.0 已通过唯一正式流水线发布 macOS Universal。当前用户随后要求把 Windows 和 Linux 也发布。根据按平台发布合同，新增平台使用新的不可变版本；本次以 0.16.1 PATCH 发布 Windows x64 与 Linux x64，不追加或覆盖 0.16.0 的 macOS 制品。
 
-0.16.1 仅推进客户端版本标识，功能内容继承 0.16.0 的 gRPC、市场 v4 路径修复与真实读取验收；不合入 Shell 分支，不变更固定 CLI 0.149.1 来源。使用 `release-bridge-agent`，平台参数为 `windows,linux`，不使用分发修复模式。正式流水线必须完成真实市场读取、Windows 签名与安装升级恢复检查、Linux 检查，以及 GitHub/OSS/两平台更新元数据验收。macOS 继续使用已发布的 0.16.0；本次平台发布不调整强制升级策略。
+0.16.1 仅推进客户端版本标识，功能内容继承 0.16.0 的 gRPC、市场 v4 路径修复与真实读取验收；不合入 Shell 分支，不变更固定 CLI 0.121.0 来源。使用 `release-bridge-agent`，平台参数为 `windows,linux`，不使用分发修复模式。正式流水线必须完成真实市场读取、Windows 签名与安装升级恢复检查、Linux 检查，以及 GitHub/OSS/两平台更新元数据验收。macOS 继续使用已发布的 0.16.0；本次平台发布不调整强制升级策略。
+
+2026-10-30 发布验收回读准确源码的 `tools/baijimu-cli/VERSION`、`SOURCE.json` 和流水线 `bundled-cli-market-source` 回执，确认 0.16.0 与 0.16.1 内置 CLI 均固定为 0.121.0。此前将维护机器上安装的 0.149.1 误记为客户端内置版本，本次仅纠正文档与验收记录；不修改 CLI 版本、来源、已签名客户端制品或不可变标签。
