@@ -137,15 +137,10 @@ jobs:
         if: runner.os == 'Linux'
         run: .github/scripts/install-linux-release-dependencies.sh
 
-      - name: Run release checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm ci
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            TAURI_ENV_PLATFORM=windows npm run prepare:windows-uninstaller:quality
-          fi
-          npm run quality
+      - name: Run release checks and real market acceptance
+        uses: ./.github/actions/release-quality
+        with:
+          market_access_json: ${{ secrets.BRIDGE_AGENT_MARKET_ACCESS_JSON }}
 
       - name: Verify released Linux CLI upgrade, restart and rollback
         if: runner.os == 'Linux'

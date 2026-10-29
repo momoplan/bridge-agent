@@ -20,13 +20,7 @@ pub(super) async fn resolve(
     let bytes = fs::read(shared_cli_auth_path()).map_err(|_| "无法读取环境授权")?;
     let document = serde_json::from_slice(&bytes).map_err(|_| "环境授权格式无效")?;
     let credential = market_consumer::credential_for(&config, document)?;
-    let mut endpoint = market_consumer::consumer_api_base(&config.platform.base_url)?;
-    endpoint
-        .path_segments_mut()
-        .map_err(|_| "环境地址无效")?
-        .pop_if_empty()
-        .pop()
-        .push("local-apps");
+    let endpoint = environment_api_base(&config.platform.base_url)?;
     let reader = EnvironmentReader::new(
         source.application.environment_key.clone(),
         endpoint.as_str(),
@@ -85,4 +79,56 @@ pub(super) async fn resolve(
         },
         provenance,
     ))
+}
+
+fn environment_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
+    let mut endpoint = market_consumer::consumer_service_api_base(platform_base)?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| "环境地址无效")?
+        .pop_if_empty()
+        .push("local-apps");
+    Ok(endpoint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_frozen_versions_keep_their_own_route_when_market_uses_v4() {
+        for (platform, expected) in [
+            (
+                "https://consumer.example.test/lowcode3",
+                "https://consumer.example.test/partner/v1/local-app-service/api/local-apps",
+            ),
+            (
+                "https://consumer.example.test/env/lowcode3/",
+                "https://consumer.example.test/env/partner/v1/local-app-service/api/local-apps",
+            ),
+            (
+                "https://consumer.example.test/env",
+                "https://consumer.example.test/env/partner/v1/local-app-service/api/local-apps",
+            ),
+        ] {
+            let endpoint = environment_api_base(platform).unwrap();
+            assert_eq!(endpoint.as_str(), expected);
+            let source: SourceVersion = serde_json::from_value(serde_json::json!({
+                "application": {"environmentKey": "consumer", "appId": "test-app"},
+                "version": "1.2.3"
+            }))
+            .unwrap();
+            let reader = EnvironmentReader::new(
+                source.application.environment_key.clone(),
+                endpoint.as_str(),
+                7,
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            assert_eq!(
+                reader.version_url(&source).unwrap().as_str(),
+                format!("{expected}/test-app/versions/1.2.3")
+            );
+        }
+    }
 }

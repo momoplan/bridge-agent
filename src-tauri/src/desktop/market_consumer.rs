@@ -88,7 +88,14 @@ pub(super) async fn market_consumer(config_path: &Path) -> Result<MarketConsumer
     let bytes =
         fs::read(shared_cli_auth_path()).map_err(|_| "无法读取当前工作区授权，请重新授权")?;
     let document = serde_json::from_slice(&bytes).map_err(|_| "当前工作区授权文件无效")?;
-    let credential = credential_for(&config, document)?;
+    market_consumer_with_auth(&config, document).await
+}
+
+pub(super) async fn market_consumer_with_auth(
+    config: &AgentConfig,
+    document: SharedAuthentication,
+) -> Result<MarketConsumer, String> {
+    let credential = credential_for(config, document)?;
     let base = consumer_api_base(&config.platform.base_url)?;
     let reader = MarketReader::connect(
         base.as_str(),
@@ -101,22 +108,25 @@ pub(super) async fn market_consumer(config_path: &Path) -> Result<MarketConsumer
     Ok(MarketConsumer { reader, credential })
 }
 
-// platform.base_url may name the lowcode API; Partner routes share its parent base.
 pub(super) fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
+    let mut url = consumer_service_api_base(platform_base)?;
+    url.path_segments_mut()
+        .map_err(|_| "当前环境地址不能作为路径基址")?
+        .pop_if_empty()
+        .extend(["v4", "local-app-market", ""]);
+    Ok(url)
+}
+
+// Market and private frozen-version routes have independent version boundaries.
+// platform.base_url may name the lowcode API; Partner routes share its parent base.
+pub(super) fn consumer_service_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
     let base = platform_base.trim_end_matches('/');
     let base = base.strip_suffix("/lowcode3").unwrap_or(base);
     let mut url = reqwest::Url::parse(base).map_err(|_| "当前环境地址无效")?;
     url.path_segments_mut()
         .map_err(|_| "当前环境地址不能作为路径基址")?
         .pop_if_empty()
-        .extend([
-            "partner",
-            "v1",
-            "local-app-service",
-            "api",
-            "local-app-market",
-            "",
-        ]);
+        .extend(["partner", "v1", "local-app-service", "api", ""]);
     Ok(url)
 }
 
@@ -280,9 +290,9 @@ mod tests {
     #[test]
     fn consumer_endpoint_uses_partner_base_and_preserves_environment_prefix() {
         for (base, expected) in [
-            ("https://consumer.example.test/lowcode3", "https://consumer.example.test/partner/v1/local-app-service/api/local-app-market/"),
-            ("https://consumer.example.test/env/lowcode3/", "https://consumer.example.test/env/partner/v1/local-app-service/api/local-app-market/"),
-            ("https://consumer.example.test/env", "https://consumer.example.test/env/partner/v1/local-app-service/api/local-app-market/"),
+            ("https://consumer.example.test/lowcode3", "https://consumer.example.test/partner/v1/local-app-service/api/v4/local-app-market/"),
+            ("https://consumer.example.test/env/lowcode3/", "https://consumer.example.test/env/partner/v1/local-app-service/api/v4/local-app-market/"),
+            ("https://consumer.example.test/env", "https://consumer.example.test/env/partner/v1/local-app-service/api/v4/local-app-market/"),
         ] {
             assert_eq!(consumer_api_base(base).unwrap().as_str(), expected);
         }

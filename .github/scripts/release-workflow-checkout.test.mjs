@@ -124,6 +124,20 @@ describe("release workflow repository script availability", () => {
     expect(body).not.toContain(".latestVersion.repo ==");
   });
 
+  test("release signing requires real desktop market acceptance independently of CLI provenance", () => {
+    const gate = jobBody("quality-gate", "windows-quality-gate");
+    const release = jobBody("release", "mirror-domestic-release");
+    const action = readFileSync(".github/actions/release-quality/action.yml", "utf8");
+    expect(release).toContain("quality-gate");
+    expect(gate).toContain("uses: ./.github/actions/release-quality");
+    expect(gate).toContain("market_access_json: ${{ secrets.BRIDGE_AGENT_MARKET_ACCESS_JSON }}");
+    expect(action).toContain("npm run quality");
+    expect(action).toContain("node .github/scripts/run-market-acceptance.mjs");
+    expect(action).toContain("if-no-files-found: error");
+    expect(action).not.toContain("continue-on-error");
+    expect(action).not.toContain("tools/baijimu-cli");
+  });
+
   test("verify-update-service checks out the dispatched workflow commit", () => {
     const body = jobBody("verify-update-service");
     const checkoutIndex = body.indexOf("uses: actions/checkout@v4");

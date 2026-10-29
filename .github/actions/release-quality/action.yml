@@ -1,0 +1,29 @@
+name: Release quality and real market acceptance
+description: Run desktop quality checks and authenticate real market reads before signing.
+inputs:
+  market_access_json:
+    description: Authorized consumer environment, workspace and PAT for read-only acceptance.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Run release checks
+      shell: bash
+      run: |
+        set -euo pipefail
+        npm ci
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          TAURI_ENV_PLATFORM=windows npm run prepare:windows-uninstaller:quality
+        fi
+        npm run quality
+    - name: Accept real desktop market list and exact version reads
+      shell: bash
+      env:
+        BRIDGE_AGENT_MARKET_ACCESS_JSON: ${{ inputs.market_access_json }}
+      run: node .github/scripts/run-market-acceptance.mjs
+    - name: Preserve real market acceptance receipt
+      uses: actions/upload-artifact@v4
+      with:
+        name: market-read-acceptance
+        path: market-read-acceptance.json
+        if-no-files-found: error
