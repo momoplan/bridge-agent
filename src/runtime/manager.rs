@@ -30,11 +30,7 @@ impl AgentRuntimeManager {
         let log_file_path = file_log
             .as_ref()
             .map(|sink| sink.path().display().to_string());
-        let ws_url = build_agent_url(
-            &config.relay.url,
-            &config.relay.agent_id,
-            &config.relay.token,
-        )?;
+        let relay_endpoint = relay_endpoint(&config.relay.url)?;
         let snapshot = RuntimeSnapshot {
             revision: 0,
             status: RuntimeStatus::Starting,
@@ -80,7 +76,7 @@ impl AgentRuntimeManager {
             config_path,
             log_limit,
             runtime_lock,
-            ws_url,
+            relay_endpoint,
             registry,
         ) {
             Ok(handles) => handles,
@@ -341,7 +337,7 @@ fn spawn_runtime_task(
     config_path: &Path,
     log_limit: usize,
     runtime_lock: RuntimeInstanceLock,
-    ws_url: Url,
+    relay_endpoint: Url,
     registry: Arc<RwLock<ServiceRegistry>>,
 ) -> Result<RuntimeTaskHandles> {
     let event_queue = QueueIdentity::from_authorized_config(&config)
@@ -366,7 +362,7 @@ fn spawn_runtime_task(
         log_limit,
         config,
         config_path: config_path.display().to_string(),
-        ws_url,
+        relay_endpoint,
         registry,
         event_queue: event_queue.clone(),
     };

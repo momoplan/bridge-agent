@@ -42,9 +42,9 @@ async fn incomplete_identity_keeps_control_available_and_rejects_event_handoff()
 async fn authorization_restart_opens_scoped_queue_and_connects_relay() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("agent-config.json");
-    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut relay = FakeRelay::start();
     let mut config = AgentConfig::example();
-    config.relay.url = format!("ws://{}/ws/agent", relay.local_addr().unwrap());
+    config.relay.url = relay.url.clone();
     config.runtime.event_server_bind = "127.0.0.1:0".into();
     config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
     config.services.clear();
@@ -60,10 +60,8 @@ async fn authorization_restart_opens_scoped_queue_and_connects_relay() {
     config.relay.token = "authorized-test-token".into();
     crate::config::save_config(&path, &config).unwrap();
     manager.start_from_path(&path).await.unwrap();
-    let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(3), relay.accept()).await.unwrap().unwrap();
-    let mut socket = accept_async(stream).await.unwrap();
-    let message = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next()).await.unwrap().unwrap().unwrap();
-    assert!(matches!(message, Message::Text(_)));
+    let mut session = relay.accept().await;
+    assert_eq!(session.receive().await["type"], "capabilities");
     assert!(crate::event_delivery::database_path(&path).unwrap().exists());
     manager.stop().await.unwrap();
 }

@@ -33,8 +33,7 @@
 
     #[tokio::test]
     async fn runtime_connects_without_waiting_for_local_service_readiness() {
-        let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = relay_listener.local_addr().unwrap();
+        let mut relay = FakeRelay::start();
         let health_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let health_addr = health_listener.local_addr().unwrap();
         let (health_started_tx, health_started_rx) = oneshot::channel();
@@ -54,7 +53,7 @@
         config.platform.environment_key = Some("test".into());
         config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
-        config.relay.url = format!("ws://{relay_addr}/ws/agent");
+        config.relay.url = relay.url.clone();
         config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
         config.runtime.event_server_enabled = false;
@@ -92,20 +91,8 @@
         );
         assert_ne!(manager.snapshot().await.status, RuntimeStatus::Stopped);
 
-        let (relay_socket, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            relay_listener.accept(),
-        )
-        .await
-        .expect("relay connection waited for local service readiness")
-        .expect("relay listener failed");
-        let _relay_stream = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            accept_async(relay_socket),
-        )
-        .await
-        .expect("relay WebSocket handshake waited for local service readiness")
-        .expect("relay WebSocket handshake failed");
+        // `accept` fails if the stream waited for local service readiness.
+        let _relay_session = relay.accept().await;
         tokio::time::timeout(std::time::Duration::from_secs(10), health_started_rx)
             .await
             .expect("local service health request was never started")

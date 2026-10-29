@@ -27,7 +27,7 @@ impl<'a> RelayConnection<'a> {
             } else {
                 AgentMessage::InvokeResult(result)
             };
-            return write_json(&mut self.write, &message).await;
+            return self.send(message).await;
         }
         let future = match request {
             AgentMessage::InvokeRequest(r) => self.runner.handle_invoke_request(r).boxed(),

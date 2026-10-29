@@ -1,10 +1,15 @@
     #[test]
-    fn build_url_injects_token() {
-        let url = build_agent_url("wss://relay.baijimu.com/ws/agent", "devbox", "secret").unwrap();
-        assert_eq!(
-            url.as_str(),
-            "wss://relay.baijimu.com/ws/agent/devbox?token=secret"
-        );
+    fn relay_endpoint_is_the_origin_of_the_configured_relay_url() {
+        for (configured, endpoint) in [
+            ("wss://relay.baijimu.com/ws/agent", "https://relay.baijimu.com/"),
+            ("ws://127.0.0.1:8081/ws/agent?x=1#y", "http://127.0.0.1:8081/"),
+            ("https://relay.example.test:8443/", "https://relay.example.test:8443/"),
+        ] {
+            assert_eq!(relay_endpoint(configured).unwrap().as_str(), endpoint);
+        }
+        for invalid in ["ftp://relay/ws", "wss://user:pass@relay/ws", "not a url"] {
+            assert!(relay_endpoint(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[tokio::test]
@@ -55,48 +60,38 @@
         let config_path = dir.path().join("agent-config.json");
         let occupied_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let event_addr = occupied_listener.local_addr().unwrap();
-        let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = relay_listener.local_addr().unwrap();
-
+        let mut relay = FakeRelay::start();
+        let relay_url = relay.url.clone();
         let relay_task = tokio::spawn(async move {
-            let (stream, _) = relay_listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            let capabilities =
-                tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
-                    .await
-                    .expect("relay did not receive capabilities")
-                    .expect("relay websocket closed before capabilities")
-                    .unwrap();
-            let Message::Text(capabilities) = capabilities else {
-                panic!("expected text capabilities message");
-            };
-            let capabilities: Value = serde_json::from_str(capabilities.as_str()).unwrap();
-            assert_eq!(capabilities["type"], "capabilities");
-
-            socket
-                .send(Message::Text(
-                    json!({
-                        "type": "registered_ack",
-                        "agent_id": "dev_event_server_recovery",
-                        "workspace_id": 1,
-                        "connection_id": "connection-1",
-                        "registered_at_epoch_seconds": 1,
-                        "heartbeat_timeout_secs": 75
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-
+            let mut session = relay.accept().await;
+            assert_eq!(
+                session.metadata.get("authorization").unwrap(),
+                "Bearer test-authorized-device"
+            );
+            assert_eq!(
+                session.metadata.get("x-baijimu-device-id").unwrap(),
+                "dev_event_server_recovery"
+            );
+            assert_eq!(session.receive().await["type"], "capabilities");
+            session
+                .send(json!({
+                    "type": "registered_ack",
+                    "agent_id": "dev_event_server_recovery",
+                    "workspace_id": 1,
+                    "connection_id": "connection-1",
+                    "registered_at_epoch_seconds": 1,
+                    "heartbeat_timeout_secs": 75
+                }))
+                .await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop((session, relay));
         });
 
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
         config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
-        config.relay.url = format!("ws://{relay_addr}/ws/agent");
+        config.relay.url = relay_url;
         config.relay.agent_id = "dev_event_server_recovery".to_string();
         config.relay.reconnect_secs = 1;
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
@@ -183,17 +178,33 @@
     }
 
     #[test]
-    fn relay_decoder_ignores_unknown_message_type() {
-        let message = r#"{"type":"server_notice","message":"hello"}"#;
+    fn relay_decoder_ignores_unknown_frame_kind_and_reads_heartbeats() {
+        assert!(matches!(
+            decode_relay_frame(v1::RelayFrame { frame: None }).unwrap(),
+            RelayInbound::Unsupported
+        ));
+        let heartbeat = v1::RelayFrame {
+            frame: Some(RelayFrameKind::Heartbeat(v1::Heartbeat {})),
+        };
+        assert!(matches!(
+            decode_relay_frame(heartbeat).unwrap(),
+            RelayInbound::Heartbeat
+        ));
+    }
 
-        assert!(decode_relay_message(message).unwrap().is_none());
+    fn decoded(message: Value) -> AgentMessage {
+        let message: AgentMessage = serde_json::from_value(message).unwrap();
+        match decode_relay_frame(relay_frame(message)).unwrap() {
+            RelayInbound::Message(message) => message,
+            _ => panic!("expected a relay message"),
+        }
     }
 
     #[test]
     fn relay_decoder_accepts_registered_ack() {
-        let message = r#"{"type":"registered_ack","agent_id":"dev_1","workspace_id":1327,"connection_id":"conn_1","registered_at_epoch_seconds":1783680377,"heartbeat_timeout_secs":75}"#;
-
-        match decode_relay_message(message).unwrap().unwrap() {
+        match decoded(json!({"type":"registered_ack","agent_id":"dev_1","workspace_id":1327,
+            "connection_id":"conn_1","registered_at_epoch_seconds":1783680377,"heartbeat_timeout_secs":75}))
+        {
             AgentMessage::RegisteredAck(ack) => {
                 assert_eq!(ack.agent_id, "dev_1");
                 assert_eq!(ack.workspace_id, 1327);
@@ -205,9 +216,9 @@
 
     #[test]
     fn relay_decoder_accepts_device_event_ack() {
-        let message = r#"{"type":"event_ack","eventId":"evt-1","appId":"camera","receipts":[{"consumerId":"worker","receipt":{"status":"processed","duplicate":true}}]}"#;
-
-        match decode_relay_message(message).unwrap().unwrap() {
+        match decoded(json!({"type":"event_ack","eventId":"evt-1","appId":"camera",
+            "receipts":[{"consumerId":"worker","receipt":{"status":"processed","duplicate":true}}]}))
+        {
             AgentMessage::EventAck(ack) => {
                 assert_eq!(ack.event_id, "evt-1");
                 assert_eq!(ack.app_id, "camera");
@@ -269,21 +280,63 @@
 
     #[test]
     fn relay_decoder_accepts_local_app_invoke_request() {
-        let message = r#"{"type":"local_app_invoke_request","requestId":"req-1","workspaceId":642,"appId":"camera","method":"capture","arguments":{}}"#;
-
-        match decode_relay_message(message).unwrap().unwrap() {
+        match decoded(json!({"type":"local_app_invoke_request","requestId":"req-1",
+            "workspaceId":642,"appId":"camera","method":"capture","arguments":{}}))
+        {
             AgentMessage::LocalAppInvokeRequest(request) => {
                 assert_eq!(request.app_id, "camera");
                 assert_eq!(request.method, "capture");
                 assert_eq!(request.workspace_id, Some(642));
+                assert_eq!(request.arguments, json!({}));
             }
             other => panic!("expected local_app_invoke_request, got {other:?}"),
         }
     }
 
     #[test]
-    fn relay_decoder_rejects_invalid_known_message() {
-        let message = r#"{"type":"invoke_request","request_id":"req_1"}"#;
+    fn relay_decoder_treats_omitted_arguments_as_null_and_rejects_invalid_json() {
+        let mut request = v1::InvokeRequest {
+            request_id: "req_1".into(),
+            service: "svc".into(),
+            method: "call".into(),
+            arguments_json: Vec::new(),
+            timeout_secs: None,
+        };
+        let frame = |request: v1::InvokeRequest| v1::RelayFrame {
+            frame: Some(RelayFrameKind::InvokeRequest(request)),
+        };
+        match decode_relay_frame(frame(request.clone())).unwrap() {
+            RelayInbound::Message(AgentMessage::InvokeRequest(decoded)) => {
+                assert_eq!(decoded.arguments, Value::Null)
+            }
+            _ => panic!("expected invoke_request"),
+        }
+        request.arguments_json = b"{not json".to_vec();
+        assert!(decode_relay_frame(frame(request)).is_err());
+    }
 
-        assert!(decode_relay_message(message).is_err());
+    #[test]
+    fn device_frames_round_trip_through_relay_decoding() {
+        let messages = [
+            json!({"type":"capabilities","agent_id":"dev","protocol_version":"4.0.0",
+                "protocol_features":["registered_ack"],
+                "services":[{"name":"svc","description":"d","methods":[{"name":"m",
+                    "description":"","input_schema":{"type":"object"},"responseMode":"plain"}]}],
+                "local_apps":[{"appId":"app","name":"App","version":"1.0.0","description":"",
+                    "methods":[],"events":[{"name":"changed","description":"","payload_schema":{}}]}]}),
+            json!({"type":"invoke_result","request_id":"r","success":false,"data":null,
+                "error":{"public_details":{"field":"x"},"code":"BAD","message":"m"},"duration_ms":3}),
+            json!({"type":"local_app_invoke_result","request_id":"r","success":true,
+                "data":{"ok":true},"error":null,"duration_ms":1}),
+            json!({"type":"error","request_id":null,"message":"bad"}),
+        ];
+        for message in messages {
+            let typed: AgentMessage = serde_json::from_value(message.clone()).unwrap();
+            let frame = encode_device_frame(typed).unwrap().frame.unwrap();
+            let decoded = serde_json::to_value(device_message(frame).unwrap()).unwrap();
+            assert_eq!(decoded, message);
+        }
+        let relay_only: AgentMessage =
+            serde_json::from_value(json!({"type":"stream_detach","attachId":"a"})).unwrap();
+        assert!(encode_device_frame(relay_only).is_err());
     }
