@@ -41,4 +41,6 @@
 
 ## 0.14.1 发布校验调整（2026-10-19）
 
-客户端发布只读取版本化 `tools/baijimu-cli/SOURCE.json`，与同目录 VERSION、SHA256SUMS 一起审查，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。发布不依赖环境在线或工作区 PAT。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用。本次消费环境已读取 CLI 0.121.0 的同来源市场记录与三平台制品；Linux 升级验收由官方流水线单独执行。准确范围见 [本次 ADR](adr/2026-10-19-linux-cli-updates.md)。
+捆绑 CLI 校验读取版本化 `tools/baijimu-cli/SOURCE.json`，与同目录 VERSION、SHA256SUMS 一起审查，离线校验固定 appId、版本和来源字段并生成 INSTALL_SOURCE.json；各平台继续按固定 SHA-256 校验 CLI 制品。它不要求 CLI 新版本上架或市场审核。`verify-consumer-market.mjs` 保留为独立联调工具，不由发布流水线调用；Linux 升级验收由官方流水线单独执行。准确范围见 [本次 ADR](adr/2026-10-19-linux-cli-updates.md)。
+
+2026-10-29 起，客户端发布另行强制执行真实市场读取验收：使用授权的消费环境和工作区身份运行桌面自身的列表、展示和精确版本读取，缺少凭据或验收失败均阻止发布。该验收不要求市场包含某个捆绑 CLI 版本；配置与回执见 [独立市场读取发布 ADR](adr/2026-10-29-independent-market-read-release.md)。

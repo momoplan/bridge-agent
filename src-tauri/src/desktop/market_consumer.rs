@@ -88,7 +88,14 @@ pub(super) async fn market_consumer(config_path: &Path) -> Result<MarketConsumer
     let bytes =
         fs::read(shared_cli_auth_path()).map_err(|_| "无法读取当前工作区授权，请重新授权")?;
     let document = serde_json::from_slice(&bytes).map_err(|_| "当前工作区授权文件无效")?;
-    let credential = credential_for(&config, document)?;
+    market_consumer_with_auth(&config, document).await
+}
+
+pub(super) async fn market_consumer_with_auth(
+    config: &AgentConfig,
+    document: SharedAuthentication,
+) -> Result<MarketConsumer, String> {
+    let credential = credential_for(config, document)?;
     let base = consumer_api_base(&config.platform.base_url)?;
     let reader = MarketReader::connect(
         base.as_str(),
@@ -114,6 +121,7 @@ pub(super) fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, Str
             "v1",
             "local-app-service",
             "api",
+            "v4",
             "local-app-market",
             "",
         ]);
@@ -280,9 +288,9 @@ mod tests {
     #[test]
     fn consumer_endpoint_uses_partner_base_and_preserves_environment_prefix() {
         for (base, expected) in [
-            ("https://consumer.example.test/lowcode3", "https://consumer.example.test/partner/v1/local-app-service/api/local-app-market/"),
-            ("https://consumer.example.test/env/lowcode3/", "https://consumer.example.test/env/partner/v1/local-app-service/api/local-app-market/"),
-            ("https://consumer.example.test/env", "https://consumer.example.test/env/partner/v1/local-app-service/api/local-app-market/"),
+            ("https://consumer.example.test/lowcode3", "https://consumer.example.test/partner/v1/local-app-service/api/v4/local-app-market/"),
+            ("https://consumer.example.test/env/lowcode3/", "https://consumer.example.test/env/partner/v1/local-app-service/api/v4/local-app-market/"),
+            ("https://consumer.example.test/env", "https://consumer.example.test/env/partner/v1/local-app-service/api/v4/local-app-market/"),
         ] {
             assert_eq!(consumer_api_base(base).unwrap().as_str(), expected);
         }
