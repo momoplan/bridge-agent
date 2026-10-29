@@ -108,23 +108,25 @@ pub(super) async fn market_consumer_with_auth(
     Ok(MarketConsumer { reader, credential })
 }
 
-// platform.base_url may name the lowcode API; Partner routes share its parent base.
 pub(super) fn consumer_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
+    let mut url = consumer_service_api_base(platform_base)?;
+    url.path_segments_mut()
+        .map_err(|_| "当前环境地址不能作为路径基址")?
+        .pop_if_empty()
+        .extend(["v4", "local-app-market", ""]);
+    Ok(url)
+}
+
+// Market and private frozen-version routes have independent version boundaries.
+// platform.base_url may name the lowcode API; Partner routes share its parent base.
+pub(super) fn consumer_service_api_base(platform_base: &str) -> Result<reqwest::Url, String> {
     let base = platform_base.trim_end_matches('/');
     let base = base.strip_suffix("/lowcode3").unwrap_or(base);
     let mut url = reqwest::Url::parse(base).map_err(|_| "当前环境地址无效")?;
     url.path_segments_mut()
         .map_err(|_| "当前环境地址不能作为路径基址")?
         .pop_if_empty()
-        .extend([
-            "partner",
-            "v1",
-            "local-app-service",
-            "api",
-            "v4",
-            "local-app-market",
-            "",
-        ]);
+        .extend(["partner", "v1", "local-app-service", "api", ""]);
     Ok(url)
 }
 
