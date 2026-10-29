@@ -19,3 +19,9 @@ GitHub Secret `BRIDGE_AGENT_MARKET_ACCESS_JSON` 提供验收身份，格式为 `
 当前用户另行明确允许将本机已有、限定工作区 642 的 PAT 及该环境配置保存到仓库的加密 Secret `BRIDGE_AGENT_MARKET_ACCESS_JSON`，仅注入只读验收步骤。已明确告知该 PAT 本身具有工作区 API 权限，并非只读令牌。凭据值不进入源码、普通日志、回执或制品。本段记录本次准确授权范围，不作为运行时环境或工作区默认配置。
 
 随后核实 gRPC 公网入口实际返回 HTTP/2 404，OpenResty 主线尚无 `grpc_pass` 路由。当前用户明确选择保留 0.16.0，等待 gRPC 入口完成后发布；不改发 0.15.1，不将入口或基础设施修改并入市场修复。市场修复继续独立合入，发布只等待 0.16.0 确实依赖的入口条件，与 Shell 和 CLI 审核无关。
+
+## Windows 与 Linux 后续交付
+
+0.16.0 已通过唯一正式流水线发布 macOS Universal。当前用户随后要求把 Windows 和 Linux 也发布。根据按平台发布合同，新增平台使用新的不可变版本；本次以 0.16.1 PATCH 发布 Windows x64 与 Linux x64，不追加或覆盖 0.16.0 的 macOS 制品。
+
+0.16.1 仅推进客户端版本标识，功能内容继承 0.16.0 的 gRPC、市场 v4 路径修复与真实读取验收；不合入 Shell 分支，不变更固定 CLI 0.149.1 来源。使用 `release-bridge-agent`，平台参数为 `windows,linux`，不使用分发修复模式。正式流水线必须完成真实市场读取、Windows 签名与安装升级恢复检查、Linux 检查，以及 GitHub/OSS/两平台更新元数据验收。macOS 继续使用已发布的 0.16.0；本次平台发布不调整强制升级策略。
