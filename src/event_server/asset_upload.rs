@@ -111,18 +111,10 @@ async fn upload_local_asset_bytes(
     slot: &PrepareAssetUploadResponse,
     asset: &ValidatedLocalAsset,
 ) -> Result<(), asset_protocol::AssetUploadError> {
-    use asset_protocol::AssetUploadError;
-    let mut upload = state.http_client.put(&slot.upload_url)
-        .timeout(Duration::from_secs(state.upload_timeout_secs)).body(asset.bytes.clone());
-    for (name, value) in &slot.headers { upload = upload.header(name, value); }
-    if !slot.headers.keys().any(|name| name.eq_ignore_ascii_case("content-type")) {
-        upload = upload.header(reqwest::header::CONTENT_TYPE, &asset.content_type);
-    }
-    let response = upload.send().await.map_err(|error| AssetUploadError::transport(error, "transfer"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AssetUploadError::new(StatusCode::BAD_GATEWAY, "OBJECT_STORAGE_UPLOAD_FAILED", format!("对象存储拒绝截图上传（HTTP {}）", status.as_u16()), status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS, "transfer"));
-    }
+    crate::file_transfer::put_source(&state.http_client, &slot.upload_url, &slot.headers,
+        crate::file_transfer::UploadSource::Bytes(asset.bytes.clone()), asset.size_bytes,
+        Arc::new(std::sync::atomic::AtomicU64::new(0))).await
+        .map_err(|error| asset_protocol::AssetUploadError::new(StatusCode::BAD_GATEWAY, &error.code, error.message, false, "transfer"))?;
     Ok(())
 }
 

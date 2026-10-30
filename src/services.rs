@@ -1,10 +1,10 @@
 use crate::cmodel_response::normalize_cmodel_http_response;
+#[cfg(any(target_os = "macos", windows))]
+use crate::config::ComputerUseAction;
 use crate::config::{
     AgentConfig, ComputerUseBinding, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
     ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
 };
-#[cfg(any(target_os = "macos", windows))]
-use crate::config::{ComputerUseAction, UploadConfig};
 use crate::process_environment::enrich_user_command_environment;
 use crate::protocol::{
     EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode, ServiceDefinition,
@@ -92,6 +92,7 @@ struct RuntimeLocalApp {
 }
 
 enum RuntimeMethod {
+    File(crate::file_transfer::FileMethod),
     Shell(ShellMethod),
     Http(HttpMethod),
     Computer(ComputerMethod),
@@ -122,12 +123,7 @@ struct HttpMethod {
 struct ComputerMethod {
     action: ComputerUseAction,
     display_id: Option<u32>,
-    upload: UploadConfig,
-    upload_prepare_url: Option<String>,
-    agent_id: String,
-    relay_token: String,
-    workspace_id: Option<u64>,
-    client: Client,
+    files: crate::file_transfer::FileClient,
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -377,37 +373,6 @@ struct ComputerDragArgs {
     keys: Vec<String>,
 }
 
-#[cfg(any(test, target_os = "macos", windows))]
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PrepareUploadRequest {
-    agent_id: String,
-    content_type: String,
-    file_name: String,
-    size_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<u64>,
-    purpose: String,
-}
-
-#[cfg(any(target_os = "macos", windows))]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrepareUploadResponse {
-    file_id: String,
-    upload_url: String,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
-    #[serde(default)]
-    object_key: Option<String>,
-    #[serde(default)]
-    download_url: Option<String>,
-    #[serde(default)]
-    expires_at: Option<String>,
-}
-
 include!("services/registry.rs");
 include!("services/local_apps.rs");
 include!("services/runtime_health.rs");
@@ -431,8 +396,7 @@ mod cmodel_tests;
 mod tests {
     use super::{
         bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env,
-        shell_exec_path, PrepareUploadRequest, ServiceRegistry, ShellCommand, ShellExecArgs,
-        LOCAL_APP_START_POLICY_ENV,
+        shell_exec_path, ServiceRegistry, ShellCommand, ShellExecArgs, LOCAL_APP_START_POLICY_ENV,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,

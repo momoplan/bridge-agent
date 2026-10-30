@@ -32,7 +32,7 @@ export interface UiComputerUseBinding {
   display_id: string;
 }
 
-export type UiMethodBinding = UiShellBinding | UiHttpBinding | UiComputerUseBinding;
+export type UiMethodBinding = UiShellBinding | UiHttpBinding | UiComputerUseBinding | { type: "file_transfer" };
 
 export interface UiMethodConfig {
   name: string;

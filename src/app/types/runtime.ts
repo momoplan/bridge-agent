@@ -162,7 +162,7 @@ export interface ComputerUseBinding {
   display_id?: number | null;
 }
 
-export type MethodBinding = ShellBinding | HttpBinding | ComputerUseBinding;
+export type MethodBinding = ShellBinding | HttpBinding | ComputerUseBinding | { type: "file_transfer" };
 
 export interface MethodConfig {
   name: string;

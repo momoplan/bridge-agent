@@ -219,6 +219,7 @@ impl RuntimeRunner {
             agent_id: self.config.relay.agent_id.clone(),
             protocol_version: AGENT_PROTOCOL_VERSION.to_string(),
             protocol_features: vec![
+                crate::file_transfer::PROTOCOL_FEATURE.to_string(),
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
@@ -238,6 +239,7 @@ impl RuntimeRunner {
             agent_id: self.config.relay.agent_id.clone(),
             protocol_version: AGENT_PROTOCOL_VERSION.to_string(),
             protocol_features: vec![
+                crate::file_transfer::PROTOCOL_FEATURE.to_string(),
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),

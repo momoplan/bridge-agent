@@ -31,7 +31,7 @@ import { loadSynchronizedLocalAppCatalog } from "./local-app-catalog";
 
 
 
-import { toUiConfig, isComputerService, isShellService, reindexRecordAfterDelete } from "./app/config-conversion";
+import { toUiConfig, isComputerService, isShellService, isFileService, reindexRecordAfterDelete } from "./app/config-conversion";
 import { serviceSignature, calculateAppUpdateProgressPercent, readError, readRuntimeConflict } from "./app/formatters";
 
 
@@ -232,6 +232,10 @@ export function useAppController() {
           kind: "built_in",
           serviceIndexes: [serviceIndex]
         });
+        return;
+      }
+      if (isFileService(service)) {
+        apps.push({ id: "built-in:files", name: "文件传输", description: "上传、下载本机文件，查看进度或取消传输。", kind: "built_in", serviceIndexes: [serviceIndex] });
         return;
       }
       if (isShellService(service)) {

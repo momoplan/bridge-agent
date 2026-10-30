@@ -1,7 +1,7 @@
 import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { PrivateSourceSyncPanel } from "./private-source-sync-panel";
 import { embeddedLocalAppView } from "../local-app-runtime";
-import { isComputerService, isShellService } from "./config-conversion";
+import { isComputerService, isShellService, isFileService } from "./config-conversion";
 import { LocalAppEmbeddedUi } from "./embedded-local-app";
 import { formatTime } from "./formatters";
 import { ApplicationIcon, handleTabListKeyDown, InfoRow } from "./ui-primitives";
@@ -56,7 +56,7 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
       .find((service): service is UiServiceConfig => Boolean(service && isComputerService(service)));
     const hasShellCapability = app.serviceIndexes.some((serviceIndex) => {
       const service = config.services[serviceIndex];
-      return service ? isShellService(service) : false;
+      return service ? isShellService(service) || isFileService(service) : false;
     });
     const embeddedUi = app.connector?.ui?.type === "embedded" ? app.connector.ui : null;
     const isManagedTool = app.kind === "managed_tool" && Boolean(app.managedTool);

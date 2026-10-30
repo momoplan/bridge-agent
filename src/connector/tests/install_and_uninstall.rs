@@ -122,7 +122,7 @@
                 .iter()
                 .map(|service| service.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["computer", "shell"]
+            vec!["computer", "shell", "files"]
         );
 
         let record = load_install_record("com.baijimu.connector.v2-test").unwrap();

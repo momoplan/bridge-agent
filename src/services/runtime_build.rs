@@ -74,6 +74,9 @@ fn build_runtime_method(
     shell_executions: ShellExecutionStore,
 ) -> Result<RuntimeMethod> {
     match &method.binding {
+        MethodBinding::FileTransfer => Ok(RuntimeMethod::File(
+            crate::file_transfer::FileMethod::new(config, &method.name)?,
+        )),
         MethodBinding::ShellCommand(binding) => Ok(RuntimeMethod::Shell(build_shell_method(
             service,
             method,
@@ -164,12 +167,7 @@ fn build_computer_method(
     Ok(ComputerMethod {
         action: binding.action.clone(),
         display_id: binding.display_id,
-        upload: config.upload.clone(),
-        upload_prepare_url: config.upload.prepare_url(&config.relay),
-        agent_id: config.relay.agent_id.clone(),
-        relay_token: config.relay.token.clone(),
-        workspace_id: config.platform.workspace_id,
-        client: Client::new(),
+        files: crate::file_transfer::FileClient::from_config(config)?,
     })
 }
 

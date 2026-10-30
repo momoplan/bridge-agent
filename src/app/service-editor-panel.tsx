@@ -203,7 +203,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                         <Field label="绑定类型">
                           <select
                             value={method.binding.type}
-                            disabled={method.binding.type === "computer_use"}
+                            disabled={method.binding.type === "computer_use" || method.binding.type === "file_transfer"}
                             onChange={(event) =>
                               updateMethod(serviceIndex, methodIndex, (current) => ({
                                 ...current,
@@ -221,6 +221,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                             {method.binding.type === "computer_use" ? (
                               <option value="computer_use">computer_use（内置）</option>
                             ) : null}
+                            {method.binding.type === "file_transfer" ? <option value="file_transfer">文件传输（内置）</option> : null}
                             <option value="shell_command">shell_command</option>
                             <option value="http">http</option>
                           </select>
@@ -252,7 +253,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                           </button>
                         </div>
                       </Field>
-                    ) : (
+                    ) : method.binding.type === "file_transfer" ? <p>上传、下载与任务控制由内置文件传输服务执行。</p> : (
                       <>
                         <Field label="本地 URL" wide>
                           <input
@@ -390,7 +391,7 @@ export function ServiceEditorPanel(props: ServiceEditorPanelProps) {
                           />
                         </Field>
                       </div>
-                    ) : (
+                    ) : method.binding.type === "file_transfer" ? <p>传输在后台执行，通过 queryTransfer 查询进度。</p> : (
                       <div className="form-grid">
                         <Field label="超时">
                           <input

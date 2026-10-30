@@ -6,7 +6,7 @@
             .iter()
             .map(|service| service.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(service_names, vec!["computer", "shell"]);
+        assert_eq!(service_names, vec!["computer", "shell", "files"]);
     }
     #[test]
     fn migrate_config_removes_legacy_disabled_local_java_example() {

@@ -1,0 +1,207 @@
+{
+  "documentType": "implementation-approval-proposal",
+  "approvalState": "confirmed",
+  "title": "Bridge Agent 内置文件传输应用",
+  "scope": {
+    "ui": "与桌面控制、Shell 并列的文件传输内置应用，随宿主发布；不是市场应用，没有独立 appId 或独立发行版本",
+    "serviceName": "files",
+    "dataPlane": "设备与文件 Owner 签发的 OSS URL 直接传输字节；Relay 仅传控制、进度和文件引用",
+    "fileOwnership": "当前设备授权对应用户的个人文件空间，由 workspace-file-service 校验归属；不接受调用者传入 userId 选择文件所有者",
+    "sharedImplementation": "通用文件、截图、Connector 图片共用流式传输实现；截图和 Connector 保留各自来源授权、类型、私有路径限制与现有成功返回格式",
+    "discovery": "在现有设备服务清单中公布 files 与方法参数说明，明确文件字节不经 Shell stdout 或 Relay"
+  },
+  "externalContractChange": {
+    "before": "无内置 files 服务；Shell 只有 exec、startExecution、queryExecution、cancelExecution",
+    "after": "新增以下四个方法，不删除或重命名既有服务方法",
+    "owner": "Bridge Agent 是设备方法与任务执行 Owner；workspace-file-service 是个人文件、OSS 票据与文件归属 Owner；Relay 是设备授权转发与控制通道",
+    "consumers": [
+      "设备调用方与 Agent",
+      "通过设备方法调用的 Bundle、平台应用、Hosted Service"
+    ],
+    "methods": {
+      "files.upload": {
+        "input": {
+          "localPath": "必填，本地文件绝对路径",
+          "fileName": "可选，默认本地文件名",
+          "mimeType": "可选，默认 application/octet-stream"
+        },
+        "output": "TransferSnapshot；启动后立即返回，不等待整个文件上传"
+      },
+      "files.download": {
+        "input": {
+          "fileId": "必填，当前授权用户个人文件的 ID",
+          "localPath": "必填，目标本地绝对路径",
+          "overwrite": "可选，默认 false",
+          "expectedSha256": "可选，64 位十六进制 SHA-256"
+        },
+        "output": "TransferSnapshot；启动后立即返回"
+      },
+      "files.queryTransfer": {
+        "input": {
+          "transferId": "必填，当前设备任务 ID"
+        },
+        "output": "TransferSnapshot"
+      },
+      "files.cancelTransfer": {
+        "input": {
+          "transferId": "必填，当前设备任务 ID"
+        },
+        "output": "TransferSnapshot；请求中止未完成任务，已完成任务返回实际终态"
+      }
+    },
+    "TransferSnapshot": {
+      "required": [
+        "transferId",
+        "direction",
+        "status",
+        "bytesTransferred"
+      ],
+      "fields": {
+        "transferId": "字符串，设备内唯一任务 ID",
+        "direction": [
+          "UPLOAD",
+          "DOWNLOAD"
+        ],
+        "status": [
+          "QUEUED",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "bytesTransferred": "非负整数字节数，不表示 Owner 已完成提交",
+        "totalBytes": "已知时返回非负整数字节数",
+        "localPath": "任务对应本地绝对路径",
+        "fileRef": "成功时返回 FileRef",
+        "error": "失败时返回 {code,message}，不包含设备 token、OSS 签名 URL 或其他凭据"
+      }
+    },
+    "FileRef": {
+      "required": [
+        "fileId",
+        "path",
+        "fileName",
+        "mimeType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "fields": {
+        "fileId": "Owner 返回的文件 ID",
+        "path": "平台逻辑文件路径，不是 OSS object key",
+        "fileName": "文件名",
+        "mimeType": "文件类型",
+        "sizeBytes": "非负整数字节数",
+        "sha256": "传输端计算的 SHA-256；不宣称是 Owner 数据库中的权威校验值"
+      }
+    },
+    "semantics": [
+      "upload 的 SUCCEEDED 仅在 OSS 实际上传成功且文件 Owner complete 已确认后返回。",
+      "download 使用临时文件，完成长度及可选 expectedSha256 校验后原子落到目标路径；失败或取消清理本任务临时文件。",
+      "查询和取消只操作本设备文件任务；不存在任务显式报错。",
+      "任务独立于单次 RPC 和 Relay 重连；不承诺跨 Bridge Agent 进程重启续传，未知任务显式报错，不自动重发。",
+      "不增加二进制 Base64 返回、Shell 搬运、签名 URL 过期自动重试或旧新路径试错回退。",
+      "截图继续返回既有 asset_ref 成功包络及宽高、显示器等元数据；Connector 图片继续返回既有 camelCase asset_ref 包络。",
+      "新旧截图客户端通过明确的能力声明区别完成责任；旧客户端原正式合同继续支持，新客户端由共享文件实现完成上传登记，不重复 complete。"
+    ],
+    "migration": "新增设备方法无需迁移业务数据；现有调用方可继续调用原方法，新 files 调用方使用异步查询。截图与 Connector 消费者保持原成功返回合同。"
+  },
+  "dependencyChange": {
+    "libraryOwner": "Bridge Agent",
+    "before": {
+      "reqwest": {
+        "constraint": "0.12",
+        "resolved": "0.12.28",
+        "defaultFeatures": false,
+        "features": [
+          "json",
+          "rustls-tls"
+        ]
+      },
+      "futures-util": "0.3.32，已有直接依赖",
+      "tokio-util": "0.7.18，已有传递依赖"
+    },
+    "after": {
+      "reqwest": {
+        "constraint": "0.12",
+        "resolved": "0.12.28",
+        "defaultFeatures": false,
+        "features": [
+          "json",
+          "rustls-tls",
+          "stream"
+        ]
+      },
+      "futures-util": "保持 0.3.32",
+      "tokio-util": "保持 0.7.18，启用 io 能力",
+      "wasm-streams": "新增传递锁定 0.4.2，仅 WASM 目标；桌面目标不编译"
+    },
+    "otherPackages": "保持既有解析版本；若实际锁文件出现其他解析变化，单独列明后再确认，不扩大本次批准范围",
+    "reason": "大文件流式读写及取消，避免整文件载入内存。复用已有 futures-util，不新增其他直接库。",
+    "alternative": "整文件缓冲会随文件大小占用内存；Shell/stdout 会重现控制通道阻塞；手写 HTTP 上传会复制现有网络库职责。",
+    "serviceRelationships": {
+      "before": "Bridge Agent → Relay → workspace-file-service，已有截图和 Connector 图片票据合同",
+      "after": "保留现有服务关系，增加设备通用文件上传、设备 fileId 下载签名合同；新增 files 能力依赖 Relay 0.40.0 与 workspace-file-service 8.3.0 的相应合同",
+      "owners": [
+        "Bridge Agent",
+        "Relay",
+        "workspace-file-service"
+      ]
+    },
+    "impact": "Bridge Agent 需要重新构建签名客户端；服务端新增接口并保留旧正式合同；不新增数据库列或数据迁移。",
+    "rollback": "各单元使用权威发布记录回滚；已完成个人文件仍由 Owner 保存；新客户端调用缺失的新接口时显式失败，不退回 Shell。部署接纳与实际依赖由 Control Plane/环境 Agent 判断。"
+  },
+  "releaseVersionApproval": [
+    {
+      "unit": "Bridge Agent",
+      "category": "独立客户端",
+      "repository": "momoplan/bridge-agent",
+      "currentPublished": "0.16.1",
+      "proposed": "0.17.0",
+      "level": "MINOR",
+      "impact": "新增内置 files 应用与方法，截图/Connector 共用传输；保留现有成功返回合同"
+    },
+    {
+      "unit": "Relay",
+      "category": "平台 Component",
+      "componentId": "09ad491d-bbd2-11f1-96b9-00163e3bb515",
+      "currentPublished": "0.39.0",
+      "proposed": "0.40.0",
+      "level": "MINOR",
+      "impact": "增加通用文件授权转发与新客户端上传完成责任处理，保留旧客户端正式合同"
+    },
+    {
+      "unit": "workspace-file-service",
+      "category": "平台 Component",
+      "componentId": "09ad80b8-bbd2-11f1-96b9-00163e3bb515",
+      "currentPublished": "8.2.0",
+      "proposed": "8.3.0",
+      "level": "MINOR",
+      "impact": "新增设备通用上传、按当前用户个人 fileId 签发下载票据；保留旧图片接口"
+    }
+  ],
+  "delivery": "各单元独立验证和发布，不以同属需求为由另建联合上线门禁；代码和依赖约束由 Owner 登记，Control Plane/Agent 计算真实升级计划。CLI、device-service、local-app-service 不纳入本次代码发布范围。",
+  "validation": [
+    "服务清单发现 files，UI 显示内置文件传输；已有用户配置升级后默认能力可发现。",
+    "超过单次设备 RPC 超时的上传和下载仍可查询进度，Relay 重连不主动取消本地任务。",
+    "大文件流式传输、实际 OSS 状态判定、Owner complete 错误传播。",
+    "上传下载回环的字节数与 SHA-256 一致；下载不覆盖默认策略、显式覆盖、长度及 hash 错误、失败清理。",
+    "取消与完成竞态返回实际终态，授权撤销与跨用户 fileId 拒绝。",
+    "截图只上传一次且仅完成一次；尺寸元数据与原成功包络正确。",
+    "Connector 私有目录、图片类型和来源授权回归；新旧正式客户端合同分别验证。",
+    "准确提交通过登记的客户端与服务端发布质量门禁；发布后验证健康、真实设备文件链路和下载结果。"
+  ],
+  "approvalRules": {
+    "file": "/Users/c/lowcode/AGENTS.md",
+    "sections": [
+      "内部通信与 Bundle 对外协议",
+      "Component Dependency Change Approval",
+      "Version Selection and Release Approval"
+    ],
+    "status": "本文为可审查提案，不是代码实现、依赖更新或已发布证明"
+  },
+  "confirmation": {
+    "date": "2026-10-31",
+    "userReply": "确认",
+    "scope": "对上一条协议、依赖和三个准确版本的确认"
+  }
+}

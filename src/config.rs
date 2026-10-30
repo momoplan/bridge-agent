@@ -226,6 +226,7 @@ pub enum ServiceStartCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MethodBinding {
+    FileTransfer,
     ShellCommand(ShellCommandBinding),
     Http(HttpBinding),
     ComputerUse(ComputerUseBinding),
@@ -334,6 +335,7 @@ include!("config/identity_and_paths.rs");
 include!("config/persistence.rs");
 include!("config/legacy_migrations.rs");
 include!("config/manifest_and_defaults.rs");
+include!("config/file_transfer_defaults.rs");
 include!("config/service_reconciliation.rs");
 include!("config/default_values.rs");
 

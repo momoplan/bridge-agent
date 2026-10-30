@@ -47,7 +47,7 @@
             loaded.upload.prepare_url(&loaded.relay).as_deref(),
             Some("https://relay.baijimu.com/api/bridge-agent/uploads/prepare")
         );
-        assert_eq!(loaded.services.len(), 2);
+        assert_eq!(loaded.services.len(), 3);
         assert!(loaded.services.iter().any(|service| service.name == "shell"
             && service.methods.iter().any(|method| method.name == "exec")));
         let shell_methods = loaded
@@ -248,7 +248,7 @@
         assert_eq!(fs::read_to_string(archived_path).unwrap(), "{");
         assert_generated_agent_id(&recovery.config.relay.agent_id);
         let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.services.len(), 2);
+        assert_eq!(loaded.services.len(), 3);
     }
 
 #[test]

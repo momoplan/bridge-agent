@@ -2,7 +2,8 @@ impl AgentConfig {
     pub fn example() -> Self {
         Self {
             platform: PlatformConfig {
-            environment_key: None,                base_url: environment::official_api_base(),
+                environment_key: None,
+                base_url: environment::official_api_base(),
                 workspace_id: None,
             },
             upload: UploadConfig::default(),
@@ -35,13 +36,21 @@ impl AgentConfig {
                 service_registration_enabled: true,
                 service_registration_token: Some(generate_registration_token()),
             },
-            services: vec![default_computer_service(), default_shell_service()],
+            services: vec![
+                default_computer_service(),
+                default_shell_service(),
+                default_file_service(),
+            ],
             local_apps: Vec::new(),
         }
     }
 
     pub fn normalize(&mut self) -> bool {
         let mut changed = ensure_default_computer_methods(self);
+        if !self.services.iter().any(|service| service.name == "files") {
+            self.services.push(default_file_service());
+            changed = true;
+        }
         changed |= ensure_default_shell_service(self);
         changed |= ensure_service_registration_defaults(self);
         changed |= ensure_default_platform_base_url(self);
@@ -266,7 +275,11 @@ fn validate_service_methods(service: &ServiceConfig) -> Result<()> {
             bail!("method name cannot be empty in service `{}`", service.name);
         }
         if !method_names.insert(method.name.as_str()) {
-            bail!("duplicate method `{}` in service `{}`", method.name, service.name);
+            bail!(
+                "duplicate method `{}` in service `{}`",
+                method.name,
+                service.name
+            );
         }
         match &method.binding {
             MethodBinding::ShellCommand(binding) if binding.root_dir.trim().is_empty() => bail!(
@@ -305,10 +318,16 @@ fn validate_local_apps(local_apps: &[LocalAppConfig]) -> Result<()> {
             bail!("duplicate local app appId `{}`", app.app_id);
         }
         if app.name.trim().is_empty() || app.version.trim().is_empty() {
-            bail!("local app name and version cannot be empty for `{}`", app.app_id);
+            bail!(
+                "local app name and version cannot be empty for `{}`",
+                app.app_id
+            );
         }
         if app.methods.is_empty() && app.events.is_empty() {
-            bail!("local app `{}` must declare at least one method or event", app.app_id);
+            bail!(
+                "local app `{}` must declare at least one method or event",
+                app.app_id
+            );
         }
         validate_local_app_capabilities(app)?;
     }

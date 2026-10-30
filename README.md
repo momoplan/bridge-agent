@@ -1015,3 +1015,24 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 - 发布说明：如何下载桌面包、如何校验版本、如何查看源码
 
 当前 README 先把最关键的产品边界写清楚了：`bridge-agent` 是一个需要安装在本机的开源本地代理，而不是一个无需安装就能直接获得本地能力的云工具。
+
+### 内置文件传输
+
+“文件传输”与“桌面控制”“Shell”并列内置，由宿主统一发布，不需要安装市场应用。
+设备服务清单提供 `files.upload(localPath, fileName?, mimeType?)`、
+`files.download(fileId, localPath, overwrite=false, expectedSha256?)`、
+`files.queryTransfer(transferId)` 和 `files.cancelTransfer(transferId)`。
+`localPath` 必须是设备上的绝对文件路径；文件归当前设备授权用户的个人空间。
+调用上传下载后立即获取 `transferId`，通过查询等待 `SUCCEEDED`、`FAILED` 或 `CANCELLED`。
+进度字节数表示传输端已读取的字节，上传只有经文件 Owner 完成登记后才算成功。
+成功结果包含 `fileRef`（文件 ID、逻辑路径、文件名、类型、大小、SHA-256），不保存短期签名 URL。
+
+文件字节通过 OSS 签名 URL 传输，不经 Shell、Base64 或 Relay。大文件采用流式读写；
+下载先写临时文件，校验长度和可选 SHA-256，再原子落盘；默认不覆盖已有文件。
+取消可中断传输，已经进入 Owner 提交或原子落盘的任务继续返回实际结果。
+任务可跨 Relay 重连及注册表刷新查询，但不支持跨宿主进程重启恢复或自动续传。
+
+截图复用文件客户端并保持现有 `asset_ref` 包络和尺寸、显示器元数据。
+Connector 图片复用相同的字节上传实现，并继续使用其图片类型、私有数据目录和来源授权规则。
+`device_file_transfers_v1` 能力声明标识截图已由设备完成登记；旧客户端仍按原正式合同由 Relay 完成。
+新文件能力需要 Relay 0.40.0 和 workspace-file-service 8.3.0 提供对应合同，缺少接口时明确失败。

@@ -3,7 +3,7 @@
         let current_dir = std::env::current_dir().unwrap();
         let registry = ServiceRegistry::from_config(&AgentConfig::example(), &current_dir).unwrap();
         let definitions = registry.definitions();
-        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions.len(), 3);
         assert!(definitions.iter().any(|service| service.name == "computer"
             && service
                 .methods

@@ -109,7 +109,7 @@ export function toUiMethod(method: MethodConfig): UiMethodConfig {
               headers_text: headersToText(method.binding.headers),
               timeout_secs: toOptionalText(method.binding.timeout_secs)
             }
-          : {
+          : method.binding.type === "file_transfer" ? { type: "file_transfer" } : {
               type: "computer_use",
               action: method.binding.action,
               display_id: toOptionalText(method.binding.display_id)
@@ -140,7 +140,7 @@ export function fromUiMethod(method: UiMethodConfig): MethodConfig {
               headers: textToHeaders(method.binding.headers_text),
               timeout_secs: toOptionalNumber(method.binding.timeout_secs)
             }
-          : {
+          : method.binding.type === "file_transfer" ? { type: "file_transfer" } : {
               type: "computer_use",
               action: method.binding.action,
               display_id: toOptionalNumber(method.binding.display_id)
@@ -327,8 +327,12 @@ export function isShellService(service: Pick<UiServiceConfig, "name">): boolean 
   return service.name.trim().toLowerCase() === "shell";
 }
 
+export function isFileService(service: Pick<UiServiceConfig, "name">): boolean {
+  return service.name.trim().toLowerCase() === "files";
+}
+
 export function isSystemService(service: Pick<UiServiceConfig, "name">): boolean {
-  return isComputerService(service) || isShellService(service);
+  return isComputerService(service) || isShellService(service) || isFileService(service);
 }
 
 export function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
@@ -338,6 +342,7 @@ export function formatMethodTypeLabel(type: UiMethodBinding["type"]): string {
   if (type === "http") {
     return "HTTP";
   }
+  if (type === "file_transfer") return "文件传输";
   return "Computer";
 }
 
@@ -384,6 +389,7 @@ export function describeMethodBinding(method: UiMethodConfig): string {
       : "";
     return `Computer use · ${method.binding.action}${displayLabel}`;
   }
+  if (method.binding.type === "file_transfer") return "文件传输 · 上传、下载、进度查询和取消";
   const url = method.binding.url.trim() || "未填写 URL";
   return `${method.binding.http_method || "HTTP"} ${url}`;
 }

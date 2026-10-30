@@ -47,19 +47,14 @@ async fn execute_windows_computer_action(
 #[cfg(windows)]
 async fn capture_windows_screenshot(method: &ComputerMethod) -> Result<ServiceOutcome> {
     let capture = capture_windows_monitor_png(method.display_id)?;
-    if capture.bytes.len() > method.upload.inline_limit_bytes {
-        return upload_screenshot(method, capture.bytes, capture.width, capture.height).await;
-    }
-
-    Ok(success_outcome(json!({
-        "result_type": "inline_image",
-        "mime_type": "image/png",
-        "width": capture.width,
-        "height": capture.height,
-        "display_id": capture.display_id,
-        "size_bytes": capture.bytes.len(),
-        "image_base64": BASE64_STANDARD.encode(capture.bytes),
-    })))
+    upload_screenshot(
+        method,
+        capture.bytes,
+        capture.width,
+        capture.height,
+        capture.display_id,
+    )
+    .await
 }
 
 #[cfg(windows)]

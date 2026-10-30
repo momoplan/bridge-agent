@@ -3,6 +3,7 @@ pub mod config;
 pub mod connector;
 pub mod event_delivery;
 mod event_server;
+mod file_transfer;
 pub mod logging;
 pub mod market_distribution;
 mod power;
@@ -14,7 +15,6 @@ pub mod runtime;
 mod secret_store;
 pub mod services;
 #[cfg(any(target_os = "macos", windows, test))]
-mod upload_response;
 #[cfg(windows)]
 mod windows_process;
 mod windows_tcp;

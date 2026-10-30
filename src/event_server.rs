@@ -233,7 +233,11 @@ impl LocalEventServer {
                 relay_token: config.relay.token.clone(),
                 agent_id: config.relay.agent_id.clone(),
                 workspace_id: config.platform.workspace_id,
-                http_client: reqwest::Client::new(),
+                http_client: reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .read_timeout(Duration::from_secs(config.upload.timeout_secs))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?,
             },
         }))
     }

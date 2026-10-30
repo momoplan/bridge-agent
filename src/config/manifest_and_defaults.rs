@@ -173,7 +173,7 @@ fn default_computer_service() -> ServiceConfig {
         methods: vec![
             computer_method(
                 "screenshot",
-                "Capture the current desktop and return a PNG screenshot.",
+                "Capture the current desktop, upload through the shared file service, and return a PNG asset_ref with dimensions.",
                 ComputerUseAction::Screenshot,
             ),
             computer_method(
@@ -223,7 +223,7 @@ fn default_computer_service() -> ServiceConfig {
 fn default_shell_service() -> ServiceConfig {
     ServiceConfig {
         name: "shell".to_string(),
-        description: "Run and query allowlisted shell commands on the local machine.".to_string(),
+        description: "Run and query allowlisted shell commands on the local machine. Transfer files with files.upload/files.download, never through stdout or Base64.".to_string(),
         enabled: true,
         health_check: None,
         start_command: None,
