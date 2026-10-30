@@ -107,13 +107,18 @@ impl RuntimeRunner {
             Ok(Ok(channel)) => {
                 self.push_log("info", "connected to relay, waiting for registration")
                     .await;
-                if let Err(err) = self
+                let Err(err) = self
                     .handle_connection(channel, shutdown_rx, apply_rx, event_rx, audit_rx)
                     .await
-                {
-                    self.enter_backoff(err.to_string(), &format!("connection ended: {err:#}"))
-                        .await;
+                else {
+                    return true;
+                };
+                if let Some(notice) = err.downcast_ref::<RelayUpdateRequired>() {
+                    self.enter_update_required(notice, shutdown_rx).await;
+                    return false;
                 }
+                self.enter_backoff(err.to_string(), &format!("connection ended: {err:#}"))
+                    .await;
                 true
             }
             Ok(Err(err))
@@ -347,6 +352,8 @@ impl RelayConnection<'_> {
                     .push_log("warn", "ignored unsupported relay frame")
                     .await;
             }
+            // Terminal: Relay ends the stream right after this notice.
+            RelayInbound::UpdateRequired(notice) => return Err(notice.into()),
         }
         Ok(())
     }
