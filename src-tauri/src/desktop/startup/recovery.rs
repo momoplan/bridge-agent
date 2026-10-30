@@ -19,13 +19,9 @@ fn start_update_service_recovery(
                     apply_updater_health_status(&startup_health, &status);
                     if startup_update_decision(&status) == StartupUpdateDecision::RequireUpdate {
                         diagnostics.warn(
-                            "required update discovered after offline-capable startup; showing the main window",
+                            "required update discovered after offline-capable startup; stopping business",
                         );
-                        show_main_window(
-                            &app,
-                            Some(&diagnostics),
-                            MainWindowOpenReason::RequiredUpdate,
-                        );
+                        enforce_required_update(&app, status, &diagnostics).await;
                     }
                     return;
                 }
@@ -211,6 +207,7 @@ async fn run_desktop_business_after_update_gate(startup: DesktopBusinessStartup)
     {
         return;
     }
+    start_required_update_watch(app.clone(), diagnostics.clone());
 
     let startup_migration_ready =
         migrate_desktop_config(&config_path, &startup_health, &diagnostics);

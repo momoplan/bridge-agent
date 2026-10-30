@@ -105,5 +105,6 @@ fn runtime_start_is_active(status: RuntimeStatus) -> bool {
             | RuntimeStatus::Connecting
             | RuntimeStatus::Backoff
             | RuntimeStatus::AuthorizationRequired
+            | RuntimeStatus::UpdateRequired
     )
 }

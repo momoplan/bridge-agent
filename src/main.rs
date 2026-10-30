@@ -112,9 +112,37 @@ async fn run_command(config: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("failed to start runtime from {}", config_path.display()))?;
 
     tracing::info!("bridge-agent started, press Ctrl+C to stop");
-    wait_for_shutdown_signal().await?;
+    tokio::select! {
+        result = wait_for_shutdown_signal() => result?,
+        detail = wait_for_update_required(&runtime) => {
+            runtime.stop().await?;
+            anyhow::bail!("bridge-agent stopped because this version is no longer supported: {detail}; install the latest release and start it again");
+        }
+    }
     runtime.stop().await?;
     Ok(())
+}
+
+/// Relay rejects this client version; the headless runtime stops like the desktop.
+async fn wait_for_update_required(runtime: &AgentRuntimeManager) -> String {
+    use bridge_agent::runtime::{RuntimeEvent, RuntimeStatus};
+    let mut events = runtime.subscribe();
+    let mut snapshot = runtime.snapshot().await;
+    loop {
+        if snapshot.status == RuntimeStatus::UpdateRequired {
+            let detail = snapshot.last_error.unwrap_or_default();
+            tracing::error!(%detail, "relay requires a client update; stopping");
+            return detail;
+        }
+        snapshot = match events.recv().await {
+            Ok(RuntimeEvent::SnapshotChanged(snapshot)) => snapshot,
+            Ok(RuntimeEvent::LogAppended(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => runtime.snapshot().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return std::future::pending().await
+            }
+        };
+    }
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {

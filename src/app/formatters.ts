@@ -401,6 +401,7 @@ export function formatStartAgentMessage(snapshot: RuntimeSnapshot): string {
     connecting: "Agent 正在连接",
     backoff: "Agent 正在重连等待",
     authorization_required: "Agent 需要重新授权",
+    update_required: "当前版本已停止支持，需要先升级客户端",
     online: "Agent 已启动"
   };
   return messages[snapshot.status] ?? "Agent 已启动";

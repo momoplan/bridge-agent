@@ -37,6 +37,8 @@ pub(super) const STARTUP_UPDATE_RECOVERY_DELAYS: &[Duration] = &[
     Duration::from_secs(60),
     Duration::from_secs(120),
 ];
+/// How often a running app re-checks whether its version is still supported.
+pub(super) const REQUIRED_UPDATE_RECHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub(super) const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const CONNECTOR_MANIFEST_FILE: &str = "connector.json";
 pub(super) const LOCAL_APP_UI_BRIDGE_ASSET: &str = "__baijimu_bridge.js";

@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2021"
 default-run = "bridge-agent"
 
@@ -10,7 +10,7 @@ toml = "0.8"
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
-relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "8831f35902bb34538e488afe9aaacbac0b131eac", default-features = false, features = ["device-channel"] }
+relay = { git = "https://gitee.com/zxflimit/relay.git", rev = "2d88ce00cc66cb5736f8df43229fae4ea9de568f", default-features = false, features = ["device-channel"] }
 anyhow = "1.0"
 axum = "0.8"
 baijimu-cmodel-core = { version = "=11.0.0" }
