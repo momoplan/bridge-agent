@@ -22,6 +22,7 @@ struct Owner {
     bytes: Arc<Mutex<Vec<u8>>>,
     commits: Arc<AtomicU64>,
     delay: Arc<AtomicBool>,
+    delay_ms: Arc<AtomicU64>,
     reject_complete: Arc<AtomicBool>,
     declared_size: Arc<AtomicU64>,
     mime_type: Arc<Mutex<String>>,
@@ -44,7 +45,7 @@ async fn store(State(s): State<Owner>, headers: HeaderMap, body: Bytes) -> axum:
         "device bearer must never reach object storage"
     );
     if s.delay.load(Ordering::Relaxed) {
-        sleep(Duration::from_millis(400)).await;
+        sleep(Duration::from_millis(s.delay_ms.load(Ordering::Relaxed))).await;
     }
     *s.bytes.lock().unwrap() = body.to_vec();
     axum::http::StatusCode::OK
@@ -75,6 +76,7 @@ async fn fixture() -> (Owner, AgentConfig, tokio::task::JoinHandle<()>) {
     let s = Owner {
         base: format!("http://{}", listener.local_addr().unwrap()),
         mime_type: Arc::new(Mutex::new("application/octet-stream".into())),
+        delay_ms: Arc::new(AtomicU64::new(400)),
         ..Owner::default()
     };
     let app = Router::new()
@@ -299,5 +301,29 @@ async fn screenshot_uses_shared_upload_and_owner_completion() {
     assert_eq!(file.mime_type, "image/png");
     assert_eq!(owner.commits.load(Ordering::Relaxed), 1);
     assert_eq!(hash, format!("{:x}", Sha256::digest(b"png")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn object_transfer_outlives_the_control_request_timeout() {
+    let (owner, mut config, server) = fixture().await;
+    config.upload.timeout_secs = 1;
+    owner.delay.store(true, Ordering::Relaxed);
+    owner.delay_ms.store(1400, Ordering::Relaxed);
+    let client = FileClient::from_config(&config).unwrap();
+    let before = Instant::now();
+    let (file, _) = client
+        .upload(
+            UploadSource::Bytes(b"long".to_vec()),
+            "file.bin",
+            "application/octet-stream",
+            4,
+            Purpose::File,
+        )
+        .await
+        .unwrap();
+    assert_eq!(file.size_bytes, 4);
+    assert!(before.elapsed() > Duration::from_secs(1));
+    assert_eq!(owner.commits.load(Ordering::Relaxed), 1);
     server.abort();
 }

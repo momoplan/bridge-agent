@@ -192,7 +192,6 @@ impl FileClient {
         Ok(Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
-                .read_timeout(Duration::from_secs(config.upload.timeout_secs))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             base_url: base.to_string().trim_end_matches('/').into(),
