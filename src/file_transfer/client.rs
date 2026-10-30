@@ -122,6 +122,7 @@ impl Completion {
             || self.file_name.is_empty()
             || self.mime_type.is_empty()
             || self.download_url.is_empty()
+            || self.expires_at.is_empty()
         {
             return Err(TransferError::new(
                 "FILE_RESPONSE_INVALID",
