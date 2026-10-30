@@ -113,9 +113,19 @@ async fn streamed_roundtrip_survives_registry_rebuild_and_checks_hash() {
     let output = dir.path().join("output.bin");
     let bytes = vec![0x53; 5 * 1024 * 1024 + 19];
     tokio::fs::write(&input, &bytes).await.unwrap();
-    let upload = FileMethod::new(&config, "upload").unwrap();
+    let upload = crate::services::ServiceRegistry::from_config(&config, dir.path()).unwrap();
     let before = Instant::now();
-    let started = upload.invoke(json!({"localPath":input})).await.unwrap();
+    let result = upload
+        .invoke(
+            "upload".into(),
+            "files",
+            "upload",
+            json!({"localPath":input}),
+            None,
+        )
+        .await;
+    assert!(result.success);
+    let started = result.data.unwrap();
     assert!(before.elapsed() < Duration::from_millis(200));
     drop(upload);
     let done = terminal(&config, &started["transferId"]).await;

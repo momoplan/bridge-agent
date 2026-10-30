@@ -1,12 +1,3 @@
-#[cfg(any(target_os = "macos", windows))]
-fn success_outcome(data: Value) -> ServiceOutcome {
-    ServiceOutcome {
-        success: true,
-        data: Some(data),
-        error: None,
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn with_macos_modifiers<F>(keys: &[String], action: F) -> Result<()>
 where

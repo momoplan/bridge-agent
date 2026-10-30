@@ -57,12 +57,14 @@ type Result<T> = std::result::Result<T, TransferError>;
 #[derive(Clone)]
 pub(crate) enum Purpose {
     File,
+    #[cfg(any(test, target_os = "macos", windows))]
     Screenshot,
 }
 impl Purpose {
     fn label(&self) -> &'static str {
         match self {
             Self::File => "file",
+            #[cfg(any(test, target_os = "macos", windows))]
             Self::Screenshot => "screenshot",
         }
     }
@@ -278,6 +280,7 @@ impl FileClient {
         }
         Ok((file, pending.sha256))
     }
+    #[cfg(any(test, target_os = "macos", windows))]
     pub async fn upload(
         &self,
         source: UploadSource,

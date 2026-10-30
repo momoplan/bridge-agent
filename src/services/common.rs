@@ -1,3 +1,11 @@
+fn success_outcome(data: Value) -> ServiceOutcome {
+    ServiceOutcome {
+        success: true,
+        data: Some(data),
+        error: None,
+    }
+}
+
 fn collect_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
     headers
         .iter()
