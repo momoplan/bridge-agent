@@ -7,7 +7,7 @@ import { parseBaijimuDeepLink } from "../deep-link";
 import { resolveStartupUpdateGate } from "../startup-update-gate";
 import type { createDesktopActions } from "./desktop-actions";
 import type { createLocalAppCatalogActions } from "./local-app-catalog-actions";
-import type { ConnectorLifecycleSnapshot, LocalAppRuntimeStatus, LocalAppsChangedEvent, RegisteredServiceStatus, RuntimeSnapshot, StartupHealthSnapshot } from "./types";
+import type { AppUpdateStatus, ConnectorLifecycleSnapshot, LocalAppRuntimeStatus, LocalAppsChangedEvent, RegisteredServiceStatus, RuntimeSnapshot, StartupHealthSnapshot } from "./types";
 import { mergeLocalAppInstallTasks, type LocalAppInstallTask } from "../local-app-install-tasks";
 import type { AppControllerState } from "./use-app-state";
 
@@ -15,7 +15,7 @@ type ActionDependencies = ReturnType<typeof createDesktopActions> & ReturnType<t
 interface EffectDependencies { applyRuntimeSnapshot: (snapshot: RuntimeSnapshot) => void; applyStartupHealthSnapshot: (snapshot: StartupHealthSnapshot) => void; refreshAll: () => Promise<void>; refreshDesktopPermissions: () => Promise<void>; refreshLocalAppCatalog: (revision: number) => Promise<void>; }
 
 export function usePlatformEffects(context: AppControllerState & ActionDependencies & EffectDependencies) {
-  const { activePage, applyRuntimeSnapshot, applyStartupHealthSnapshot, authorizationStateRef, checkAppUpdate, connectorApps, connectorAppsRef, localAppInstallTasks, localAppInstallTasksRef, localAppsChangeRevisionRef, openBaijimuDeepLinkIntent, previousActivePageRef, queuedDeepLinkIntentsRef, refreshAll, refreshDesktopPermissions, refreshLocalAppCatalog, refreshLocalAppUpdateData, setConnectorLifecycles, setLocalAppInstallTasks, setLocalAppRuntimeStatuses, setRegisteredServiceStatuses, setStartupUpdateGate, startupConfigGateReady } = context;
+  const { activePage, applyRuntimeSnapshot, applyStartupHealthSnapshot, authorizationStateRef, checkAppUpdate, connectorApps, connectorAppsRef, localAppInstallTasks, localAppInstallTasksRef, localAppsChangeRevisionRef, openBaijimuDeepLinkIntent, previousActivePageRef, queuedDeepLinkIntentsRef, refreshAll, refreshDesktopPermissions, refreshLocalAppCatalog, refreshLocalAppUpdateData, setAppUpdate, setConnectorLifecycles, setLocalAppInstallTasks, setLocalAppRuntimeStatuses, setRegisteredServiceStatuses, setStartupUpdateGate, startupConfigGateReady } = context;
 useEffect(() => {
     connectorAppsRef.current = connectorApps;
   }, [connectorApps]);
@@ -257,6 +257,29 @@ useEffect(() => {
       void refreshLocalAppUpdateData();
     }
   }, [activePage, startupConfigGateReady]);
+
+useEffect(() => {
+    // A running app learns here that its version is no longer supported; the
+    // backend has already stopped the business components.
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<AppUpdateStatus>("app-update-required", (event) => {
+      if (active) {
+        setAppUpdate(event.payload);
+        setStartupUpdateGate("update_required");
+      }
+    }).then((dispose) => {
+      if (active) {
+        unlisten = dispose;
+      } else {
+        dispose();
+      }
+    }).catch((err) => clientWarn("订阅强制升级通知失败", err));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
 
 useEffect(() => {
     let active = true;

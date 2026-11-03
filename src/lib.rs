@@ -6,6 +6,7 @@ mod event_server;
 mod file_transfer;
 pub mod logging;
 pub mod market_distribution;
+mod os_version;
 mod power;
 pub mod process_environment;
 mod process_identity;
@@ -48,6 +49,7 @@ pub use connector::{
     PythonRuntimeStatus,
 };
 pub use logging::{LogEntry, LogMetadata};
+pub use os_version::current_os_version;
 pub use runtime::{
     terminate_runtime_lock_owner, AgentRuntimeManager, RuntimeEvent, RuntimeLockConflict,
     RuntimeProcessInfo, RuntimeSnapshot, RuntimeStatus,

@@ -102,6 +102,7 @@ export function useAppController() {
       online: "在线",
       backoff: "重连等待",
       authorization_required: "需重新授权",
+      update_required: "需要升级",
       stopping: "停止中"
     };
     return textMap[runtime.status];

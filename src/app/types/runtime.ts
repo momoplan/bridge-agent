@@ -7,6 +7,7 @@ export type RuntimeStatus =
   | "online"
   | "backoff"
   | "authorization_required"
+  | "update_required"
   | "stopping";
 
 export interface RuntimeSnapshot {

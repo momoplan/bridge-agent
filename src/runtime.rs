@@ -67,6 +67,8 @@ pub enum RuntimeStatus {
     Online,
     Backoff,
     AuthorizationRequired,
+    /// Relay rejected this client version; the runtime waits to be stopped.
+    UpdateRequired,
     Stopping,
 }
 
@@ -129,6 +131,7 @@ pub struct AgentRuntimeManager {
 
 struct RuntimeInner {
     lifecycle: Mutex<()>,
+    required_update: Mutex<Option<String>>,
     state: Mutex<ManagedState>,
     logs: Mutex<VecDeque<LogEntry>>,
     file_log: Mutex<Option<FileLogSink>>,
@@ -141,6 +144,7 @@ impl Default for RuntimeInner {
         let (events, _) = broadcast::channel(512);
         Self {
             lifecycle: Mutex::new(()),
+            required_update: Mutex::new(None),
             state: Mutex::new(ManagedState::default()),
             logs: Mutex::new(VecDeque::new()),
             file_log: Mutex::new(None),
@@ -253,6 +257,7 @@ include!("runtime/runner.rs");
 include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
 include!("runtime/channel.rs");
+include!("runtime/update_required.rs");
 include!("runtime/streams.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
@@ -291,6 +296,7 @@ mod tests {
     include!("runtime/tests/concurrent_invocations.rs");
     include!("runtime/tests/locks.rs");
     include!("runtime/tests/authorization.rs");
+    include!("runtime/tests/update_required.rs");
     include!("runtime/tests/unauthorized_control.rs");
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");

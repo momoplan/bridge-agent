@@ -13,7 +13,7 @@ use std::sync::{
     Arc,
 };
 use tokio::process::{Child, Command};
-use tokio::sync::{oneshot, watch, Mutex, Notify};
+use tokio::sync::{oneshot, watch, Mutex, Notify, RwLock};
 use tokio::time::{timeout, Duration};
 
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,6 +22,7 @@ const CONNECTOR_RUNTIME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 pub(crate) struct ConnectorProcessManager {
+    start_admission: Arc<RwLock<Option<String>>>,
     inner: Arc<Mutex<HashMap<String, ManagedConnectorHandle>>>,
     legacy_started: Arc<Mutex<HashSet<String>>>,
     next_generation: Arc<AtomicU64>,
@@ -82,6 +83,22 @@ impl ConnectorProcessManager {
     }
 
     pub(crate) async fn start(
+        &self,
+        app_id: &str,
+        config_path: &Path,
+        dependency_env: std::collections::BTreeMap<String, String>,
+    ) -> Result<ConnectorStartResult, String> {
+        // Hold admission through process creation, including legacy starts.
+        // Required-update shutdown waits for all admitted starts before stopping.
+        let admission = self.start_admission.read().await;
+        if let Some(reason) = admission.as_ref() {
+            return Err(format!("客户端必须先升级，禁止启动本地应用：{reason}"));
+        }
+        self.start_admitted(app_id, config_path, dependency_env)
+            .await
+    }
+
+    async fn start_admitted(
         &self,
         app_id: &str,
         config_path: &Path,
@@ -285,7 +302,14 @@ impl ConnectorProcessManager {
     }
 
     pub(crate) async fn stop_all(&self, config_path: &Path) -> Vec<String> {
-        let app_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        let mut app_ids = self
+            .inner
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        app_ids.extend(self.legacy_started.lock().await.iter().cloned());
         let mut failures = Vec::new();
         for app_id in app_ids {
             if let Err(err) = self.stop(&app_id, config_path).await {
@@ -315,3 +339,4 @@ fn ensure_lifecycle_succeeded(
 }
 
 include!("process/runtime.rs");
+include!("process/required_update.rs");

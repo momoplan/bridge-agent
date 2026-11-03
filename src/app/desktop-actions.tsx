@@ -2,6 +2,7 @@ import type { EventStorageStats } from "./types/runtime";
 import { invoke } from "@tauri-apps/api/core";
 import { clientWarn } from "../client-logger";
 import { resolveStartupUpdateGate } from "../startup-update-gate";
+import { reconcileAppUpdateStatus } from "./required-update-status";
 import { buildConsoleUrl, fromUiConfig, fromUiService } from "./config-conversion";
 import { formatAppUpdateProgressDetail, formatStartAgentMessage, needsBrowserAuthorization, readError, readRuntimeConflict, serviceSignature } from "./formatters";
 import type { AppUpdateInstallResult, AppUpdateStatus, AppVersionInfo, BrowserAuthStartResponse, ConfigDocument, ConfigRecoveryDocument, DesktopPermissionStatus, LocalAppRuntimeStatus, MarketConnector, RuntimeSnapshot } from "./types";
@@ -16,7 +17,8 @@ export function createDesktopActions(state: AppControllerState, dependencies: De
     setAppUpdateCheckState("checking");
     setAppUpdateError(null);
     try {
-      const status = await invoke<AppUpdateStatus>("check_app_update");
+      const checked = await invoke<AppUpdateStatus>("check_app_update");
+      const status = reconcileAppUpdateStatus(state.appUpdateRef.current, checked);
       setAppUpdate(status);
       setAppUpdateCheckState("ready");
       if (showLatestMessage) {

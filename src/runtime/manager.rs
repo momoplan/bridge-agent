@@ -18,6 +18,9 @@ impl AgentRuntimeManager {
 
     pub async fn start(&self, config: AgentConfig, config_path: &Path) -> Result<RuntimeSnapshot> {
         let _lifecycle = self.inner.lifecycle.lock().await;
+        if let Some(reason) = self.inner.required_update.lock().await.as_ref() {
+            bail!("客户端必须先升级，禁止重新启动运行时：{reason}");
+        }
         if let Some(snapshot) = self.active_start_snapshot(&config, config_path).await {
             return Ok(snapshot);
         }
@@ -155,6 +158,15 @@ impl AgentRuntimeManager {
 
     pub async fn stop(&self) -> Result<RuntimeSnapshot> {
         let _lifecycle = self.inner.lifecycle.lock().await;
+        self.stop_if_running().await?;
+        Ok(self.snapshot().await)
+    }
+
+    /// Serializes with starts and keeps the required-update decision until the
+    /// upgraded process creates a new manager. Stopping cannot clear it.
+    pub async fn stop_for_required_update(&self, reason: String) -> Result<RuntimeSnapshot> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        *self.inner.required_update.lock().await = Some(reason);
         self.stop_if_running().await?;
         Ok(self.snapshot().await)
     }
