@@ -36,9 +36,11 @@ it("keeps the forced page and startup gate when an older check completes after R
   expect(state.appUpdate?.forceUpdateMessage).toBe("Relay 要求升级");
   expect(state.startupUpdateGate).toBe("update_required");
 
-  ipc.invoke.mockResolvedValueOnce({ ...status(false), releaseUrl: "https://downloads.example/release" });
+  ipc.invoke.mockResolvedValueOnce({ ...status(false), minimumSupportedVersion: "0.17.0", forceUpdateMessage: "旧策略提示", releaseUrl: "https://downloads.example/release" });
   await act(async () => { await actions.checkStartupAppUpdate(); });
   expect(state.appUpdate?.forceUpdateRequired).toBe(true);
   expect(state.appUpdate?.releaseUrl).toBe("https://downloads.example/release");
+  expect(state.appUpdate?.minimumSupportedVersion).toBe("0.18.1");
+  expect(state.appUpdate?.forceUpdateMessage).toBe("Relay 要求升级");
   expect(state.startupUpdateGate).toBe("update_required");
 });

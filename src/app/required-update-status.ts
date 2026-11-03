@@ -4,12 +4,13 @@ import type { AppUpdateStatus } from "./types";
 // Later checks can refresh download information without reopening business UI.
 export function reconcileAppUpdateStatus(previous: AppUpdateStatus | null, next: AppUpdateStatus): AppUpdateStatus {
   if (previous?.forceUpdateRequired && previous.currentVersion === next.currentVersion) {
+    const decision = next.forceUpdateRequired ? next : previous;
     return {
       ...next,
       updateAvailable: true,
       forceUpdateRequired: true,
-      minimumSupportedVersion: next.minimumSupportedVersion ?? previous.minimumSupportedVersion,
-      forceUpdateMessage: next.forceUpdateMessage ?? previous.forceUpdateMessage
+      minimumSupportedVersion: decision.minimumSupportedVersion ?? previous.minimumSupportedVersion,
+      forceUpdateMessage: decision.forceUpdateMessage ?? previous.forceUpdateMessage
     };
   }
   return next;
