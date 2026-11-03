@@ -15,6 +15,7 @@ enum RelayInbound {
     Heartbeat,
     /// A frame kind this client does not know, sent by a newer Relay.
     Unsupported,
+    UpdateRequired(RelayUpdateRequired),
 }
 
 /// The gRPC origin of the configured relay URL. Existing configs keep the
@@ -115,6 +116,10 @@ fn encode_device_frame(message: AgentMessage) -> Result<DeviceFrame> {
                     .into_iter()
                     .map(encode_local_app)
                     .collect(),
+                client_version: Some(CLIENT_VERSION.to_string()),
+                client_platform: Some(client_platform().to_string()),
+                client_arch: Some(client_arch().to_string()),
+                client_os_version: client_os_version(),
             })
         }
         AgentMessage::InvokeResult(result) => DeviceFrameKind::InvokeResult(encode_result(result)),
@@ -239,5 +244,11 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
             message: error.message,
         }),
         RelayFrameKind::Heartbeat(_) => return Ok(RelayInbound::Heartbeat),
+        RelayFrameKind::UpdateRequired(notice) => {
+            return Ok(RelayInbound::UpdateRequired(RelayUpdateRequired {
+                minimum_supported_version: notice.minimum_supported_version,
+                message: notice.message,
+            }))
+        }
     }))
 }

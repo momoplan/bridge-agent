@@ -17,6 +17,7 @@ mod market_consumer;
 #[cfg(debug_assertions)]
 mod native_smoke;
 mod recovery;
+mod required_update;
 mod runtime_commands;
 mod settings;
 mod startup;
@@ -38,6 +39,7 @@ use local_app_ui::*;
 #[cfg(target_os = "macos")]
 use macos_permissions::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions, PermissionApi};
 use recovery::*;
+use required_update::*;
 use runtime_commands::*;
 use settings::*;
 use startup::*;

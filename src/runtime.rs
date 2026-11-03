@@ -67,6 +67,8 @@ pub enum RuntimeStatus {
     Online,
     Backoff,
     AuthorizationRequired,
+    /// Relay rejected this client version; the runtime waits to be stopped.
+    UpdateRequired,
     Stopping,
 }
 
@@ -253,6 +255,7 @@ include!("runtime/runner.rs");
 include!("runtime/invocations.rs");
 include!("runtime/relay.rs");
 include!("runtime/channel.rs");
+include!("runtime/update_required.rs");
 include!("runtime/streams.rs");
 include!("runtime/instance_lock.rs");
 include!("runtime/process.rs");
@@ -291,6 +294,7 @@ mod tests {
     include!("runtime/tests/concurrent_invocations.rs");
     include!("runtime/tests/locks.rs");
     include!("runtime/tests/authorization.rs");
+    include!("runtime/tests/update_required.rs");
     include!("runtime/tests/unauthorized_control.rs");
     include!("runtime/tests/startup.rs");
     include!("runtime/tests/process.rs");

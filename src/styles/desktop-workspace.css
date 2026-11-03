@@ -92,6 +92,7 @@
   background: var(--ds-color-warning);
 }
 
+.status-dot.status-update_required,
 .status-dot.status-error,
 .status-dot.status-unhealthy,
 .status-dot.status-start_failed {
