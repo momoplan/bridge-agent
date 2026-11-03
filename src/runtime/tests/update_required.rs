@@ -75,4 +75,22 @@
 
         manager.stop().await.unwrap();
         assert_eq!(manager.snapshot().await.status, RuntimeStatus::Stopped);
+        let error = manager
+            .start(update_required_config(&relay, dir.path()), &dir.path().join("agent-config.json"))
+            .await
+            .expect_err("stopping must not permit an unsupported client to start again");
+        assert!(error.to_string().contains("必须先升级"));
+        assert_eq!(relay.attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn required_update_before_start_blocks_start_without_opening_a_connection() {
+        let relay = FakeRelay::start();
+        let dir = tempdir().unwrap();
+        let manager = AgentRuntimeManager::new();
+        manager.stop_for_required_update("需要官方更新".into()).await.unwrap();
+        let error = manager.start(update_required_config(&relay, dir.path()), &dir.path().join("agent-config.json"))
+            .await.expect_err("background startup must respect a concurrent required update");
+        assert!(error.to_string().contains("需要官方更新"));
+        assert_eq!(relay.attempts(), 0);
     }

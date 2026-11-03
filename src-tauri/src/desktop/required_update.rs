@@ -118,12 +118,15 @@ pub(super) async fn enforce_required_update(
     diagnostics.warn(format!(
         "required update while running; stopping business components: {detail}"
     ));
-    for failure in connector_processes.stop_all(&config_path).await {
+    for failure in connector_processes
+        .stop_for_required_update(&config_path, detail.clone())
+        .await
+    {
         diagnostics.warn(format!(
             "failed to stop connector for required update: {failure}"
         ));
     }
-    if let Err(err) = runtime.stop().await {
+    if let Err(err) = runtime.stop_for_required_update(detail.clone()).await {
         diagnostics.warn(format!(
             "failed to stop runtime for required update: {err:#}"
         ));

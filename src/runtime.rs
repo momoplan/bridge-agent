@@ -131,6 +131,7 @@ pub struct AgentRuntimeManager {
 
 struct RuntimeInner {
     lifecycle: Mutex<()>,
+    required_update: Mutex<Option<String>>,
     state: Mutex<ManagedState>,
     logs: Mutex<VecDeque<LogEntry>>,
     file_log: Mutex<Option<FileLogSink>>,
@@ -143,6 +144,7 @@ impl Default for RuntimeInner {
         let (events, _) = broadcast::channel(512);
         Self {
             lifecycle: Mutex::new(()),
+            required_update: Mutex::new(None),
             state: Mutex::new(ManagedState::default()),
             logs: Mutex::new(VecDeque::new()),
             file_log: Mutex::new(None),

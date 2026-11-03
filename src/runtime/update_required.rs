@@ -62,6 +62,7 @@ impl RuntimeRunner {
         notice: &RelayUpdateRequired,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) {
+        *self.inner.required_update.lock().await = Some(notice.status_detail());
         if let Some(queue) = &self.event_queue {
             if let Err(error) = queue.subscriptions(None).await {
                 tracing::error!(%error, "cannot invalidate device subscriptions");
