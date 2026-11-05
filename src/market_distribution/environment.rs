@@ -1,11 +1,11 @@
 //! Private versions are read only from the explicitly authorized source environment.
 use super::{
-    reader::{artifact_response, decode, send},
+    reader::{artifact_response, decode, send, workspace_client},
     validate_endpoint,
 };
 use anyhow::{ensure, Result};
 use local_app_contract::{EnvironmentKey, FrozenVersion, SourceVersion};
-use reqwest::{header, Client, ClientBuilder, Response, Url};
+use reqwest::{Client, Response, Url};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -80,20 +80,6 @@ impl EnvironmentReader {
             .extend(["artifacts", &artifact.to_string()]);
         artifact_response(send(&self.client, url, credential).await?).await
     }
-}
-
-// The PAT can authorize more than one workspace; the source owner must receive
-// the device's selected recipient workspace for both metadata and artifact reads.
-fn workspace_client(workspace: u64, timeout: Duration) -> Result<ClientBuilder> {
-    ensure!(workspace > 0, "consumer workspace required");
-    ensure!(!timeout.is_zero(), "request timeout must be positive");
-    let mut headers = header::HeaderMap::new();
-    headers.insert("x-workspace-id", workspace.to_string().parse()?);
-    Ok(Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .default_headers(headers)
-        .timeout(timeout))
 }
 
 #[cfg(test)]

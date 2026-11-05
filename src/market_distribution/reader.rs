@@ -1,10 +1,10 @@
 //! Authenticated consumer access. User credentials never target the central market.
 use super::ConsumerFailure;
 use super::{resolve_exact, MarketDistribution};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use baijimu_cmodel_http::{decode_response, REQUEST_ID_HEADER, TRACE_ID_HEADER};
 use local_app_contract::{InstallSource, MarketListing, MarketPage};
-use reqwest::{header::HeaderValue, Client, Response, Url};
+use reqwest::{header, header::HeaderValue, Client, ClientBuilder, Response, Url};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 use uuid::Uuid;
@@ -26,16 +26,10 @@ impl MarketReader {
     }
 
     pub fn new(distribution: MarketDistribution, timeout: Duration) -> Result<Self> {
-        if timeout.is_zero() {
-            bail!("consumer request timeout must be positive");
-        }
+        let client = workspace_client(distribution.workspace_id, timeout)?.build()?;
         Ok(Self {
             distribution,
-            client: Client::builder()
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(timeout)
-                .build()?,
+            client,
         })
     }
 
@@ -105,6 +99,20 @@ impl MarketReader {
         }
         Ok(response)
     }
+}
+
+// Partner requests select the recipient workspace independently of business
+// query parameters. Share this binding across market and private source reads.
+pub(super) fn workspace_client(workspace: u64, timeout: Duration) -> Result<ClientBuilder> {
+    ensure!(workspace > 0, "consumer workspace required");
+    ensure!(!timeout.is_zero(), "request timeout must be positive");
+    let mut headers = header::HeaderMap::new();
+    headers.insert("x-workspace-id", workspace.to_string().parse()?);
+    Ok(Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .timeout(timeout))
 }
 
 pub(super) async fn decode<T: DeserializeOwned>(mut response: Response) -> Result<T> {
@@ -212,3 +220,7 @@ pub(super) async fn send(client: &Client, url: Url, credential: &str) -> Result<
     }
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "reader_tests.rs"]
+mod tests;
