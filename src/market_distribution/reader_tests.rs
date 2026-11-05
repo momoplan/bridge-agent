@@ -106,8 +106,13 @@ async fn market_catalog_version_and_artifact_requests_bind_the_recipient_workspa
         source: listing.frozen_version.source.clone(),
     };
     assert_eq!(
-        reader.page("test-pat", None).await.unwrap().items,
-        [listing.clone()]
+        reader
+            .page("test-pat", None)
+            .await
+            .unwrap()
+            .items
+            .as_slice(),
+        std::slice::from_ref(&listing)
     );
     assert_eq!(
         reader.version("test-pat", &selection).await.unwrap(),
