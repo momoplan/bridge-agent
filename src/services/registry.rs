@@ -1,4 +1,6 @@
 impl ServiceRegistry {
+    /// Installed, explicitly enabled capabilities. Process readiness belongs to
+    /// the lifecycle monitor and never removes declarations from this registry.
     pub fn from_config(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
         let mut services = BTreeMap::new();
         let mut local_apps = BTreeMap::new();
@@ -20,118 +22,6 @@ impl ServiceRegistry {
                 continue;
             }
             let service = local_app_runtime_service(app)?;
-            let runtime =
-                build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
-            let events = local_app_events(app);
-            let stream = local_app_stream_target(app)?;
-            if !runtime.methods.is_empty() || !events.is_empty() || stream.is_some() {
-                local_apps.insert(
-                    app.app_id.clone(),
-                    RuntimeLocalApp {
-                        definition: local_app_definition(app),
-                        runtime,
-                        events,
-                        stream,
-                    },
-                );
-            }
-        }
-
-        Ok(Self {
-            services: Arc::new(services),
-            local_apps: Arc::new(local_apps),
-        })
-    }
-
-    /// Builds the capabilities that are safe to advertise without waiting on any
-    /// external process or network endpoint. Health-checked services are added by
-    /// a later readiness refresh after the relay connection has started.
-    pub fn from_config_initial(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
-        let mut services = BTreeMap::new();
-        let mut local_apps = BTreeMap::new();
-        let shell_executions = ShellExecutionStore::default();
-
-        for service in &config.services {
-            if !service.enabled || service.health_check.is_some() {
-                continue;
-            }
-            let runtime_service =
-                build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime_service.methods.is_empty() {
-                services.insert(service.name.clone(), runtime_service);
-            }
-        }
-
-        for app in &config.local_apps {
-            if !app.enabled || app.health_check.is_some() {
-                continue;
-            }
-            let service = local_app_runtime_service(app)?;
-            let runtime =
-                build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
-            let events = local_app_events(app);
-            let stream = local_app_stream_target(app)?;
-            if !runtime.methods.is_empty() || !events.is_empty() || stream.is_some() {
-                local_apps.insert(
-                    app.app_id.clone(),
-                    RuntimeLocalApp {
-                        definition: local_app_definition(app),
-                        runtime,
-                        events,
-                        stream,
-                    },
-                );
-            }
-        }
-
-        Ok(Self {
-            services: Arc::new(services),
-            local_apps: Arc::new(local_apps),
-        })
-    }
-
-    pub async fn from_config_checked(config: &AgentConfig, config_base_dir: &Path) -> Result<Self> {
-        let mut services = BTreeMap::new();
-        let mut local_apps = BTreeMap::new();
-        let shell_executions = ShellExecutionStore::default();
-        let health_client = Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .context("build registered service health client")?;
-
-        for service in &config.services {
-            if !service.enabled {
-                continue;
-            }
-            if !ensure_registered_service_ready(service, &health_client).await {
-                warn!(
-                    service = %service.name,
-                    "registered service is not healthy; omitting from runtime capabilities"
-                );
-                continue;
-            }
-            let runtime_service =
-                build_runtime_service(service, config, config_base_dir, shell_executions.clone())?;
-            if !runtime_service.methods.is_empty() {
-                services.insert(service.name.clone(), runtime_service);
-            }
-        }
-
-        for app in &config.local_apps {
-            if !app.enabled {
-                continue;
-            }
-            let service = local_app_runtime_service(app)?;
-            // Connector lifecycle belongs to the desktop process supervisor. The
-            // registry only observes readiness and must never execute a host-owned
-            // foreground command as if it were a one-shot service start command.
-            if !registered_service_is_healthy(&service, &health_client).await {
-                warn!(
-                    app_id = %app.app_id,
-                    "local app is not healthy; omitting from runtime capabilities"
-                );
-                continue;
-            }
             let runtime =
                 build_runtime_service(&service, config, config_base_dir, shell_executions.clone())?;
             let events = local_app_events(app);

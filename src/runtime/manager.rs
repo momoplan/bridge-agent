@@ -63,7 +63,7 @@ impl AgentRuntimeManager {
         }
         self.push_log("info", "runtime starting", log_limit).await;
 
-        let registry = match ServiceRegistry::from_config_initial(&config, &config_base_dir) {
+        let registry = match ServiceRegistry::from_config(&config, &config_base_dir) {
             Ok(registry) => Arc::new(RwLock::new(registry)),
             Err(err) => {
                 let message = format!("initial runtime preparation failed: {err:#}");
@@ -96,30 +96,13 @@ impl AgentRuntimeManager {
         let snapshot = state.snapshot.clone();
         drop(state);
 
-        let refresh_manager = self.clone();
-        let refresh_path = config_path.to_path_buf();
-        tokio::spawn(async move {
-            if let Err(err) = refresh_manager
-                .apply_capabilities_from_path(&refresh_path)
-                .await
-            {
-                refresh_manager
-                    .push_log(
-                        "warn",
-                        &format!("post-connect capability readiness refresh failed: {err:#}"),
-                        log_limit,
-                    )
-                    .await;
-            }
-        });
-
         Ok(snapshot)
     }
 
     pub async fn apply_capabilities_from_path(&self, path: &Path) -> Result<RuntimeSnapshot> {
         let config = load_config(path)?;
         let config_base_dir = resolve_config_base_dir(path);
-        let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir).await?;
+        let registry = ServiceRegistry::from_config(&config, &config_base_dir)?;
         let services = registry.definitions();
         let local_apps = registry.local_app_definitions();
         let update = RuntimeRegistryUpdate {

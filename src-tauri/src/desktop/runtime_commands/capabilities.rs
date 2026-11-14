@@ -43,8 +43,7 @@ async fn invoke_saved_local_app_capability(
         .filter(|value| *value > 0)
         .ok_or("设备授权缺少有效工作区，请重新授权")?;
     let config_base_dir = resolve_config_base_dir(config_path);
-    let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir)
-        .await
+    let registry = ServiceRegistry::from_config(&config, &config_base_dir)
         .map_err(|err| format!("构建本地应用运行环境失败: {err}"))?;
     let request_id = format!("desktop-local-app-test-{}", now_ms());
 

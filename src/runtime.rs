@@ -275,7 +275,7 @@ mod tests {
         RuntimeLockDocument, RuntimeProcessInfo, RuntimeStatus, SseEvent, SseParser, StreamPumps,
         RELAY_AUTHORIZATION_REQUIRED_MESSAGE, RETIRED_EVENT_OUTBOX_DIR,
     };
-    use crate::config::{AgentConfig, ServiceConfig, ServiceHealthCheck};
+    use crate::config::AgentConfig;
     use crate::logging::LogMetadata;
     use crate::protocol::{AgentCapabilities, AgentMessage};
     use reqwest::StatusCode;

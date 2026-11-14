@@ -32,75 +32,48 @@
     }
 
     #[tokio::test]
-    async fn runtime_connects_without_waiting_for_local_service_readiness() {
+    async fn first_relay_registration_and_refresh_include_unhealthy_installed_apps() {
         let mut relay = FakeRelay::start();
         let health_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let health_addr = health_listener.local_addr().unwrap();
-        let (health_started_tx, health_started_rx) = oneshot::channel();
-        let (release_health_tx, release_health_rx) = oneshot::channel();
-        let health_server = tokio::spawn(async move {
-            let Ok((socket, _)) = health_listener.accept().await else {
-                return;
-            };
-            let _ = health_started_tx.send(());
-            let _ = release_health_rx.await;
-            drop(socket);
-        });
-
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("agent-config.json");
+        let token_path = dir.path().join("app-token");
+        fs::write(&token_path, "bjm_app_startup_capabilities_test_private_token").unwrap();
         let mut config = AgentConfig::example();
         config.platform.environment_key = Some("test".into());
-        config.relay.token = "test-authorized-device".into();
         config.platform.workspace_id = Some(1);
+        config.relay.token = "test-authorized-device".into();
         config.relay.url = relay.url.clone();
-        config.relay.agent_id = "dev_starting_during_service_preparation".to_string();
+        config.relay.agent_id = "dev_installed_capabilities".into();
         config.runtime.log_file_dir = Some(dir.path().join("logs").display().to_string());
         config.runtime.event_server_enabled = false;
         config.runtime.service_registration_enabled = false;
-        config.services = vec![ServiceConfig {
-            name: "slowHealthCheck".to_string(),
-            description: "Keeps runtime preparation pending for the test.".to_string(),
-            enabled: true,
-            health_check: Some(ServiceHealthCheck::Http {
-                url: format!("http://{health_addr}/health"),
-                http_method: "GET".to_string(),
-                headers: BTreeMap::new(),
-                timeout_secs: Some(60),
-                expect_status: Some(200),
-                body_contains: None,
-            }),
-            start_command: None,
-            stop_command: None,
-            methods: Vec::new(),
-        }];
-
-        // Persist the fixture so the post-connect readiness refresh really runs.
+        config.local_apps = vec![serde_json::from_value(json!({
+            "appId":"installed-app","name":"Installed app","version":"1.0.0",
+            "description":"Not ready yet","enabled":true,"methods":[],
+            "healthCheck":{"type":"http","url":format!("http://{health_addr}/health"),
+                "http_method":"GET","headers":{},"timeoutSecs":60},
+            "startCommand":{"type":"shell_command","command":["must-not-start"],
+                "env":{"BAIJIMU_LOCAL_APP_TOKEN_FILE":token_path.display().to_string()}},
+            "events":[{"name":"messageReceived","description":"Messages","enabled":true,"payload_schema":{}}]
+        })).unwrap()];
         crate::config::save_config(&config_path, &config).unwrap();
         let manager = AgentRuntimeManager::new();
-        let starting = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            manager.start(config, &config_path),
-        )
-        .await
-        .expect("runtime start waited for local service readiness")
-        .expect("runtime start failed");
-        assert_eq!(
-            starting.agent_id.as_deref(),
-            Some("dev_starting_during_service_preparation")
-        );
-        assert_ne!(manager.snapshot().await.status, RuntimeStatus::Stopped);
-
-        // `accept` fails if the stream waited for local service readiness.
-        let _relay_session = relay.accept().await;
-        tokio::time::timeout(std::time::Duration::from_secs(10), health_started_rx)
-            .await
-            .expect("local service health request was never started")
-            .unwrap();
-        assert!(!health_server.is_finished(), "health must still be pending at relay connection");
-        release_health_tx.send(()).unwrap();
+        manager.start(config.clone(), &config_path).await.unwrap();
+        let mut session = relay.accept().await;
+        let first = session.receive().await;
+        assert_eq!(first["local_apps"][0]["appId"], "installed-app");
+        assert_eq!(first["local_apps"][0]["events"][0]["name"], "messageReceived");
+        manager.apply_capabilities_from_path(&config_path).await.unwrap();
+        let refreshed = session.receive().await;
+        assert_eq!(refreshed["local_apps"], first["local_apps"]);
+        config.local_apps.clear();
+        crate::config::save_config(&config_path, &config).unwrap();
+        manager.apply_capabilities_from_path(&config_path).await.unwrap();
+        assert_eq!(session.receive().await["local_apps"], json!([]));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), health_listener.accept()).await.is_err());
         manager.stop().await.unwrap();
-        health_server.await.unwrap();
     }
 
     #[tokio::test]

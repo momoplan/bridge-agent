@@ -373,8 +373,7 @@ pub(super) async fn test_capability(
     }
 
     let config_base_dir = resolve_config_base_dir(&state.config_path);
-    let registry = ServiceRegistry::from_config_checked(&config, &config_base_dir)
-        .await
+    let registry = ServiceRegistry::from_config(&config, &config_base_dir)
         .map_err(|err| format!("构建本地能力运行环境失败: {err}"))?;
     let request_id = format!("desktop-test-{}", now_ms());
 

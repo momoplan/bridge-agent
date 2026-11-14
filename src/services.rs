@@ -5,7 +5,6 @@ use crate::config::{
     AgentConfig, ComputerUseBinding, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
     ServiceConfig, ServiceHealthCheck, ServiceStartCommand, ShellCommandBinding,
 };
-use crate::process_environment::enrich_user_command_environment;
 use crate::protocol::{
     EventDefinition, InvokeError, InvokeResult, LocalAppDefinition, ResponseMode, ServiceDefinition,
 };
@@ -13,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
 use image::GenericImageView;
-use reqwest::{Client, Method};
+use reqwest::Method;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,13 +30,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
-use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(windows)]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNNING_SHELL_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
-const LOCAL_APP_START_POLICY_ENV: &str = "BAIJIMU_LOCAL_APP_START_POLICY";
 pub(crate) const BAIJIMU_WORKSPACE_ID_HEADER: &str = "x-baijimu-workspace-id";
 
 #[cfg(target_os = "macos")]
@@ -375,7 +372,7 @@ struct ComputerDragArgs {
 
 include!("services/registry.rs");
 include!("services/local_apps.rs");
-include!("services/runtime_health.rs");
+include!("services/runtime_method.rs");
 include!("services/shell_method.rs");
 include!("services/shell_store.rs");
 include!("services/shell_execution.rs");
@@ -396,7 +393,7 @@ mod cmodel_tests;
 mod tests {
     use super::{
         bgra_to_rgba, is_command_allowed, passthrough_http_outcome, resolve_cwd, sanitize_env,
-        shell_exec_path, ServiceRegistry, ShellCommand, ShellExecArgs, LOCAL_APP_START_POLICY_ENV,
+        shell_exec_path, ServiceRegistry, ShellCommand, ShellExecArgs,
     };
     use crate::config::{
         AgentConfig, EventConfig, HttpBinding, LocalAppConfig, MethodBinding, MethodConfig,
@@ -417,7 +414,7 @@ mod tests {
 
     include!("services/tests/core.rs");
     include!("services/tests/shell.rs");
-    include!("services/tests/health.rs");
+    include!("services/tests/installed_capabilities.rs");
     include!("services/tests/http.rs");
     include!("services/tests/helpers.rs");
 }

@@ -41,6 +41,14 @@ async fn start_and_refresh_installed_connector(
     prepared: &PreparedConnectorInstall,
     install: ConnectorInstallResult,
 ) -> Result<ConnectorAppInstallDocument, String> {
+    // Installation establishes the capability inventory. A failed process start
+    // must not keep the installed app out of Relay's directory.
+    execution
+        .runtime_manager
+        .apply_capabilities_from_path(execution.config_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    execution.registered_services.request_refresh();
     let should_start = prepared.options.start || prepared.restart_after_replace;
     let started = if should_start {
         report_install_progress(
@@ -87,12 +95,7 @@ async fn start_and_refresh_installed_connector(
         "正在刷新本地应用能力",
         Some(96),
     )?;
-    let runtime = execution
-        .runtime_manager
-        .apply_capabilities_from_path(execution.config_path)
-        .await
-        .map_err(|err| err.to_string())?;
-    execution.registered_services.request_refresh();
+    let runtime = execution.runtime_manager.snapshot().await;
     let config = load_agent_config(execution.config_path).map_err(|err| err.to_string())?;
     let manifest_preview = manifest_preview_json(&config).map_err(|err| err.to_string())?;
     Ok(ConnectorAppInstallDocument {
