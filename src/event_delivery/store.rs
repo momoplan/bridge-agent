@@ -32,11 +32,7 @@ impl Store {
             // may carry a later observation timestamp; never replace the pending body.
             return Ok(accepted(&event, LocalAcceptance::Queued));
         }
-        let groups = self
-            .subscriptions
-            .as_ref()
-            .filter(|_| self.subscription_received.elapsed().as_secs() < 30)
-            .map(|s| targets(s, &event));
+        let groups = self.subscriptions.as_ref().map(|s| targets(s, &event));
         if groups.as_ref().is_some_and(Vec::is_empty) {
             return Ok(accepted(&event, LocalAcceptance::NoSubscribers));
         }
@@ -70,12 +66,8 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<LocalAppEventEmitted>> {
         self.cleanup(policy, now)?;
-        // No fresh subscription authority: retain locally and wait, including across restart.
-        let Some(snapshot) = self
-            .subscriptions
-            .as_ref()
-            .filter(|_| self.subscription_received.elapsed().as_secs() < 30)
-        else {
+        // Wait for this connection’s initial snapshot, including after restart.
+        let Some(snapshot) = self.subscriptions.as_ref() else {
             return Ok(vec![]);
         };
         let tx = self.db.transaction()?;

@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub const AGENT_PROTOCOL_VERSION: &str = "4.0.0";
 pub const AGENT_PROTOCOL_FEATURE_REGISTERED_ACK: &str = "registered_ack";
+pub const AGENT_PROTOCOL_FEATURE_SUBSCRIPTION_CHANGES: &str = "device_subscription_changes_v1";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2: &str = "local_app_events_v2";
 pub const AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3: &str = "local_app_capabilities_v3";
 pub use relay::contracts::device_streams::LOCAL_APP_STREAMS_FEATURE as AGENT_PROTOCOL_FEATURE_LOCAL_APP_STREAMS;

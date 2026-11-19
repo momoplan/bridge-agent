@@ -111,7 +111,6 @@ struct Store {
     scope: String,
     subscriptions: Option<DeviceSubscriptions>,
     last_maintenance: i64,
-    subscription_received: std::time::Instant,
 }
 impl EventQueue {
     pub fn open(path: &Path, identity: QueueIdentity) -> Result<Self> {
@@ -159,7 +158,6 @@ impl EventQueue {
                 scope,
                 subscriptions: None,
                 last_maintenance: 0,
-                subscription_received: std::time::Instant::now(),
             })),
         })
     }
@@ -206,7 +204,6 @@ impl EventQueue {
                 }
             }
             store.subscriptions = snapshot;
-            store.subscription_received = std::time::Instant::now();
             Ok(())
         })
         .await
