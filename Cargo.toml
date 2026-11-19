@@ -1,6 +1,6 @@
 [package]
 name = "bridge-agent"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 default-run = "bridge-agent"
 
@@ -21,7 +21,7 @@ directories = "5.0"
 futures-util = "0.3"
 fs2 = "0.4"
 sysinfo = "0.33"
-local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "915e6b9ccaf551293d3c153f61b9947052736b83", version = "=4.0.0" }
+local-app-contract = { git = "https://gitee.com/zxflimit_admin/local-app-contract.git", rev = "b629d2a58db94c98a054ba4e9c70084f8106e022", version = "=6.0.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pep440_rs = "0.7.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

@@ -49,6 +49,33 @@ fn market_install_preserves_source_and_rejects_other_environment_before_mutation
 }
 
 #[test]
+fn explicit_reinstall_checks_source_without_loading_retired_manifest() {
+    let directory = tempdir().unwrap();
+    let _env = connector_test_env(directory.path().join("connectors"));
+    let config_path = directory.path().join("config.json");
+    save_config(&config_path, &AgentConfig::example()).unwrap();
+    let source = directory.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    let manifest = source.join(CONNECTOR_MANIFEST_FILE);
+    fs::write(&manifest, include_str!("../../../tests/fixtures/market-connector-3.0.0.json")).unwrap();
+    let first = fixture_market_provenance("author-a", uuid::Uuid::from_u128(1), "1.0.0");
+    install_connector_from_path_with_provenance(&source, &config_path, false, first.clone()).unwrap();
+    mark_fixture_connector_stopped(&config_path);
+    let path = install_record_path("test-app").unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    legacy["manifest"]["remoteCapabilities"] = json!([]);
+    let original = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&path, &original).unwrap();
+    assert!(show_connector("test-app").is_err());
+    let foreign = fixture_market_provenance("author-b", uuid::Uuid::from_u128(2), "1.0.0");
+    let error = install_connector_from_path_with_provenance(&source, &config_path, true, foreign).unwrap_err();
+    assert!(error.to_string().contains("different source applications"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    install_connector_from_path_with_provenance(&source, &config_path, true, first.clone()).unwrap();
+    assert_eq!(show_connector("test-app").unwrap().install_source, first.install_source);
+}
+
+#[test]
 fn historical_installation_does_not_acquire_a_market_source_from_matching_app_id() {
     let directory = tempdir().unwrap();
     let _env = connector_test_env(directory.path().join("connectors"));

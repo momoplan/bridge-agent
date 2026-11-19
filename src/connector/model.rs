@@ -64,8 +64,6 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub publisher: Option<ConnectorPublisher>,
-    #[serde(default)]
     pub source: Option<ConnectorSource>,
     #[serde(default)]
     pub runtime: Option<ConnectorRuntime>,
@@ -87,8 +85,6 @@ pub struct ConnectorManifest {
     pub upgrade_review: Option<ConnectorUpgradeReview>,
     #[serde(default)]
     pub database: Option<ConnectorDatabaseContract>,
-    #[serde(default)]
-    pub remote_capabilities: Vec<ConnectorRemoteCapability>,
     #[serde(default)]
     pub permissions: Vec<ConnectorPermission>,
     #[serde(default)]
@@ -145,13 +141,6 @@ pub struct ConnectorUi {
     pub title: Option<String>,
     #[serde(default)]
     pub default_view: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorPublisher {
-    pub name: String,
-    #[serde(default)]
-    pub homepage: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,15 +326,6 @@ pub struct ConnectorHostRequirements {
 
 fn default_connector_setup_timeout_secs() -> u64 {
     1_800
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorRemoteCapability {
-    pub name: String,
-    #[serde(default)]
-    pub risk: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

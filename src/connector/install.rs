@@ -34,6 +34,22 @@ pub fn install_connector_from_path_with_source_reference(
     )
 }
 
+// Replacement needs the installed identity even when the old manifest can no
+// longer be executed by this host. The incoming package is fully validated.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledConnectorIdentity {
+    manifest: InstalledAppId,
+    install_source: Option<local_app_contract::InstallSource>,
+    installed_at_epoch_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledAppId {
+    app_id: String,
+}
+
 pub fn install_connector_from_path_with_provenance(
     source: &Path,
     config_path: &Path,
@@ -76,7 +92,26 @@ pub fn install_connector_from_path_with_provenance(
             package_path.display()
         );
     }
-    let previous_record = load_install_record(&manifest.app_id).ok();
+    let previous_record = match read_install_record::<InstalledConnectorIdentity>(&manifest.app_id) {
+        Ok(record) => {
+            if record.manifest.app_id != manifest.app_id {
+                bail!("stored connector installation identity does not match the package");
+            }
+            if !replace {
+                bail!("connector install record already exists; pass replace to reinstall");
+            }
+            Some(record)
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+                && !package_path.try_exists()? =>
+        {
+            None
+        }
+        Err(error) => return Err(error.context("cannot establish installed connector provenance")),
+    };
     validate_install_replacement(previous_record.as_ref(), &provenance)?;
 
     if package_path.exists() && previous_record.is_some() {
@@ -173,7 +208,7 @@ fn complete_connector_install(
     registrations: &[ServiceRegistration],
     services: &mut [ServiceConfig],
     config: &mut AgentConfig,
-    previous_record: Option<&ConnectorInstallRecord>,
+    previous_record: Option<&InstalledConnectorIdentity>,
     provenance: &ConnectorInstallProvenance,
     config_saved: &mut bool,
 ) -> Result<ConnectorInstallResult> {
@@ -502,7 +537,7 @@ fn sync_installed_connector_record(
 }
 
 fn validate_install_replacement(
-    previous_record: Option<&ConnectorInstallRecord>,
+    previous_record: Option<&InstalledConnectorIdentity>,
     provenance: &ConnectorInstallProvenance,
 ) -> Result<()> {
     if previous_record.is_some_and(|record| record.install_source.is_some())
