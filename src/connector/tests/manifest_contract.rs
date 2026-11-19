@@ -1,4 +1,19 @@
     #[test]
+    fn connector_manifest_uses_declared_surface_without_author_claims() {
+        let input = test_manifest_with_command("test-app", "Test", "1.0.0", "test", &[]);
+        let manifest: ConnectorManifest = serde_json::from_value(input.clone()).unwrap();
+        let stored = serde_json::to_value(manifest).unwrap();
+        for field in ["remoteCapabilities", "publisher"] {
+            assert!(stored.get(field).is_none());
+            let mut old_input = input.clone();
+            old_input[field] = Value::Null;
+            let error = serde_json::from_value::<ConnectorManifest>(old_input).unwrap_err();
+            assert!(error.to_string().contains(field));
+        }
+        assert_eq!(stored["methods"][0]["name"], "ping");
+    }
+
+    #[test]
     fn connector_manifest_rejects_retired_service_registration_files() {
         let dir = tempdir().unwrap();
         fs::write(

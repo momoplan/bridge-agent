@@ -245,7 +245,6 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
 推荐字段：
 
 - `description`
-- `publisher`
 - `source`
 - `runtime`
 - `management`
@@ -254,7 +253,6 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
 - `upgradeReview`
 - `configSchema`
 - `database`
-- `remoteCapabilities`
 - `hooks`
 - `permissions`
 - `legacyAutostartLabels`
@@ -268,10 +266,6 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
   "name": "WeChat Connector",
   "version": "0.2.3",
   "description": "Expose local WeChat search and message events to 百积木.",
-  "publisher": {
-    "name": "Baijimu",
-    "homepage": "https://baijimu.com"
-  },
   "source": {
     "type": "git",
     "repo": "momoplan/wechat-bridge-collector",
@@ -354,14 +348,7 @@ Bridge Agent `0.6.0` 前由迁移工具完成数据归档，应用必须重新�
     "entry": "ui/index.html",
     "title": "管理",
     "defaultView": true
-  },
-  "remoteCapabilities": [
-    {
-      "name": "wechat.events.messageReceived",
-      "risk": "high",
-      "description": "Emit message events from the user's local WeChat data."
-    }
-  ]
+  }
 }
 ```
 

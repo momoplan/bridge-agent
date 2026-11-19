@@ -1,4 +1,27 @@
     #[test]
+    fn replacement_requires_a_readable_install_record() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent-config.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        let app_id = "test-record";
+        let package_manifest = source.join(CONNECTOR_MANIFEST_FILE);
+        let document = test_manifest(app_id, "Record Test", "1.0.0");
+        fs::write(&package_manifest, document.to_string()).unwrap();
+        install_connector_from_path(&source, &config_path, false).unwrap();
+        let record_path = install_record_path(app_id).unwrap();
+        let original_config = fs::read(&config_path).unwrap();
+        fs::write(&record_path, b"{}").unwrap();
+        assert!(install_connector_from_path(&source, &config_path, true).is_err());
+        assert_eq!(fs::read(&record_path).unwrap(), b"{}");
+        fs::remove_file(&record_path).unwrap();
+        assert!(install_connector_from_path(&source, &config_path, true).is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), original_config);
+    }
+
+    #[test]
     fn install_connector_updates_agent_config() {
         let dir = tempdir().unwrap();
         let _env = connector_test_env(dir.path().join("connectors"));

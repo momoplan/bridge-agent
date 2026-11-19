@@ -76,7 +76,18 @@ pub fn install_connector_from_path_with_provenance(
             package_path.display()
         );
     }
-    let previous_record = load_install_record(&manifest.app_id).ok();
+    let previous_record = match load_install_record(&manifest.app_id) {
+        Ok(record) => Some(record),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+                && !package_path.try_exists()? =>
+        {
+            None
+        }
+        Err(error) => return Err(error.context("cannot establish installed connector provenance")),
+    };
     validate_install_replacement(previous_record.as_ref(), &provenance)?;
 
     if package_path.exists() && previous_record.is_some() {
