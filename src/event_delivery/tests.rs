@@ -260,3 +260,38 @@ fn storage_identity_uses_the_existing_environment_authority() {
     config.platform.workspace_id = None;
     assert!(QueueIdentity::from_config(&config).is_err());
 }
+
+#[tokio::test]
+async fn idle_connection_keeps_demand_until_a_change_or_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = EventQueue::open(&dir.path().join("q"), identity()).unwrap();
+    let policy = StoragePolicy::default();
+    queue
+        .subscriptions(Some(snapshot(&["worker"])))
+        .await
+        .unwrap();
+    // Cross the old wall-clock lease with no intervening Relay frames.
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    queue.admit(event("idle"), policy.clone()).await.unwrap();
+    let due = queue.due(policy.clone(), 1).await.unwrap();
+    assert_eq!(due[0].target_consumers, ["worker"]);
+    queue.subscriptions(Some(snapshot(&[]))).await.unwrap();
+    assert_eq!(
+        queue
+            .admit(event("removed"), policy.clone())
+            .await
+            .unwrap()
+            .status,
+        LocalAcceptance::NoSubscribers
+    );
+    queue.subscriptions(None).await.unwrap();
+    assert_eq!(
+        queue
+            .admit(event("offline"), policy.clone())
+            .await
+            .unwrap()
+            .status,
+        LocalAcceptance::Queued
+    );
+    assert!(queue.due(policy, 1).await.unwrap().is_empty());
+}
