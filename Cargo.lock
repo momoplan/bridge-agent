@@ -380,7 +380,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
- "local-app-contract",
+ "local-app-contract 6.0.0",
  "pep440_rs",
  "relay",
  "reqwest",
@@ -1435,12 +1435,30 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
 name = "local-app-contract"
-version = "4.0.0"
-source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=915e6b9ccaf551293d3c153f61b9947052736b83#915e6b9ccaf551293d3c153f61b9947052736b83"
+version = "3.1.0"
+source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=2c354a1cba2e219d96c02e1cd7bd85e94b00bbec#2c354a1cba2e219d96c02e1cd7bd85e94b00bbec"
 dependencies = [
  "anyhow",
  "base64",
  "image",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "local-app-contract"
+version = "6.0.0"
+source = "git+https://gitee.com/zxflimit_admin/local-app-contract.git?rev=b629d2a58db94c98a054ba4e9c70084f8106e022#b629d2a58db94c98a054ba4e9c70084f8106e022"
+dependencies = [
+ "anyhow",
+ "base64",
+ "image",
+ "local-app-contract 3.1.0",
  "semver",
  "serde",
  "serde_json",

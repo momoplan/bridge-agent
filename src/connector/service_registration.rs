@@ -159,6 +159,10 @@ fn load_install_records() -> Result<Vec<ConnectorInstallRecord>> {
 }
 
 fn load_install_record(app_id: &str) -> Result<ConnectorInstallRecord> {
+    read_install_record(app_id)
+}
+
+fn read_install_record<T: serde::de::DeserializeOwned>(app_id: &str) -> Result<T> {
     let path = install_record_path(app_id)?;
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read connector install record {}", path.display()))?;
