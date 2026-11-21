@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 if ($env:GITHUB_ACTIONS -ne "true") { throw "Installer regression test is CI-only" }
 # Immutable regression fixtures: 0.6.18 first exposed the white-screen failure.
-# 0.20.0 wrote the legacy Connector records checked during the upgrade.
+# 0.20.0 is the released desktop version affected by the market read failure.
 $fixtureVersions = @("0.6.18", "0.20.0")
 $directory = Join-Path $env:RUNNER_TEMP "white-screen-repair"
 New-Item -ItemType Directory -Path $directory -Force | Out-Null
