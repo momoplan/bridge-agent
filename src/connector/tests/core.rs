@@ -79,7 +79,7 @@
         assert!(!local_app_starts_automatically(&app));
     }
 
-    struct ConnectorTestEnvGuard {
+    pub(crate) struct ConnectorTestEnvGuard {
         _lock: MutexGuard<'static, ()>,
         previous: Option<OsString>,
         previous_data: Option<OsString>,
@@ -100,7 +100,7 @@
         }
     }
 
-    fn connector_test_env(path: impl AsRef<Path>) -> ConnectorTestEnvGuard {
+    pub(crate) fn connector_test_env(path: impl AsRef<Path>) -> ConnectorTestEnvGuard {
         let lock = CONNECTOR_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

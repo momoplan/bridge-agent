@@ -100,6 +100,7 @@ fn local_app_events(app: &LocalAppConfig) -> BTreeSet<String> {
 
 fn local_app_definition(app: &LocalAppConfig) -> LocalAppDefinition {
     LocalAppDefinition {
+        installed_source: crate::connector::registered_source(app).ok(),
         app_id: app.app_id.clone(),
         name: app.name.clone(),
         version: app.version.clone(),

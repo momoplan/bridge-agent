@@ -13,6 +13,7 @@ fn identity() -> QueueIdentity {
 }
 fn event(id: &str) -> LocalAppEventEmitted {
     LocalAppEventEmitted {
+        installed_source: None,
         event_id: id.into(),
         app_id: "connector".into(),
         event: "output".into(),
@@ -294,4 +295,42 @@ async fn idle_connection_keeps_demand_until_a_change_or_disconnect() {
         LocalAcceptance::Queued
     );
     assert!(queue.due(policy, 1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bound_event_preserves_origin_across_restart_and_source_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("event.sqlite");
+    let policy = StoragePolicy::default();
+    let mut original = event("pending");
+    original.installed_source = Some(
+        serde_json::from_value(serde_json::json!({
+            "application": {"environmentKey":"first","appId":"connector"}, "version":"1.0.0"
+        }))
+        .unwrap(),
+    );
+    {
+        let queue = EventQueue::open(&path, identity()).unwrap();
+        queue.admit(original.clone(), policy.clone()).await.unwrap();
+    }
+    let queue = EventQueue::open(&path, identity()).unwrap();
+    let mut after_upgrade = original.clone();
+    after_upgrade.installed_source.as_mut().unwrap().version = "2.0.0".into();
+    queue
+        .admit(after_upgrade.clone(), policy.clone())
+        .await
+        .unwrap();
+    after_upgrade
+        .installed_source
+        .as_mut()
+        .unwrap()
+        .application
+        .environment_key = "second".into();
+    assert!(queue.admit(after_upgrade, policy.clone()).await.is_err());
+    queue
+        .subscriptions(Some(snapshot(&["worker"])))
+        .await
+        .unwrap();
+    let pending = queue.due(policy, 1).await.unwrap();
+    assert_eq!(pending[0].installed_source, original.installed_source);
 }

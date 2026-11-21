@@ -4,6 +4,7 @@ use crate::services::ServiceRegistry;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 
 struct InvocationHarness {
+    capabilities: v1::Capabilities,
     socket: RelaySession,
     _relay: FakeRelay,
     apply: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
@@ -17,8 +18,40 @@ struct InvocationHarness {
     _dir: tempfile::TempDir,
 }
 
+fn invocation_config(dir: &std::path::Path, addr: std::net::SocketAddr) -> AgentConfig {
+    let token_path = dir.join("token");
+    fs::write(&token_path, "bjm_app_test_concurrent_private_runtime_token").unwrap();
+    let method = json!({"name":"call","description":"test","enabled":true,
+        "input_schema":{},"response_mode":"cmodel","binding":{
+            "type":"http","url":format!("http://{addr}/invoke"),
+            "http_method":"POST","headers":{},"timeout_secs":60}});
+    let mut config = AgentConfig::example();
+    config.relay.agent_id = "dev_test".into();
+    config.platform.environment_key = Some("test".into());
+    config.platform.workspace_id = Some(1);
+    config.services = vec![serde_json::from_value(json!({
+        "name":"test-service","description":"test","enabled":true,"methods":[method.clone()]
+    }))
+    .unwrap()];
+    config.local_apps = vec![serde_json::from_value(json!({
+        "appId":"test-app","name":"test","version":"1.0.0","description":"test",
+        "enabled":true,"methods":[method],"events":[],"startCommand":{
+            "type":"shell_command","command":["unused"],"env":{
+                "BAIJIMU_LOCAL_APP_TOKEN_FILE":token_path.to_string_lossy()
+            },"timeout_secs":1}
+    }))
+    .unwrap()];
+    config
+}
+
 impl InvocationHarness {
     async fn new() -> Self {
+        Self::with_config(|_, _, _| {}).await
+    }
+
+    async fn with_config(
+        configure: impl FnOnce(&mut AgentConfig, &std::path::Path, &str),
+    ) -> Self {
         let entered = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -43,27 +76,8 @@ impl InvocationHarness {
             axum::serve(listener, app).await.unwrap();
         });
         let dir = tempdir().unwrap();
-        let token_path = dir.path().join("token");
-        fs::write(&token_path, "bjm_app_test_concurrent_private_runtime_token").unwrap();
-        let method = json!({"name":"call","description":"test","enabled":true,
-            "input_schema":{},"response_mode":"cmodel","binding":{
-                "type":"http","url":format!("http://{addr}/invoke"),
-                "http_method":"POST","headers":{},"timeout_secs":60}});
-        let mut config = AgentConfig::example();
-        config.platform.environment_key = Some("test".into());
-        config.platform.workspace_id = Some(1);
-        config.services = vec![serde_json::from_value(json!({
-            "name":"test-service","description":"test","enabled":true,"methods":[method.clone()]
-        }))
-        .unwrap()];
-        config.local_apps = vec![serde_json::from_value(json!({
-            "appId":"test-app","name":"test","version":"1.0.0","description":"test",
-            "enabled":true,"methods":[method],"events":[],"startCommand":{
-                "type":"shell_command","command":["unused"],"env":{
-                    "BAIJIMU_LOCAL_APP_TOKEN_FILE":token_path.to_string_lossy()
-                },"timeout_secs":1}
-        }))
-        .unwrap()];
+        let mut config = invocation_config(dir.path(), addr);
+        configure(&mut config, dir.path(), &format!("http://{addr}"));
         let registry = ServiceRegistry::from_config(&config, dir.path()).unwrap();
         let mut relay = FakeRelay::start();
         let relay_endpoint = relay_endpoint(&relay.url).unwrap();
@@ -100,8 +114,11 @@ impl InvocationHarness {
                 .await
         });
         let mut socket = relay.accept().await;
-        assert_eq!(socket.receive().await["type"], "capabilities");
+        let DeviceFrameKind::Capabilities(capabilities) = socket.next_frame().await else {
+            panic!("expected the initial device registration");
+        };
         Self {
+            capabilities,
             socket,
             _relay: relay,
             apply,
@@ -261,4 +278,66 @@ async fn relay_disconnect_drops_active_invocations_without_waiting_or_replay() {
         .unwrap();
     assert!(result.is_err());
     assert_eq!(h.entered.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bound_call_cannot_dispatch_to_an_unproven_app_by_name() {
+    let mut h = InvocationHarness::new().await;
+    h.socket.send_frame(v1::RelayFrame {
+        frame: Some(RelayFrameKind::BoundLocalAppInvokeRequest(v1::BoundLocalAppInvokeRequest {
+            request_id: "bound".into(),
+            workspace_id: 1,
+            application_runtime_id: "runtime-a".into(),
+            local_app_locator: "private/example/LOCAL_APP/selected".into(),
+            source: Some(v1::LocalAppSource {
+                environment_key: "private".into(),
+                app_id: "test-app".into(),
+                version: "1.0.0".into(),
+            }),
+            method: "call".into(),
+            arguments_json: br#"{"slow":true}"#.to_vec(),
+        })),
+    }).await;
+    let result = h.receive().await;
+    assert_eq!(result["type"], "local_app_invoke_result");
+    assert_eq!(result["request_id"], "bound");
+    assert_eq!(result["success"], false);
+    assert_eq!(result["error"]["code"], "BOUND_LOCAL_APP_DENIED");
+    assert_eq!(h.entered.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn registered_bound_call_returns_installed_connectors_reply() {
+    use crate::connector::tests::{connector_test_env, install_bound_call_fixture};
+    let installation = tempdir().unwrap();
+    let _env = connector_test_env(installation.path().join("connectors"));
+    let mut harness = InvocationHarness::with_config(install_bound_call_fixture).await;
+    let app = harness.capabilities.local_apps.iter().find(|app| app.app_id == "test-app").unwrap();
+    let source = app.installed_source.clone().expect("device must register its installed source");
+    assert_eq!(source.environment_key, "test");
+    assert_eq!(source.app_id, app.app_id);
+    assert_eq!(source.version, "1.0.0");
+    assert!(app.methods.iter().any(|method| method.name == "ping"));
+    harness.socket.send(json!({
+        "type": "registered_ack", "agent_id": "dev_test", "workspace_id": 1,
+        "connection_id": "bound-connection", "registered_at_epoch_seconds": 1,
+        "heartbeat_timeout_secs": 75
+    })).await;
+    let call = v1::BoundLocalAppInvokeRequest {
+        request_id: "registered-call".into(),
+        workspace_id: 1,
+        application_runtime_id: "test-runtime".into(),
+        local_app_locator: "test/example/LOCAL_APP/selected".into(),
+        source: Some(source),
+        method: "ping".into(),
+        arguments_json: serde_json::to_vec(&json!({"echo": "device-result"})).unwrap(),
+    };
+    harness.socket.send_frame(v1::RelayFrame {
+        frame: Some(RelayFrameKind::BoundLocalAppInvokeRequest(call)),
+    }).await;
+    let reply = harness.receive().await;
+    assert_eq!(reply["type"], "local_app_invoke_result");
+    assert_eq!(reply["request_id"], "registered-call");
+    assert_eq!(reply["success"], true, "{reply}");
+    assert_eq!(reply["data"]["echo"], "device-result");
 }

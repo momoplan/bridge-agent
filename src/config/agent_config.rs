@@ -160,6 +160,7 @@ impl AgentConfig {
             .iter()
             .filter(|app| app.enabled)
             .map(|app| LocalAppDefinition {
+                installed_source: None,
                 app_id: app.app_id.clone(),
                 name: app.name.clone(),
                 version: app.version.clone(),

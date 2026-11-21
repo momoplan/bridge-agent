@@ -27,7 +27,13 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        if existing.is_some() {
+        if let Some(existing) = existing {
+            let queued: LocalAppEventEmitted = serde_json::from_str(&existing)?;
+            if queued.installed_source.as_ref().map(|s| &s.application)
+                != event.installed_source.as_ref().map(|s| &s.application)
+            {
+                bail!("event ID is already queued for a different installation source");
+            }
             // The first durable record owns this event identity. A source replay
             // may carry a later observation timestamp; never replace the pending body.
             return Ok(accepted(&event, LocalAcceptance::Queued));

@@ -358,6 +358,17 @@ pub struct ConnectorInstallProvenance {
     source_checksum: Option<String>,
 }
 
+impl ConnectorManifest {
+    fn verify_source_identity(&self, source: &local_app_contract::SourceVersion) -> Result<()> {
+        if source.application.app_id.as_str() != self.app_id
+            || source.version.to_string() != self.version
+        {
+            bail!("installed manifest differs from the selected frozen source version");
+        }
+        Ok(())
+    }
+}
+
 impl ConnectorInstallProvenance {
     pub fn frozen_environment(
         frozen: &local_app_contract::FrozenVersion,
@@ -396,11 +407,7 @@ impl ConnectorInstallProvenance {
                 local_app_contract::InstallSource::Market { source, .. }
                 | local_app_contract::InstallSource::Environment { source } => source,
             };
-            if source.application.app_id.as_str() != manifest.app_id
-                || source.version.to_string() != manifest.version
-            {
-                bail!("installed manifest differs from the selected frozen source version");
-            }
+            manifest.verify_source_identity(source)?;
         }
         Ok(())
     }

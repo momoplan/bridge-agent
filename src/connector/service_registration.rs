@@ -173,3 +173,27 @@ fn read_install_record<T: serde::de::DeserializeOwned>(app_id: &str) -> Result<T
         )
     })
 }
+
+/// Attest the actual callable targets and events in the host registry against the
+/// installed manifest. Hand-configured apps do not have an installation identity.
+pub(crate) fn registered_source(app: &LocalAppConfig) -> Result<local_app_contract::SourceVersion> {
+    let record = read_install_record::<ConnectorInstallRecord>(&app.app_id)?;
+    check_registered_source(app, &record)
+}
+
+fn check_registered_source(app: &LocalAppConfig, record: &ConnectorInstallRecord) -> Result<local_app_contract::SourceVersion> {
+    let source = crate::market_distribution::installed_source_version(record.install_source.as_ref())?;
+    record.manifest.verify_source_identity(source)?;
+    if record.manifest.app_id != app.app_id || record.manifest.version != app.version {
+        bail!("installed connector does not match the registered app and version");
+    }
+    let registrations = load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)?;
+    let services = registrations.iter().cloned().map(ServiceRegistration::into_connector_service_config)
+        .collect::<Result<Vec<_>>>()?;
+    let installed = local_app_from_services(&record.manifest, &services, &registrations)?;
+    if serde_json::to_value(installed.methods)? != serde_json::to_value(&app.methods)?
+        || serde_json::to_value(installed.events)? != serde_json::to_value(&app.events)? {
+        bail!("registered targets differ from the installed connector");
+    }
+    Ok(source.clone())
+}

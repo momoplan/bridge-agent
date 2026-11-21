@@ -54,22 +54,16 @@ pub fn resolve_exact<'a>(
     }
 }
 
-/// Only select a newer release for an already proven source application.
-/// Market and listing identify a distribution route, not application lineage.
-/// Missing provenance is a migration blocker, never a request to infer an owner.
-/// This function does not authorize installation or mutate an installation record.
-pub fn select_upgrade(
+pub(crate) fn installed_source_version(
     installed: Option<&InstallSource>,
-    candidate: &MarketListing,
-) -> Result<Option<InstallSource>, ContractError> {
-    validate_listing(candidate)?;
+) -> Result<&local_app_contract::SourceVersion, ContractError> {
     let Some(installed) = installed else {
         return Err(ContractError::new(
             "installed.source",
             "proven source application identity required",
         ));
     };
-    let source = match installed {
+    Ok(match installed {
         InstallSource::Market {
             version, source, ..
         } if version == &source.version => source,
@@ -80,7 +74,19 @@ pub fn select_upgrade(
             ));
         }
         InstallSource::Environment { source } => source,
-    };
+    })
+}
+
+/// Only select a newer release for an already proven source application.
+/// Market and listing identify a distribution route, not application lineage.
+/// Missing provenance is a migration blocker, never a request to infer an owner.
+/// This function does not authorize installation or mutate an installation record.
+pub fn select_upgrade(
+    installed: Option<&InstallSource>,
+    candidate: &MarketListing,
+) -> Result<Option<InstallSource>, ContractError> {
+    validate_listing(candidate)?;
+    let source = installed_source_version(installed)?;
     if source.application != candidate.frozen_version.source.application {
         return Err(ContractError::new(
             "installed.source",

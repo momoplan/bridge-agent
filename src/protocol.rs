@@ -16,6 +16,8 @@ pub enum AgentMessage {
     InvokeRequest(InvokeRequest),
     InvokeResult(InvokeResult),
     LocalAppInvokeRequest(LocalAppInvokeRequest),
+    #[serde(skip)]
+    BoundLocalAppInvokeRequest(Box<BoundLocalAppInvokeRequest>),
     LocalAppInvokeResult(InvokeResult),
     LocalAppEventEmitted(LocalAppEventEmitted),
     EventAck(EventAck),
@@ -85,6 +87,8 @@ pub struct EventDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalAppDefinition {
+    #[serde(skip)]
+    pub installed_source: Option<local_app_contract::SourceVersion>,
     pub app_id: String,
     pub name: String,
     pub version: String,
@@ -92,6 +96,16 @@ pub struct LocalAppDefinition {
     pub methods: Vec<MethodDefinition>,
     #[serde(default)]
     pub events: Vec<EventDefinition>,
+}
+
+/// Decoded only from the authenticated Relay device channel.
+#[derive(Debug, Clone)]
+pub struct BoundLocalAppInvokeRequest {
+    pub request_id: String,
+    pub workspace_id: u64,
+    pub source: local_app_contract::SourceVersion,
+    pub method: String,
+    pub arguments: Value,
 }
 
 pub use relay::contracts::device_events::{DeviceSubscriptions, EventAck, LocalAppEventEmitted};

@@ -50,7 +50,7 @@ include!("connector/summary.rs");
 include!("connector/tokens.rs");
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::AgentConfig;
     use image::{DynamicImage, Rgba, RgbaImage};

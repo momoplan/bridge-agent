@@ -86,7 +86,13 @@ pub fn authorize_connector_event(
     event_name: &str,
     token: &str,
 ) -> Result<()> {
-    load_install_record(app_id)?;
+    authorized_event_source(config_path, app_id, event_name, token).map(|_| ())
+}
+
+pub(crate) fn authorized_event_source(
+    config_path: &Path, app_id: &str, event_name: &str, token: &str,
+) -> Result<Option<local_app_contract::SourceVersion>> {
+    let record = load_install_record(app_id)?;
     let expected_token_path = connector_event_token_path(app_id)?;
     let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
         format!(
@@ -100,19 +106,10 @@ pub fn authorize_connector_event(
 
     let config = load_config(config_path)?;
     let event_name = event_name.trim();
-    let declared = config
-        .local_apps
-        .iter()
-        .find(|app| app.app_id == app_id && app.enabled)
-        .is_some_and(|app| {
-            app.events
-                .iter()
-                .any(|event| event.enabled && event.name == event_name)
-        });
-    if !declared {
-        bail!("local app event `{event_name}` is not declared by connector `{app_id}`");
-    }
-    Ok(())
+    let app = config.local_apps.iter().find(|app| {
+        app.app_id == app_id && app.enabled && app.events.iter().any(|event| event.enabled && event.name == event_name)
+    }).with_context(|| format!("local app event `{event_name}` is not declared by connector `{app_id}`"))?;
+    Ok(check_registered_source(app, &record).ok())
 }
 
 pub fn load_connector_manifest(source: &Path) -> Result<ConnectorManifest> {

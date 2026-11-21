@@ -261,6 +261,7 @@ fn device_message(frame: DeviceFrameKind) -> Option<AgentMessage> {
                     .local_apps
                     .into_iter()
                     .map(|app| LocalAppDefinition {
+                        installed_source: app.installed_source.map(|source| super::decode_source(source).unwrap()),
                         app_id: app.app_id,
                         name: app.name,
                         version: app.version,

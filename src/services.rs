@@ -82,6 +82,7 @@ struct RuntimeService {
 }
 
 struct RuntimeLocalApp {
+    config: LocalAppConfig,
     definition: LocalAppDefinition,
     runtime: RuntimeService,
     stream: Option<LocalAppStreamTarget>,

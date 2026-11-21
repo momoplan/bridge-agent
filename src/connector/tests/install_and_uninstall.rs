@@ -276,3 +276,43 @@
             vec![101]
         );
     }
+
+    #[test]
+    fn bound_method_uses_current_frozen_installation_and_registered_target() {
+        let dir = tempdir().unwrap();
+        let _env = connector_test_env(dir.path().join("connectors"));
+        let config_path = dir.path().join("agent.json");
+        save_config(&config_path, &AgentConfig::example()).unwrap();
+        let package = dir.path().join("fixture");
+        fs::create_dir(&package).unwrap();
+        let app_id = "com.example.bound";
+        fs::write(package.join(CONNECTOR_MANIFEST_FILE), test_manifest(app_id, "fixture", "1.2.0").to_string()).unwrap();
+        install_connector_from_path(&package, &config_path, false).unwrap();
+        prepare_installed_connector_runtime(&config_path, app_id).unwrap();
+        let mut config = load_config(&config_path).unwrap();
+        let mut record = show_connector(app_id).unwrap();
+        let source: local_app_contract::SourceVersion = serde_json::from_value(json!({
+            "application":{"environmentKey":"private","appId":app_id},"version":"1.2.0"
+        })).unwrap();
+        let get_registry = |cfg: &AgentConfig| crate::services::ServiceRegistry::from_config(cfg,dir.path()).unwrap();
+        assert!(get_registry(&config).bound_app_id(&source, "ping").is_err());
+        record.install_source = Some(local_app_contract::InstallSource::Environment {source:source.clone()});
+        save_install_record(&record).unwrap();
+        let registry = get_registry(&config);
+        assert_eq!(registry.bound_app_id(&source, "ping").unwrap(), app_id);
+        assert!(registry.bound_app_id(&source, "undeclared").is_err());
+        let other = local_app_contract::SourceVersion {
+            application: local_app_contract::SourceApp {environment_key:"other".to_string().try_into().unwrap(), ..source.application.clone()},
+            ..source.clone()
+        };
+        assert!(registry.bound_app_id(&other, "ping").is_err());
+        record.install_source = Some(local_app_contract::InstallSource::Environment {source:other});
+        save_install_record(&record).unwrap();
+        assert!(registry.bound_app_id(&source, "ping").is_err());
+        record.install_source = Some(local_app_contract::InstallSource::Environment {source:source.clone()});
+        save_install_record(&record).unwrap();
+        let app = config.local_apps.iter_mut().find(|app|app.app_id == app_id).unwrap();
+        let crate::config::MethodBinding::Http(binding) = &mut app.methods[0].binding else { panic!("fixture is HTTP") };
+        binding.url.push_str("/unexpected");
+        assert!(get_registry(&config).bound_app_id(&source, "ping").is_err());
+    }
