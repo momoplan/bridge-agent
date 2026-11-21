@@ -1,20 +1,23 @@
     #[test]
     fn connector_manifest_uses_declared_surface_without_author_claims() {
-        let input = test_manifest_with_command("test-app", "Test", "1.0.0", "test", &[]);
+        let mut input = test_manifest_with_command("test-app", "Test", "1.0.0", "test", &[]);
+        input["publisher"] = json!({ "name": "Historical author claim" });
+        input["remoteCapabilities"] = json!([{ "name": "historical-claim" }]);
+        input["serviceRegistrationFiles"] = json!(["service-registration.json"]);
         let manifest: ConnectorManifest = serde_json::from_value(input.clone()).unwrap();
+        validate_manifest(&manifest).unwrap();
         let stored = serde_json::to_value(manifest).unwrap();
-        for field in ["remoteCapabilities", "publisher"] {
+        for field in ["remoteCapabilities", "publisher", "serviceRegistrationFiles"] {
             assert!(stored.get(field).is_none());
-            let mut old_input = input.clone();
-            old_input[field] = Value::Null;
-            let error = serde_json::from_value::<ConnectorManifest>(old_input).unwrap_err();
-            assert!(error.to_string().contains(field));
         }
         assert_eq!(stored["methods"][0]["name"], "ping");
+
+        input["name"] = json!(42);
+        assert!(serde_json::from_value::<ConnectorManifest>(input).is_err());
     }
 
     #[test]
-    fn connector_manifest_rejects_retired_service_registration_files() {
+    fn retired_service_registration_files_do_not_satisfy_the_manifest_contract() {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join(CONNECTOR_MANIFEST_FILE),
@@ -29,7 +32,7 @@
         )
         .unwrap();
         let error = load_connector_manifest(dir.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("serviceRegistrationFiles"));
+        assert!(format!("{error:#}").contains("requires transport"));
     }
 
     #[test]
