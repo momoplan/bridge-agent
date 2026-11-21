@@ -11,6 +11,7 @@ mod identity;
 mod reader;
 pub use environment::EnvironmentReader;
 pub use failure::{artifact_read_error, ConsumerFailure};
+pub(crate) use identity::installed_source_version;
 pub use identity::{resolve_exact, resolve_source, select_artifact, select_upgrade};
 pub use reader::MarketReader;
 

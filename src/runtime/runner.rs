@@ -210,6 +210,7 @@ impl RuntimeRunner {
                 keepalive_interval,
             ),
             last_relay_seen: tokio::time::Instant::now(),
+            registered_workspace: None,
             pending_events: PendingEventWaiters::new(),
             invocations: FuturesUnordered::new(),
             streams: StreamPumps::new(),
@@ -226,6 +227,8 @@ impl RuntimeRunner {
             protocol_features: vec![
                 crate::file_transfer::PROTOCOL_FEATURE.to_string(),
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
+                relay::contracts::device_events::BOUND_LOCAL_APP_INVOKE_FEATURE.to_owned(),
+                relay::contracts::device_events::BOUND_EVENT_ORIGIN_FEATURE.to_owned(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 crate::protocol::AGENT_PROTOCOL_FEATURE_SUBSCRIPTION_CHANGES.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
@@ -247,6 +250,8 @@ impl RuntimeRunner {
             protocol_features: vec![
                 crate::file_transfer::PROTOCOL_FEATURE.to_string(),
                 AGENT_PROTOCOL_FEATURE_REGISTERED_ACK.to_string(),
+                relay::contracts::device_events::BOUND_LOCAL_APP_INVOKE_FEATURE.to_owned(),
+                relay::contracts::device_events::BOUND_EVENT_ORIGIN_FEATURE.to_owned(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_EVENTS_V2.to_string(),
                 crate::protocol::AGENT_PROTOCOL_FEATURE_SUBSCRIPTION_CHANGES.to_string(),
                 AGENT_PROTOCOL_FEATURE_LOCAL_APP_CAPABILITIES_V3.to_string(),
@@ -377,6 +382,9 @@ impl RelayConnection<'_> {
             AgentMessage::InvokeRequest(request) => {
                 self.queue_invocation(AgentMessage::InvokeRequest(request)).await?
             }
+            AgentMessage::BoundLocalAppInvokeRequest(request) => {
+                self.queue_invocation(AgentMessage::BoundLocalAppInvokeRequest(request)).await?
+            }
             AgentMessage::LocalAppInvokeRequest(request) => {
                 self.queue_invocation(AgentMessage::LocalAppInvokeRequest(request)).await?
             }
@@ -404,6 +412,8 @@ impl RelayConnection<'_> {
     }
 
     async fn handle_registered_ack(&mut self, ack: crate::protocol::RegisteredAck) {
+        self.registered_workspace = (ack.agent_id == self.runner.config.relay.agent_id && ack.workspace_id > 0
+            && self.runner.config.platform.workspace_id == Some(ack.workspace_id)).then_some(ack.workspace_id);
         self.runner.update_registered_snapshot(&ack).await;
         self.runner
             .push_log(
@@ -442,6 +452,7 @@ struct RelayConnection<'a> {
     inbound: tonic::Streaming<RelayFrame>,
     keepalive: tokio::time::Interval,
     last_relay_seen: tokio::time::Instant,
+    registered_workspace: Option<u64>,
     pending_events: PendingEventWaiters,
     // Owned by this connection: dropping it cancels pending futures, never replays them.
     invocations: FuturesUnordered<BoxFuture<'a, AgentMessage>>,

@@ -164,3 +164,21 @@ fn distribution_route_can_change_within_the_same_source_application() {
         replacement.install_source
     );
 }
+
+/// Install a source-pinned fixture using the same disk records as the desktop installer.
+pub(crate) fn install_bound_call_fixture(config: &mut AgentConfig, root: &Path, base_url: &str) {
+    let config_path = root.join("config.json");
+    config.local_apps.clear();
+    save_config(&config_path, config).unwrap();
+    let package = root.join("fixture-package");
+    fs::create_dir(&package).unwrap();
+    let mut manifest = test_manifest("test-app", "Fixture", "1.0.0");
+    manifest["transport"]["baseUrl"] = json!(base_url);
+    manifest["methods"][0]["path"] = json!("/invoke");
+    manifest["methods"][0]["httpMethod"] = json!("POST");
+    fs::write(package.join(CONNECTOR_MANIFEST_FILE), manifest.to_string()).unwrap();
+    let source = fixture_market_provenance("test", uuid::Uuid::from_u128(1), "1.0.0");
+    install_connector_from_path_with_provenance(&package, &config_path, false, source).unwrap();
+    prepare_installed_connector_runtime(&config_path, "test-app").unwrap();
+    *config = load_config(&config_path).unwrap();
+}

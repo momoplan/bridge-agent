@@ -3,7 +3,7 @@ use crate::config::{
     ServiceRegistration,
 };
 use crate::connector::{
-    authorize_connector_asset_upload, authorize_connector_event, connector_declares_asset_upload,
+    authorize_connector_asset_upload, authorized_event_source, connector_declares_asset_upload,
 };
 use crate::event_delivery::EventQueue;
 use crate::logging::LogMetadata;

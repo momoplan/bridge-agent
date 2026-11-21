@@ -27,7 +27,7 @@ async fn emit_local_app_event(
             "connector event credential is required",
         )
     })?;
-    authorize_connector_event(&state.config_path, app_id, event_name, &token)
+    let installed_source = authorized_event_source(&state.config_path, app_id, event_name, &token)
         .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
     let event_id = request
         .event_id
@@ -37,6 +37,13 @@ async fn emit_local_app_event(
         .map(ToOwned::to_owned)
         .ok_or_else(|| EventApiError::new(StatusCode::BAD_REQUEST, "stable eventId is required"))?;
     let event = LocalAppEventEmitted {
+        installed_source: installed_source.map(|source| relay::contracts::device_events::InstalledLocalAppSource {
+            application: relay::contracts::device_events::SourceApplication {
+                environment_key: source.application.environment_key.as_str().to_owned(),
+                app_id: source.application.app_id.as_str().to_owned(),
+            },
+            version: source.version.to_string(),
+        }),
         event_id: event_id.clone(),
         app_id: app_id.to_string(),
         event: event_name.to_string(),

@@ -30,6 +30,7 @@ impl ServiceRegistry {
                 local_apps.insert(
                     app.app_id.clone(),
                     RuntimeLocalApp {
+                        config: app.clone(),
                         definition: local_app_definition(app),
                         runtime,
                         events,
@@ -107,6 +108,24 @@ impl ServiceRegistry {
                 duration_ms: started.elapsed().as_millis() as u64,
             },
         }
+    }
+
+    /// Check both the registry snapshot that owns the endpoint and the current
+    /// on-disk installation before forwarding a trusted, bound request.
+    pub(crate) fn bound_app_id(&self, source: &local_app_contract::SourceVersion, method: &str) -> Result<&str> {
+        let mut matches = self.local_apps.values().filter(|app| {
+            app.definition.installed_source.as_ref() == Some(source)
+        });
+        let app = matches.next().context("source is not registered on this device")?;
+        if matches.next().is_some() {
+            bail!("ambiguous installed source");
+        }
+        if !app.runtime.methods.contains_key(method)
+            || crate::connector::registered_source(&app.config)? != *source
+            || local_app_token_path(&app.config)? != crate::connector::connector_management_token_path(&app.config.app_id)? {
+            bail!("installation no longer matches the requested source and method");
+        }
+        Ok(&app.config.app_id)
     }
 
     pub async fn invoke_local_app(

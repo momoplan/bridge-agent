@@ -138,6 +138,7 @@ fn encode_device_frame(message: AgentMessage) -> Result<DeviceFrame> {
         }),
         AgentMessage::RegisteredAck(_)
         | AgentMessage::InvokeRequest(_)
+        | AgentMessage::BoundLocalAppInvokeRequest(_)
         | AgentMessage::LocalAppInvokeRequest(_)
         | AgentMessage::EventAck(_)
         | AgentMessage::DeviceSubscriptions(_)
@@ -165,6 +166,11 @@ fn encode_methods(methods: Vec<MethodDefinition>) -> Vec<v1::MethodDefinition> {
 
 fn encode_local_app(app: LocalAppDefinition) -> v1::LocalAppDefinition {
     v1::LocalAppDefinition {
+        installed_source: app.installed_source.map(|source| v1::LocalAppSource {
+            environment_key: source.application.environment_key.as_str().into(),
+            app_id: source.application.app_id.as_str().into(),
+            version: source.version.to_string(),
+        }),
         app_id: app.app_id,
         name: app.name,
         version: app.version,
@@ -233,6 +239,18 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
                 timeout_secs: request.timeout_secs,
             })
         }
+        RelayFrameKind::BoundLocalAppInvokeRequest(request) => {
+            if request.application_runtime_id.is_empty() || request.local_app_locator.is_empty() {
+                bail!("bound method requires a runtime and LOCAL_APP");
+            }
+            AgentMessage::BoundLocalAppInvokeRequest(Box::new(crate::protocol::BoundLocalAppInvokeRequest {
+                request_id: request.request_id,
+                workspace_id: request.workspace_id,
+                source: decode_source(request.source.context("bound method requires an installation source")?)?,
+                method: request.method,
+                arguments: decode_json_or_null("argumentsJson", &request.arguments_json)?,
+            }))
+        }
         RelayFrameKind::EventAck(ack) => AgentMessage::EventAck(ack.try_into()?),
         RelayFrameKind::DeviceSubscriptions(snapshot) => {
             AgentMessage::DeviceSubscriptions(snapshot.try_into()?)
@@ -251,4 +269,14 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
             }))
         }
     }))
+}
+
+fn decode_source(source: v1::LocalAppSource) -> Result<local_app_contract::SourceVersion> {
+    Ok(local_app_contract::SourceVersion {
+        application: local_app_contract::SourceApp {
+            environment_key: source.environment_key.try_into()?,
+            app_id: source.app_id.try_into()?,
+        },
+        version: source.version.parse()?,
+    })
 }
