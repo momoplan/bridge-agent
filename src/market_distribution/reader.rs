@@ -3,7 +3,10 @@ use super::ConsumerFailure;
 use super::{resolve_exact, MarketDistribution};
 use anyhow::{bail, ensure, Context, Result};
 use baijimu_cmodel_http::{decode_response, REQUEST_ID_HEADER, TRACE_ID_HEADER};
-use local_app_contract::{InstallSource, MarketListing, MarketPage};
+use local_app_contract::{
+    bundle::{market::LocatedMarketListing, LocalAppLocator},
+    InstallSource, MarketListing, MarketPage,
+};
 use reqwest::{header, header::HeaderValue, Client, ClientBuilder, Response, Url};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -45,6 +48,78 @@ impl MarketReader {
         .await?;
         self.distribution.validate_page(after, &page)?;
         Ok(page)
+    }
+
+    pub async fn located_by_listing(
+        &self,
+        credential: &str,
+        listing_id: Uuid,
+    ) -> Result<Option<LocatedMarketListing>> {
+        ensure!(!listing_id.is_nil(), "market listing identity required");
+        let item = self
+            .located(credential, &[("listingId", &listing_id.to_string())])
+            .await?;
+        ensure!(
+            item.as_ref()
+                .is_none_or(|item| item.listing_id == listing_id),
+            "market returned a different listing identity"
+        );
+        Ok(item)
+    }
+
+    pub async fn located_for_target(
+        &self,
+        credential: &str,
+        locator: &LocalAppLocator,
+        platform: &str,
+        architecture: &str,
+    ) -> Result<Option<LocatedMarketListing>> {
+        let item = self
+            .located(
+                credential,
+                &[
+                    ("resourceLocator", &locator.to_string()),
+                    ("platform", platform),
+                    ("architecture", architecture),
+                ],
+            )
+            .await?;
+        ensure!(
+            item.as_ref().is_none_or(|item| {
+                &item.frozen_version.source.resource_locator == locator
+                    && item
+                        .frozen_version
+                        .content
+                        .artifacts
+                        .iter()
+                        .any(|artifact| {
+                            artifact.platform == platform
+                                && (artifact.architecture == architecture
+                                    || artifact.architecture == "universal")
+                        })
+            }),
+            "market returned a different locator or target"
+        );
+        Ok(item)
+    }
+
+    async fn located(
+        &self,
+        credential: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Option<LocatedMarketListing>> {
+        let mut url = self.distribution.page_url(None)?;
+        url.query_pairs_mut().extend_pairs(query);
+        let mut items: Vec<LocatedMarketListing> = decode(self.get(url, credential).await?).await?;
+        ensure!(
+            items.len() <= 1,
+            "market returned more than one locator match"
+        );
+        let item = items.pop();
+        if let Some(item) = &item {
+            item.validate()?;
+        }
+        Ok(item)
     }
 
     pub async fn version(

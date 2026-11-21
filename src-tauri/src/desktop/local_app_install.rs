@@ -27,32 +27,16 @@ pub(super) async fn check_connector_app_update(
         .as_ref()
         .ok_or("该安装记录缺少可验证的来源身份，不能自动匹配公开市场")?;
     let consumer = market_consumer::market_consumer(&state.config_path).await?;
-    let source = match selected {
-        local_app_contract::InstallSource::Market { source, .. }
-        | local_app_contract::InstallSource::Environment { source } => source,
-    };
-    let listing = consumer
-        .listings()
-        .await?
-        .into_iter()
-        .filter(|listing| listing.frozen_version.source.application == source.application)
-        .max_by(|left, right| {
-            left.frozen_version
-                .source
-                .version
-                .precedence_cmp(&right.frozen_version.source.version)
-        })
-        .ok_or("市场中找不到该来源的应用")?;
-    let upgrade = bridge_agent::market_distribution::select_upgrade(Some(selected), &listing)
-        .map_err(|error| error.to_string())?;
-    let latest_version = listing.frozen_version.source.version.to_string();
+    let update = consumer
+        .connector_update(selected, &installed.manifest.version)
+        .await?;
     Ok(ConnectorAppUpdateStatus {
         app_id: installed.manifest.app_id,
         name: installed.manifest.name,
         current_version: installed.manifest.version,
-        latest_version,
-        update_available: upgrade.is_some(),
-        source: String::new(),
+        latest_version: update.version,
+        update_available: update.available,
+        source: update.source,
     })
 }
 

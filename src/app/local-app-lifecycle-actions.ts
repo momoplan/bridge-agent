@@ -31,13 +31,13 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
   async function checkLocalAppVersion(app: LocalAppItem) {
     setMessage("");
     setError("");
+    if (app.connector) {
+      await checkLocalAppUpdate(app);
+      return;
+    }
     const failure = await refreshLocalAppUpdateData();
     if (failure) {
       setError(`检查更新失败：${failure}`);
-      return;
-    }
-    if (app.connector) {
-      await checkLocalAppUpdate(app);
       return;
     }
     setMessage(`${app.name} 的市场版本信息已刷新`);
@@ -115,16 +115,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
   }
 
   async function checkLocalAppUpdate(app: LocalAppItem, showLatestMessage = true) {
-    const marketApp = marketConnectorForLocalApp(app);
-    if (!app.connector || !marketApp) {
-      setError(`应用 ${app.name} 没有关联的市场更新源`);
-      return null;
-    }
-    if (!marketApp.compatible) {
-      setError(
-        marketApp.compatibilityMessage ||
-          `当前百积木客户端不支持 ${marketApp.name} ${marketApp.version}，请先升级客户端`
-      );
+    if (!app.connector) {
       return null;
     }
     try {
