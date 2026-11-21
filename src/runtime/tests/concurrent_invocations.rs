@@ -18,6 +18,32 @@ struct InvocationHarness {
     _dir: tempfile::TempDir,
 }
 
+fn invocation_config(dir: &std::path::Path, addr: std::net::SocketAddr) -> AgentConfig {
+    let token_path = dir.join("token");
+    fs::write(&token_path, "bjm_app_test_concurrent_private_runtime_token").unwrap();
+    let method = json!({"name":"call","description":"test","enabled":true,
+        "input_schema":{},"response_mode":"cmodel","binding":{
+            "type":"http","url":format!("http://{addr}/invoke"),
+            "http_method":"POST","headers":{},"timeout_secs":60}});
+    let mut config = AgentConfig::example();
+    config.relay.agent_id = "dev_test".into();
+    config.platform.environment_key = Some("test".into());
+    config.platform.workspace_id = Some(1);
+    config.services = vec![serde_json::from_value(json!({
+        "name":"test-service","description":"test","enabled":true,"methods":[method.clone()]
+    }))
+    .unwrap()];
+    config.local_apps = vec![serde_json::from_value(json!({
+        "appId":"test-app","name":"test","version":"1.0.0","description":"test",
+        "enabled":true,"methods":[method],"events":[],"startCommand":{
+            "type":"shell_command","command":["unused"],"env":{
+                "BAIJIMU_LOCAL_APP_TOKEN_FILE":token_path.to_string_lossy()
+            },"timeout_secs":1}
+    }))
+    .unwrap()];
+    config
+}
+
 impl InvocationHarness {
     async fn new() -> Self {
         Self::with_config(|_, _, _| {}).await
@@ -50,28 +76,7 @@ impl InvocationHarness {
             axum::serve(listener, app).await.unwrap();
         });
         let dir = tempdir().unwrap();
-        let token_path = dir.path().join("token");
-        fs::write(&token_path, "bjm_app_test_concurrent_private_runtime_token").unwrap();
-        let method = json!({"name":"call","description":"test","enabled":true,
-            "input_schema":{},"response_mode":"cmodel","binding":{
-                "type":"http","url":format!("http://{addr}/invoke"),
-                "http_method":"POST","headers":{},"timeout_secs":60}});
-        let mut config = AgentConfig::example();
-        config.relay.agent_id = "dev_test".into();
-        config.platform.environment_key = Some("test".into());
-        config.platform.workspace_id = Some(1);
-        config.services = vec![serde_json::from_value(json!({
-            "name":"test-service","description":"test","enabled":true,"methods":[method.clone()]
-        }))
-        .unwrap()];
-        config.local_apps = vec![serde_json::from_value(json!({
-            "appId":"test-app","name":"test","version":"1.0.0","description":"test",
-            "enabled":true,"methods":[method],"events":[],"startCommand":{
-                "type":"shell_command","command":["unused"],"env":{
-                    "BAIJIMU_LOCAL_APP_TOKEN_FILE":token_path.to_string_lossy()
-                },"timeout_secs":1}
-        }))
-        .unwrap()];
+        let mut config = invocation_config(dir.path(), addr);
         configure(&mut config, dir.path(), &format!("http://{addr}"));
         let registry = ServiceRegistry::from_config(&config, dir.path()).unwrap();
         let mut relay = FakeRelay::start();
