@@ -55,7 +55,7 @@ pub struct PythonRuntimeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectorManifest {
     pub schema_version: String,
     pub app_id: String,

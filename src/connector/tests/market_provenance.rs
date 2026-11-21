@@ -49,7 +49,7 @@ fn market_install_preserves_source_and_rejects_other_environment_before_mutation
 }
 
 #[test]
-fn explicit_reinstall_checks_source_without_loading_retired_manifest() {
+fn installed_connector_with_retired_claims_keeps_its_source_and_can_be_replaced() {
     let directory = tempdir().unwrap();
     let _env = connector_test_env(directory.path().join("connectors"));
     let config_path = directory.path().join("config.json");
@@ -63,10 +63,15 @@ fn explicit_reinstall_checks_source_without_loading_retired_manifest() {
     mark_fixture_connector_stopped(&config_path);
     let path = install_record_path("test-app").unwrap();
     let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    legacy["manifest"]["publisher"] = json!({ "name": "Historical author claim" });
     legacy["manifest"]["remoteCapabilities"] = json!([]);
     let original = serde_json::to_vec(&legacy).unwrap();
     fs::write(&path, &original).unwrap();
-    assert!(show_connector("test-app").is_err());
+
+    let installed = show_connector("test-app").unwrap();
+    assert_eq!(installed.install_source, first.install_source);
+    assert_eq!(list_connectors().unwrap()[0].version, "1.0.0");
+    assert_eq!(fs::read(&path).unwrap(), original);
     let foreign = fixture_market_provenance("author-b", uuid::Uuid::from_u128(2), "1.0.0");
     let error = install_connector_from_path_with_provenance(&source, &config_path, true, foreign).unwrap_err();
     assert!(error.to_string().contains("different source applications"));

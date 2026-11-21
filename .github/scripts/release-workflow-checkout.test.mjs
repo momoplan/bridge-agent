@@ -79,9 +79,10 @@ describe("release workflow repository script availability", () => {
     expect(smoke).toContain('Get-AuthenticodeSignature -LiteralPath $installed');
     expect(smoke).toContain('$expected = (Get-FileHash $installed).Hash');
     expect(smoke).not.toContain('Get-FileHash "src-tauri/target/release/bridge-agent-desktop.exe"');
+    expect(smoke).toContain('$fixtureVersions = @("0.6.18", "0.20.0")');
     expect(smoke.indexOf('"install-current-msi-baseline"')).toBeLessThan(smoke.indexOf('$expected ='));
-    expect(smoke.indexOf('$expected =')).toBeLessThan(smoke.indexOf('"install-affected-version"'));
-    expect(smoke.indexOf('"install-affected-version"')).toBeLessThan(smoke.indexOf('"repair-with-new-version"'));
+    expect(smoke.indexOf('$expected =')).toBeLessThan(smoke.indexOf('"install-affected-version-$fixtureVersion"'));
+    expect(smoke.indexOf('"install-affected-version-$fixtureVersion"')).toBeLessThan(smoke.indexOf('"repair-with-new-version-$fixtureVersion"'));
   });
 
   test("frontend and native recovery are mandatory on both desktop platforms before release", () => {
@@ -95,8 +96,8 @@ describe("release workflow repository script availability", () => {
     expect(release).toContain("needs: [select-platforms, prepare-domestic-release, quality-gate, windows-quality-gate, frontend-recovery-gate]");
     expect(action).toContain("npm run test:browser");
     expect(action).toContain("npm run test:native");
-    expect(release.indexOf("repair-with-new-version")).toBeGreaterThan(0);
-    expect(release.indexOf("repair-with-new-version")).toBeLessThan(release.indexOf("Upload bundles to GitHub release"));
+    expect(release.indexOf("repair-with-new-version-$fixtureVersion")).toBeGreaterThan(0);
+    expect(release.indexOf("repair-with-new-version-$fixtureVersion")).toBeLessThan(release.indexOf("Upload bundles to GitHub release"));
   });
 
   test("all Bridge Agent release package versions remain aligned", () => {
