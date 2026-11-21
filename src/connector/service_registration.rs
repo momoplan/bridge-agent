@@ -183,8 +183,8 @@ pub(crate) fn registered_source(app: &LocalAppConfig) -> Result<local_app_contra
 
 fn check_registered_source(app: &LocalAppConfig, record: &ConnectorInstallRecord) -> Result<local_app_contract::SourceVersion> {
     let source = crate::market_distribution::installed_source_version(record.install_source.as_ref())?;
-    if record.manifest.app_id != app.app_id || record.manifest.version != app.version
-        || source.version.to_string() != app.version {
+    record.manifest.verify_source_identity(source)?;
+    if record.manifest.app_id != app.app_id || record.manifest.version != app.version {
         bail!("installed connector does not match the registered app and version");
     }
     let registrations = load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)?;

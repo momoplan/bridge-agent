@@ -182,3 +182,18 @@ pub(crate) fn install_bound_call_fixture(config: &mut AgentConfig, root: &Path, 
     prepare_installed_connector_runtime(&config_path, "test-app").unwrap();
     *config = load_config(&config_path).unwrap();
 }
+
+#[test]
+fn bound_registration_requires_the_installed_app_identity() {
+    let dir = tempdir().unwrap();
+    let _env = connector_test_env(dir.path().join("connectors"));
+    let mut config = AgentConfig::example();
+    install_bound_call_fixture(&mut config, dir.path(), "http://127.0.0.1:8080");
+    let app = &config.local_apps[0];
+    let mut record = load_install_record(&app.app_id).unwrap();
+    let Some(local_app_contract::InstallSource::Market { source, .. }) = &mut record.install_source else {
+        panic!("expected a market installation");
+    };
+    source.application.app_id = "different-app".to_owned().try_into().unwrap();
+    assert!(check_registered_source(app, &record).is_err());
+}
