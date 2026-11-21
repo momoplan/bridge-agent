@@ -174,8 +174,8 @@ export function LocalAppDetailDialog(props: LocalAppDetailDialogProps) {
                     安装应用
                   </button>
                 </>
-              ) : marketApp || isManagedTool ? (
-                updateStatus?.updateAvailable ? (
+              ) : marketApp || isManagedTool || (app.connector?.reviewStatus === "PUBLISHED" && app.connector.installSource) ? (
+                updateStatus?.updateAvailable && marketApp ? (
                   <button
                     className="primary accent"
                     onClick={() => setPendingUpgradeAppId(app.id)}

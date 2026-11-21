@@ -1,11 +1,17 @@
 use super::*;
 use bridge_agent::market_distribution::MarketReader;
-use local_app_contract::MarketListing;
+use local_app_contract::{bundle::LocatedAppVersion, InstallSource, MarketListing};
 use std::collections::BTreeMap;
 
 pub(super) struct MarketConsumer {
     pub(super) reader: MarketReader,
     pub(super) credential: String,
+}
+
+pub(super) struct ConnectorMarketUpdate {
+    pub(super) version: String,
+    pub(super) available: bool,
+    pub(super) source: String,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +137,96 @@ pub(super) fn consumer_service_api_base(platform_base: &str) -> Result<reqwest::
 }
 
 impl MarketConsumer {
+    pub(super) async fn connector_update(
+        &self,
+        installed: &InstallSource,
+        installed_version: &str,
+    ) -> Result<ConnectorMarketUpdate, String> {
+        let source = match installed {
+            InstallSource::Market {
+                listing_id,
+                source,
+                version,
+            } => {
+                if version != &source.version || version.to_string() != installed_version {
+                    return Err("安装记录的版本与市场来源版本不一致".into());
+                }
+                if let Some(binding) = self
+                    .reader
+                    .located_by_listing(&self.credential, *listing_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    let locator = binding.frozen_version.source.resource_locator;
+                    let resource = locator.resource_locator();
+                    if resource.environment_key() != source.application.environment_key.as_str()
+                        || resource.resource_key() != source.application.app_id.as_str()
+                    {
+                        return Err("市场返回的 Bundle 应用与该安装的来源不一致".into());
+                    }
+                    let current = LocatedAppVersion {
+                        resource_locator: locator,
+                        version: version.clone(),
+                    };
+                    return self.located_connector_update(*listing_id, &current).await;
+                }
+                source
+            }
+            InstallSource::Environment { source } => source,
+        };
+        let listing = self
+            .listings()
+            .await?
+            .into_iter()
+            .filter(|listing| listing.frozen_version.source.application == source.application)
+            .max_by(|left, right| {
+                left.frozen_version
+                    .source
+                    .version
+                    .precedence_cmp(&right.frozen_version.source.version)
+            })
+            .ok_or("市场中找不到该来源的应用")?;
+        let upgrade = bridge_agent::market_distribution::select_upgrade(Some(installed), &listing)
+            .map_err(|error| error.to_string())?;
+        Ok(ConnectorMarketUpdate {
+            version: listing.frozen_version.source.version.to_string(),
+            available: upgrade.is_some(),
+            source: String::new(),
+        })
+    }
+
+    async fn located_connector_update(
+        &self,
+        listing_id: uuid::Uuid,
+        current: &LocatedAppVersion,
+    ) -> Result<ConnectorMarketUpdate, String> {
+        let candidate = self
+            .reader
+            .located_for_target(
+                &self.credential,
+                &current.resource_locator,
+                normalized_platform(),
+                std::env::consts::ARCH,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let (version, available) = match candidate {
+            Some(candidate) if candidate.listing_id == listing_id => {
+                let newer = candidate
+                    .is_update_for(current)
+                    .map_err(|error| error.to_string())?;
+                (candidate.frozen_version.source.version, newer)
+            }
+            Some(_) => return Err("市场返回了其他应用条目的版本".into()),
+            None => (current.version.clone(), false),
+        };
+        Ok(ConnectorMarketUpdate {
+            version: version.to_string(),
+            available,
+            source: current.resource_locator.to_string(),
+        })
+    }
+
     pub(super) async fn selection(
         &self,
         source: &local_app_contract::SourceVersion,
