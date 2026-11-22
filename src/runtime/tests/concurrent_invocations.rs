@@ -293,6 +293,7 @@ async fn bound_call_cannot_dispatch_to_an_unproven_app_by_name() {
                 environment_key: "private".into(),
                 app_id: "test-app".into(),
                 version: "1.0.0".into(),
+                resource_locator: None,
             }),
             method: "call".into(),
             arguments_json: br#"{"slow":true}"#.to_vec(),
@@ -340,4 +341,49 @@ async fn registered_bound_call_returns_installed_connectors_reply() {
     assert_eq!(reply["request_id"], "registered-call");
     assert_eq!(reply["success"], true, "{reply}");
     assert_eq!(reply["data"]["echo"], "device-result");
+}
+
+#[tokio::test]
+async fn located_bound_calls_reach_only_the_selected_same_named_connector() {
+    use crate::connector::tests::{connector_test_env, install_two_bound_bundle_fixtures};
+
+    let installation = tempdir().unwrap();
+    let _env = connector_test_env(installation.path().join("connectors"));
+    let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = format!("http://{}", second_listener.local_addr().unwrap());
+    let service = axum::Router::new().route(
+        "/invoke",
+        axum::routing::post(|| async { axum::Json(json!({"ok":true,"data":{"echo":"second"}})) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(second_listener, service).await.unwrap() });
+    let mut harness = InvocationHarness::with_config(|config, root, first| {
+        install_two_bound_bundle_fixtures(config, root, first, &second)
+    }).await;
+    harness.socket.send(json!({
+        "type":"registered_ack", "agent_id":"dev_test", "workspace_id":1,
+        "connection_id":"located", "registered_at_epoch_seconds":1, "heartbeat_timeout_secs":75
+    })).await;
+    for bundle in ["first", "second"] {
+        let locator = format!("author-a/{bundle}/LOCAL_APP/test-app");
+        let source = harness.capabilities.local_apps.iter()
+            .find(|app| app.app_id == locator).unwrap().installed_source.clone().unwrap();
+        assert_eq!(source.resource_locator.as_deref(), Some(locator.as_str()));
+        assert_eq!(source.app_id, "test-app");
+        harness.socket.send_frame(v1::RelayFrame {
+            frame: Some(RelayFrameKind::BoundLocalAppInvokeRequest(v1::BoundLocalAppInvokeRequest {
+                request_id: bundle.into(),
+                workspace_id: 1,
+                application_runtime_id: "test-runtime".into(),
+                local_app_locator: locator,
+                source: Some(source),
+                method: "ping".into(),
+                arguments_json: serde_json::to_vec(&json!({"echo":"first"})).unwrap(),
+            })),
+        }).await;
+        let response = harness.receive().await;
+        assert_eq!(response["request_id"], bundle);
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(response["data"]["echo"], bundle);
+    }
+    server.abort();
 }

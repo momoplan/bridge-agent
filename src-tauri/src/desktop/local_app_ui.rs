@@ -31,7 +31,7 @@ impl LocalAppUiProtocol {
                 .warn("local app UI protocol request rejected: invalid_endpoint");
             return local_app_ui_error(StatusCode::NOT_FOUND, "not found");
         };
-        let result = load_local_app_ui_asset(app_id, asset_path);
+        let result = load_local_app_ui_asset(&app_id, asset_path);
         match result {
             Ok((content_type, body)) => {
                 self.diagnostics.info(format!(
@@ -56,7 +56,7 @@ fn local_app_ui_url(token: &str, app_id: &str, windows: bool) -> String {
     } else {
         format!("{LOCAL_APP_UI_SCHEME}://{host}")
     };
-    format!("{origin}/{token}/{app_id}/")
+    format!("{origin}/{token}/{}/", urlencoding::encode(app_id))
 }
 
 pub(super) fn local_app_ui_host(token: &str, app_id: &str) -> String {
@@ -73,7 +73,7 @@ pub(super) fn local_app_ui_host(token: &str, app_id: &str) -> String {
 fn local_app_ui_request<'a>(
     token: &str,
     uri: &'a tauri::http::Uri,
-) -> Option<(&'a str, Option<&'a str>)> {
+) -> Option<(std::borrow::Cow<'a, str>, Option<&'a str>)> {
     if uri.scheme_str() != Some(LOCAL_APP_UI_SCHEME) || uri.port().is_some() {
         return None;
     }
@@ -81,8 +81,8 @@ fn local_app_ui_request<'a>(
     if parts.next()? != token {
         return None;
     }
-    let app_id = parts.next()?;
-    if app_id.is_empty() || uri.authority()?.as_str() != local_app_ui_host(token, app_id) {
+    let app_id = urlencoding::decode(parts.next()?).ok()?;
+    if app_id.is_empty() || uri.authority()?.as_str() != local_app_ui_host(token, &app_id) {
         return None;
     }
     let asset = parts.next()?;
@@ -199,11 +199,14 @@ mod tests {
         let token = "test-session-token";
         let native = local_app_ui_url(token, "first-app", false);
         let uri: tauri::http::Uri = native.parse().unwrap();
-        assert_eq!(local_app_ui_request(token, &uri), Some(("first-app", None)));
+        assert_eq!(
+            local_app_ui_request(token, &uri),
+            Some(("first-app".into(), None))
+        );
         let asset: tauri::http::Uri = format!("{native}assets/main.js?v=1").parse().unwrap();
         assert_eq!(
             local_app_ui_request(token, &asset),
-            Some(("first-app", Some("assets/main.js")))
+            Some(("first-app".into(), Some("assets/main.js")))
         );
         let windows = local_app_ui_url(token, "first-app", true);
         assert_eq!(
@@ -212,6 +215,15 @@ mod tests {
         );
         assert_ne!(local_app_ui_url(token, "second-app", false), native);
         assert_ne!(local_app_ui_url("next-session", "first-app", false), native);
+        let locator = "origin/orders/LOCAL_APP/first-app";
+        let native_locator = local_app_ui_url(token, locator, false);
+        let locator_uri = native_locator.parse().unwrap();
+        assert_eq!(
+            local_app_ui_request(token, &locator_uri),
+            Some((locator.into(), None))
+        );
+        let foreign = native_locator.replace("%2Forders%2F", "%2Fother%2F");
+        assert!(local_app_ui_request(token, &foreign.parse().unwrap()).is_none());
         assert!(local_app_ui_request("wrong-token", &uri).is_none());
         for invalid in [
             native.replace("/first-app/", "/second-app/"),

@@ -94,7 +94,7 @@ use bridge_agent::{
     resolve_connector_ui_asset, resolve_connector_ui_entry, save_config as save_agent_config,
     show_connector, sync_installed_connectors_report, terminate_runtime_lock_owner,
     uninstall_connector_with_options, AgentConfig, AgentRuntimeManager, ConnectorIcon,
-    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult, ConnectorManifest,
+    ConnectorInstallProvenance, ConnectorInstallRecord, ConnectorInstallResult,
     ConnectorStartResult, ConnectorSummary, ConnectorSyncReport, ConnectorUninstallOptions,
     RuntimeEvent, RuntimeLockConflict, RuntimeSnapshot, RuntimeStatus, ServiceConfig,
     ServiceStartCommand,

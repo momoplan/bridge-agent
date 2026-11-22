@@ -11,7 +11,7 @@ impl Store {
     ) -> Result<LocalEventAccepted> {
         policy.validate()?;
         if !relay::routing::valid_identity(&event.event_id)
-            || !relay::routing::valid_identity(&event.app_id)
+            || !relay::routing::valid_app_identity(&event.app_id)
             || !relay::routing::valid_identity(&event.event)
         {
             bail!("invalid event identity");
@@ -116,6 +116,54 @@ impl Store {
         }
         tx.commit()?;
         Ok(result)
+    }
+
+    pub(super) fn adopt_installation(
+        &mut self,
+        legacy: &local_app_contract::SourceVersion,
+        target: &str,
+    ) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let old_id = legacy.application.app_id.as_str();
+        let affected: Vec<(String, String)> = {
+            let mut query =
+                tx.prepare("SELECT event_id,body FROM events WHERE scope=?1 AND app_id=?2")?;
+            let rows = query.query_map(params![self.scope, old_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, body) in affected {
+            let mut event: LocalAppEventEmitted = serde_json::from_str(&body)?;
+            let Some(source) = &mut event.installed_source else {
+                // A queued event without verified origin cannot acquire a new origin.
+                continue;
+            };
+            if source.resource_locator.is_some()
+                || source.application.environment_key != legacy.application.environment_key.as_str()
+                || source.application.app_id != old_id
+            {
+                continue;
+            }
+            source.resource_locator = Some(target.into());
+            event.app_id = target.into();
+            tx.execute(
+                "UPDATE events SET app_id=?4,body=?5 WHERE scope=?1 AND app_id=?2 AND event_id=?3",
+                params![
+                    self.scope,
+                    old_id,
+                    id,
+                    target,
+                    serde_json::to_string(&event)?
+                ],
+            )?;
+            tx.execute(
+                "UPDATE deliveries SET app_id=?4 WHERE scope=?1 AND app_id=?2 AND event_id=?3",
+                params![self.scope, old_id, id, target],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub(super) fn acknowledge(&mut self, ack: EventAck, now: i64) -> Result<()> {

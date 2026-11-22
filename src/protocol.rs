@@ -88,7 +88,7 @@ pub struct EventDefinition {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalAppDefinition {
     #[serde(skip)]
-    pub installed_source: Option<local_app_contract::SourceVersion>,
+    pub installed_source: Option<relay::contracts::device_events::InstalledLocalAppSource>,
     pub app_id: String,
     pub name: String,
     pub version: String,
@@ -103,7 +103,7 @@ pub struct LocalAppDefinition {
 pub struct BoundLocalAppInvokeRequest {
     pub request_id: String,
     pub workspace_id: u64,
-    pub source: local_app_contract::SourceVersion,
+    pub source: relay::contracts::device_events::InstalledLocalAppSource,
     pub method: String,
     pub arguments: Value,
 }

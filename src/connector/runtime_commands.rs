@@ -9,9 +9,10 @@ fn resolve_installed_start_commands(
     package_path: &Path,
     runtime_config: &RuntimeConfig,
     manifest: &ConnectorManifest,
+    installation_id: &str,
     runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<()> {
-    let data_dir = connector_data_dir(&manifest.app_id)?;
+    let data_dir = connector_data_dir(installation_id)?;
     let start_policy = manifest
         .runtime
         .as_ref()
@@ -25,7 +26,7 @@ fn resolve_installed_start_commands(
         );
     }
     let (event_token_path, local_app_token_path, asset_upload_token_path) =
-        prepare_connector_runtime_paths(manifest, &data_dir, runtime_preparation)?;
+        prepare_connector_runtime_paths(manifest, installation_id, &data_dir, runtime_preparation)?;
     let package_bins = read_package_bins(package_path)?;
     let python_scripts = read_python_project_scripts(package_path)?;
     let python_env = if python_scripts.is_empty() {
@@ -62,40 +63,46 @@ fn resolve_installed_start_commands(
 
 fn prepare_connector_runtime_paths(
     manifest: &ConnectorManifest,
+    installation_id: &str,
     data_dir: &Path,
     runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<(PathBuf, PathBuf, Option<PathBuf>)> {
     let prepare = runtime_preparation == ConnectorRuntimePreparation::Prepare;
     if prepare {
         fs::create_dir_all(data_dir).with_context(|| {
-            format!("failed to create connector data directory {}", data_dir.display())
+            format!(
+                "failed to create connector data directory {}",
+                data_dir.display()
+            )
         })?;
         #[cfg(unix)]
         fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
     }
     let event_token_path = if prepare {
-        ensure_connector_event_token(&manifest.app_id)?
+        ensure_connector_event_token(installation_id)?
     } else {
-        connector_event_token_path(&manifest.app_id)?
+        connector_event_token_path(installation_id)?
     };
     let local_app_token_path = if prepare {
-        ensure_connector_management_token(&manifest.app_id)?
+        ensure_connector_management_token(installation_id)?
     } else {
-        connector_management_token_path(&manifest.app_id)?
+        connector_management_token_path(installation_id)?
     };
-    let asset_upload_token_path = connector_permission_is_active(
-        manifest,
-        CONNECTOR_ASSET_UPLOAD_PERMISSION,
-    )
-    .then(|| {
-        if prepare {
-            ensure_connector_asset_upload_token(&manifest.app_id)
-        } else {
-            connector_asset_upload_token_path(&manifest.app_id)
-        }
-    })
-    .transpose()?;
-    Ok((event_token_path, local_app_token_path, asset_upload_token_path))
+    let asset_upload_token_path =
+        connector_permission_is_active(manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION)
+            .then(|| {
+                if prepare {
+                    ensure_connector_asset_upload_token(installation_id)
+                } else {
+                    connector_asset_upload_token_path(installation_id)
+                }
+            })
+            .transpose()?;
+    Ok((
+        event_token_path,
+        local_app_token_path,
+        asset_upload_token_path,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

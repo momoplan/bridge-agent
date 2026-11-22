@@ -1,10 +1,17 @@
 use super::*;
-use bridge_agent::market_distribution::{select_artifact, EnvironmentReader};
-use local_app_contract::SourceVersion;
+use bridge_agent::market_distribution::{
+    select_artifact, select_target_artifact, EnvironmentReader,
+};
+use local_app_contract::{bundle::LocatedAppVersion, SourceVersion};
+
+pub(super) enum Selection<'a> {
+    Legacy(&'a SourceVersion),
+    Bundle(&'a LocatedAppVersion),
+}
 
 pub(super) async fn resolve(
     config_path: &Path,
-    source: &SourceVersion,
+    source: Selection<'_>,
     migrate: bool,
     progress: Option<&LocalAppInstallProgressReporter>,
 ) -> Result<(ResolvedConnectorSource, ConnectorInstallProvenance), String> {
@@ -14,7 +21,11 @@ pub(super) async fn resolve(
         .environment_key
         .as_deref()
         .ok_or("设备缺少已授权的来源环境身份")?;
-    if environment != source.application.environment_key.as_str() {
+    let source_environment = match &source {
+        Selection::Legacy(source) => source.application.environment_key.as_str(),
+        Selection::Bundle(source) => source.resource_locator.resource_locator().environment_key(),
+    };
+    if environment != source_environment {
         return Err("私有安装必须来自设备已授权的环境，不能切换或推断来源".into());
     }
     let bytes = fs::read(shared_cli_auth_path()).map_err(|_| "无法读取环境授权")?;
@@ -22,7 +33,10 @@ pub(super) async fn resolve(
     let credential = market_consumer::credential_for(&config, document)?;
     let endpoint = environment_api_base(&config.platform.base_url)?;
     let reader = EnvironmentReader::new(
-        source.application.environment_key.clone(),
+        environment
+            .to_owned()
+            .try_into()
+            .map_err(|error: local_app_contract::ContractError| error.to_string())?,
         endpoint.as_str(),
         config
             .platform
@@ -31,18 +45,65 @@ pub(super) async fn resolve(
         Duration::from_secs(60),
     )
     .map_err(|error| error.to_string())?;
-    let frozen = reader
-        .version(&credential, source)
-        .await
-        .map_err(|error| error.to_string())?;
-    let artifact = select_artifact(&frozen, normalized_platform(), std::env::consts::ARCH)
-        .map_err(|error| error.to_string())?
-        .ok_or("该来源版本不支持当前平台")?;
+    let (artifact, mut response, provenance) = match source {
+        Selection::Legacy(source) => {
+            let frozen = reader
+                .version(&credential, source)
+                .await
+                .map_err(|error| error.to_string())?;
+            let artifact = select_artifact(&frozen, normalized_platform(), std::env::consts::ARCH)
+                .map_err(|error| error.to_string())?
+                .ok_or("该来源版本不支持当前平台")?;
+            let response = reader
+                .artifact(&credential, &frozen, artifact.artifact_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let provenance = ConnectorInstallProvenance::frozen_environment(&frozen, migrate)
+                .map_err(|error| error.to_string())?;
+            (artifact.clone(), response, provenance)
+        }
+        Selection::Bundle(source) => {
+            let frozen = reader
+                .located_version(&credential, source)
+                .await
+                .map_err(|error| error.to_string())?;
+            let artifact = select_target_artifact(
+                &frozen.content,
+                normalized_platform(),
+                std::env::consts::ARCH,
+            )
+            .ok_or("该来源版本不支持当前平台")?;
+            let response = reader
+                .located_artifact(&credential, &frozen, artifact.artifact_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut provenance = ConnectorInstallProvenance::frozen_bundle(&frozen)
+                .map_err(|error| error.to_string())?;
+            if migrate {
+                let key = source.resource_locator.resource_locator().resource_key();
+                let installed = show_connector(key).map_err(|error| error.to_string())?;
+                let legacy = match installed.install_source {
+                    Some(
+                        local_app_contract::InstallSource::Market { source, .. }
+                        | local_app_contract::InstallSource::Environment { source },
+                    ) => source,
+                    None => return Err("旧安装缺少已验证来源，无法迁移".into()),
+                };
+                let adoption = reader
+                    .adoption(&credential, &legacy)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if adoption != *source {
+                    return Err("来源登记的迁入 Locator 或精确版本与所选目标不一致".into());
+                }
+                provenance = provenance
+                    .for_adoption(legacy)
+                    .map_err(|error| error.to_string())?;
+            }
+            (artifact.clone(), response, provenance)
+        }
+    };
     let kind = connector_archive_kind(artifact.file_name.as_str()).ok_or("安装包格式不受支持")?;
-    let mut response = reader
-        .artifact(&credential, &frozen, artifact.artifact_id)
-        .await
-        .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         bridge_agent::market_distribution::artifact_read_error(error, &response).to_string()
@@ -66,8 +127,6 @@ pub(super) async fn resolve(
     fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
     extract_connector_archive(&bytes, kind, &extract_dir)?;
     let path = find_extracted_connector_root(&extract_dir)?;
-    let provenance = ConnectorInstallProvenance::frozen_environment(&frozen, migrate)
-        .map_err(|error| error.to_string())?;
     let manifest = load_connector_manifest(&path).map_err(|error| error.to_string())?;
     provenance
         .validate_manifest(&manifest)

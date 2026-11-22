@@ -113,7 +113,7 @@ pub(super) fn connector_app_ui_url(
         .ok_or_else(|| format!("应用 {} 没有声明内嵌界面", record.manifest.name))?;
     resolve_connector_ui_entry(Path::new(&record.package_path), ui)
         .map_err(|err| err.to_string())?;
-    Ok(state.url(&record.manifest.app_id))
+    Ok(state.url(&record.installation_id()))
 }
 
 #[tauri::command]

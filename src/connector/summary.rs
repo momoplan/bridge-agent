@@ -55,8 +55,8 @@ fn summary_from_record(record: ConnectorInstallRecord) -> ConnectorSummary {
         .transpose()
         .unwrap_or_default();
     ConnectorSummary {
+        app_id: record.installation_id(),
         install_source: record.install_source,
-        app_id: record.manifest.app_id,
         name: record.manifest.name,
         version: record.manifest.version,
         package_path: record.package_path,

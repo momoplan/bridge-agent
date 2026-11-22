@@ -7,6 +7,8 @@ fn fixture_market_provenance(
         "application": {"environmentKey": environment, "appId": "test-app"}, "version": version
     })).unwrap();
     ConnectorInstallProvenance {
+        adopted_legacy: None,
+        bundle_source: None,
         install_source: Some(local_app_contract::InstallSource::Market {
             listing_id, version: version.parse().unwrap(), source
         }),
@@ -196,4 +198,157 @@ fn bound_registration_requires_the_installed_app_identity() {
     };
     source.application.app_id = "different-app".to_owned().try_into().unwrap();
     assert!(check_registered_source(app, &record).is_err());
+}
+
+fn fixture_bundle_provenance(bundle: &str, manifest: &Value) -> ConnectorInstallProvenance {
+    use local_app_contract::{
+        bundle::{LocatedAppVersion, LocatedFrozenVersion},
+        ApplicationType, Artifact, ManifestDocument, VersionContent,
+    };
+    let frozen = LocatedFrozenVersion::new(
+        LocatedAppVersion {
+            resource_locator: format!("author-a/{bundle}/LOCAL_APP/test-app")
+                .parse()
+                .unwrap(),
+            version: "1.0.0".parse().unwrap(),
+        },
+        VersionContent {
+            application_type: ApplicationType::Connector,
+            manifest: ManifestDocument::parse(manifest.to_string()).unwrap(),
+            source_revision: "v1.0.0".into(),
+            artifacts: vec![Artifact {
+                artifact_id: Uuid::new_v4(),
+                platform: "windows".into(),
+                architecture: "x86_64".into(),
+                file_name: "package.zip".to_owned().try_into().unwrap(),
+                size_bytes: 10,
+            }],
+        },
+    )
+    .unwrap();
+    ConnectorInstallProvenance::frozen_bundle(&frozen).unwrap()
+}
+
+#[test]
+fn same_app_id_in_two_bundles_keeps_paths_and_event_credentials_separate() {
+    let directory = tempdir().unwrap();
+    let _env = connector_test_env(directory.path().join("connectors"));
+    let config_path = directory.path().join("config.json");
+    save_config(&config_path, &AgentConfig::example()).unwrap();
+    let source = directory.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    let mut manifest: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/market-connector-3.0.0.json"
+    ))
+    .unwrap();
+    manifest["events"] = json!([{"name":"changed","description":"Changed"}]);
+    let mut installed = Vec::new();
+    for (bundle, port) in [("first", 18110), ("second", 18111)] {
+        let url = format!("http://127.0.0.1:{port}");
+        manifest["transport"]["baseUrl"] = json!(url);
+        manifest["management"]["baseUrl"] = json!(url);
+        fs::write(source.join(CONNECTOR_MANIFEST_FILE), manifest.to_string()).unwrap();
+        let install = install_connector_from_path_with_provenance(
+            &source,
+            &config_path,
+            false,
+            fixture_bundle_provenance(bundle, &manifest),
+        )
+        .unwrap();
+        assert_eq!(
+            install.app_id,
+            format!("author-a/{bundle}/LOCAL_APP/test-app")
+        );
+        let token =
+            fs::read_to_string(ensure_connector_event_token(&install.app_id).unwrap()).unwrap();
+        let (verified, origin) =
+            authorized_event_source(&config_path, "test-app", "changed", &token).unwrap();
+        assert_eq!(verified, install.app_id);
+        assert_eq!(
+            origin.unwrap().resource_locator.as_deref(),
+            Some(install.app_id.as_str())
+        );
+        installed.push((install, token));
+    }
+    let (first, first_token) = &installed[0];
+    let (second, second_token) = &installed[1];
+    assert_ne!(first.package_path, second.package_path);
+    assert_ne!(
+        connector_data_dir(&first.app_id).unwrap(),
+        connector_data_dir(&second.app_id).unwrap()
+    );
+    assert_ne!(first_token, second_token);
+    assert!(authorized_event_source(&config_path, &second.app_id, "changed", first_token).is_err());
+    assert_eq!(list_connectors().unwrap().len(), 2);
+}
+
+#[test]
+fn adopting_the_verified_version_preserves_existing_data_and_token() {
+    let directory = tempdir().unwrap();
+    let _env = connector_test_env(directory.path().join("connectors"));
+    let config_path = directory.path().join("config.json");
+    save_config(&config_path, &AgentConfig::example()).unwrap();
+    let package = directory.path().join("source");
+    fs::create_dir_all(&package).unwrap();
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/market-connector-3.0.0.json"
+    ))
+    .unwrap();
+    fs::write(package.join(CONNECTOR_MANIFEST_FILE), manifest.to_string()).unwrap();
+    let legacy = fixture_market_provenance("author-a", Uuid::from_u128(8), "1.0.0");
+    let legacy_source =
+        crate::market_distribution::installed_source_version(legacy.install_source.as_ref())
+            .unwrap()
+            .clone();
+    install_connector_from_path_with_provenance(&package, &config_path, false, legacy).unwrap();
+    mark_fixture_connector_stopped(&config_path);
+    let token = fs::read(ensure_connector_management_token("test-app").unwrap()).unwrap();
+    fs::write(
+        connector_data_dir("test-app").unwrap().join("state"),
+        b"existing data",
+    )
+    .unwrap();
+    let adoption = fixture_bundle_provenance("first", &manifest)
+        .for_adoption(legacy_source)
+        .unwrap();
+    let installed =
+        install_connector_from_path_with_provenance(&package, &config_path, false, adoption)
+            .unwrap();
+    assert_eq!(
+        fs::read(connector_data_dir(&installed.app_id).unwrap().join("state")).unwrap(),
+        b"existing data"
+    );
+    assert_eq!(
+        fs::read(connector_management_token_path(&installed.app_id).unwrap()).unwrap(),
+        token
+    );
+    assert!(show_connector("test-app").is_err());
+    assert!(!connector_data_dir("test-app").unwrap().exists());
+    let config = load_config(&config_path).unwrap();
+    assert_eq!(config.local_apps[0].app_id, installed.app_id);
+}
+
+pub(crate) fn install_two_bound_bundle_fixtures(
+    config: &mut AgentConfig,
+    root: &Path,
+    first: &str,
+    second: &str,
+) {
+    let config_path = root.join("config.json");
+    config.local_apps.clear();
+    save_config(&config_path, config).unwrap();
+    for (bundle, base_url) in [("first", first), ("second", second)] {
+        let package = root.join(bundle);
+        fs::create_dir(&package).unwrap();
+        let mut manifest = test_manifest("test-app", "Fixture", "1.0.0");
+        manifest["transport"]["baseUrl"] = json!(base_url);
+        manifest["methods"][0]["path"] = json!("/invoke");
+        manifest["methods"][0]["httpMethod"] = json!("POST");
+        fs::write(package.join(CONNECTOR_MANIFEST_FILE), manifest.to_string()).unwrap();
+        let installed = install_connector_from_path_with_provenance(
+            &package, &config_path, false, fixture_bundle_provenance(bundle, &manifest),
+        ).unwrap();
+        prepare_installed_connector_runtime(&config_path, &installed.app_id).unwrap();
+    }
+    *config = load_config(&config_path).unwrap();
 }

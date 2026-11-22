@@ -331,6 +331,8 @@ fn default_connector_setup_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorInstallRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_source: Option<local_app_contract::bundle::LocatedAppVersion>,
     #[serde(default)]
     pub install_source: Option<local_app_contract::InstallSource>,
     pub manifest: ConnectorManifest,
@@ -351,6 +353,8 @@ pub struct ConnectorInstallRecord {
 
 #[derive(Debug, Clone)]
 pub struct ConnectorInstallProvenance {
+    adopted_legacy: Option<local_app_contract::SourceVersion>,
+    bundle_source: Option<local_app_contract::bundle::LocatedAppVersion>,
     install_source: Option<local_app_contract::InstallSource>,
     source_identity_migration: bool,
     source_reference: Option<String>,
@@ -369,13 +373,79 @@ impl ConnectorManifest {
     }
 }
 
+fn verify_bundle_manifest(
+    manifest: &ConnectorManifest,
+    source: &local_app_contract::bundle::LocatedAppVersion,
+) -> Result<()> {
+    if source.resource_locator.resource_locator().resource_key() != manifest.app_id
+        || source.version.to_string() != manifest.version
+    {
+        bail!("installed manifest differs from the selected frozen Bundle version");
+    }
+    Ok(())
+}
+
+impl ConnectorInstallRecord {
+    pub fn installation_id(&self) -> String {
+        connector_installation_id(&self.manifest.app_id, self.bundle_source.as_ref())
+    }
+}
+
+fn connector_installation_id(
+    app_id: &str,
+    source: Option<&local_app_contract::bundle::LocatedAppVersion>,
+) -> String {
+    match source {
+        Some(source) => source.resource_locator.to_string(),
+        None => app_id.to_owned(),
+    }
+}
+
 impl ConnectorInstallProvenance {
+    pub fn installation_id(&self, app_id: &str) -> String {
+        connector_installation_id(app_id, self.bundle_source.as_ref())
+    }
+
+    pub fn frozen_bundle(
+        frozen: &local_app_contract::bundle::LocatedFrozenVersion,
+    ) -> Result<Self> {
+        frozen.validate()?;
+        Ok(Self {
+            adopted_legacy: None,
+            bundle_source: Some(frozen.source.clone()),
+            install_source: None,
+            source_identity_migration: false,
+            source_reference: None,
+            review_status: "SOURCE_FROZEN".into(),
+            source_checksum: None,
+        })
+    }
+
+    /// The caller obtained this correspondence from the source Owner.
+    pub fn for_adoption(mut self, source: local_app_contract::SourceVersion) -> Result<Self> {
+        let located = self
+            .bundle_source
+            .as_ref()
+            .context("adoption requires the Bundle source")?;
+        let locator = located.resource_locator.resource_locator();
+        if locator.environment_key() != source.application.environment_key.as_str()
+            || locator.resource_key() != source.application.app_id.as_str()
+            || located.version != source.version
+        {
+            bail!("adoption does not match the installed legacy version");
+        }
+        self.adopted_legacy = Some(source);
+        Ok(self)
+    }
+
     pub fn frozen_environment(
         frozen: &local_app_contract::FrozenVersion,
         source_identity_migration: bool,
     ) -> Result<Self> {
         frozen.validate()?;
         Ok(Self {
+            adopted_legacy: None,
+            bundle_source: None,
             install_source: Some(local_app_contract::InstallSource::Environment {
                 source: frozen.source.clone(),
             }),
@@ -393,6 +463,8 @@ impl ConnectorInstallProvenance {
     ) -> Result<Self> {
         crate::market_distribution::resolve_exact(&selection, listing)?;
         Ok(Self {
+            adopted_legacy: None,
+            bundle_source: None,
             install_source: Some(selection),
             source_identity_migration,
             source_reference: None,
@@ -402,6 +474,9 @@ impl ConnectorInstallProvenance {
     }
 
     pub fn validate_manifest(&self, manifest: &ConnectorManifest) -> Result<()> {
+        if let Some(source) = &self.bundle_source {
+            verify_bundle_manifest(manifest, source)?;
+        }
         if let Some(selection) = &self.install_source {
             let source = match selection {
                 local_app_contract::InstallSource::Market { source, .. }
@@ -423,6 +498,8 @@ impl ConnectorInstallProvenance {
             .context("registered connector review status is required")?;
         let source_checksum = normalize_sha256_checksum(source_checksum)?;
         Ok(Self {
+            adopted_legacy: None,
+            bundle_source: None,
             install_source: None,
             source_identity_migration: false,
             source_reference: Some(source_reference),

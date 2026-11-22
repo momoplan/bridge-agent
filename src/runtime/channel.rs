@@ -76,7 +76,9 @@ async fn open_relay_channel(
     );
     metadata.insert(
         DEVICE_ID_METADATA,
-        agent_id.parse().context("device id is not valid metadata")?,
+        agent_id
+            .parse()
+            .context("device id is not valid metadata")?,
     );
     let inbound = client.connect(request).await?.into_inner();
     Ok(RelayChannel { outbound, inbound })
@@ -143,7 +145,9 @@ fn encode_device_frame(message: AgentMessage) -> Result<DeviceFrame> {
         | AgentMessage::EventAck(_)
         | AgentMessage::DeviceSubscriptions(_)
         | AgentMessage::StreamAttach(_)
-        | AgentMessage::StreamDetach(_) => bail!("relay-originated message cannot be sent to relay"),
+        | AgentMessage::StreamDetach(_) => {
+            bail!("relay-originated message cannot be sent to relay")
+        }
     };
     Ok(DeviceFrame { frame: Some(frame) })
 }
@@ -166,11 +170,7 @@ fn encode_methods(methods: Vec<MethodDefinition>) -> Vec<v1::MethodDefinition> {
 
 fn encode_local_app(app: LocalAppDefinition) -> v1::LocalAppDefinition {
     v1::LocalAppDefinition {
-        installed_source: app.installed_source.map(|source| v1::LocalAppSource {
-            environment_key: source.application.environment_key.as_str().into(),
-            app_id: source.application.app_id.as_str().into(),
-            version: source.version.to_string(),
-        }),
+        installed_source: app.installed_source.map(Into::into),
         app_id: app.app_id,
         name: app.name,
         version: app.version,
@@ -243,13 +243,19 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
             if request.application_runtime_id.is_empty() || request.local_app_locator.is_empty() {
                 bail!("bound method requires a runtime and LOCAL_APP");
             }
-            AgentMessage::BoundLocalAppInvokeRequest(Box::new(crate::protocol::BoundLocalAppInvokeRequest {
-                request_id: request.request_id,
-                workspace_id: request.workspace_id,
-                source: decode_source(request.source.context("bound method requires an installation source")?)?,
-                method: request.method,
-                arguments: decode_json_or_null("argumentsJson", &request.arguments_json)?,
-            }))
+            AgentMessage::BoundLocalAppInvokeRequest(Box::new(
+                crate::protocol::BoundLocalAppInvokeRequest {
+                    request_id: request.request_id,
+                    workspace_id: request.workspace_id,
+                    source: decode_source(
+                        request
+                            .source
+                            .context("bound method requires an installation source")?,
+                    )?,
+                    method: request.method,
+                    arguments: decode_json_or_null("argumentsJson", &request.arguments_json)?,
+                },
+            ))
         }
         RelayFrameKind::EventAck(ack) => AgentMessage::EventAck(ack.try_into()?),
         RelayFrameKind::DeviceSubscriptions(snapshot) => {
@@ -266,17 +272,27 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
             return Ok(RelayInbound::UpdateRequired(RelayUpdateRequired {
                 minimum_supported_version: notice.minimum_supported_version,
                 message: notice.message,
-            }))
+            }));
         }
     }))
 }
 
-fn decode_source(source: v1::LocalAppSource) -> Result<local_app_contract::SourceVersion> {
-    Ok(local_app_contract::SourceVersion {
-        application: local_app_contract::SourceApp {
-            environment_key: source.environment_key.try_into()?,
-            app_id: source.app_id.try_into()?,
-        },
-        version: source.version.parse()?,
-    })
+fn decode_source(
+    source: v1::LocalAppSource,
+) -> Result<relay::contracts::device_events::InstalledLocalAppSource> {
+    use local_app_contract::{bundle::LocalAppLocator, AppId, EnvironmentKey, SemanticVersion};
+    let source: relay::contracts::device_events::InstalledLocalAppSource = source.into();
+    let _: EnvironmentKey = source.application.environment_key.clone().try_into()?;
+    let _: AppId = source.application.app_id.parse()?;
+    let _: SemanticVersion = source.version.parse()?;
+    if let Some(locator) = &source.resource_locator {
+        let locator: LocalAppLocator = locator.parse()?;
+        let locator = locator.resource_locator();
+        if locator.environment_key() != source.application.environment_key
+            || locator.resource_key() != source.application.app_id
+        {
+            bail!("LOCAL_APP locator differs from the source identity");
+        }
+    }
+    Ok(source)
 }

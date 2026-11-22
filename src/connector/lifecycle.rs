@@ -33,7 +33,7 @@ pub fn start_connector_with_env(
         },
     };
     Ok(ConnectorStartResult {
-        app_id: record.manifest.app_id,
+        app_id: record.installation_id(),
         lifecycle,
     })
 }
@@ -54,7 +54,7 @@ pub fn stop_connector(app_id: &str, config_path: &Path) -> Result<ConnectorStart
         },
     };
     Ok(ConnectorStartResult {
-        app_id: record.manifest.app_id,
+        app_id: record.installation_id(),
         lifecycle,
     })
 }

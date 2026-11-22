@@ -21,7 +21,7 @@ async fn install_connector_candidate(
             start_connector_and_wait(
                 connector_processes,
                 config_path,
-                &prepared.candidate_manifest.app_id,
+                &prepared.installation_id,
                 "恢复旧版应用",
                 prepared.bundled_cli.as_deref(),
             )
@@ -58,7 +58,7 @@ async fn start_and_refresh_installed_connector(
             "应用已安装，正在启动并检查运行状态",
         );
         execution.connector_lifecycles.advance(
-            &prepared.candidate_manifest.app_id,
+            &prepared.installation_id,
             &operation.id,
             ConnectorLifecycleState::Starting,
             "应用已安装，正在启动并检查运行状态",
@@ -85,7 +85,7 @@ async fn start_and_refresh_installed_connector(
         "正在刷新本地应用能力",
     );
     execution.connector_lifecycles.advance(
-        &prepared.candidate_manifest.app_id,
+        &prepared.installation_id,
         &operation.id,
         if should_start {
             ConnectorLifecycleState::Starting
@@ -116,7 +116,7 @@ async fn finish_connector_install_lifecycle(
     connector_lifecycles: &ConnectorLifecycleManager,
     connector_processes: &ConnectorProcessManager,
     operation: ConnectorLifecycleOperation,
-    candidate: &ConnectorManifest,
+    installation_id: &str,
     result: Result<ConnectorAppInstallDocument, String>,
 ) -> Result<ConnectorAppInstallDocument, String> {
     match result {
@@ -125,7 +125,7 @@ async fn finish_connector_install_lifecycle(
                 connector_lifecycles.complete_ready(
                     operation,
                     Some(document.install.version.clone()),
-                    connector_processes.managed_pid(&candidate.app_id).await,
+                    connector_processes.managed_pid(installation_id).await,
                     "应用已启动并通过就绪检查",
                 )?;
             } else {
@@ -139,17 +139,17 @@ async fn finish_connector_install_lifecycle(
         }
         Err(error) => {
             let recovered =
-                connector_local_app_is_healthy(config_path, &candidate.app_id, connector_processes)
+                connector_local_app_is_healthy(config_path, installation_id, connector_processes)
                     .await
                     .unwrap_or(false);
             if recovered {
-                let observed_version = show_connector(&candidate.app_id)
+                let observed_version = show_connector(installation_id)
                     .ok()
                     .map(|record| record.manifest.version);
                 connector_lifecycles.complete_ready(
                     operation,
                     observed_version,
-                    connector_processes.managed_pid(&candidate.app_id).await,
+                    connector_processes.managed_pid(installation_id).await,
                     "升级失败，已恢复原运行版本",
                 )?;
             } else {

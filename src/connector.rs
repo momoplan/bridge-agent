@@ -33,6 +33,7 @@ use uuid::Uuid;
 include!("connector/model.rs");
 include!("connector/access.rs");
 include!("connector/install.rs");
+include!("connector/adoption.rs");
 include!("connector/lifecycle.rs");
 include!("connector/manifest_validation.rs");
 include!("connector/service_registration.rs");

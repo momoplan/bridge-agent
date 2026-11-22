@@ -258,11 +258,12 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       installSourceMode === "market" ? selectedMarket?.appId ?? "" : registeredInstallAppId;
     const version =
       installSourceMode === "market" ? selectedMarket?.version ?? "" : registeredInstallVersion;
-    if (!appId || !version || (installSourceMode === "custom" && !registeredInstallEnvironmentKey)) {
+    const located = installSourceMode === "custom" && appId.includes("/");
+    if (!appId || !version || (installSourceMode === "custom" && !located && !registeredInstallEnvironmentKey)) {
       setError(
         installSourceMode === "market"
           ? "请选择要安装的应用"
-          : "请输入来源环境 key、appId 和精确版本"
+          : "请输入 LOCAL_APP Locator，或输入来源环境 key 和 appId，并填写精确版本"
       );
       return;
     }
@@ -270,13 +271,22 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       setError("请先确认注册来源权限");
       return;
     }
-    const installSource = installSourceMode === "market" ? selectedMarket?.installSource : {
+    const installSource = installSourceMode === "market" ? selectedMarket?.installSource : located ? undefined : {
       kind: "environment" as const,
       source: { application: { environmentKey: registeredInstallEnvironmentKey, appId }, version }
     };
     const existingConnector = connectorAppsRef.current.find((app) => app.appId === appId);
     let sourceIdentityMigration = false;
-    if (existingConnector && !existingConnector.installSource) {
+    if (located) {
+      const legacyId = appId.slice(appId.lastIndexOf("/") + 1);
+      const legacy = connectorAppsRef.current.find((app) => app.appId === legacyId && app.version === version);
+      if (legacy?.installSource) {
+        sourceIdentityMigration = window.confirm(
+          `将“${legacy.name}”的现有安装和数据迁入所选 Locator？确认后会先核验来源归属。选择取消会独立安装。`
+        );
+      }
+    }
+    if (existingConnector && !existingConnector.installSource && !located) {
       const sourceApplication = installSource?.source.application;
       if (!sourceApplication) {
         setError("选择的市场版本缺少来源应用身份");

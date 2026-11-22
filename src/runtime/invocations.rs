@@ -31,7 +31,10 @@ impl<'a> RelayConnection<'a> {
             return self.send(message).await;
         }
         let future = match request {
-            AgentMessage::BoundLocalAppInvokeRequest(r) => self.runner.handle_bound_invoke(*r, self.registered_workspace).boxed(),
+            AgentMessage::BoundLocalAppInvokeRequest(r) => self
+                .runner
+                .handle_bound_invoke(*r, self.registered_workspace)
+                .boxed(),
             AgentMessage::InvokeRequest(r) => self.runner.handle_invoke_request(r).boxed(),
             AgentMessage::LocalAppInvokeRequest(r) => {
                 self.runner.handle_local_app_invoke_request(r).boxed()
@@ -44,22 +47,45 @@ impl<'a> RelayConnection<'a> {
 }
 
 impl RuntimeRunner {
-    async fn handle_bound_invoke(&self, request: crate::protocol::BoundLocalAppInvokeRequest, registered_workspace: Option<u64>) -> AgentMessage {
+    async fn handle_bound_invoke(
+        &self,
+        request: crate::protocol::BoundLocalAppInvokeRequest,
+        registered_workspace: Option<u64>,
+    ) -> AgentMessage {
         let registry = self.registry.read().await.clone();
         let target = if registered_workspace == Some(request.workspace_id) {
             registry.bound_app_id(&request.source, &request.method)
         } else {
-            Err(anyhow::anyhow!("bound call outside the registered device workspace"))
+            Err(anyhow::anyhow!(
+                "bound call outside the registered device workspace"
+            ))
         };
         let result = match target {
-            Ok(app_id) => registry.invoke_local_app(request.request_id, registered_workspace, app_id, &request.method, request.arguments, None).await,
+            Ok(app_id) => {
+                registry
+                    .invoke_local_app(
+                        request.request_id,
+                        registered_workspace,
+                        app_id,
+                        &request.method,
+                        request.arguments,
+                        None,
+                    )
+                    .await
+            }
             Err(_) => InvokeResult {
                 request_id: request.request_id,
                 success: false,
                 data: None,
-                error: Some(crate::protocol::InvokeError { code: "BOUND_LOCAL_APP_DENIED".into(), message: "Device registration or installed source does not authorize this method".into(), public_details: None }),
+                error: Some(crate::protocol::InvokeError {
+                    code: "BOUND_LOCAL_APP_DENIED".into(),
+                    message:
+                        "Device registration or installed source does not authorize this method"
+                            .into(),
+                    public_details: None,
+                }),
                 duration_ms: 0,
-            }
+            },
         };
         AgentMessage::LocalAppInvokeResult(result)
     }
@@ -119,6 +145,19 @@ impl RuntimeRunner {
         &self,
         request: crate::protocol::LocalAppInvokeRequest,
     ) -> AgentMessage {
+        if request.app_id.contains('/') {
+            return AgentMessage::LocalAppInvokeResult(InvokeResult {
+                request_id: request.request_id,
+                success: false,
+                data: None,
+                error: Some(crate::protocol::InvokeError {
+                    code: "BOUND_LOCAL_APP_REQUIRED".into(),
+                    message: "Bundle Connectors require a bound device invocation".into(),
+                    public_details: None,
+                }),
+                duration_ms: 0,
+            });
+        }
         let app_id = request.app_id.clone();
         let method = request.method.clone();
         let request_id = request.request_id.clone();

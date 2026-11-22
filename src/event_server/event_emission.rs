@@ -9,10 +9,12 @@ async fn emit_local_app_event(
             "local event API is disabled",
         ));
     }
-    let queue = state.event_queue.as_ref().ok_or_else(|| EventApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "device authorization required before event handoff",
-    ))?;
+    let queue = state.event_queue.as_ref().ok_or_else(|| {
+        EventApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device authorization required before event handoff",
+        )
+    })?;
     let app_id = request.app_id.trim();
     let event_name = request.event.trim();
     if app_id.is_empty() || event_name.is_empty() {
@@ -27,8 +29,9 @@ async fn emit_local_app_event(
             "connector event credential is required",
         )
     })?;
-    let installed_source = authorized_event_source(&state.config_path, app_id, event_name, &token)
-        .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    let (installation_id, installed_source) =
+        authorized_event_source(&state.config_path, app_id, event_name, &token)
+            .map_err(|err| EventApiError::new(StatusCode::FORBIDDEN, err.to_string()))?;
     let event_id = request
         .event_id
         .as_deref()
@@ -37,15 +40,9 @@ async fn emit_local_app_event(
         .map(ToOwned::to_owned)
         .ok_or_else(|| EventApiError::new(StatusCode::BAD_REQUEST, "stable eventId is required"))?;
     let event = LocalAppEventEmitted {
-        installed_source: installed_source.map(|source| relay::contracts::device_events::InstalledLocalAppSource {
-            application: relay::contracts::device_events::SourceApplication {
-                environment_key: source.application.environment_key.as_str().to_owned(),
-                app_id: source.application.app_id.as_str().to_owned(),
-            },
-            version: source.version.to_string(),
-        }),
+        installed_source,
         event_id: event_id.clone(),
-        app_id: app_id.to_string(),
+        app_id: installation_id,
         event: event_name.to_string(),
         payload: AppPayload(request.payload),
         target_consumers: vec![],
@@ -56,9 +53,13 @@ async fn emit_local_app_event(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     };
-    let policy = crate::event_delivery::read_policy(&state.config_path).await
+    let policy = crate::event_delivery::read_policy(&state.config_path)
+        .await
         .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
-    let receipt = queue.admit(event, policy).await
+    let mut receipt = queue
+        .admit(event, policy)
+        .await
         .map_err(|err| EventApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
+    receipt.app_id = app_id.to_owned();
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }

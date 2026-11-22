@@ -294,25 +294,28 @@
         let source: local_app_contract::SourceVersion = serde_json::from_value(json!({
             "application":{"environmentKey":"private","appId":app_id},"version":"1.2.0"
         })).unwrap();
+        let verified = |source: &local_app_contract::SourceVersion| {
+            serde_json::from_value(serde_json::to_value(source).unwrap()).unwrap()
+        };
         let get_registry = |cfg: &AgentConfig| crate::services::ServiceRegistry::from_config(cfg,dir.path()).unwrap();
-        assert!(get_registry(&config).bound_app_id(&source, "ping").is_err());
+        assert!(get_registry(&config).bound_app_id(&verified(&source), "ping").is_err());
         record.install_source = Some(local_app_contract::InstallSource::Environment {source:source.clone()});
         save_install_record(&record).unwrap();
         let registry = get_registry(&config);
-        assert_eq!(registry.bound_app_id(&source, "ping").unwrap(), app_id);
-        assert!(registry.bound_app_id(&source, "undeclared").is_err());
+        assert_eq!(registry.bound_app_id(&verified(&source), "ping").unwrap(), app_id);
+        assert!(registry.bound_app_id(&verified(&source), "undeclared").is_err());
         let other = local_app_contract::SourceVersion {
             application: local_app_contract::SourceApp {environment_key:"other".to_string().try_into().unwrap(), ..source.application.clone()},
             ..source.clone()
         };
-        assert!(registry.bound_app_id(&other, "ping").is_err());
+        assert!(registry.bound_app_id(&verified(&other), "ping").is_err());
         record.install_source = Some(local_app_contract::InstallSource::Environment {source:other});
         save_install_record(&record).unwrap();
-        assert!(registry.bound_app_id(&source, "ping").is_err());
+        assert!(registry.bound_app_id(&verified(&source), "ping").is_err());
         record.install_source = Some(local_app_contract::InstallSource::Environment {source:source.clone()});
         save_install_record(&record).unwrap();
         let app = config.local_apps.iter_mut().find(|app|app.app_id == app_id).unwrap();
         let crate::config::MethodBinding::Http(binding) = &mut app.methods[0].binding else { panic!("fixture is HTTP") };
         binding.url.push_str("/unexpected");
-        assert!(get_registry(&config).bound_app_id(&source, "ping").is_err());
+        assert!(get_registry(&config).bound_app_id(&verified(&source), "ping").is_err());
     }

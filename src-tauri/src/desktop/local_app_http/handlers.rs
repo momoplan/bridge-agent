@@ -66,11 +66,11 @@ pub(super) async fn local_app_control_show_handler(
         let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
         let process_running = state
             .connector_processes
-            .managed_running(&record.manifest.app_id)
+            .managed_running(&record.installation_id())
             .await;
         let status = connector_local_app_status(
             &state.config_path,
-            &record.manifest.app_id,
+            &record.installation_id(),
             process_running,
         )
         .await?;
@@ -187,7 +187,7 @@ pub(super) async fn local_app_control_sync_handler(
     let result = async {
         let record = show_connector(app_id.trim()).map_err(|err| err.to_string())?;
         let identity =
-            RegisteredAppVersionIdentity::parse(record.manifest.app_id, record.manifest.version)?;
+            RegisteredAppVersionIdentity::parse(record.installation_id(), record.manifest.version)?;
         let document = install_connector_app_with_context(
             &state.config_path,
             &state.runtime,

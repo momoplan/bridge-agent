@@ -361,7 +361,7 @@ lazy-python-connector = "lazy_python_connector.app:main"
             &["start"],
         ))
         .unwrap();
-        let bad_package_path = installed_connector_package_path(&bad_manifest).unwrap();
+        let bad_package_path = installed_connector_package_path(&bad_manifest.app_id).unwrap();
         fs::create_dir_all(&bad_package_path).unwrap();
         fs::write(
             bad_package_path.join("pyproject.toml"),
@@ -376,6 +376,7 @@ bad-python-connector = "bad_python_connector.app:main"
         )
         .unwrap();
         save_install_record(&ConnectorInstallRecord {
+            bundle_source: None,
             install_source: None,
             manifest: bad_manifest,
             package_path: bad_package_path.display().to_string(),

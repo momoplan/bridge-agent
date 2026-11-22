@@ -112,14 +112,25 @@ pub fn select_artifact<'a>(
     architecture: &str,
 ) -> Result<Option<&'a local_app_contract::Artifact>, ContractError> {
     frozen.validate()?;
-    Ok(frozen
-        .content
+    Ok(select_target_artifact(
+        &frozen.content,
+        platform,
+        architecture,
+    ))
+}
+
+pub fn select_target_artifact<'a>(
+    content: &'a local_app_contract::VersionContent,
+    platform: &str,
+    architecture: &str,
+) -> Option<&'a local_app_contract::Artifact> {
+    content
         .artifacts
         .iter()
         .find(|artifact| artifact.platform == platform && artifact.architecture == architecture)
         .or_else(|| {
-            frozen.content.artifacts.iter().find(|artifact| {
+            content.artifacts.iter().find(|artifact| {
                 artifact.platform == platform && artifact.architecture == "universal"
             })
-        }))
+        })
 }

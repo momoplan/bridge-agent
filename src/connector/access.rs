@@ -9,12 +9,12 @@ pub fn connectors_dir() -> Result<PathBuf> {
 }
 
 pub fn connector_data_dir(app_id: &str) -> Result<PathBuf> {
-    validate_app_id(app_id)?;
+    let path_component = installation_storage_path(app_id)?;
     if let Some(path) = std::env::var_os("BRIDGE_AGENT_LOCAL_APP_DATA_DIR") {
-        return Ok(PathBuf::from(path).join(app_id));
+        return Ok(PathBuf::from(path).join(&path_component));
     }
     if let Some(dirs) = ProjectDirs::from("com", "baijimu", "bridge-agent") {
-        return Ok(dirs.config_dir().join("app-data").join(app_id));
+        return Ok(dirs.config_dir().join("app-data").join(path_component));
     }
     bail!("failed to resolve BridgeAgent connector data directory")
 }
@@ -44,29 +44,20 @@ pub fn authorize_connector_asset_upload(
     app_id: &str,
     token: &str,
 ) -> Result<PathBuf> {
-    let record = load_install_record(app_id)?;
+    let record = connector_with_token(app_id, token, connector_asset_upload_token_path)?;
+    let installation_id = record.installation_id();
     if !connector_permission_is_active(&record.manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION) {
-        bail!("connector `{app_id}` does not declare assets.upload permission");
-    }
-    let expected_token_path = connector_asset_upload_token_path(app_id)?;
-    let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
-        format!(
-            "failed to read connector asset upload credential {}",
-            expected_token_path.display()
-        )
-    })?;
-    if !constant_time_text_eq(expected_token.trim(), token.trim()) {
-        bail!("invalid connector asset upload credential");
+        bail!("connector `{app_id}` does not declare asset upload permission");
     }
     let config = load_config(config_path)?;
     if !config
         .local_apps
         .iter()
-        .any(|app| app.app_id == app_id && app.enabled)
+        .any(|app| app.app_id == installation_id && app.enabled)
     {
         bail!("connector `{app_id}` is not enabled");
     }
-    connector_data_dir(app_id)
+    connector_data_dir(&installation_id)
 }
 
 fn connector_permission_is_active(manifest: &ConnectorManifest, permission_id: &str) -> bool {
@@ -90,26 +81,65 @@ pub fn authorize_connector_event(
 }
 
 pub(crate) fn authorized_event_source(
-    config_path: &Path, app_id: &str, event_name: &str, token: &str,
-) -> Result<Option<local_app_contract::SourceVersion>> {
-    let record = load_install_record(app_id)?;
-    let expected_token_path = connector_event_token_path(app_id)?;
-    let expected_token = fs::read_to_string(&expected_token_path).with_context(|| {
-        format!(
-            "failed to read connector event credential {}",
-            expected_token_path.display()
-        )
-    })?;
-    if !constant_time_text_eq(expected_token.trim(), token.trim()) {
-        bail!("invalid connector event credential");
-    }
-
+    config_path: &Path,
+    app_id: &str,
+    event_name: &str,
+    token: &str,
+) -> Result<(
+    String,
+    Option<relay::contracts::device_events::InstalledLocalAppSource>,
+)> {
+    let record = connector_with_token(app_id, token, connector_event_token_path)?;
+    let installation_id = record.installation_id();
     let config = load_config(config_path)?;
     let event_name = event_name.trim();
-    let app = config.local_apps.iter().find(|app| {
-        app.app_id == app_id && app.enabled && app.events.iter().any(|event| event.enabled && event.name == event_name)
-    }).with_context(|| format!("local app event `{event_name}` is not declared by connector `{app_id}`"))?;
-    Ok(check_registered_source(app, &record).ok())
+    let app = config
+        .local_apps
+        .iter()
+        .find(|app| {
+            app.app_id == installation_id
+                && app.enabled
+                && app
+                    .events
+                    .iter()
+                    .any(|event| event.enabled && event.name == event_name)
+        })
+        .with_context(|| {
+            format!("local app event `{event_name}` is not declared by connector `{app_id}`")
+        })?;
+    let source = if record.bundle_source.is_some() {
+        Some(check_registered_source(app, &record)?)
+    } else {
+        check_registered_source(app, &record).ok()
+    };
+    Ok((installation_id, source))
+}
+
+fn connector_with_token(
+    app_id: &str,
+    token: &str,
+    token_path: fn(&str) -> Result<PathBuf>,
+) -> Result<ConnectorInstallRecord> {
+    let mut selected = None;
+    for record in load_install_records()? {
+        let id = record.installation_id();
+        if id != app_id && record.manifest.app_id != app_id {
+            continue;
+        }
+        let path = token_path(&id)?;
+        let expected = match fs::read_to_string(path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if constant_time_text_eq(expected.trim(), token.trim()) {
+            if selected.is_some() {
+                bail!("ambiguous connector credential");
+            }
+            selected = Some(record);
+        }
+    }
+    selected.context("invalid connector credential")
 }
 
 pub fn load_connector_manifest(source: &Path) -> Result<ConnectorManifest> {

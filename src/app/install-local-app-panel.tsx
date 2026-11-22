@@ -254,16 +254,16 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
               <div className="custom-install-form">
                 <div className="custom-install-intro">
                   <strong>安装已注册但未公开上架的应用</strong>
-                  <p>输入来源环境 key、appId 和精确版本；客户端使用该环境的授权读取冻结版本。</p>
+                  <p>输入 LOCAL_APP Locator 和精确版本。旧应用也可使用来源环境 key 和 appId。</p>
                 </div>
-                <Field label="来源环境 key" wide>
+                <Field label="来源环境 key（仅旧应用）" wide>
                   <input value={registeredInstallEnvironmentKey} onChange={(event) => setRegisteredInstallEnvironmentKey(event.target.value)} placeholder="environmentKey" />
                 </Field>
-                <Field label="appId" wide>
+                <Field label="LOCAL_APP Locator 或 appId" wide>
                   <input
                     value={registeredInstallAppId}
                     onChange={(event) => setRegisteredInstallAppId(event.target.value)}
-                    placeholder="已在平台注册的 appId"
+                    placeholder="来源环境/Bundle/LOCAL_APP/appId"
                     autoFocus
                   />
                 </Field>
@@ -331,7 +331,7 @@ export function InstallLocalAppPanel(props: InstallLocalAppPanelProps) {
                 (installSourceMode === "market" && !selectedMarket) ||
                 (installSourceMode === "market" && marketPrimaryAction?.disabled === true) ||
                 (installSourceMode === "custom" &&
-                  (!registeredInstallEnvironmentKey || !registeredInstallAppId || !registeredInstallVersion || !customInstallConfirmed))
+                  ((!registeredInstallEnvironmentKey && !registeredInstallAppId.includes("/")) || !registeredInstallAppId || !registeredInstallVersion || !customInstallConfirmed))
               }
             >
               {installBusy

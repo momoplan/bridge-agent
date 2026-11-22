@@ -31,7 +31,7 @@ pub(super) async fn check_connector_app_update(
         .connector_update(selected, &installed.manifest.version)
         .await?;
     Ok(ConnectorAppUpdateStatus {
-        app_id: installed.manifest.app_id,
+        app_id: installed.installation_id(),
         name: installed.manifest.name,
         current_version: installed.manifest.version,
         latest_version: update.version,
@@ -158,7 +158,7 @@ pub(super) fn list_connector_app_install_tasks(
 struct PreparedConnectorInstall {
     options: ConnectorInstallOptions,
     resolved_source: ResolvedConnectorSource,
-    candidate_manifest: ConnectorManifest,
+    installation_id: String,
     existing: Option<ConnectorSummary>,
     restart_after_replace: bool,
     bundled_cli: Option<PathBuf>,
@@ -185,9 +185,9 @@ pub(super) async fn install_connector_app_with_context(
     let prepared = prepare_connector_install(config_path, connector_processes, options).await?;
     let operation = connector_lifecycles
         .begin(
-            &prepared.candidate_manifest.app_id,
+            &prepared.installation_id,
             prepared.operation_kind,
-            Some(prepared.candidate_manifest.version.clone()),
+            Some(prepared.options.identity.version.to_string()),
             if prepared.operation_kind == ConnectorOperationKind::Upgrade {
                 "正在切换应用版本"
             } else {
@@ -210,7 +210,7 @@ pub(super) async fn install_connector_app_with_context(
         connector_lifecycles,
         connector_processes,
         operation,
-        &prepared.candidate_manifest,
+        &prepared.installation_id,
         result,
     )
     .await
@@ -239,9 +239,10 @@ async fn prepare_connector_install(
     }
     let candidate_manifest =
         load_connector_manifest(resolved_source.path()).map_err(|err| err.to_string())?;
+    let installation_id = provenance.installation_id(&candidate_manifest.app_id);
     if let Some(progress) = options.progress.as_ref() {
         progress.identity(
-            &candidate_manifest.app_id,
+            &installation_id,
             &candidate_manifest.name,
             &candidate_manifest.version,
         );
@@ -260,7 +261,7 @@ async fn prepare_connector_install(
     let existing = list_connectors()
         .map_err(|err| err.to_string())?
         .into_iter()
-        .find(|connector| connector.app_id == candidate_manifest.app_id);
+        .find(|connector| connector.app_id == installation_id);
     let restart_after_replace = if options.replace {
         match existing.as_ref() {
             Some(connector) => {
@@ -280,7 +281,7 @@ async fn prepare_connector_install(
     Ok(PreparedConnectorInstall {
         options,
         resolved_source,
-        candidate_manifest,
+        installation_id,
         existing,
         restart_after_replace,
         bundled_cli,
@@ -305,7 +306,7 @@ async fn execute_connector_install(
         "正在安装并注册应用",
     );
     connector_lifecycles.advance(
-        &prepared.candidate_manifest.app_id,
+        &prepared.installation_id,
         &operation.id,
         prepared.operation_kind.lifecycle(),
         "正在安装并注册应用",
@@ -360,7 +361,29 @@ async fn resolve_install_package(
             validate_environment_install_identity(&options.identity, source)?;
             environment_install::resolve(
                 config_path,
-                source,
+                environment_install::Selection::Legacy(source),
+                options.source_identity_migration,
+                options.progress.as_ref(),
+            )
+            .await?
+        }
+        None if options.accept_unreviewed && options.identity.app_id.contains('/') => {
+            let source = local_app_contract::bundle::LocatedAppVersion {
+                resource_locator: options
+                    .identity
+                    .app_id
+                    .parse()
+                    .map_err(|error: local_app_contract::ContractError| error.to_string())?,
+                version: options
+                    .identity
+                    .version
+                    .to_string()
+                    .parse()
+                    .map_err(|error: local_app_contract::ContractError| error.to_string())?,
+            };
+            environment_install::resolve(
+                config_path,
+                environment_install::Selection::Bundle(&source),
                 options.source_identity_migration,
                 options.progress.as_ref(),
             )

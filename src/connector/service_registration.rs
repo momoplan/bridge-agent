@@ -58,20 +58,33 @@ fn load_connector_service_registrations(
     }])
 }
 
-fn installed_connector_package_path(manifest: &ConnectorManifest) -> Result<PathBuf> {
+fn installation_storage_path(id: &str) -> Result<PathBuf> {
+    if !id.contains('/') {
+        validate_app_id(id)?;
+        return Ok(PathBuf::from(id));
+    }
+    use sha2::{Digest, Sha256};
+    let locator: local_app_contract::bundle::LocalAppLocator = id.parse()?;
+    Ok(PathBuf::from("@bundles").join(format!(
+        "{:x}",
+        Sha256::digest(locator.to_string().as_bytes())
+    )))
+}
+
+fn installed_connector_package_path(installation_id: &str) -> Result<PathBuf> {
     Ok(connectors_dir()?
-        .join(sanitize_path_component(&manifest.app_id))
+        .join(installation_storage_path(installation_id)?)
         .join("package"))
 }
 
-fn install_record_path(app_id: &str) -> Result<PathBuf> {
+fn install_record_path(installation_id: &str) -> Result<PathBuf> {
     Ok(connectors_dir()?
-        .join(sanitize_path_component(app_id))
+        .join(installation_storage_path(installation_id)?)
         .join(CONNECTOR_INSTALL_RECORD_FILE))
 }
 
 fn save_install_record(record: &ConnectorInstallRecord) -> Result<()> {
-    let path = install_record_path(&record.manifest.app_id)?;
+    let path = install_record_path(&record.installation_id())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create connector dir {}", parent.display()))?;
@@ -140,31 +153,51 @@ fn load_install_records() -> Result<Vec<ConnectorInstallRecord>> {
         return Ok(Vec::new());
     }
     let mut records = Vec::new();
-    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    for directory in [&dir, &dir.join("@bundles")] {
+        if !directory.exists() {
             continue;
         }
-        let id = entry.file_name().to_string_lossy().to_string();
-        if id.starts_with('.') && id.contains(".uninstalling-") {
-            continue;
-        }
-        match load_install_record(&id) {
-            Ok(record) => records.push(record),
-            Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if id == "@bundles" || (id.starts_with('.') && id.contains(".uninstalling-")) {
+                continue;
+            }
+            let path = entry.path().join(CONNECTOR_INSTALL_RECORD_FILE);
+            if !path.exists() && entry.path().join("connector.install.adopted.json").exists() {
+                continue;
+            }
+            match load_install_record_at(&path) {
+                Ok(record) => records.push(record),
+                Err(err) => tracing::warn!("failed to load connector `{id}`: {err:#}"),
+            }
         }
     }
-    records.sort_by(|left, right| left.manifest.app_id.cmp(&right.manifest.app_id));
+    records.sort_by_key(ConnectorInstallRecord::installation_id);
     Ok(records)
 }
 
 fn load_install_record(app_id: &str) -> Result<ConnectorInstallRecord> {
-    read_install_record(app_id)
+    load_install_record_at(&install_record_path(app_id)?)
+}
+
+fn load_install_record_at(path: &Path) -> Result<ConnectorInstallRecord> {
+    let record: ConnectorInstallRecord = read_record_at(path)?;
+    if install_record_path(&record.installation_id())? != path {
+        bail!("connector install record does not match its installation identity");
+    }
+    Ok(record)
 }
 
 fn read_install_record<T: serde::de::DeserializeOwned>(app_id: &str) -> Result<T> {
-    let path = install_record_path(app_id)?;
-    let content = fs::read_to_string(&path)
+    read_record_at(&install_record_path(app_id)?)
+}
+
+fn read_record_at<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read connector install record {}", path.display()))?;
     serde_json::from_str(&content).with_context(|| {
         format!(
@@ -176,24 +209,61 @@ fn read_install_record<T: serde::de::DeserializeOwned>(app_id: &str) -> Result<T
 
 /// Attest the actual callable targets and events in the host registry against the
 /// installed manifest. Hand-configured apps do not have an installation identity.
-pub(crate) fn registered_source(app: &LocalAppConfig) -> Result<local_app_contract::SourceVersion> {
-    let record = read_install_record::<ConnectorInstallRecord>(&app.app_id)?;
+pub(crate) fn registered_source(
+    app: &LocalAppConfig,
+) -> Result<relay::contracts::device_events::InstalledLocalAppSource> {
+    let record = load_install_record(&app.app_id)?;
     check_registered_source(app, &record)
 }
 
-fn check_registered_source(app: &LocalAppConfig, record: &ConnectorInstallRecord) -> Result<local_app_contract::SourceVersion> {
-    let source = crate::market_distribution::installed_source_version(record.install_source.as_ref())?;
-    record.manifest.verify_source_identity(source)?;
-    if record.manifest.app_id != app.app_id || record.manifest.version != app.version {
+fn check_registered_source(
+    app: &LocalAppConfig,
+    record: &ConnectorInstallRecord,
+) -> Result<relay::contracts::device_events::InstalledLocalAppSource> {
+    use relay::contracts::device_events::{InstalledLocalAppSource, SourceApplication};
+
+    let (application, resource_locator) = if let Some(source) = &record.bundle_source {
+        verify_bundle_manifest(&record.manifest, source)?;
+        let locator = source.resource_locator.resource_locator();
+        (
+            SourceApplication {
+                environment_key: locator.environment_key().to_owned(),
+                app_id: locator.resource_key().to_owned(),
+            },
+            Some(locator.to_string()),
+        )
+    } else {
+        let source =
+            crate::market_distribution::installed_source_version(record.install_source.as_ref())?;
+        record.manifest.verify_source_identity(source)?;
+        (
+            SourceApplication {
+                environment_key: source.application.environment_key.as_str().to_owned(),
+                app_id: source.application.app_id.as_str().to_owned(),
+            },
+            None,
+        )
+    };
+
+    if record.installation_id() != app.app_id || record.manifest.version != app.version {
         bail!("installed connector does not match the registered app and version");
     }
-    let registrations = load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)?;
-    let services = registrations.iter().cloned().map(ServiceRegistration::into_connector_service_config)
+    let registrations =
+        load_connector_service_registrations(Path::new(&record.package_path), &record.manifest)?;
+    let services = registrations
+        .iter()
+        .cloned()
+        .map(ServiceRegistration::into_connector_service_config)
         .collect::<Result<Vec<_>>>()?;
     let installed = local_app_from_services(&record.manifest, &services, &registrations)?;
     if serde_json::to_value(installed.methods)? != serde_json::to_value(&app.methods)?
-        || serde_json::to_value(installed.events)? != serde_json::to_value(&app.events)? {
+        || serde_json::to_value(installed.events)? != serde_json::to_value(&app.events)?
+    {
         bail!("registered targets differ from the installed connector");
     }
-    Ok(source.clone())
+    Ok(InstalledLocalAppSource {
+        application,
+        resource_locator,
+        version: record.manifest.version.clone(),
+    })
 }

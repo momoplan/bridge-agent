@@ -117,6 +117,46 @@ where
     Ok(Some((*first).clone()))
 }
 
+fn validate_bundle_transport(
+    configured: &[LocalAppConfig],
+    installation_id: &str,
+    replaced_legacy_id: Option<&str>,
+    candidate: &LocalAppConfig,
+) -> Result<()> {
+    // Connector transports address local processes. Another installation on
+    // the same port would send requests to the wrong process before its auth check.
+    fn ports(app: &LocalAppConfig) -> BTreeSet<u16> {
+        let methods = app
+            .methods
+            .iter()
+            .filter_map(|method| match &method.binding {
+                crate::config::MethodBinding::Http(binding) => Some(binding.url.as_str()),
+                _ => None,
+            });
+        let stream = app
+            .notification_stream
+            .iter()
+            .map(|stream| stream.url.as_str());
+        methods
+            .chain(stream)
+            .filter_map(|url| url::Url::parse(url).ok()?.port_or_known_default())
+            .collect()
+    }
+    let candidate_ports = ports(candidate);
+    for app in configured {
+        if app.app_id == installation_id || Some(app.app_id.as_str()) == replaced_legacy_id {
+            continue;
+        }
+        if !candidate_ports.is_disjoint(&ports(app)) {
+            bail!(
+                "Connector transport shares a local port with installation `{}`",
+                app.app_id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn upsert_local_app(
     local_apps: &mut Vec<LocalAppConfig>,
     local_app: LocalAppConfig,

@@ -227,6 +227,24 @@ impl EventQueue {
         self.run(move |store| store.cleanup(&policy, now())).await
     }
 }
+pub(crate) fn adopt_installation(
+    config_path: &Path,
+    config: &crate::AgentConfig,
+    legacy: &local_app_contract::SourceVersion,
+    target: &str,
+) -> Result<()> {
+    let path = database_path(config_path)?;
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    let queue = EventQueue::open(&path, QueueIdentity::from_config(config)?)?;
+    let mut store = queue
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event storage lock poisoned"))?;
+    store.adopt_installation(legacy, target)
+}
+
 pub fn database_path(config_path: &Path) -> Result<PathBuf> {
     Ok(crate::config::resolve_config_base_dir(config_path)
         .join("event-delivery")

@@ -40,6 +40,7 @@ pub fn install_connector_from_path_with_source_reference(
 #[serde(rename_all = "camelCase")]
 struct InstalledConnectorIdentity {
     manifest: InstalledAppId,
+    bundle_source: Option<local_app_contract::bundle::LocatedAppVersion>,
     install_source: Option<local_app_contract::InstallSource>,
     installed_at_epoch_ms: u64,
 }
@@ -78,7 +79,16 @@ pub fn install_connector_from_path_with_provenance(
         .map(ServiceRegistration::into_connector_service_config)
         .collect::<Result<Vec<_>>>()?;
 
-    let package_path = installed_connector_package_path(&manifest)?;
+    let installation_id = provenance.installation_id(&manifest.app_id);
+    if provenance.bundle_source.is_some() {
+        let candidate = local_app_from_services(&manifest, &services, &registrations)?;
+        let legacy_id = provenance
+            .adopted_legacy
+            .as_ref()
+            .map(|source| source.application.app_id.as_str());
+        validate_bundle_transport(&config.local_apps, &installation_id, legacy_id, &candidate)?;
+    }
+    let package_path = installed_connector_package_path(&installation_id)?;
     if source == package_path || source.starts_with(&package_path) {
         bail!(
             "connector source {} cannot be inside its installed package {}",
@@ -92,7 +102,8 @@ pub fn install_connector_from_path_with_provenance(
             package_path.display()
         );
     }
-    let previous_record = match read_install_record::<InstalledConnectorIdentity>(&manifest.app_id) {
+    let previous_record = match read_install_record::<InstalledConnectorIdentity>(&installation_id)
+    {
         Ok(record) => {
             if record.manifest.app_id != manifest.app_id {
                 bail!("stored connector installation identity does not match the package");
@@ -115,8 +126,15 @@ pub fn install_connector_from_path_with_provenance(
     validate_install_replacement(previous_record.as_ref(), &provenance)?;
 
     if package_path.exists() && previous_record.is_some() {
-        stop_connector_for_package_change(&manifest.app_id, &config)?;
+        stop_connector_for_package_change(&installation_id, &config)?;
     }
+    let adoption = provenance
+        .adopted_legacy
+        .as_ref()
+        .map(|legacy| {
+            ConnectorAdoption::start(legacy, &installation_id, &original_config)
+        })
+        .transpose()?;
     let replaced_package = if package_path.exists() {
         Some(prepare_connector_package_destination(
             &package_path,
@@ -137,18 +155,34 @@ pub fn install_connector_from_path_with_provenance(
         &mut config,
         previous_record.as_ref(),
         &provenance,
+        &installation_id,
         &mut config_saved,
     );
 
-    finalize_connector_install(
+    let result = finalize_connector_install(
         install_result,
         config_path,
         &original_config,
         &package_path,
         replaced_package,
         config_saved,
-        &manifest.app_id,
-    )
+        &installation_id,
+    );
+    if let Some(adoption) = adoption {
+        match result {
+            Ok(install) => {
+                adoption.finish(config_path, &original_config)?;
+                return Ok(install);
+            }
+            Err(error) => {
+                adoption
+                    .rollback()
+                    .context(format!("adoption failed: {error:#}"))?;
+                return Err(error);
+            }
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +244,7 @@ fn complete_connector_install(
     config: &mut AgentConfig,
     previous_record: Option<&InstalledConnectorIdentity>,
     provenance: &ConnectorInstallProvenance,
+    installation_id: &str,
     config_saved: &mut bool,
 ) -> Result<ConnectorInstallResult> {
     copy_connector_package(source, package_path)?;
@@ -218,11 +253,22 @@ fn complete_connector_install(
         package_path,
         &config.runtime,
         manifest,
+        installation_id,
         ConnectorRuntimePreparation::Deferred,
     )?;
-    cleanup_legacy_connector_autostarts_for_manifest(manifest);
+    if provenance.bundle_source.is_none() {
+        cleanup_legacy_connector_autostarts_for_manifest(manifest);
+    }
 
-    let local_app = local_app_from_services(manifest, services, registrations)?;
+    let mut local_app = local_app_from_services(manifest, services, registrations)?;
+    local_app.app_id = installation_id.to_owned();
+    if let Some(legacy) = &provenance.adopted_legacy {
+        let legacy_id = legacy.application.app_id.as_str();
+        if let Some(previous) = config.local_apps.iter().find(|app| app.app_id == legacy_id) {
+            local_app.enabled = previous.enabled;
+        }
+        config.local_apps.retain(|app| app.app_id != legacy_id);
+    }
     let method_names = local_app
         .methods
         .iter()
@@ -239,6 +285,7 @@ fn complete_connector_install(
 
     let now = now_ms();
     save_install_record(&ConnectorInstallRecord {
+        bundle_source: provenance.bundle_source.clone(),
         install_source: provenance.install_source.clone(),
         manifest: manifest.clone(),
         package_path: package_path.display().to_string(),
@@ -269,7 +316,7 @@ fn complete_connector_install(
     }
 
     Ok(ConnectorInstallResult {
-        app_id: manifest.app_id.clone(),
+        app_id: installation_id.to_owned(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         package_path: package_path.display().to_string(),
@@ -345,9 +392,7 @@ pub fn uninstall_connector_with_options(
     }
     cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
 
-    config
-        .local_apps
-        .retain(|app| app.app_id != record.manifest.app_id);
+    config.local_apps.retain(|app| app.app_id != app_id);
 
     let install_root = install_record_path(app_id)?
         .parent()
@@ -449,7 +494,7 @@ pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorS
     let mut failures = Vec::new();
 
     for record in records {
-        let app_id = record.manifest.app_id.clone();
+        let app_id = record.installation_id();
         let name = record.manifest.name.clone();
         match sync_installed_connector_record(
             &mut config,
@@ -508,9 +553,11 @@ fn sync_installed_connector_record(
     now: u64,
     runtime_preparation: ConnectorRuntimePreparation,
 ) -> Result<ConnectorSummary> {
-    cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
+    if record.bundle_source.is_none() {
+        cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
+    }
     let package_path = PathBuf::from(&record.package_path);
-    let app_id = record.manifest.app_id.clone();
+    let app_id = record.installation_id();
     let registrations = load_connector_service_registrations(&package_path, &record.manifest)
         .with_context(|| {
             format!("failed to reload service registrations for connector `{app_id}`")
@@ -525,10 +572,12 @@ fn sync_installed_connector_record(
         &package_path,
         &config.runtime,
         &record.manifest,
+        &app_id,
         runtime_preparation,
     )?;
 
-    let local_app = local_app_from_services(&record.manifest, &services, &registrations)?;
+    let mut local_app = local_app_from_services(&record.manifest, &services, &registrations)?;
+    local_app.app_id = app_id;
     upsert_synced_local_app(&mut config.local_apps, local_app);
 
     record.last_synced_at_epoch_ms = now;
@@ -540,6 +589,19 @@ fn validate_install_replacement(
     previous_record: Option<&InstalledConnectorIdentity>,
     provenance: &ConnectorInstallProvenance,
 ) -> Result<()> {
+    if let Some(previous) = previous_record {
+        if previous
+            .bundle_source
+            .as_ref()
+            .map(|source| &source.resource_locator)
+            != provenance
+                .bundle_source
+                .as_ref()
+                .map(|source| &source.resource_locator)
+        {
+            bail!("different source applications cannot replace the same installation");
+        }
+    }
     if previous_record.is_some_and(|record| record.install_source.is_some())
         && provenance.install_source.is_none()
     {
@@ -565,7 +627,9 @@ fn validate_install_replacement(
                     }
                 }
                 None => {
-                    bail!("existing installation has no verified source identity; explicit source identity migration is required before upgrade");
+                    bail!(
+                        "existing installation has no verified source identity; explicit source identity migration is required before upgrade"
+                    );
                 }
             }
         }
