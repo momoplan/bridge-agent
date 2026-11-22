@@ -523,6 +523,8 @@ pub struct ConnectorInstallResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_source: Option<local_app_contract::bundle::LocatedAppVersion>,
     pub install_source: Option<local_app_contract::InstallSource>,
     pub app_id: String,
     pub name: String,

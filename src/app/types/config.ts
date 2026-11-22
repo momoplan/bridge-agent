@@ -119,6 +119,7 @@ export interface StartRegisteredServiceResult {
 }
 
 export interface ConnectorSummary {
+  bundleSource?: { resourceLocator: string; version: string };
   installSource?: InstallSource | null;
   appId: string;
   name: string;

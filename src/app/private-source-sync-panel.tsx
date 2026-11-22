@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { privateSourceLabel } from "./private-source-sync";
 import type { LocalAppItem } from "./types";
 
 export function PrivateSourceSyncPanel({ app, busy, syncLocalApp }: {
@@ -7,8 +8,8 @@ export function PrivateSourceSyncPanel({ app, busy, syncLocalApp }: {
   syncLocalApp: (app: LocalAppItem, targetVersion: string) => Promise<void>;
 }) {
   const [version, setVersion] = useState(app.connector?.version ?? "");
-  const source = app.connector?.installSource;
-  if (source?.kind !== "environment") {
+  const source = app.connector && privateSourceLabel(app.connector);
+  if (!source) {
     return <p role="alert">当前安装缺少来源环境身份，请从来源环境重新选择安装版本。</p>;
   }
   return (
@@ -18,7 +19,7 @@ export function PrivateSourceSyncPanel({ app, busy, syncLocalApp }: {
     }}>
       <div>
         <strong>同步或升级来源环境版本</strong>
-        <p>来源：{source.source.application.environmentKey} / {source.source.application.appId}</p>
+        <p>来源：{source}</p>
         <p>当前版本：{app.connector!.version}。请输入要安装的已发布版本；同步当前版本会重新安装该版本。</p>
         <label>
           目标版本

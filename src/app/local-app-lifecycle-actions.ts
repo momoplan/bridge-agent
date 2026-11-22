@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { flushSync } from "react-dom";
 import { createLocalAppUpdateSelectors } from "./local-app-update-selectors";
-import { privateSourceSyncRequest } from "./private-source-sync";
+import { privateSourceLabel, privateSourceSyncRequest } from "./private-source-sync";
 import { isConnectorUninstallStopError } from "../local-app-uninstall";
 import { defaultCapabilityArgumentsText, fromUiConfig, toUiMethod } from "./config-conversion";
 import { formatConnectorServiceFailures, parseJson, readError } from "./formatters";
@@ -100,6 +100,9 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
     const connector = app.connector;
     if (!connector) {
       return "";
+    }
+    if (connector.bundleSource) {
+      return `${connector.bundleSource.resourceLocator} / ${connector.bundleSource.version}`;
     }
     const source = connector.installSource;
     return source
@@ -202,7 +205,7 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
     }
     if (
       !window.confirm(
-        `将从 ${request.installSource!.source.application.environmentKey} 同步“${app.name}” ${targetVersion}（当前 ${app.connector.version}）。此来源未公开审核，将校验所选版本并覆盖当前安装，是否继续？`
+        `将从 ${privateSourceLabel(app.connector)} 同步“${app.name}” ${targetVersion}（当前 ${app.connector.version}）。此来源未公开审核，将校验所选版本并覆盖当前安装，是否继续？`
       )
     ) {
       return;

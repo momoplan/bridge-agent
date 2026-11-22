@@ -30,6 +30,18 @@ describe("private source version selection", () => {
     expect(privateSourceSyncRequest(installed, "1.2.3").version).toBe("1.2.3");
   });
 
+  it("uses the installed Locator when both Bundles have the same appId", () => {
+    for (const bundle of ["first", "second"]) {
+      const resourceLocator = `author-source/${bundle}/LOCAL_APP/fixture-app`;
+      const installed = { ...connector(), appId: resourceLocator, installSource: null, bundleSource: { resourceLocator, version: "1.2.3" } };
+      expect(privateSourceSyncRequest(installed, "1.2.4")).toMatchObject({
+        appId: resourceLocator, installSource: undefined, sourceIdentityMigration: false,
+        operation: "sync", version: "1.2.4", replace: true, acceptUnreviewed: true
+      });
+      expect(() => privateSourceSyncRequest({ ...installed, appId: "author-source/other/LOCAL_APP/fixture-app" }, "1.2.4")).toThrow("来源应用身份不一致");
+    }
+  });
+
   it("rejects missing or mismatched identity without inferring from temporary paths", () => {
     expect(() => privateSourceSyncRequest({ ...connector(), installSource: null, sourcePath: "/tmp/old/package" }, "1.2.4")).toThrow("来源环境身份");
     const other = connector();
