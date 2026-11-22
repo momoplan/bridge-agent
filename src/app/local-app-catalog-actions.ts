@@ -1,3 +1,4 @@
+import { confirmLocalAppChange } from "./local-app-confirmation";
 import { marketSelectionKey } from "./market-identity";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { clientInfo, clientWarn } from "../client-logger";
@@ -276,34 +277,32 @@ export function createLocalAppCatalogActions(state: AppControllerState, dependen
       source: { application: { environmentKey: registeredInstallEnvironmentKey, appId }, version }
     };
     const existingConnector = connectorAppsRef.current.find((app) => app.appId === appId);
-    let sourceIdentityMigration = false;
-    if (located) {
-      const legacyId = appId.slice(appId.lastIndexOf("/") + 1);
-      const legacy = connectorAppsRef.current.find((app) => app.appId === legacyId && app.version === version);
-      if (legacy?.installSource) {
-        sourceIdentityMigration = window.confirm(
-          `将“${legacy.name}”的现有安装和数据迁入所选 Locator？确认后会先核验来源归属。选择取消会独立安装。`
-        );
-      }
-    }
-    if (existingConnector && !existingConnector.installSource && !located) {
-      const sourceApplication = installSource?.source.application;
-      if (!sourceApplication) {
-        setError("选择的市场版本缺少来源应用身份");
-        return;
-      }
-      if (!window.confirm(
-        `“${existingConnector.name}”是旧版安装记录，尚未登记来源应用身份。继续会将其认领为 ${sourceApplication.environmentKey} / ${sourceApplication.appId}，并用所选市场版本覆盖升级。市场与条目仅作为本次分发记录。是否继续？`
-      )) {
-        return;
-      }
-      sourceIdentityMigration = true;
-    }
     try {
       setInstallBusy(true);
       setMessage("");
       setError("");
       setRuntimeConflict(null);
+      let sourceIdentityMigration = false;
+      if (located) {
+        const legacyId = appId.slice(appId.lastIndexOf("/") + 1);
+        const legacy = connectorAppsRef.current.find((app) => app.appId === legacyId && app.version === version);
+        if (legacy?.installSource) {
+          sourceIdentityMigration = await confirmLocalAppChange(
+            `将“${legacy.name}”的现有安装和数据迁入所选 Locator？确认后会先核验来源归属。选择取消会独立安装。`
+          );
+        }
+      }
+      if (existingConnector && !existingConnector.installSource && !located) {
+        const sourceApplication = installSource?.source.application;
+        if (!sourceApplication) {
+          setError("选择的市场版本缺少来源应用身份");
+          return;
+        }
+        sourceIdentityMigration = await confirmLocalAppChange(
+          `“${existingConnector.name}”是旧版安装记录，尚未登记来源应用身份。继续会将其认领为 ${sourceApplication.environmentKey} / ${sourceApplication.appId}，并用所选市场版本覆盖升级。市场与条目仅作为本次分发记录。是否继续？`
+        );
+        if (!sourceIdentityMigration) return;
+      }
       if (installSourceMode === "market" && selectedMarket?.applicationType === "managed_tool") {
         const status = await invoke<ManagedToolStatus>("install_baijimu_cli_update", { installSource: selectedMarket.installSource });
         setBaijimuCli(status);

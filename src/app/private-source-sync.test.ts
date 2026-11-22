@@ -70,16 +70,44 @@ describe("private sync command and progress integration", () => {
     const resolving: LocalAppInstallTask = { ...queued, revision: 2, phase: "resolving" };
     const failed: LocalAppInstallTask = { ...queued, revision: 3, phase: "failed", error: "来源版本未授权", message: "应用同步失败" };
     let channel: { onmessage: (task: LocalAppInstallTask) => void };
-    ipc.invoke.mockImplementation(async (_name, args) => {
+    ipc.invoke.mockImplementation(async (name, args) => {
+      if (name === "plugin:dialog|message") return "Ok";
       channel = args.onEvent;
       if (early) { channel.onmessage(resolving); channel.onmessage(failed); }
       return queued;
     });
-    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     await lifecycle.syncLocalApp(app, "1.2.4");
     if (!early) { channel!.onmessage(resolving); channel!.onmessage(failed); }
     expect(ipc.invoke).toHaveBeenCalledWith("start_connector_app_install", expect.objectContaining({ request: expect.objectContaining({ version: "1.2.4", installSource: { kind: "environment", source: { application: { environmentKey: "author-source", appId: "fixture-app" }, version: "1.2.4" } } }) }));
     expect(tasks).toEqual([failed]);
+    expect(handleCommandError).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("native confirmation before Locator migration", () => {
+  it.each([["Ok", true], ["Cancel", false]])("waits for %s and submits a boolean migration choice", async (answer, migrate) => {
+    const appId = "author-source/owning-bundle/LOCAL_APP/fixture-app";
+    const state = new Proxy({
+      connectorAppsRef: { current: [connector()] },
+      customInstallConfirmed: true,
+      installSourceMode: "custom",
+      registeredInstallAppId: appId,
+      registeredInstallVersion: "1.2.3"
+    }, { get(target, key) { return key in target ? target[key as keyof typeof target] : vi.fn(); } }) as unknown as AppControllerState;
+    const handleCommandError = vi.fn();
+    const catalog = createLocalAppCatalogActions(state, { installableMarketConnectors: [], handleCommandError } as unknown as Parameters<typeof createLocalAppCatalogActions>[1]);
+    let answerDialog!: (answer: string) => void;
+    const dialog = new Promise<string>((resolve) => { answerDialog = resolve; });
+    ipc.invoke.mockImplementation((name) => name === "plugin:dialog|message" ? dialog : Promise.resolve({ taskId: "queued", name: "Fixture" }));
+    const installation = catalog.installLocalApp();
+    expect(ipc.invoke).toHaveBeenCalledTimes(1);
+    expect(ipc.invoke).toHaveBeenCalledWith("plugin:dialog|message", expect.objectContaining({ buttons: "OkCancel" }));
+    answerDialog(answer);
+    await installation;
+    expect(ipc.invoke).toHaveBeenCalledWith("start_connector_app_install", expect.objectContaining({
+      request: expect.objectContaining({ appId, version: "1.2.3", sourceIdentityMigration: migrate })
+    }));
     expect(handleCommandError).not.toHaveBeenCalled();
   });
 });

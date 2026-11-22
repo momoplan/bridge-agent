@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { confirmLocalAppChange } from "./local-app-confirmation";
 import { flushSync } from "react-dom";
 import { createLocalAppUpdateSelectors } from "./local-app-update-selectors";
 import { privateSourceLabel, privateSourceSyncRequest } from "./private-source-sync";
@@ -203,18 +204,15 @@ export function createLocalAppLifecycleActions(state: AppControllerState, depend
       handleCommandError(error);
       return;
     }
-    if (
-      !window.confirm(
-        `将从 ${privateSourceLabel(app.connector)} 同步“${app.name}” ${targetVersion}（当前 ${app.connector.version}）。此来源未公开审核，将校验所选版本并覆盖当前安装，是否继续？`
-      )
-    ) {
-      return;
-    }
     try {
       setConnectorUpdateBusy(app.id);
       setMessage("");
       setError("");
       setRuntimeConflict(null);
+      const confirmed = await confirmLocalAppChange(
+        `将从 ${privateSourceLabel(app.connector)} 同步“${app.name}” ${targetVersion}（当前 ${app.connector.version}）。此来源未公开审核，将校验所选版本并覆盖当前安装，是否继续？`
+      );
+      if (!confirmed) return;
       const task = await startLocalAppInstallTask(request);
       setConnectorUpdateStatuses((current) => {
         const next = { ...current };
