@@ -130,6 +130,7 @@ pub struct AgentRuntimeManager {
 }
 
 struct RuntimeInner {
+    cloud_calls: crate::cloud_calls::CloudCalls,
     lifecycle: Mutex<()>,
     required_update: Mutex<Option<String>>,
     state: Mutex<ManagedState>,
@@ -143,6 +144,7 @@ impl Default for RuntimeInner {
     fn default() -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
+            cloud_calls: Default::default(),
             lifecycle: Mutex::new(()),
             required_update: Mutex::new(None),
             state: Mutex::new(ManagedState::default()),
@@ -294,6 +296,7 @@ mod tests {
     include!("runtime/tests/relay_harness.rs");
     include!("runtime/tests/core.rs");
     include!("runtime/tests/concurrent_invocations.rs");
+    include!("runtime/tests/cloud_module_calls.rs");
     include!("runtime/tests/locks.rs");
     include!("runtime/tests/authorization.rs");
     include!("runtime/tests/update_required.rs");

@@ -4,6 +4,7 @@ use crate::services::ServiceRegistry;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 
 struct InvocationHarness {
+    cloud_calls: crate::cloud_calls::CloudCalls,
     capabilities: v1::Capabilities,
     socket: RelaySession,
     _relay: FakeRelay,
@@ -96,6 +97,7 @@ impl InvocationHarness {
             relay_endpoint: relay_endpoint.clone(),
             registry: Arc::new(RwLock::new(registry.clone())),
         };
+        let cloud_calls = runner.inner.cloud_calls.clone();
         let task = tokio::spawn(async move {
             let _keep_audit = audit_tx;
             let capabilities = runner.current_capabilities().await;
@@ -118,6 +120,7 @@ impl InvocationHarness {
             panic!("expected the initial device registration");
         };
         Self {
+            cloud_calls,
             capabilities,
             socket,
             _relay: relay,

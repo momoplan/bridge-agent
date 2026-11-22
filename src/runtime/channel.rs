@@ -11,6 +11,7 @@ struct RelayChannel {
 }
 
 enum RelayInbound {
+    CloudReply(v1::CloudModuleReply),
     Message(AgentMessage),
     Heartbeat,
     /// A frame kind this client does not know, sent by a newer Relay.
@@ -215,6 +216,7 @@ fn decode_relay_frame(frame: RelayFrame) -> Result<RelayInbound> {
         return Ok(RelayInbound::Unsupported);
     };
     Ok(RelayInbound::Message(match frame {
+        RelayFrameKind::CloudModuleReply(reply) => return Ok(RelayInbound::CloudReply(reply)),
         RelayFrameKind::RegisteredAck(ack) => AgentMessage::RegisteredAck(RegisteredAck {
             agent_id: ack.agent_id,
             workspace_id: ack.workspace_id,

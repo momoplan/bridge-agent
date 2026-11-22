@@ -4229,8 +4229,8 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "relay"
-version = "0.49.0"
-source = "git+https://gitee.com/zxflimit/relay.git?rev=90e93d6f0234f5d22f2b8fd1a86dec468c7d915a#90e93d6f0234f5d22f2b8fd1a86dec468c7d915a"
+version = "0.53.0"
+source = "git+https://gitee.com/zxflimit/relay.git?rev=3b074867d3c4d289b18480419b3398a6fdd3835f#3b074867d3c4d289b18480419b3398a6fdd3835f"
 dependencies = [
  "prost",
  "protox",
