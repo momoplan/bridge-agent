@@ -89,40 +89,7 @@ pub fn install_connector_from_path_with_provenance(
         validate_bundle_transport(&config.local_apps, &installation_id, legacy_id, &candidate)?;
     }
     let package_path = installed_connector_package_path(&installation_id)?;
-    if source == package_path || source.starts_with(&package_path) {
-        bail!(
-            "connector source {} cannot be inside its installed package {}",
-            source.display(),
-            package_path.display()
-        );
-    }
-    if package_path.exists() && !replace {
-        bail!(
-            "connector package already exists at {}; pass replace to overwrite it",
-            package_path.display()
-        );
-    }
-    let previous_record = match read_install_record::<InstalledConnectorIdentity>(&installation_id)
-    {
-        Ok(record) => {
-            if record.manifest.app_id != manifest.app_id {
-                bail!("stored connector installation identity does not match the package");
-            }
-            if !replace {
-                bail!("connector install record already exists; pass replace to reinstall");
-            }
-            Some(record)
-        }
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
-                && !package_path.try_exists()? =>
-        {
-            None
-        }
-        Err(error) => return Err(error.context("cannot establish installed connector provenance")),
-    };
+    let previous_record = previous_connector_installation(&source, &package_path, &installation_id, &manifest.app_id, replace)?;
     validate_install_replacement(previous_record.as_ref(), &provenance)?;
 
     if package_path.exists() && previous_record.is_some() {
@@ -168,10 +135,62 @@ pub fn install_connector_from_path_with_provenance(
         config_saved,
         &installation_id,
     );
+    finish_connector_adoption(adoption, result, config_path, &original_config)
+}
+
+fn previous_connector_installation(
+    source: &Path,
+    package_path: &Path,
+    installation_id: &str,
+    app_id: &str,
+    replace: bool,
+) -> Result<Option<InstalledConnectorIdentity>> {
+    if source == package_path || source.starts_with(package_path) {
+        bail!(
+            "connector source {} cannot be inside its installed package {}",
+            source.display(),
+            package_path.display()
+        );
+    }
+    if package_path.exists() && !replace {
+        bail!(
+            "connector package already exists at {}; pass replace to overwrite it",
+            package_path.display()
+        );
+    }
+    Ok(match read_install_record::<InstalledConnectorIdentity>(installation_id)
+    {
+        Ok(record) => {
+            if record.manifest.app_id != app_id {
+                bail!("stored connector installation identity does not match the package");
+            }
+            if !replace {
+                bail!("connector install record already exists; pass replace to reinstall");
+            }
+            Some(record)
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+                && !package_path.try_exists()? =>
+        {
+            None
+        }
+        Err(error) => return Err(error.context("cannot establish installed connector provenance")),
+    })
+}
+
+fn finish_connector_adoption(
+    adoption: Option<ConnectorAdoption>,
+    result: Result<ConnectorInstallResult>,
+    config_path: &Path,
+    original_config: &AgentConfig,
+) -> Result<ConnectorInstallResult> {
     if let Some(adoption) = adoption {
         match result {
             Ok(install) => {
-                adoption.finish(config_path, &original_config)?;
+                adoption.finish(config_path, original_config)?;
                 return Ok(install);
             }
             Err(error) => {
@@ -424,165 +443,6 @@ pub fn uninstall_connector_with_options(
     }
 
     Ok(summary)
-}
-
-pub fn list_connectors() -> Result<Vec<ConnectorSummary>> {
-    let mut connectors = load_install_records()?
-        .into_iter()
-        .map(summary_from_record)
-        .collect::<Vec<_>>();
-    connectors.sort_by(|left, right| left.app_id.cmp(&right.app_id));
-    Ok(connectors)
-}
-
-pub fn show_connector(app_id: &str) -> Result<ConnectorInstallRecord> {
-    load_install_record(app_id)
-}
-
-pub fn sync_installed_connectors(config_path: &Path) -> Result<Vec<ConnectorSummary>> {
-    let report = sync_installed_connectors_report(config_path)?;
-    if !report.failures.is_empty() {
-        bail!("{}", format_connector_sync_failures(&report.failures));
-    }
-    Ok(report.summaries)
-}
-
-pub fn sync_installed_connector(config_path: &Path, app_id: &str) -> Result<ConnectorSummary> {
-    crate::config::initialize_config(config_path)?;
-    let mut config = load_config(config_path)?;
-    let record = load_install_record(app_id)?;
-    let summary = sync_installed_connector_record(
-        &mut config,
-        record,
-        now_ms(),
-        ConnectorRuntimePreparation::Deferred,
-    )?;
-    save_config(config_path, &config)?;
-    Ok(summary)
-}
-
-pub fn prepare_installed_connector_runtime(
-    config_path: &Path,
-    app_id: &str,
-) -> Result<ConnectorSummary> {
-    crate::config::initialize_config(config_path)?;
-    let mut config = load_config(config_path)?;
-    let record = load_install_record(app_id)?;
-    let summary = sync_installed_connector_record(
-        &mut config,
-        record,
-        now_ms(),
-        ConnectorRuntimePreparation::Prepare,
-    )?;
-    save_config(config_path, &config)?;
-    Ok(summary)
-}
-
-pub fn sync_installed_connectors_report(config_path: &Path) -> Result<ConnectorSyncReport> {
-    crate::config::initialize_config(config_path)?;
-    let records = load_install_records()?;
-    if records.is_empty() {
-        return Ok(ConnectorSyncReport {
-            summaries: Vec::new(),
-            failures: Vec::new(),
-        });
-    }
-
-    let mut config = load_config(config_path)?;
-    let now = now_ms();
-    let mut summaries = Vec::new();
-    let mut failures = Vec::new();
-
-    for record in records {
-        let app_id = record.installation_id();
-        let name = record.manifest.name.clone();
-        match sync_installed_connector_record(
-            &mut config,
-            record,
-            now,
-            ConnectorRuntimePreparation::Deferred,
-        ) {
-            Ok(summary) => summaries.push(summary),
-            Err(err) => {
-                let error = format!("{err:#}");
-                tracing::warn!(
-                    app_id = %app_id,
-                    name = %name,
-                    error = %error,
-                    "failed to sync installed connector"
-                );
-                failures.push(ConnectorSyncFailure {
-                    app_id,
-                    name,
-                    error,
-                });
-            }
-        }
-    }
-
-    save_config(config_path, &config)?;
-    Ok(ConnectorSyncReport {
-        summaries,
-        failures,
-    })
-}
-
-pub fn format_connector_sync_failures(failures: &[ConnectorSyncFailure]) -> String {
-    if failures.is_empty() {
-        return "no connector sync failures".to_string();
-    }
-    let details = failures
-        .iter()
-        .map(|failure| {
-            format!(
-                "{} ({}) failed: {}",
-                failure.name, failure.app_id, failure.error
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!(
-        "failed to sync {} installed connector(s): {details}",
-        failures.len()
-    )
-}
-
-fn sync_installed_connector_record(
-    config: &mut crate::config::AgentConfig,
-    mut record: ConnectorInstallRecord,
-    now: u64,
-    runtime_preparation: ConnectorRuntimePreparation,
-) -> Result<ConnectorSummary> {
-    if record.bundle_source.is_none() {
-        cleanup_legacy_connector_autostarts_for_manifest(&record.manifest);
-    }
-    let package_path = PathBuf::from(&record.package_path);
-    let app_id = record.installation_id();
-    let registrations = load_connector_service_registrations(&package_path, &record.manifest)
-        .with_context(|| {
-            format!("failed to reload service registrations for connector `{app_id}`")
-        })?;
-    let mut services = registrations
-        .iter()
-        .cloned()
-        .map(ServiceRegistration::into_connector_service_config)
-        .collect::<Result<Vec<_>>>()?;
-    resolve_installed_start_commands(
-        &mut services,
-        &package_path,
-        &config.runtime,
-        &record.manifest,
-        &app_id,
-        runtime_preparation,
-    )?;
-
-    let mut local_app = local_app_from_services(&record.manifest, &services, &registrations)?;
-    local_app.app_id = app_id;
-    upsert_synced_local_app(&mut config.local_apps, local_app);
-
-    record.last_synced_at_epoch_ms = now;
-    save_install_record(&record)?;
-    Ok(summary_from_record(record))
 }
 
 fn validate_install_replacement(

@@ -105,17 +105,24 @@ fn private_versions_bind_locator_bundle_and_exact_version_to_the_existing_source
         "https://source.example.test/partner/v1/local-app-service/api/local-apps",
         42,
         Duration::from_secs(5),
-    ).unwrap();
+    )
+    .unwrap();
     let selected = |environment, bundle| LocatedAppVersion {
-        resource_locator: format!("{environment}/{bundle}/LOCAL_APP/test-app").parse().unwrap(),
+        resource_locator: format!("{environment}/{bundle}/LOCAL_APP/test-app")
+            .parse()
+            .unwrap(),
         version: "1.0.0+exact".parse().unwrap(),
     };
     for bundle in ["first", "second"] {
-        let path = reader.located_version_url(&selected("source-test", bundle)).unwrap();
+        let path = reader
+            .located_version_url(&selected("source-test", bundle))
+            .unwrap();
         assert_eq!(
             path.path(),
             format!("/partner/v1/local-app-service/api/v5/local-apps/{bundle}/test-app/versions/1.0.0+exact")
         );
     }
-    assert!(reader.located_version_url(&selected("other-source", "first")).is_err());
+    assert!(reader
+        .located_version_url(&selected("other-source", "first"))
+        .is_err());
 }

@@ -345,7 +345,9 @@ fn same_event_id_on_two_locators_requires_two_distinct_receipts() {
     let second = "test-environment/second/LOCAL_APP/connector";
     let mut subscription = snapshot(&["first", "second"]);
     for (group, locator) in subscription.groups.iter_mut().zip([first, second]) {
-        group.subscriptions[0].apps = Selection::Selected { values: vec![locator.into()] };
+        group.subscriptions[0].apps = Selection::Selected {
+            values: vec![locator.into()],
+        };
     }
     store.subscriptions = Some(subscription);
     for locator in [first, second] {
@@ -359,16 +361,27 @@ fn same_event_id_on_two_locators_requires_two_distinct_receipts() {
             },
             version: "1.0.0".into(),
         });
-        assert_eq!(store.admit(item, &policy, 100).unwrap().status, LocalAcceptance::Queued);
+        assert_eq!(
+            store.admit(item, &policy, 100).unwrap().status,
+            LocalAcceptance::Queued
+        );
     }
     let deliveries = store.due(&policy, 100, 10).unwrap();
     assert_eq!(deliveries.len(), 2);
     for delivery in deliveries {
         assert_eq!(delivery.target_consumers.len(), 1);
-        let expected = if delivery.app_id == first { "first" } else { "second" };
+        let expected = if delivery.app_id == first {
+            "first"
+        } else {
+            "second"
+        };
         assert_eq!(delivery.target_consumers[0], expected);
     }
-    let mut first_receipt = ack("same", "first", DeliveryReceipt::Processed { duplicate: false });
+    let mut first_receipt = ack(
+        "same",
+        "first",
+        DeliveryReceipt::Processed { duplicate: false },
+    );
     first_receipt.app_id = first.into();
     store.acknowledge(first_receipt, 101).unwrap();
     assert_eq!(store.statistics(&policy, 101).unwrap().pending_events, 1);
