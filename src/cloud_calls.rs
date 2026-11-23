@@ -59,7 +59,15 @@ pub(crate) struct Receipt {
     request_id: String,
     success: bool,
     data: Option<Value>,
-    error: Option<crate::protocol::InvokeError>,
+    error: Option<ReceiptError>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReceiptError {
+    code: String,
+    message: String,
+    public_details: Option<Value>,
 }
 
 impl CloudCalls {
@@ -189,7 +197,7 @@ impl Receipt {
         let error = result
             .error
             .map(|e| -> Result<_> {
-                Ok(crate::protocol::InvokeError {
+                Ok(ReceiptError {
                     code: e.code,
                     message: e.message,
                     public_details: e

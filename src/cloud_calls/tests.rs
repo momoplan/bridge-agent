@@ -92,6 +92,12 @@ async fn a_bad_receipt_fails_only_its_request_and_a_module_denial_is_preserved()
     calls.receive(&channel, refusal).unwrap();
     let receipt = denied.await.unwrap().unwrap();
     assert!(!receipt.success);
+    let wire = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        wire["error"]["publicDetails"],
+        json!({"method":"prepareFileUpload"})
+    );
+    assert!(wire["error"].get("public_details").is_none());
     let error = receipt.error.unwrap();
     assert_eq!(error.code, "METHOD_DENIED");
     assert_eq!(
