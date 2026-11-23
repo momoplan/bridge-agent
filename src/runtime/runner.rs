@@ -331,6 +331,9 @@ impl RelayConnection<'_> {
 
     async fn send_keepalive(&mut self) -> Result<()> {
         prune_closed_event_waiters(&mut self.pending_events);
+        if self.runner.inner.cloud_calls.exhausted(&self.outbound) {
+            bail!("reconnecting after all cloud call receipts timed out");
+        }
         if self.last_relay_seen.elapsed() > Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS) {
             bail!(
                 "relay heartbeat timed out after {}s without server frame",

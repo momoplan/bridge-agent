@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+const MAX_PENDING: usize = 32;
+pub(crate) const LOCAL_PATH: &str = "/v1/local-app-module-calls";
+
 #[derive(Default, Clone)]
 pub(crate) struct CloudCalls(Arc<Mutex<Session>>);
 
@@ -31,6 +34,24 @@ pub(crate) struct Request {
     method: String,
     arguments: Map<String, Value>,
 }
+
+#[derive(Debug)]
+pub(crate) enum DispatchError {
+    InvalidRequest,
+    InFlight,
+    Timeout,
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidRequest => "invalid module call",
+            Self::InFlight => "request is already in flight",
+            Self::Timeout => "cloud call timed out; outcome unknown",
+        })
+    }
+}
+impl std::error::Error for DispatchError {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +78,18 @@ impl CloudCalls {
         };
     }
 
+    /// Missing receipts keep their correlation IDs reserved until the peer replies.
+    /// If every slot timed out, a fresh stream can safely release those IDs.
+    pub(crate) fn exhausted(&self, channel: &mpsc::Sender<v1::DeviceFrame>) -> bool {
+        let session = self.0.lock().unwrap();
+        session
+            .channel
+            .as_ref()
+            .is_some_and(|c| c.same_channel(channel))
+            && session.pending.len() == MAX_PENDING
+            && session.pending.iter().all(|p| p.reply.is_closed())
+    }
+
     pub(crate) fn disconnect(&self, channel: &mpsc::Sender<v1::DeviceFrame>) {
         let mut session = self.0.lock().unwrap();
         if session
@@ -80,14 +113,16 @@ impl CloudCalls {
             method: req.method,
             arguments: req.arguments,
         };
-        call.validate().map_err(|e| anyhow!(e))?;
+        call.validate()
+            .map_err(|e| anyhow!(e))
+            .context(DispatchError::InvalidRequest)?;
         let waiting = {
             let mut session = self.0.lock().unwrap();
             let channel = session
                 .channel
                 .as_ref()
                 .context("device has no registered Relay connection")?;
-            if session.pending.len() >= 32 {
+            if session.pending.len() >= MAX_PENDING {
                 bail!("device cloud call capacity exceeded");
             }
             if session
@@ -95,7 +130,7 @@ impl CloudCalls {
                 .iter()
                 .any(|p| p.source == source && p.id == call.request_id)
             {
-                bail!("request is already in flight");
+                return Err(anyhow!(DispatchError::InFlight));
             }
             let id = call.request_id.clone();
             let frame = v1::DeviceFrame {
@@ -110,7 +145,7 @@ impl CloudCalls {
         };
         tokio::time::timeout(Duration::from_secs(60), waiting)
             .await
-            .context("cloud call timed out; outcome unknown")?
+            .context(DispatchError::Timeout)?
             .context("Relay disconnected; cloud call outcome unknown")?
     }
 

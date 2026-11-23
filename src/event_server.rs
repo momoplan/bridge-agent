@@ -50,6 +50,7 @@ pub(crate) struct LocalEventServer {
 
 #[derive(Clone)]
 struct EventServerState {
+    cloud_calls: crate::cloud_calls::CloudCalls,
     registry: Arc<RwLock<ServiceRegistry>>,
     event_queue: Option<EventQueue>,
     apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
@@ -188,6 +189,7 @@ impl LocalEventServer {
         event_queue: Option<EventQueue>,
         apply_tx: mpsc::UnboundedSender<RuntimeRegistryUpdate>,
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
+        cloud_calls: crate::cloud_calls::CloudCalls,
     ) -> Result<Option<Self>> {
         if !config.runtime.event_server_enabled && !config.runtime.service_registration_enabled {
             let asset_upload_enabled = config
@@ -196,7 +198,13 @@ impl LocalEventServer {
                 .filter(|app| app.enabled)
                 .filter_map(|app| connector_declares_asset_upload(&app.app_id).ok())
                 .any(|declared| declared);
-            if !asset_upload_enabled {
+            let module_calls_enabled = config.local_apps.iter().any(|app| app.enabled)
+                && config
+                    .runtime
+                    .event_server_bind
+                    .parse::<SocketAddr>()
+                    .is_ok_and(|addr| addr.ip().is_loopback());
+            if !asset_upload_enabled && !module_calls_enabled {
                 return Ok(None);
             }
         }
@@ -214,6 +222,7 @@ impl LocalEventServer {
             bind,
             listener,
             state: EventServerState {
+                cloud_calls,
                 registry,
                 event_queue,
                 apply_tx,
@@ -255,7 +264,16 @@ impl LocalEventServer {
             .route(
                 "/v1/services/{service}",
                 put(replace_service).delete(delete_service),
+            );
+        let app = if self.bind.ip().is_loopback() {
+            app.route(
+                crate::cloud_calls::LOCAL_PATH,
+                post(invoke_local_app_module),
             )
+        } else {
+            app
+        };
+        let app = app
             .with_state(state.clone())
             .layer(middleware::from_fn_with_state(state, audit_http_request));
 
@@ -275,6 +293,55 @@ impl LocalEventServer {
 include!("event_server/port_management.rs");
 include!("event_server/event_emission.rs");
 include!("event_server/asset_upload.rs");
+async fn invoke_local_app_module(
+    State(state): State<EventServerState>,
+    headers: HeaderMap,
+    Json(request): Json<crate::cloud_calls::Request>,
+) -> Result<Json<crate::cloud_calls::Receipt>, EventApiError> {
+    let credential = bearer_token(&headers)
+        .filter(|_| {
+            headers
+                .get_all(axum::http::header::AUTHORIZATION)
+                .iter()
+                .count()
+                == 1
+        })
+        .ok_or_else(|| {
+            EventApiError::new(StatusCode::UNAUTHORIZED, "connector credential required")
+        })?;
+    let source = tokio::task::spawn_blocking(move || {
+        crate::connector::authorized_module_caller(&state.config_path, &credential)
+    })
+    .await
+    .map_err(|_| {
+        EventApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "installation lookup failed",
+        )
+    })?
+    .map_err(|_| {
+        EventApiError::new(
+            StatusCode::FORBIDDEN,
+            "connector credential or installation is invalid",
+        )
+    })?;
+    state
+        .cloud_calls
+        .call(source, request)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            use crate::cloud_calls::DispatchError;
+            let status = match error.downcast_ref::<DispatchError>() {
+                Some(DispatchError::InvalidRequest) => StatusCode::BAD_REQUEST,
+                Some(DispatchError::InFlight) => StatusCode::CONFLICT,
+                Some(DispatchError::Timeout) => StatusCode::GATEWAY_TIMEOUT,
+                None => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            EventApiError::new(status, error.to_string())
+        })
+}
+
 mod asset_protocol;
 include!("event_server/service_management.rs");
 include!("event_server/auth_and_audit.rs");

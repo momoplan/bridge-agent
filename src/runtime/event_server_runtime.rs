@@ -25,6 +25,7 @@ impl LocalEventServerRuntime {
                 self.event_queue.clone(),
                 self.apply_tx.clone(),
                 self.audit_tx.clone(),
+            self.inner.cloud_calls.clone(),
             )
             .await
             {
