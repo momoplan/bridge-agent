@@ -43,6 +43,9 @@ fn resolve_installed_start_commands(
     };
     let command_runtime = InstalledCommandRuntime {
         package_path,
+        module_endpoint: runtime_config.event_server_bind.parse::<std::net::SocketAddr>().ok()
+            .filter(|addr| addr.ip().is_loopback() && addr.port() != 0)
+            .map(|addr| format!("http://{addr}{}", crate::cloud_calls::LOCAL_PATH)),
         package_bins: &package_bins,
         python_scripts: &python_scripts,
         python_env: python_env.as_deref(),
@@ -158,6 +161,12 @@ fn configure_service_runtime_commands(
                     DEFAULT_LOCAL_APP_ASSET_UPLOAD_ENDPOINT.to_string(),
                 );
             }
+            const MODULE_ENDPOINT: &str = "BAIJIMU_LOCAL_APP_MODULE_ENDPOINT";
+            if let Some(endpoint) = &command_runtime.module_endpoint {
+                env.insert(MODULE_ENDPOINT.to_owned(), endpoint.clone());
+            } else {
+                env.remove(MODULE_ENDPOINT);
+            }
             resolve_installed_shell_command(command, cwd, env, command_runtime);
         }
     }
@@ -188,6 +197,7 @@ fn derive_stop_command_from_start(
 }
 
 struct InstalledCommandRuntime<'a> {
+    module_endpoint: Option<String>,
     package_path: &'a Path,
     package_bins: &'a BTreeMap<String, String>,
     python_scripts: &'a BTreeMap<String, String>,

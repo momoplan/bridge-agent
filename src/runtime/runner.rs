@@ -331,6 +331,9 @@ impl RelayConnection<'_> {
 
     async fn send_keepalive(&mut self) -> Result<()> {
         prune_closed_event_waiters(&mut self.pending_events);
+        if self.runner.inner.cloud_calls.exhausted(&self.outbound) {
+            bail!("reconnecting after all cloud call receipts timed out");
+        }
         if self.last_relay_seen.elapsed() > Duration::from_secs(RELAY_HEARTBEAT_TIMEOUT_SECS) {
             bail!(
                 "relay heartbeat timed out after {}s without server frame",
@@ -355,6 +358,13 @@ impl RelayConnection<'_> {
         self.mark_relay_seen().await;
         match decode_relay_frame(frame).context("invalid relay frame")? {
             RelayInbound::Message(message) => self.handle_agent_message(message).await?,
+            RelayInbound::CloudReply(reply) => {
+                if self.runner.inner.cloud_calls.receive(&self.outbound, reply).is_err() {
+                    self.runner
+                        .push_log("warn", "ignored cloud method receipt lacking correlation information")
+                        .await;
+                }
+            }
             RelayInbound::Heartbeat => {}
             RelayInbound::Unsupported => {
                 self.runner
@@ -414,6 +424,11 @@ impl RelayConnection<'_> {
     async fn handle_registered_ack(&mut self, ack: crate::protocol::RegisteredAck) {
         self.registered_workspace = (ack.agent_id == self.runner.config.relay.agent_id && ack.workspace_id > 0
             && self.runner.config.platform.workspace_id == Some(ack.workspace_id)).then_some(ack.workspace_id);
+        if self.registered_workspace.is_some() {
+            self.runner.inner.cloud_calls.connect(self.outbound.clone());
+        } else {
+            self.runner.inner.cloud_calls.disconnect(&self.outbound);
+        }
         self.runner.update_registered_snapshot(&ack).await;
         self.runner
             .push_log(
@@ -458,6 +473,12 @@ struct RelayConnection<'a> {
     invocations: FuturesUnordered<BoxFuture<'a, AgentMessage>>,
     // Owned by this connection: dropping it aborts every local app stream pump.
     streams: StreamPumps,
+}
+
+impl Drop for RelayConnection<'_> {
+    fn drop(&mut self) {
+        self.runner.inner.cloud_calls.disconnect(&self.outbound);
+    }
 }
 
 impl RelayConnection<'_> {

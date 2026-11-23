@@ -58,6 +58,7 @@ wechat-bridge-collector = "wechat_bridge_collector.app:main"
         )]);
 
         let command_runtime = InstalledCommandRuntime {
+            module_endpoint: None,
             package_path: dir.path(),
             package_bins: &BTreeMap::new(),
             python_scripts: &scripts,

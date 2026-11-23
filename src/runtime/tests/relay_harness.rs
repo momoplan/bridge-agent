@@ -302,6 +302,7 @@ fn device_message(frame: DeviceFrameKind) -> Option<AgentMessage> {
             request_id: error.request_id,
             message: error.message,
         }),
+        DeviceFrameKind::CloudModuleCall(_) => panic!("unexpected cloud call in legacy message fixture"),
         DeviceFrameKind::Heartbeat(_) => return None,
     })
 }

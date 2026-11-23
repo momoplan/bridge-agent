@@ -95,6 +95,7 @@ async fn put_is_followed_by_owner_completion_and_rejection_cannot_be_success() {
         None,
         apply,
         audit,
+        Default::default(),
     )
     .await
     .unwrap()

@@ -1036,3 +1036,13 @@ macOS、Windows、Linux 正式包只由 GitHub Actions 的受控 runner 构建�
 Connector 图片复用相同的字节上传实现，并继续使用其图片类型、私有数据目录和来源授权规则。
 `device_file_transfers_v1` 能力声明标识截图已由设备完成登记；旧客户端仍按原正式合同由 Relay 完成。
 新文件能力需要 Relay 0.40.0 和 workspace-file-service 8.3.0 提供对应合同，缺少接口时明确失败。
+
+### 本地应用调用本包 Module
+
+Bridge Agent 为已启用的安装提供回环 HTTP 地址 `BAIJIMU_LOCAL_APP_MODULE_ENDPOINT`（路径为 `/v1/local-app-module-calls`）。应用读取宿主注入的 `BAIJIMU_LOCAL_APP_EVENT_TOKEN_FILE`，以 Bearer 凭据发送 JSON POST。宿主从安装记录核对来源，Relay 按云端 Bundle 安装配置选择 Runtime，并核对该设备获准的本包方法。
+
+```json
+{"requestId":"upload-001","moduleKey":"desktop_wechat_channel","method":"prepareFileUpload","arguments":{}}
+```
+
+`arguments` 按目标 Module 方法的合同填写。回执含 `requestId`、`success`、`data` 和 `error`。应用先检查 HTTP 状态，再检查 `success`。同一安装应为每次独立操作生成唯一请求号。超时或连接中断时执行结果未知，涉及写入应按目标方法的幂等合同核对后重试。

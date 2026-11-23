@@ -44,7 +44,7 @@ pub fn authorize_connector_asset_upload(
     app_id: &str,
     token: &str,
 ) -> Result<PathBuf> {
-    let record = connector_with_token(app_id, token, connector_asset_upload_token_path)?;
+    let record = connector_with_token(Some(app_id), token, connector_asset_upload_token_path)?;
     let installation_id = record.installation_id();
     if !connector_permission_is_active(&record.manifest, CONNECTOR_ASSET_UPLOAD_PERMISSION) {
         bail!("connector `{app_id}` does not declare asset upload permission");
@@ -89,7 +89,7 @@ pub(crate) fn authorized_event_source(
     String,
     Option<relay::contracts::device_events::InstalledLocalAppSource>,
 )> {
-    let record = connector_with_token(app_id, token, connector_event_token_path)?;
+    let record = connector_with_token(Some(app_id), token, connector_event_token_path)?;
     let installation_id = record.installation_id();
     let config = load_config(config_path)?;
     let event_name = event_name.trim();
@@ -115,15 +115,28 @@ pub(crate) fn authorized_event_source(
     Ok((installation_id, source))
 }
 
+pub(crate) fn authorized_module_caller(
+    config_path: &Path,
+    token: &str,
+) -> Result<relay::contracts::device_events::InstalledLocalAppSource> {
+    let record = connector_with_token(None, token, connector_event_token_path)?;
+    let id = record.installation_id();
+    let config = load_config(config_path)?;
+    let app = config.local_apps.iter().find(|app| app.enabled && app.app_id == id)
+        .context("connector is not enabled")?;
+    check_registered_source(app, &record)
+}
+
 fn connector_with_token(
-    app_id: &str,
+    app_id: Option<&str>,
     token: &str,
     token_path: fn(&str) -> Result<PathBuf>,
 ) -> Result<ConnectorInstallRecord> {
+    if token.trim().is_empty() { bail!("missing connector credential"); }
     let mut selected = None;
     for record in load_install_records()? {
         let id = record.installation_id();
-        if id != app_id && record.manifest.app_id != app_id {
+        if app_id.is_some_and(|key| id != key && record.manifest.app_id != key) {
             continue;
         }
         let path = token_path(&id)?;
