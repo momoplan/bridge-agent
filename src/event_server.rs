@@ -191,32 +191,28 @@ impl LocalEventServer {
         audit_tx: mpsc::UnboundedSender<RuntimeAuditLog>,
         cloud_calls: crate::cloud_calls::CloudCalls,
     ) -> Result<Option<Self>> {
-        if !config.runtime.event_server_enabled && !config.runtime.service_registration_enabled {
-            let asset_upload_enabled = config
-                .local_apps
-                .iter()
-                .filter(|app| app.enabled)
-                .filter_map(|app| connector_declares_asset_upload(&app.app_id).ok())
-                .any(|declared| declared);
-            let module_calls_enabled = config.local_apps.iter().any(|app| app.enabled)
-                && config
-                    .runtime
-                    .event_server_bind
-                    .parse::<SocketAddr>()
-                    .is_ok_and(|addr| addr.ip().is_loopback());
-            if !asset_upload_enabled && !module_calls_enabled {
-                return Ok(None);
-            }
-        }
-
         let bind: SocketAddr = config
             .runtime
             .event_server_bind
             .parse()
             .with_context(|| "runtime.event_server_bind must be a socket address")?;
-        let listener = bind_event_listener(bind)
-            .await
-            .with_context(|| format!("failed to bind local event server on {bind}"))?;
+        let event_listener_enabled = config.runtime.event_server_enabled
+            || config.runtime.service_registration_enabled
+            || config
+                .local_apps
+                .iter()
+                .filter(|app| app.enabled)
+                .any(|app| connector_declares_asset_upload(&app.app_id).unwrap_or(false));
+        let listener = if event_listener_enabled {
+            bind_event_listener(bind).await
+        } else if bind.ip().is_loopback() {
+            // A first connector may be installed after the host starts. The module-only
+            // endpoint must never reclaim a port held by another running host.
+            TcpListener::bind(bind).await.map_err(anyhow::Error::from)
+        } else {
+            return Ok(None);
+        }
+        .with_context(|| format!("failed to bind local event server on {bind}"))?;
         let bind = listener.local_addr()?;
         Ok(Some(Self {
             bind,
