@@ -83,3 +83,14 @@ it("keeps a mounted desktop visible after unrelated global errors before and aft
   expect(document.getElementById("root")!.hidden).toBe(false);
   expect(fixture.calls).not.toContain("report_frontend_failure");
 });
+
+it("answers a native liveness probe without waiting for a page timer", async () => {
+  await vi.advanceTimersByTimeAsync(0);
+  const heartbeats = () => fixture.calls.filter((call) => call === "frontend_heartbeat").length;
+  const before = heartbeats();
+  fixture.emit("frontend-liveness-probe");
+  expect(heartbeats()).toBe(before + 1);
+  shell.dispose();
+  fixture.emit("frontend-liveness-probe");
+  expect(heartbeats()).toBe(before + 1);
+});

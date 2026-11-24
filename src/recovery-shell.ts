@@ -77,6 +77,10 @@ export function startRecoveryShell(document: Document, reload = () => location.r
     void invoke("frontend_heartbeat").catch(() => {});
   };
   const timer = window.setInterval(pulse, 3000);
+  // Page timers stop while the window is covered or the display sleeps. The
+  // native watchdog asks before it alarms, and this answer does not need a timer.
+  void listen("frontend-liveness-probe", pulse)
+    .then((unlisten) => disposed ? unlisten() : disposers.push(unlisten)).catch(() => {});
   const bootTimeout = window.setTimeout(() => {
     if (!mounted) fail("界面启动超时，请重试或安装官方更新。");
   }, 20000);

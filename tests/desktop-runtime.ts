@@ -24,7 +24,11 @@ export function installDesktopRuntime(options: { dnsError?: boolean; marketError
     local_apps: [{ appId: connector.appId, name: connector.name, version: connector.version,
       description: "测试", enabled: true, methods: [], events: [] }]
   };
-  const fixture = { calls, options, config, autostart: true, settingsWrites: [] as unknown[] };
+  const listeners = new Map<string, Array<{ eventId: number; handler: number }>>();
+  const emit = (event: string, payload?: unknown) => {
+    for (const { eventId, handler } of listeners.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });
+  };
+  const fixture = { calls, options, config, autostart: true, settingsWrites: [] as unknown[], emit };
   Object.assign(window, {
     desktopFixture: fixture,
     __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
@@ -33,7 +37,14 @@ export function installDesktopRuntime(options: { dnsError?: boolean; marketError
       async invoke(command: string, args?: Record<string, any>) {
         calls.push(command);
         switch (command) {
-          case "plugin:event|listen": return ++nextId;
+          case "plugin:event|listen": {
+            const eventId = ++nextId;
+            listeners.set(args!.event, [...(listeners.get(args!.event) ?? []), { eventId, handler: args!.handler }]);
+            return eventId;
+          }
+          case "plugin:event|unlisten":
+            listeners.set(args!.event, (listeners.get(args!.event) ?? []).filter((entry) => entry.eventId !== args!.eventId));
+            return null;
           case "plugin:deep-link|get_current": return [];
           case "get_startup_health": return health;
           case "mark_frontend_ready": return { ...health, frontendReady: true };

@@ -197,6 +197,40 @@ impl StartupHealthManager {
         self.write_pending_state();
     }
 
+    /// A page that stops answering while the app runs is a runtime fault. The
+    /// startup record stays as it is, so this cannot push the next launch into
+    /// safe mode.
+    pub(super) fn mark_frontend_unresponsive(&self, detail: &str) {
+        self.diagnostics
+            .error(format!("frontend unresponsive: {detail}"));
+        self.set_component(
+            "desktop_shell",
+            "桌面基础壳",
+            "degraded",
+            Some(detail.to_string()),
+        );
+    }
+
+    /// Clears the unresponsive mark once the page answers again. A failure the
+    /// page reported itself carries a different detail and is left alone.
+    pub(super) fn mark_frontend_responsive(&self, unresponsive_detail: &str) {
+        let snapshot = self.snapshot();
+        let marked_unresponsive = snapshot.components.iter().any(|component| {
+            component.id == "desktop_shell"
+                && component.detail.as_deref() == Some(unresponsive_detail)
+        });
+        if !marked_unresponsive {
+            return;
+        }
+        self.diagnostics.info("frontend is answering again");
+        let status = if snapshot.frontend_ready {
+            "ready"
+        } else {
+            "starting"
+        };
+        self.set_component("desktop_shell", "桌面基础壳", status, None);
+    }
+
     pub(super) fn reset_for_normal_restart(&self) -> Result<(), String> {
         write_startup_state(
             &self.state_path,

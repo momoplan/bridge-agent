@@ -10,6 +10,14 @@ pub(super) const RUNTIME_LOG_EVENT: &str = "runtime-log-appended";
 pub(super) const RUNTIME_LOGS_SNAPSHOT_EVENT: &str = "runtime-logs-snapshot";
 pub(super) const MAIN_WINDOW_VISIBILITY_EVENT: &str = "main-window-visibility-changed";
 pub(super) const STARTUP_HEALTH_EVENT: &str = "startup-health-changed";
+/// Asks the main page to answer with a heartbeat right now.
+pub(super) const FRONTEND_LIVENESS_PROBE_EVENT: &str = "frontend-liveness-probe";
+pub(super) const FRONTEND_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+pub(super) const FRONTEND_HEARTBEAT_STALE_AFTER: Duration = Duration::from_secs(30);
+/// How long the main page has to answer a liveness probe.
+pub(super) const FRONTEND_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const FRONTEND_UNRESPONSIVE_DETAIL: &str =
+    "客户端界面长时间未响应。您仍可通过系统窗口检查并安装官方更新，也可从系统托盘打开启动日志。";
 pub(super) const HOST_CAPABILITY_CONNECTOR_SETUP_V1: &str = "connector.setup.v1";
 pub(super) const HOST_CAPABILITY_CONNECTOR_PROCESS_HOST_MANAGED_V1: &str =
     "connector.process.host-managed.v1";

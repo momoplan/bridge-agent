@@ -140,43 +140,122 @@ fn install_native_update(app: tauri::AppHandle) {
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrontendWatchdogAction {
+    Wait,
+    Probe,
+    Alarm,
+    Recovered,
+}
+
+/// Decides when the main page counts as unresponsive. The system suspends page
+/// timers while the window is covered or the display sleeps, so a stale
+/// heartbeat only makes the shell ask; the alarm needs that question to go
+/// unanswered.
+pub(super) struct FrontendWatchdog {
+    visible_since: Instant,
+    probed_at: Option<Instant>,
+    notified: bool,
+    degraded: bool,
+}
+
+impl FrontendWatchdog {
+    pub(super) fn new(now: Instant) -> Self {
+        Self {
+            visible_since: now,
+            probed_at: None,
+            notified: false,
+            degraded: false,
+        }
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        now: Instant,
+        visible: bool,
+        heartbeat: Option<Instant>,
+    ) -> FrontendWatchdogAction {
+        if !visible {
+            self.visible_since = now;
+            self.probed_at = None;
+            self.notified = false;
+        }
+        let fresh = heartbeat.is_some_and(|last| {
+            now.saturating_duration_since(last) < FRONTEND_HEARTBEAT_STALE_AFTER
+        });
+        if fresh {
+            self.probed_at = None;
+            self.notified = false;
+            return if std::mem::take(&mut self.degraded) {
+                FrontendWatchdogAction::Recovered
+            } else {
+                FrontendWatchdogAction::Wait
+            };
+        }
+        let settled =
+            now.saturating_duration_since(self.visible_since) >= FRONTEND_HEARTBEAT_STALE_AFTER;
+        if !visible || self.notified || !settled {
+            return FrontendWatchdogAction::Wait;
+        }
+        match self.probed_at {
+            None => {
+                self.probed_at = Some(now);
+                FrontendWatchdogAction::Probe
+            }
+            Some(asked) if now.saturating_duration_since(asked) >= FRONTEND_PROBE_TIMEOUT => {
+                self.probed_at = None;
+                self.notified = true;
+                self.degraded = true;
+                FrontendWatchdogAction::Alarm
+            }
+            Some(_) => FrontendWatchdogAction::Wait,
+        }
+    }
+}
+
 pub(super) fn start_frontend_watchdog(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut visible_since = Instant::now();
-        let mut notified = false;
+        let mut watchdog = FrontendWatchdog::new(Instant::now());
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(FRONTEND_WATCHDOG_INTERVAL).await;
             if app_is_quitting(&app) {
                 return;
             }
             let visible = app
                 .get_webview_window("main")
                 .is_some_and(|window| window.is_visible().unwrap_or(false));
-            if !visible {
-                visible_since = Instant::now();
-                notified = false;
-                continue;
-            }
             let heartbeat = *app
                 .state::<RecoveryState>()
                 .heartbeat
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let healthy = heartbeat.is_some_and(|last| last.elapsed() < Duration::from_secs(30));
-            if healthy {
-                notified = false;
-                continue;
-            }
-            if !notified && visible_since.elapsed() >= Duration::from_secs(30) {
-                notified = true;
-                let detail = "客户端界面长时间未响应。您仍可通过系统窗口检查并安装官方更新，也可从系统托盘打开启动日志。";
-                app.state::<DesktopState>()
-                    .startup_health
-                    .mark_frontend_failed(detail.into());
-                show_native_recovery(&app, detail);
-            }
+            apply_frontend_watchdog_action(
+                &app,
+                watchdog.observe(Instant::now(), visible, heartbeat),
+            );
         }
     });
+}
+
+fn apply_frontend_watchdog_action(app: &tauri::AppHandle, action: FrontendWatchdogAction) {
+    let startup_health = app.state::<DesktopState>().startup_health.clone();
+    match action {
+        FrontendWatchdogAction::Wait => {}
+        FrontendWatchdogAction::Probe => {
+            if let Err(error) = app.emit(FRONTEND_LIVENESS_PROBE_EVENT, ()) {
+                startup_health
+                    .diagnostics
+                    .warn(format!("failed to emit frontend liveness probe: {error}"));
+            }
+        }
+        FrontendWatchdogAction::Alarm => {
+            startup_health.mark_frontend_unresponsive(FRONTEND_UNRESPONSIVE_DETAIL);
+            show_native_recovery(app, FRONTEND_UNRESPONSIVE_DETAIL);
+        }
+        FrontendWatchdogAction::Recovered => {
+            startup_health.mark_frontend_responsive(FRONTEND_UNRESPONSIVE_DETAIL);
+        }
+    }
 }
 
 #[cfg(test)]

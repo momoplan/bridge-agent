@@ -131,12 +131,22 @@ pub(super) async fn enforce_required_update(
             "failed to stop runtime for required update: {err:#}"
         ));
     }
+    let dialog_detail = required_update_dialog_detail(&detail);
     startup_health.set_component("updater", "官方更新器", "degraded", Some(detail));
     mark_business_startup_skipped(&startup_health, "必须先完成客户端升级");
     if let Err(error) = app.emit(APP_UPDATE_REQUIRED_EVENT, &status) {
         diagnostics.warn(format!("failed to emit required update event: {error}"));
     }
     show_main_window(app, Some(diagnostics), MainWindowOpenReason::RequiredUpdate);
+    show_native_recovery(app, &dialog_detail);
+}
+
+/// The main window can open behind other windows, so the native dialog states
+/// the reason itself instead of relying on the forced-update page being seen.
+pub(super) fn required_update_dialog_detail(detail: &str) -> String {
+    format!(
+        "{detail}。本机已停止接收平台调用，本地应用也已停止，升级完成后恢复。点击“检查官方更新”可下载并安装。"
+    )
 }
 
 #[cfg(test)]
@@ -158,6 +168,14 @@ mod tests {
             auto_download_available: true,
             asset_name: Some("bridge-agent.app.tar.gz".into()),
         }
+    }
+
+    #[test]
+    fn native_dialog_names_the_required_version_and_the_stopped_work() {
+        let detail = required_update_dialog_detail(&updater_required_detail(&checked(true, None)));
+        assert!(detail.starts_with("当前版本 0.17.0 已停止支持，必须先升级到 0.17.3。"));
+        assert!(detail.contains("已停止接收平台调用"));
+        assert!(detail.contains("检查官方更新"));
     }
 
     #[test]
