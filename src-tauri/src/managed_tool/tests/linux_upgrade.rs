@@ -76,7 +76,7 @@ fn linux_cli_upgrade_acceptance() {
     let restarted = bootstrap_bundled(Some(&old)).unwrap();
     assert_eq!(restarted.installed_version, upgraded.installed_version);
     assert_eq!(restarted.install_source, upgraded.install_source);
-    assert_project_git_routes(&fixture.temp, &launcher_path());
+    assert_authoring_routes(&fixture.temp, &launcher_path());
     let rollback = rollback().unwrap();
     assert_eq!(
         rollback.installed_version.as_deref(),
@@ -91,17 +91,23 @@ fn linux_cli_upgrade_acceptance() {
 
 // Run the published native executable against a local protocol fixture. An old
 // CLI route must fail with 404, so version-only acceptance cannot pass this test.
-fn assert_project_git_routes(temp: &tempfile::TempDir, executable: &Path) {
+fn assert_authoring_routes(temp: &tempfile::TempDir, executable: &Path) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let auth = temp.path().join("fixture-auth.json");
     fs::write(&auth, serde_json::to_vec(&serde_json::json!({
         "schemaVersion":2, "currentEnvironment":"test", "currentWorkspaceId":42,
-        "environments":{"test":{"environmentKey":"test-environment", "baseUrl":format!("http://{address}")}},
-        "credentials":[{"environmentKey":"test-environment", "token":"lc_pat_fixture", "tokenType":"pat", "workspaceIds":[42]}]
+        "environments":{"test":{"environmentKey":"test", "baseUrl":format!("http://{address}")}},
+        "credentials":[{"environmentKey":"test", "userId":25, "token":"lc_pat_fixture", "tokenType":"pat", "workspaceIds":[42]}]
     })).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
-        for _ in 0..2 {
+        let project = r#"{"contractVersion":"1.0.0","errorCode":"0","data":{"projectId":71,"defaultBranch":"main","branches":[{"name":"main"}]}}"#;
+        let bundle = r#"{"contractVersion":"1.0.0","errorCode":"0","data":{"bundleId":"fixture-bundle","revision":1,"definition":{"schemaVersion":"24.0.0","userSystems":[],"resources":[]}}}"#;
+        for (expected, body) in [
+            ("GET /partner/v1/project-git-service/api/workspaces/42/projects/71/git/branches ", project),
+            ("POST /partner/v1/project-service/api/projects/71/summary/info ", project),
+            ("POST /partner/v1/bundle-service/api/v4/bundles/definition/get ", bundle),
+        ] {
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -109,28 +115,31 @@ fn assert_project_git_routes(temp: &tempfile::TempDir, executable: &Path) {
             let mut request = [0u8; 16384];
             let count = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..count]);
-            let valid = request.starts_with(
-                "GET /partner/v1/project-git-service/api/workspaces/42/projects/71/git/branches ",
-            ) || request
-                .starts_with("POST /partner/v1/project-service/api/projects/71/summary/info ");
+            let valid = request.starts_with(expected);
             let status = if valid { "200 OK" } else { "404 Not Found" };
-            let body = r#"{"contractVersion":"1.0.0","errorCode":"0","data":{"projectId":71,"defaultBranch":"main","branches":[{"name":"main"}]}}"#;
             write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             assert!(valid, "published CLI used an obsolete API route");
         }
     });
-    for command in ["branches", "get"] {
+    for (command, output_marker) in [
+        (["workspace", "project", "branches", "71"], "71"),
+        (["workspace", "project", "get", "71"], "71"),
+        (["bundle", "definition", "read", "fixture-bundle"], "fixture-bundle"),
+    ] {
         let result = Command::new(executable)
-            .args(["project", command, "71", "--workspace-id", "42"])
+            .args(command)
+            .args(["--workspace-id", "42"])
             .env("BAIJIMU_AUTH_FILE", &auth)
+            .env("BAIJIMU_CLI_CONFIG", auth.with_file_name("absent.json"))
+            .env_remove("BAIJIMU_CURRENT_WORKSPACE_ID")
             .output()
             .unwrap();
         assert!(
             result.status.success(),
-            "{command}: {}",
+            "{command:?}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(String::from_utf8_lossy(&result.stdout).contains("71"));
+        assert!(String::from_utf8_lossy(&result.stdout).contains(output_marker));
     }
     server.join().unwrap();
 }

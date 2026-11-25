@@ -1,23 +1,23 @@
 {
-  "version": "0.92.0",
+  "version": "0.121.0",
   "installSource": {
     "kind": "market",
     "listingId": "0e92a06d-50f3-479f-b10e-d747ed17a84b",
-    "version": "0.92.0",
+    "version": "0.121.0",
     "source": {
       "application": {
         "appId": "baijimu-cli",
         "environmentKey": "baijimu"
       },
-      "version": "0.92.0"
+      "version": "0.121.0"
     }
   },
   "artifacts": [
     {
       "platform": "linux",
       "arch": "x86_64",
-      "source": "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/v0.92.0/57fe122c93df97f74c40ff9a9868d2b611caa998cb4ca3dbd77f44840b9e7b4b/baijimu-cli-0.92.0-linux-x64.zip",
-      "checksum": "sha256:57fe122c93df97f74c40ff9a9868d2b611caa998cb4ca3dbd77f44840b9e7b4b"
+      "source": "https://download.baijimu.com/managed-tool-artifacts/baijimu-cli/releases/v0.121.0/00aebc33c96d40297d9d146021ce9ee344869475d67de77c88f59135bf674268/baijimu-cli-0.121.0-linux-x64.zip",
+      "checksum": "sha256:00aebc33c96d40297d9d146021ce9ee344869475d67de77c88f59135bf674268"
     }
   ]
 }

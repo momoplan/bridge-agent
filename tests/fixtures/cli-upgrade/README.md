@@ -1,5 +1,5 @@
 # Linux CLI 升级验收输入
 
-market-listing.json 是原始市场 3.0.0 响应样本，保留供来源证据核对。market-listing-v4.json 是本次合同升级后响应的测试投影，只将市场读取合同改为 4.0.0 并移除 publisher、capability、risk。它不声称现网已升级。冻结版本、manifest 原文、来源版本、制品及下载校验和均保持原始值。
+`market-listing.json` 的 `frozenVersion` 来自 `baijimu workspace local-app version get` 的作者环境回读，市场条目 ID 来自 `baijimu` 0.180.0 的正式市场发布回执。外层按市场 3.0.0 构造测试输入。`market-listing-v4.json` 使用同一冻结版本，外层改为 4.0.0 并移除 `publisher`、`capability` 和 `risk`。
 
-当前客户端验收读取 v4 样本，并继续下载准确的已发布 Linux 制品，实际验证安装失败重试、升级、重启和回滚。root 合同测试在各平台验证投影与原始冻结内容逐字相同；真实 Linux 制品验收只在登记流水线的 Linux runner 执行。
+Linux 验收下载已发布的 0.121.0 和 0.180.0 制品，验证安装失败重试、升级、重启、回滚以及项目和 Bundle v4 作者入口调用。各平台的合同测试核对两种外层格式中的冻结内容完全一致。登记流水线的 Linux runner 使用实际发行二进制执行安装验收。
